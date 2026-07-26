@@ -10,14 +10,15 @@
 
 - Maven 坐标：`io.github.zyblw`
 - 源码仓库：`https://github.com/zyblw/zyblw-agent`
+- 当前版本：[`0.1.0`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.1.0)，已发布到 Maven Central。
 - 当前发布线：`0.x`，遵循 Early SemVer；公开 API 在形成真实使用证据前仍允许有计划地调整。
 - 许可证：Apache License 2.0。
 - Git tag：`vX.Y.Z` 触发框架发布。
 - CI 会执行统一格式门禁、全量测试、PostgreSQL Testcontainers、本地 Maven 发布，并让独立 consumer 只通过生成的
   二进制包编译，防止源码工程关系掩盖发布缺陷。
 
-发布到 Maven Central 前还需要仓库维护者一次性完成 Central namespace、token 和 GPG 签名密钥配置。完整流程见
-[发布与回滚](docs/releasing.md)。
+Central namespace、短期发布 token、GPG 签名密钥和 GitHub release environment 已完成配置。后续版本仍须按
+[发布与回滚](docs/releasing.md) 的不可变 tag、签名、consumer 和回滚门禁执行。
 
 ## 业务项目如何引入
 
@@ -25,8 +26,8 @@
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "<version>",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "<version>"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.1.0",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.1.0"
 )
 ```
 

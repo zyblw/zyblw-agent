@@ -3,7 +3,7 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
-## 0.1.0 - 2026-07-26
+## 0.1.0 - 2026-07-27
 
 ### Added
 
@@ -34,5 +34,5 @@ All notable user-visible changes will be recorded here. The project follows
 - Obsolete thin sbt projects whose boundaries represented one implementation concept rather than a useful dependency or release choice.
 - Old Maven coordinates such as `zyblw-agent-runtime`, `zyblw-agent-app`, `zyblw-agent-http-host` and per-provider artifacts.
 
-No Maven Central release has been claimed yet. The first immutable release will be created only
-after namespace, signing and CI secrets are configured and the release workflow succeeds.
+Published as 11 signed Scala 3 artifacts under `io.github.zyblw` on Maven Central. The tag and
+Central artifacts are immutable; follow-up fixes use a new patch version.

@@ -90,11 +90,10 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
 
 ## P0-A：建立可信的开源发布基线
 
-1. **待外部配置**：完成 Maven Central namespace、签名密钥和 GitHub release secrets 的一次性配置。
-2. **待正式发布**：发布 `0.1.0`，验证签名与 Central 可解析性；本地 `0.1.0-local` 的 POM、binary、sources 和
-   Scaladoc JAR 已通过。
-3. **部分完成**：`zyblw-server` 已分别通过源码与 Maven-local 二进制测试；正式 Central 版本仍需重复同一门禁。
-4. **部分完成**：HTTP/OpenAPI 兼容测试、格式门禁已建立；首个已发布 JVM API 基线与结构化 OpenAPI diff 仍待发布后建立。
+1. **已完成**：Maven Central namespace、签名密钥和 GitHub release environment 已配置，短期 token 可独立轮换。
+2. **已完成**：`0.1.0` 的 11 个 POM、binary、sources、Scaladoc JAR 和签名已发布并可从 Central 解析。
+3. **已完成**：`zyblw-server` 已分别通过源码、Maven-local 候选和正式 Central `0.1.0` 的 PostgreSQL 门禁。
+4. **部分完成**：HTTP/OpenAPI 兼容测试、格式门禁和首个已发布 JVM 基线已建立；结构化 OpenAPI diff 仍待自动化。
 5. **部分完成**：五分钟最小应用已通过；独立 PostgreSQL 教程仍待补充，PostgreSQL 16/pgvector CI job 已定义并在本地
    完整通过。
 6. **部分完成**：安全 timeline/inspection 读模型与故障诊断文档已落地；CLI、轻量 UI 和真实事故验证仍待完成。
