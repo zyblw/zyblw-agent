@@ -3,7 +3,7 @@ package com.zyblw.agent.integrations.gemini
 import com.zyblw.agent.core.*
 import com.zyblw.agent.model.ModelStreamEvent
 import com.zyblw.agent.testkit.*
-import java.net.ServerSocket
+import java.net.{InetSocketAddress, ServerSocket, Socket}
 import zio.*
 import zio.http.*
 import zio.json.ast.Json
@@ -22,6 +22,17 @@ object GeminiInteractionsHttpContractSpec extends ZIOSpecDefault:
     try socket.getLocalPort
     finally socket.close()
   }
+
+  /** 等待真实 socket 开始接受连接，避免用固定 sleep 猜测 CI 机器的启动速度。 */
+  private def awaitServer(port: Int): Task[Unit] =
+    ZIO
+      .attemptBlocking {
+        val socket = Socket()
+        try socket.connect(InetSocketAddress("127.0.0.1", port), 250)
+        finally socket.close()
+      }
+      .retry(Schedule.spaced(50.millis) && Schedule.recurs(100))
+      .unit
 
   /** 根据请求 model 选择确定性 stub 场景，并只记录认证/版本是否正确。 */
   private def routes(
@@ -153,7 +164,7 @@ object GeminiInteractionsHttpContractSpec extends ZIOSpecDefault:
         cancelStarted <- Promise.make[Nothing, Unit]
         result        <- (for
           _      <- Server.serve(routes(apiKeys, revisions, stores, cancelClosed)).forkScoped
-          _      <- ZIO.sleep(100.millis)
+          _      <- awaitServer(port)
           client <- ZIO.service[Client]
           model = GeminiInteractionsChatModel(
             client,
@@ -230,7 +241,7 @@ object GeminiInteractionsHttpContractSpec extends ZIOSpecDefault:
         cancelClosed <- Promise.make[Nothing, Unit]
         response     <- (for
           _      <- Server.serve(routes(apiKeys, revisions, stores, cancelClosed)).forkScoped
-          _      <- ZIO.sleep(100.millis)
+          _      <- awaitServer(port)
           client <- ZIO.service[Client]
           model = GeminiInteractionsChatModel(
             client,
