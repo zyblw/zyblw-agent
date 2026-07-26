@@ -55,6 +55,7 @@ git push origin v0.1.0
 testFull
   -> publishM2（验证 POM/source/doc 与本地消费）
   -> 独立 Maven consumer 编译
+  -> 非交互 GPG 签名探针（验证私钥与口令，并为 runner 的 gpg-agent 建立短期缓存）
   -> ci-release（签名并上传 Central Portal）
   -> GitHub Release
 ```

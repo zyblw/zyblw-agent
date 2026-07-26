@@ -92,6 +92,33 @@ jobs:
           export ZYBLW_AGENT_VERSION="${GITHUB_REF_NAME#v}"
           sbt -batch compile
 
+      - name: Validate non-interactive PGP signing
+        shell: bash
+        env:
+          PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+
+          signing_dir="$(mktemp -d)"
+          trap 'rm -rf "$signing_dir"' EXIT
+
+          mkdir -p "$HOME/.gnupg"
+          chmod 700 "$HOME/.gnupg"
+          cat > "$HOME/.gnupg/gpg-agent.conf" <<'EOF'
+          allow-loopback-pinentry
+          default-cache-ttl 3600
+          max-cache-ttl 3600
+          EOF
+          gpgconf --reload gpg-agent
+
+          printf '%s' "$PGP_SECRET" | base64 --decode > "$signing_dir/private.asc"
+          gpg --batch --import "$signing_dir/private.asc"
+          printf 'zyblw-agent release signing probe\n' > "$signing_dir/probe"
+          printf '%s' "$PGP_PASSPHRASE" \
+            | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
+                --armor --detach-sign --output "$signing_dir/probe.asc" "$signing_dir/probe"
+          gpg --batch --verify "$signing_dir/probe.asc" "$signing_dir/probe"
+
       - name: Sign and publish to Maven Central
         run: sbt -batch ci-release
         env:
