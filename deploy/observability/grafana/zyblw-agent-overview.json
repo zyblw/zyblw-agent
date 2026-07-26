@@ -1,0 +1,128 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Active Runs",
+      "id": 1,
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "sum(zyblw_agent_run_active)" }],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Run success rate (10m)",
+      "id": 2,
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "targets": [{
+        "refId": "A",
+        "expr": "sum(rate(zyblw_agent_run_count_total{agent_outcome=\"succeeded\"}[10m])) / clamp_min(sum(rate(zyblw_agent_run_count_total[10m])), 0.001)"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Run P95 wall-clock",
+      "id": 3,
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "targets": [{
+        "refId": "A",
+        "expr": "histogram_quantile(0.95, sum by (le) (rate(zyblw_agent_run_duration_seconds_bucket[10m])))"
+      }],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Estimated cost rate",
+      "id": 4,
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "sum(rate(zyblw_agent_estimated_cost_USD_total[1h]))" }],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Runs by outcome",
+      "id": 5,
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 6 },
+      "targets": [{
+        "refId": "A",
+        "expr": "sum by (agent_outcome) (rate(zyblw_agent_run_count_total[5m]))",
+        "legendFormat": "{{agent_outcome}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Model P50/P95 duration",
+      "id": 6,
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le, gen_ai_provider_name) (rate(gen_ai_client_operation_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{gen_ai_provider_name}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, gen_ai_provider_name) (rate(gen_ai_client_operation_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{gen_ai_provider_name}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tool calls by risk/outcome",
+      "id": 7,
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 15 },
+      "targets": [{
+        "refId": "A",
+        "expr": "sum by (agent_tool_risk, agent_outcome) (rate(zyblw_agent_tool_call_count_total[5m]))",
+        "legendFormat": "{{agent_tool_risk}} / {{agent_outcome}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Retrieval P95 and hit count",
+      "id": 8,
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 15 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(zyblw_agent_retrieval_duration_seconds_bucket[5m])))",
+          "legendFormat": "retrieval p95 seconds"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(zyblw_agent_retrieval_hit_count_sum[5m])) / clamp_min(sum(rate(zyblw_agent_retrieval_hit_count_count[5m])), 0.001)",
+          "legendFormat": "average hits"
+        }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Evaluation pass rate",
+      "id": 9,
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 24 },
+      "targets": [{
+        "refId": "A",
+        "expr": "sum by (agent_evaluation_name) (rate(zyblw_agent_evaluation_count_total{agent_evaluation_passed=\"true\"}[15m])) / clamp_min(sum by (agent_evaluation_name) (rate(zyblw_agent_evaluation_count_total[15m])), 0.001)",
+        "legendFormat": "{{agent_evaluation_name}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] }
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 41,
+  "tags": ["zyblw-agent", "zio", "opentelemetry"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "title": "zyblw-agent / Production Overview",
+  "uid": "zyblw-agent-overview",
+  "version": 1
+}

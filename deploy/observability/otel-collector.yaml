@@ -1,0 +1,31 @@
+# zyblw-agent Metrics 的最小生产形态：应用通过 OTLP/HTTP 推送到 Collector，Collector 暴露 Prometheus scrape。
+# Trace 可以由应用直接发往 Langfuse，也可以在这里增加 otlphttp exporter 后统一转发。
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  batch:
+    send_batch_size: 1024
+    timeout: 5s
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:9464
+    enable_open_metrics: true
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

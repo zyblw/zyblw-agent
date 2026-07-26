@@ -1,0 +1,5 @@
+-Xms512m
+-Xmx3g
+-XX:+UseG1GC
+-Xss4m
+-Dfile.encoding=UTF-8

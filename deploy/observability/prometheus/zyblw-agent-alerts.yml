@@ -1,0 +1,53 @@
+groups:
+  - name: zyblw-agent
+    rules:
+      - alert: ZyblwAgentRunFailureRateHigh
+        expr: |
+          (
+            sum(rate(zyblw_agent_run_count_total{agent_outcome=~"failed|timedout|conflict"}[10m]))
+            /
+            clamp_min(sum(rate(zyblw_agent_run_count_total[10m])), 0.001)
+          ) > 0.05
+          and sum(rate(zyblw_agent_run_count_total[10m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: zyblw-agent Run 失败率持续高于 5%
+          description: 先按 provider/outcome 检查模型故障，再检查数据库 lease、工具和 Guardrail Trace；不要用此告警替代 RunStore 审计。
+
+      - alert: ZyblwAgentRunP95LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(zyblw_agent_run_duration_seconds_bucket[10m]))
+          ) > 30
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: zyblw-agent Run P95 wall-clock 超过 30 秒
+          description: Run duration 包含人工审批暂停；应结合 agent_status、模型 duration 和审批队列判断是执行慢还是等待久。
+
+      - alert: ZyblwAgentModelTimeouts
+        expr: sum(rate(zyblw_agent_model_call_count_total{agent_outcome="timedout"}[10m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 模型调用持续超时
+          description: 按 gen_ai_provider_name 检查 Provider、出口网络、限流和客户端 timeout，不记录或展示 prompt 正文。
+
+      - alert: ZyblwAgentToolFailureRateHigh
+        expr: |
+          (
+            sum(rate(zyblw_agent_tool_call_count_total{agent_outcome=~"failed|timedout|conflict"}[10m]))
+            /
+            clamp_min(sum(rate(zyblw_agent_tool_call_count_total[10m])), 0.001)
+          ) > 0.03
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 工具失败率持续高于 3%
+          description: 结合工具风险等级、执行账本和 outbox/inbox 状态定位；工具参数与结果不应成为 Metrics label。

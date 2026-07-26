@@ -1,0 +1,6 @@
+[tools]
+java = "temurin-21"
+sbt = "2.0.1"
+
+[env]
+SBT_OPTS = "-Xms512m -Xmx3072m -XX:ReservedCodeCacheSize=384m"

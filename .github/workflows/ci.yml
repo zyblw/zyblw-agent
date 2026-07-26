@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  framework-and-consumer:
+    name: framework / consumer
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: sbt
+          cache-dependency-path: |
+            build.sbt
+            project/**
+            integration-tests/maven-consumer/build.sbt
+            integration-tests/maven-consumer/project/**
+
+      - uses: sbt/setup-sbt@v1
+
+      - name: Format, test, and publish to Maven-local
+        run: sbt -batch 'set ThisBuild / version := "0.1.0-local"; scalafmtCheckAll; scalafmtSbtCheck; testFull; publishM2'
+
+      - name: Compile independent Maven consumer
+        working-directory: integration-tests/maven-consumer
+        env:
+          ZYBLW_AGENT_VERSION: 0.1.0-local
+        run: sbt -batch compile
+
+  postgres:
+    name: postgres
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUN_POSTGRES_INTEGRATION: "1"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: sbt
+          cache-dependency-path: |
+            build.sbt
+            project/**
+
+      - uses: sbt/setup-sbt@v1
+
+      - name: PostgreSQL persistence and failure contracts
+        run: sbt -batch postgres/testFull
