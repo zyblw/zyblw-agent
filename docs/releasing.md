@@ -27,8 +27,8 @@ GitHub 用户名，Central 不会自动授予该 namespace，必须按 Portal �
 
 1. 使用个人 GitHub 身份登录 Central Publisher Portal，确认 `io.github.zyblw` namespace 已验证。
 2. 生成 Central Portal user token；它不是 GitHub 密码。
-3. 为本项目创建独立、可轮换的 GPG signing key，并发布公钥；`PGP_SECRET` 必须是 armored 私钥再做单行 base64，
-   不能直接保存 `-----BEGIN PGP PRIVATE KEY BLOCK-----` 文本。
+3. 为本项目创建独立、可轮换的 GPG signing key，并发布公钥；`PGP_SECRET` 推荐保存为 armored 私钥的单行
+   base64。发布工作流也兼容直接保存多行 armored 文本，并会在 runner 内规范化后再交给 `sbt-ci-release`。
 4. 在 GitHub Actions secrets 设置：
    - `SONATYPE_USERNAME`
    - `SONATYPE_PASSWORD`

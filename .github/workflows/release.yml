@@ -46,7 +46,7 @@ jobs:
             exit 1
           fi
 
-      - name: Validate release secret shapes
+      - name: Validate and normalize release secrets
         shell: bash
         env:
           PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
@@ -64,14 +64,21 @@ jobs:
 
           key_file="$(mktemp)"
           trap 'rm -f "$key_file"' EXIT
-          if ! printf '%s' "$PGP_SECRET" | base64 --decode > "$key_file" 2>/dev/null; then
-            echo "PGP_SECRET must be the single-line base64 encoding of the armored private key." >&2
+
+          normalized_pgp_secret="$PGP_SECRET"
+          if printf '%s' "$PGP_SECRET" | base64 --decode > "$key_file" 2>/dev/null \
+            && grep -qx -- '-----BEGIN PGP PRIVATE KEY BLOCK-----' "$key_file"; then
+            :
+          elif printf '%s' "$PGP_SECRET" > "$key_file" \
+            && grep -qx -- '-----BEGIN PGP PRIVATE KEY BLOCK-----' "$key_file"; then
+            normalized_pgp_secret="$(base64 < "$key_file" | tr -d '\n')"
+          else
+            echo "PGP_SECRET must be an armored PGP private key or its single-line base64 encoding." >&2
             exit 1
           fi
-          if ! grep -qx -- '-----BEGIN PGP PRIVATE KEY BLOCK-----' "$key_file"; then
-            echo "PGP_SECRET decoded successfully, but it is not an armored PGP private key." >&2
-            exit 1
-          fi
+
+          printf '::add-mask::%s\n' "$normalized_pgp_secret"
+          printf 'PGP_SECRET=%s\n' "$normalized_pgp_secret" >> "$GITHUB_ENV"
 
       - name: Verify release artifacts
         env:
@@ -89,7 +96,6 @@ jobs:
         run: sbt -batch ci-release
         env:
           PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
-          PGP_SECRET: ${{ secrets.PGP_SECRET }}
           SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
           SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
 
