@@ -128,6 +128,11 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Earlier verification steps intentionally do not receive Central
+          # credentials. Stop their persistent sbt server so ci-release starts a
+          # fresh JVM with this step's environment and credential settings.
+          sbt shutdown || true
+
           credentials_file="$HOME/.sbt/sonatype_central_credentials"
           credentials_settings="$HOME/.sbt/2/zyblw-release-credentials.sbt"
           trap 'rm -f "$credentials_file" "$credentials_settings"' EXIT
