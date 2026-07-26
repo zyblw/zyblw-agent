@@ -120,7 +120,7 @@ jobs:
           gpg --batch --verify "$signing_dir/probe.asc" "$signing_dir/probe"
 
       - name: Sign and publish to Maven Central
-        run: sbt -batch ci-release
+        run: sbt -batch -Dsbt.supershell=false ci-release
         env:
           PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
           SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
