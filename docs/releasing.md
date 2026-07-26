@@ -39,6 +39,8 @@ GitHub 用户名，Central 不会自动授予该 namespace，必须按 Portal �
 
 不要把这些值写进 `.env.example`、sbt 文件、Actions 日志或 issue。
 任何曾经粘贴到聊天、issue、日志或截图中的 Portal token 都应先撤销并重新生成，再更新 GitHub secret。
+发布 workflow 会按 sbt 官方 Central Portal 格式创建 runner 临时凭据文件，并在发布命令结束后立即删除；文件内容不会进入
+Git、Actions cache 或日志。
 
 ## 首次发布
 
