@@ -1,7 +1,7 @@
 # 开源发布与版本维护
 
 > 状态：运行手册  
-> 最后核验：2026-07-24  
+> 最后核验：2026-07-26  
 > 事实来源：`build.sbt`、`project/plugins.sbt`、`.github/workflows/*.yml`、`integration-tests/maven-consumer`
 
 ## 发布目标
@@ -76,7 +76,7 @@ artifact 时，兼容检查没有可靠基线，不能用一个空检查假装�
 
 1. CHANGELOG 中有用户可理解的变化、升级方式和风险。
 2. `sbt -batch testFull` 成功。
-3. `RUN_POSTGRES_INTEGRATION=1 sbt -batch testFull` 成功。
+3. `RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull` 成功。
 4. `sbt -batch publishM2` 成功，所有公开模块生成 POM/source/doc。
 5. `integration-tests/maven-consumer` 设置 `ZYBLW_AGENT_VERSION` 后仅依赖本地发布物也能编译。
 6. 数据库迁移在空库和代表性升级库成功，已发布 migration 未被修改。

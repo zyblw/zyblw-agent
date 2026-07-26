@@ -30,11 +30,11 @@ Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基
 - `testFull`：所有已执行的确定性测试通过，0 失败；19 项 PostgreSQL 用例按默认开关忽略；
 - `0.1.0-local publishM2`：11 个公开 artifact 的 POM、binary、sources 与 Scaladoc JAR 完整；
 - `integration-tests/maven-consumer`：不使用源码 `ProjectRef`，解析全部 11 个 Maven-local 坐标并编译成功；
-- `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`：命令已确认会真实启动容器用例，但本机 Docker Engine 未运行，
-  因此本轮结果是基础设施不可用，不是 pass；
+- `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`：使用 Testcontainers/PostgreSQL 16 与 pgvector，
+  21 项通过、0 失败、0 忽略；
 - 公开 CI 已使用 `postgres/testFull`；旧的 `postgres/test` 在 sbt 2 中可能报告 0 tests，不能作为门禁证据。
 
-下面的 2026-07-25 PostgreSQL 通过记录仍是最近一次真实容器基线；公开仓库首次 GitHub Actions 必须重新取得同等证据。
+公开仓库首次 GitHub Actions 必须重新取得与本地相同的容器证据，不能只引用本地结果。
 
 2026-07-25 使用 Temurin JDK 21 完成：
 
