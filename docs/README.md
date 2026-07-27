@@ -1,7 +1,7 @@
 # zyblw-agent 文档地图
 
 > 状态：当前
-> 最后核验：2026-07-25
+> 最后核验：2026-07-28
 > 事实来源：`build.sbt`、发布工作流、模块源码、测试与数据库迁移
 
 ## 推荐学习路径
@@ -10,15 +10,16 @@
 2. [模块选择](modules.md)：只选择业务真正需要的模块，并理解 Stable/Beta/Experimental 边界。
 3. [能力审计与框架对照](framework-assessment.md)：先客观理解强项、缺口、取舍和演进证据。
 4. [学习指南](learning-guide.md)：建立 ZIO Agent 的完整心智模型。
-5. [核心概念](core-concepts.md)：认识 ID、Definition、Run、State、Event、Command。
-6. [架构总览](architecture.md)：理解模块依赖和端到端时序。
-7. [运行时](runtime.md)：阅读单 Agent loop、预算、工具计划、审批、恢复。
-8. [指令、Context 与成本](instruction-context-cost.md)：理解可信指令、动态资料、缓存和推理 token。
-9. [工具](tools.md) 与 [可靠写工具](side-effects.md)：理解能力、权限、副作用和幂等。
-10. [Context/Memory/RAG](context-memory-rag.md)：区分短期上下文、长期记忆和外部知识。
-11. [持久化](persistence.md) 与 [数据库 Schema](database-schema.md)：理解耐久性。
-12. [Run Inspector](run-inspection.md)、[测试](testing.md)、[可观测性](observability.md)、[评测趋势门禁](eval-trend-and-release-gate.md)。
-13. [成熟度与路线](maturity-and-roadmap.md)：客观看待哪些能力可依赖。
+5. [源码阅读路线](source-tour.md)：按文件、方法、测试和完成标准深入主链路。
+6. [核心概念](core-concepts.md)：认识 ID、Definition、Run、State、Event、Command。
+7. [架构总览](architecture.md)：理解模块依赖和端到端时序。
+8. [运行时](runtime.md)：阅读单 Agent loop、预算、工具计划、审批、恢复。
+9. [指令、Context 与成本](instruction-context-cost.md)：理解可信指令、动态资料、缓存和推理 token。
+10. [工具](tools.md) 与 [可靠写工具](side-effects.md)：理解能力、权限、副作用和幂等。
+11. [Context/Memory/RAG](context-memory-rag.md)：区分短期上下文、长期记忆和外部知识。
+12. [持久化](persistence.md) 与 [数据库 Schema](database-schema.md)：理解耐久性。
+13. [Run Inspector](run-inspection.md)、[测试](testing.md)、[可观测性](observability.md)、[评测趋势门禁](eval-trend-and-release-gate.md)。
+14. [成熟度与路线](maturity-and-roadmap.md)：客观看待哪些能力可依赖。
 
 ## 开源维护与发布
 

@@ -9,6 +9,10 @@ Read `README.md`, `docs/README.md`, `docs/architecture.md`, `docs/maturity-and-r
 `docs/releasing.md` before changing public APIs or release configuration. Build definitions,
 sources, tests, migrations, and generated POMs take precedence over roadmap prose.
 
+Use the repository-local `zyblw-agent-development` skill for framework implementation, review,
+documentation, source-learning, and releases. It routes version-sensitive ZIO and ZIO HTTP work to
+their current official documentation without importing private product rules.
+
 ## Architecture
 
 - Keep provider-neutral ADTs, runtime, permissions, tools, context, and memory in `agent-core`.

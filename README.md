@@ -4,7 +4,8 @@
 
 当前版本是可编译、可测试的基础设施版本，不宣称所有外围模块已经达到生产成熟度。
 
-第一次阅读请从 [文档地图](docs/README.md) 与 [深入学习指南](docs/learning-guide.md) 开始。
+第一次阅读请从 [文档地图](docs/README.md) 与 [深入学习指南](docs/learning-guide.md) 开始；准备逐文件阅读时使用
+[源码阅读路线](docs/source-tour.md)。
 
 ## 开源发布状态
 
@@ -230,6 +231,7 @@ flowchart BT
 - [真实 Provider 小流量 Smoke 与 MemoryExtractor Eval](docs/provider-live-smoke.md)
 - [测试](docs/testing.md)
 - [深入学习指南](docs/learning-guide.md)
+- [源码阅读路线：文件、方法、测试与掌握标准](docs/source-tour.md)
 - [成熟框架参考与演进 ADR](docs/architecture/0008-framework-evolution.md)
 - [成熟度、取舍与路线](docs/maturity-and-roadmap.md)
 

@@ -1,12 +1,15 @@
 # 从 ZIO 到可靠智能体：zyblw-agent 深入学习指南
 
 > 状态：学习指南
-> 最后核验：2026-07-25
+> 最后核验：2026-07-28
 > 事实来源：当前模块源码、测试、ADR，以及 ZIO/ZIO HTTP、OpenAI、Anthropic、MCP 官方资料
 
 阅读本篇前，建议先看 [能力审计、框架对照与演进判断](framework-assessment.md)，避免把“代码里存在一个 SPI”
 误解为“该能力已经生产成熟”；理解 Prompt、动态资料和成本链路时配合
 [指令、Context 与成本工程](instruction-context-cost.md)。
+
+如果目标是逐文件掌握实现，不要把本篇当成源码索引；先建立这里的概念模型，再按
+[源码阅读路线](source-tour.md) 逐步追踪 `submit -> claim -> runtime -> inspect`，每个阶段都用测试验证理解。
 
 ## 1. 先建立正确的问题意识
 
@@ -375,6 +378,9 @@ Instructions 讲目标、边界和工具使用；硬安全规则仍在代码。�
 7. 给 `search_articles` 建一个小型 recall/citation eval，并区分检索失败和生成失败。
 8. 阅读一个 Provider adapter，列出厂商协议与 core 事件之间的全部映射。
 9. 调用 Inspector，解释 `consistent` 与 `completeHistory` 的区别，并证明 JSON 中没有用户输入和工具结果。
+
+这些练习对应的生产文件、测试文件、分阶段运行命令和完成标准见 [源码阅读路线](source-tour.md)。第一次阅读先完成
+第 0～3 阶段，再根据业务目标选择 Provider、RAG、HTTP 或可靠写工具专题，不需要按文件名把整个仓库顺序通读。
 
 ## 官方延伸阅读
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "zyblw Agent Development"
+  short_description: "Develop and review the public Scala/ZIO agent framework"
+  default_prompt: "Use $zyblw-agent-development to implement and verify a framework change."
