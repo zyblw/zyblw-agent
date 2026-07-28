@@ -1,26 +1,24 @@
-## Problem
+## 目的与范围
 
-What user or maintainer problem does this change solve?
+- 维护者/使用者问题：
+- 不包含的内容：
 
-## Public contracts
+## 公共契约
 
-Describe changes to Scala APIs, HTTP/schema contracts, migrations, artifacts, configuration, or
-documented behavior. Write `none` when there are no public contract changes.
+- [ ] 不改变公开 Scala API、artifact、状态 JSON、HTTP/schema 或 migration。
+- [ ] 如有改变，已声明 Stable/Beta/Experimental 状态、Early SemVer 影响、升级方式与回滚路径。
+- [ ] 仅有一个业务消费者需要的类型、数据库投影或策略仍留在业务仓库。
 
-## Risk and rollback
+## 验证证据
 
-Describe failure modes, compatibility impact, and the rollback or forward-fix path.
+- [ ] `scalafmtCheckAll`、`scalafmtSbtCheck` 与 `testFull`。
+- [ ] PostgreSQL 契约测试（持久化或 migration 变更时）。
+- [ ] `publishM2` 与独立 Maven consumer 编译（公开依赖面变更时）。
+- [ ] 需要业务联调时，已记录 Platform 的源码/Maven-local/Central 下游验证结果。
+- [ ] 已说明未运行的门禁及原因。
 
-## Evidence
+## 交付
 
-- [ ] Formatting checks
-- [ ] Unit and contract tests
-- [ ] PostgreSQL tests, or not applicable
-- [ ] Maven-local consumer compile, or not applicable
-- [ ] Documentation and CHANGELOG updated
-- [ ] No credentials, private data, or sensitive traces added
-
-## Maturity
-
-Mark the affected capability as Foundation, Beta, Experimental, or documentation-only, and explain
-why the existing evidence supports that label.
+- [ ] 已更新 CHANGELOG 与唯一 canonical 文档（如有用户可见变化）。
+- [ ] 不包含私有业务代码、凭据、真实提示词、生产 trace 或用户数据。
+- [ ] 新增能力有明确模块边界、稳定度和移除/回滚路径。

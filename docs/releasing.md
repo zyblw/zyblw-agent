@@ -1,7 +1,7 @@
 # 开源发布与版本维护
 
 > 状态：运行手册  
-> 最后核验：2026-07-26  
+> 最后核验：2026-07-29
 > 事实来源：`build.sbt`、`project/plugins.sbt`、`.github/workflows/*.yml`、`integration-tests/maven-consumer`
 
 ## 发布目标
@@ -76,6 +76,9 @@ Central artifact 不可覆盖；失败修复必须用新版本。
 当前 build 使用 `early-semver`。第一版发布后应接入可支持当前 sbt 版本的 MiMa/version-policy 门禁；在不存在历史
 artifact 时，兼容检查没有可靠基线，不能用一个空检查假装已经完成。
 
+在 sbt 2 的 MiMa/version-policy 生态完成当前版本兼容性验证前，现有的独立 Maven consumer 与平台下游回归仍是必须
+执行的实际二进制门禁；它们不能证明所有二进制兼容性，但能证明公开 POM、资源和一条真实宿主消费路径。
+
 ## 发布前清单
 
 1. CHANGELOG 中有用户可理解的变化、升级方式和风险。
@@ -88,6 +91,8 @@ artifact 时，兼容检查没有可靠基线，不能用一个空检查假装�
 8. 无密钥、真实用户数据或敏感 trace 进入 Git 历史和 artifact。
 9. 标签与 CHANGELOG 版本一致，工作树基于已审查 commit。
 10. 私有业务仓库使用相同 Maven-local 版本完成下游兼容验证，但任何私有源码、token 或日志都不进入公开 workflow。
+11. Central Portal 显示 Published 后，在私有 `zyblw-platform` 仓库手动运行 `zyblw-server CI`，输入刚发布的精确
+    `agent_version`；该回归只从 Maven Central 解析制品，并包含 PostgreSQL 契约测试。
 
 框架的 Scaladoc 会读取多个 source root 的 TASTy；仓库通过 `.jvmopts` 为 sbt 构建 JVM 提供 3 GiB 上限和 G1GC。
 CI 不应以更小的 `SBT_OPTS/JAVA_OPTS` 覆盖该基线。若 `packageDoc` 失败，发布必须失败；不能用空 doc JAR 掩盖 API

@@ -1,7 +1,7 @@
 # 业务项目接入发布版 zyblw-agent
 
 > 状态：运行手册  
-> 最后核验：2026-07-26  
+> 最后核验：2026-07-29
 > 事实来源：`build.sbt`、`integration-tests/maven-consumer`、公开 CI consumer job
 
 ## 推荐模式
@@ -65,3 +65,13 @@ server；Run、工具协议、Provider、权限、持久化 SPI、通用 RAG/Mem
 - 框架 patch 不得破坏同一 minor 的二进制兼容。
 - Scala API、Schema、HTTP wire contract、状态 JSON 和 migration 分别检查兼容性。
 - Maven Central 制品不可覆盖；回滚是在业务 build 中恢复上一精确版本。
+
+## 发布后的下游证明
+
+框架 CI 的 Maven consumer 证明公开制品可被独立、最小的 sbt 项目消费；它不替代真实业务宿主的回归。每次 Agent 版本在
+Central Portal 显示 **Published** 后，维护者应在私有 `zyblw-platform` 仓库的 **Actions → zyblw-server CI → Run
+workflow** 中输入该精确版本。该 job 通过 Maven Central 解析依赖并运行 PostgreSQL 集成测试。
+
+平台仓库还提供 `scripts/verify-agent-integration.sh`，统一了本地 `central`、明确 sibling `source` 和候选
+`maven-local` 三种模式。源码模式用于快速反馈，Maven-local 用于发布前二进制验证，Central 下游 CI 是发布后的真实
+分发验证；三者不能互相替代。
