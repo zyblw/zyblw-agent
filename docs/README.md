@@ -24,6 +24,7 @@
 ## 开源维护与发布
 
 - [贡献指南](../CONTRIBUTING.md)
+- [VS Code 与 Metals](vscode-metals.md)
 - [模块与依赖选择](modules.md)
 - [版本、Maven Central 发布与回滚](releasing.md)
 - [宿主数据库迁移](database-migrations.md)

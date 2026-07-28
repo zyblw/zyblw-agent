@@ -1,0 +1,27 @@
+{
+  "[scala]": {
+    "editor.defaultFormatter": "scalameta.metals",
+    "editor.formatOnSave": true
+  },
+  "files.watcherExclude": {
+    "**/.bloop/**": true,
+    "**/.bsp/**": true,
+    "**/.metals/**": true,
+    "**/.scala-build/**": true,
+    "**/target/**": true
+  },
+  "files.exclude": {
+    "**/.bloop": true,
+    "**/.bsp": true,
+    "**/.metals": true,
+    "**/.scala-build": true,
+    "**/target": true
+  },
+  "search.exclude": {
+    "**/.bloop/**": true,
+    "**/.bsp/**": true,
+    "**/.metals/**": true,
+    "**/.scala-build/**": true,
+    "**/target/**": true
+  }
+}

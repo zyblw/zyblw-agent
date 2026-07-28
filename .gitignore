@@ -1,9 +1,21 @@
-.bsp/
-.metals/
-.scala-build/
+# Metals / Bloop / BSP are generated per checkout. Metals may create an extra
+# project/metals.sbt (and nested project directories) for every sbt build it imports.
+**/.bloop/
+**/.bsp/
+**/.metals/
+**/.scala-build/
+**/metals.sbt
 project/project/
 project/target/
 target/
 **/target/
+
+# Keep shared VS Code recommendations and safe tasks, but never machine settings,
+# launch configurations, or extension caches.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
+.vscode/*.local
 .idea/
 .DS_Store

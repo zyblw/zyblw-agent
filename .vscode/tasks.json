@@ -1,0 +1,34 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Agent: compile",
+      "type": "shell",
+      "command": "mise exec -- sbt -batch compile",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Agent: full test suite",
+      "type": "shell",
+      "command": "mise exec -- sbt -batch testFull",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Agent: Scala format check",
+      "type": "shell",
+      "command": "mise exec -- sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck'",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
