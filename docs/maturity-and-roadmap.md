@@ -38,7 +38,7 @@
 | Anthropic/Gemini | providers / 对应 package | Beta | Provider contract tests | zyblw QA 业务尚未启用 |
 | OTLP/Langfuse | opentelemetry | Beta | 基数、脱敏、stub tests | 生产告警与 SLO |
 | Cache/Reasoning token | core/providers/opentelemetry | Beta | OpenAI 两类协议、状态累计、指标测试 | 其他 Provider 明细语义与真实成本基线 |
-| Eval/趋势门禁 | evals；仓库内 eval-cli | Experimental | snapshot、trend、release gate | 固定真实数据集与人工校准 |
+| Eval/趋势门禁 | evals；仓库内 eval-cli | Experimental | snapshot、trend、release gate、有界多试验与 `pass@k`/`pass^k` | outcome/trajectory 分离、固定真实数据集与人工校准 |
 | MCP client | mcp / `mcp` | Beta/Experimental | 协议与测试基础 | OAuth/server/Roots、供应链与隔离 |
 | 可靠写工具 | core / `sideeffects` | Experimental | outbox/inbox/补偿抽象 | 真实 transport 与业务案例 |
 | Workflow Graph | core + postgres / `workflow` | Experimental | 显式 nodes/edges、identity/version、启动校验、单调 checkpoint、`AllSucceeded` 取消、11 个 core 测试与 4 个 PostgreSQL 16 契约 | 节点账本/pending writes、timer/signal、子图、分布式 lease、图级 eval |
@@ -112,6 +112,16 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
 
 退出标准：真实路径和故障恢复有可重复证据，而不只是单测绿色。
 
+## P0-C：结果优先的可靠性评测
+
+1. **已完成 Q0**：`AgentEvalRunner.runRepeated` 对用例 × attempt 使用一个共享的有界并发 job 集合，保留确定顺序；
+2. **已完成 Q0**：报告逐次成功率、至少一次成功的 `pass@k` 估算和连续全成功的 `pass^k` 估算；
+3. **下一步 Q1**：评分显式区分最终 outcome、执行 trajectory、safety 与 resource，结果正确不自动证明过程安全；
+4. **下一步 Q1**：把多试验低敏投影纳入趋势仓库与发布策略，补置信区间和最小样本规则；
+5. **随后 Q2**：以真实失败、事故和人工分歧构建 capability/regression 数据集，定期阅读 transcript 校准 grader。
+
+退出标准：面向用户的关键路径不再因“一次跑绿”发布；稳定性、结果、过程、安全和成本可以分别解释。
+
 ## P1-A：耐久 Workflow Graph
 
 图工程方向可行，但优先级是执行语义而不是 Agent 数量：
@@ -146,16 +156,29 @@ PostgreSQL Testcontainers 与故障注入证据。
 
 退出标准：质量和权限评测通过，语料可追溯/撤回，成本可预测。
 
+## P1-C：Agent Harness
+
+Harness 不是第二套 Agent Runtime，而是长任务的 Provider-neutral 支架：
+
+1. **已有地基**：Artifact、Workspace/Sandbox、Context/Memory、Approval、Inspector 可独立组合；
+2. **下一步 H1**：Goal、Plan、Todo 与按需 Skill 的小型 ADT/Store SPI；所有变更可审计、可恢复，不只写进 Prompt；
+3. **随后 H2**：PostgreSQL durable Adapter、任务总预算、Artifact/Workspace 关联和受控 Skill materialization；
+4. **随后 H3**：固定长任务 eval 证明 Harness 对成功率、人工介入、恢复、token 和费用的收益；
+5. 在两个以上真实独立消费者证明依赖或生命周期边界前，不拆新的 Harness artifact。
+
+完整边界见 [ADR 0016](architecture/0016-agent-application-runtime.md)。
+
 ## P2：长期记忆与受控写工具
 
 长期记忆先完成用户可见、编辑、删除、过期、来源和审计；健康信息更严格。写工具从 draft-only 开始，使用稳定幂等键、approval、outbox/inbox、补偿和审计。
 
-## P3：Plan/Goal/Artifact/Skill、MCP、多 Agent
+## P3：互操作与多 Agent
 
-1. Artifact 已先以 core 内的独立、不可变二进制 SPI 起步；Plan/Goal/Todo 与按需 Skill 仍应先做成小型可持久化 ADT，不先拆新 Maven artifact；
-2. MCP 先解决 OAuth、server identity、Roots、allowlist、脱敏、注入与隔离；
-3. checkpoint fork/time travel 必须隔离已发生的非幂等副作用；
-4. 多 Agent 只在固定 eval 中持续胜过单 Agent且成本可接受时采用，并复用已经验证的 Workflow Graph 控制面。
+1. MCP 先解决 OAuth、server identity、Roots、allowlist、脱敏、注入与隔离；
+2. checkpoint fork/time travel 必须隔离已发生的非幂等副作用；
+3. A2A 只用于不透明 Agent 应用间的任务/消息/Artifact 互操作，不替代 MCP、内部函数或 Workflow；
+4. 多 Agent 只在固定 eval 中持续胜过单 Agent且成本可接受时采用，并复用已经验证的 Workflow Graph 控制面；
+5. 通用 A2A server、Agent marketplace 和大型 Graph Studio 均晚于 Workflow G2-B、Harness H1 与 outcome eval。
 
 ## 不建议投入
 

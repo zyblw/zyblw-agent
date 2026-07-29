@@ -2,13 +2,18 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-25
+> 最后核验：2026-07-29
 >
 > 事实来源：对应模块源码、测试与构建定义
 
 ## 设计边界
 
 模型只提出文本、结构化结果或工具调用。Runtime 负责能力校验、授权、执行、持久化、预算、终止和观测。Provider、数据库、HTTP、OpenTelemetry、MCP 与业务服务不能反向污染 `agent-core`。
+
+框架的应用语义分为 Agent、Harness 与 Workflow：Agent 负责开放式模型循环；Harness 负责 Goal/Plan/Todo、Workspace、
+Artifact、Skill、Context 和 Sandbox 等长任务支架；Workflow 负责显式步骤、路由和恢复边界。它们按需组合，不是三个
+强制部署服务，也不自动对应三个 Maven artifact。完整决策见
+[ADR 0016](architecture/0016-agent-application-runtime.md)。
 
 `zyblw-agent-core` 中的 `app` package 位于业务宿主与运行控制层之间，只组合
 `AgentRuntime/AgentCommandService/WorkerHost` 及其稳定 SPI。它不会定义
@@ -120,3 +125,5 @@ sequenceDiagram
 - [0012 独立、版本化的 HTTP 公共契约](architecture/0012-versioned-http-contract.md)
 - [0013 开源发布边界](architecture/0013-open-source-release-boundary.md)
 - [0014 收敛公共模块](architecture/0014-consolidate-public-modules.md)
+- [0015 独立公共仓库](architecture/0015-independent-public-repository.md)
+- [0016 Agent Application Runtime 与三层边界](architecture/0016-agent-application-runtime.md)

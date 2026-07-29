@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-22
+> 最后核验：2026-07-29
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -28,6 +28,27 @@
   -> 通过、质量失败或显式 bootstrap 时耐久追加候选
   -> 未授权的首次通过候选不追加，防止下一次运行隐式取得基线
   -> CI 根据 EvalReleaseDecision.passed 放行或阻止
+```
+
+单次套件仍可能因模型随机性产生偶然绿灯。`AgentEvalRunner.runRepeated` 会在同一个
+`maxParallelism` 边界内执行用例 × attempt，并生成 `AgentEvalReliabilityReport`。每个用例同时报告：
+
+- 观察到的逐次 `successRate`；
+- 以该成功率估算 k 次至少一次成功的 `estimatedPassAtK(k)`；
+- 以该成功率估算连续 k 次全部成功的 `estimatedPassPowerK(k)`；
+- 最严格的 `passedEveryTrial`。
+
+`pass@k` 适合“允许多试几次、至少一次成功”的探索任务；面向用户且每次都应可靠的路径应重点看 `pass^k` 和
+`passedEveryTrial`。当前估算假设试验近似独立同分布，尚未进入长期趋势 schema；小样本不能被宣传为统计保证。
+
+```scala
+val reliability =
+  AgentEvalRunner(maxParallelism = 8).runRepeated(
+    cases = agentCases,
+    trialsPerCase = 5
+  ) { (evalCase, attempt) =>
+    runAgent(evalCase, attempt)
+  }
 ```
 
 ## 2. 为什么不直接长期保存原始报告

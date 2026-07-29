@@ -38,12 +38,12 @@ jobs:
       - uses: sbt/setup-sbt@v1
 
       - name: Format, test, and publish to Maven-local
-        run: sbt -batch 'set ThisBuild / version := "0.1.0-local"; scalafmtCheckAll; scalafmtSbtCheck; testFull; publishM2'
+        run: sbt -batch 'set ThisBuild / version := "0.2.0-local"; scalafmtCheckAll; scalafmtSbtCheck; testFull; publishM2'
 
       - name: Compile independent Maven consumer
         working-directory: integration-tests/maven-consumer
         env:
-          ZYBLW_AGENT_VERSION: 0.1.0-local
+          ZYBLW_AGENT_VERSION: 0.2.0-local
         run: sbt -batch compile
 
   postgres:

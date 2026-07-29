@@ -155,11 +155,29 @@ HTTP `1.1.0` 已提供授权后的 `/api/v1/runs/{runId}/inspection`。
 
 ## 五、下一阶段优先级
 
+### 本轮前沿文档的指导意义
+
+文档对方向的判断成立：竞争核心已经从“再加 Provider、Tool 或 Agent 数量”转向 Agent Application Runtime。与官方资料
+交叉核验后，最值得进入本项目架构的部分是：
+
+- Agent、Harness、Workflow 三层分工；
+- Provider-neutral 基线加 capability/native extension，而不是最低公分母；
+- Goal/Plan/Todo、Artifact、Workspace、Memory 与 Context 使用不同生命周期和治理；
+- durable graph 的 node ledger、pending writes、signal/timer 与故障恢复；
+- outcome 优先、trajectory 辅助、`pass@k` 与 `pass^k` 并看的评测制度；
+- MCP、A2A、内部 Workflow 各守协议边界。
+
+这些内容已经通过 [ADR 0016](architecture/0016-agent-application-runtime.md) 和
+[成熟度路线](maturity-and-roadmap.md) 进入正式决策。八个能力平面用于发现缺口，不会机械拆成八个模块。
+
+需要收敛或延后的部分也很明确：不是所有任务都需要 Graph；A2A 和多 Agent 不能早于单 Agent、Harness 和 durable
+execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替代真实数据、恢复与发布证据。
+
 ### P0：开发体验和真实发布
 
-- 发布首个可解析的 Maven Central `0.x`；
+- 已发布首个可解析的 Maven Central `0.1.0`，按 Early SemVer 和破坏性变更范围收口第二版 `0.2.0`；
 - 维持已经可运行的五分钟纯内存 sample，并补一个独立 PostgreSQL sample；
-- 对首次公开版本建立 MiMa/API、JSON 快照、HTTP schema 和数据库 migration 基线；
+- 以 `0.1.0` 为已发布基线持续检查 Scala API、JSON 快照、HTTP schema 和数据库 migration；
 - 用发布制品而不是源码完整验证 `zyblw-server`；
 - 在已有安全 Timeline/inspect HTTP 读模型上增加 CLI 与轻量界面，不急着做大型 Web Studio。
 
@@ -174,7 +192,7 @@ HTTP `1.1.0` 已提供授权后的 `/api/v1/runs/{runId}/inspection`。
 
 成功标准：Prompt/Context 修改必须给出质量、延迟、token 和费用的前后对比。
 
-### P1：Plan、Goal、Artifact、Skill
+### P1：Harness（Plan、Goal、Artifact、Skill）
 
 不是先新增四个 artifact，而是先设计四个小型 Provider-neutral ADT：
 

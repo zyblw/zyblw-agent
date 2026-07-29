@@ -123,6 +123,63 @@ final case class AgentEvalSuiteReport(reports: Chunk[AgentEvalReport]) derives J
   /** 是否全部满足发布门禁。 */
   def passed: Boolean = reports.nonEmpty && reports.forall(_.passed)
 
+/** 同一用例的一次独立试验。
+  *
+  * `attempt` 从 1 开始，只表示本次多试验运行内的稳定顺序，不是可跨构建复用的持久化身份。
+  */
+final case class AgentEvalTrialReport(attempt: Int, report: AgentEvalReport) derives JsonCodec:
+  require(attempt > 0, "评测试验 attempt 必须大于零")
+
+/** 同一用例的多次独立试验可靠性。
+  *
+  * 单次成功只能说明“这次成功”。这里同时暴露：
+  *
+  *   - `successRate`：观察到的逐次成功率；
+  *   - `estimatedPassAtK`：以观察成功率估算 k 次中至少一次成功的概率；
+  *   - `estimatedPassPowerK`：以观察成功率估算连续 k 次全部成功的概率。
+  *
+  * 两个估算都假设各次试验近似独立同分布。它们是发布决策的可靠性信号，不是置信区间，也不能替代对失败轨迹和最终结果的 人工校准。
+  */
+final case class AgentEvalCaseReliability(
+    caseId: String,
+    datasetVersion: String,
+    trials: Chunk[AgentEvalTrialReport]
+) derives JsonCodec:
+  require(caseId.trim.nonEmpty && datasetVersion.trim.nonEmpty, "可靠性报告 id 和 datasetVersion 不能为空")
+  require(trials.nonEmpty, "可靠性报告至少需要一次试验")
+  require(
+    trials.map(_.attempt) == Chunk.fromIterable(1 to trials.length),
+    "可靠性报告 attempt 必须从 1 开始连续递增"
+  )
+  require(
+    trials.forall(trial => trial.report.caseId == caseId && trial.report.datasetVersion == datasetVersion),
+    "可靠性报告中的用例身份必须一致"
+  )
+
+  def successes: Int = trials.count(_.report.passed)
+
+  def successRate: Double = successes.toDouble / trials.length.toDouble
+
+  /** k 次独立尝试中至少一次成功的估算概率，即常称的 pass@k。 */
+  def estimatedPassAtK(k: Int): Double =
+    require(k > 0, "pass@k 的 k 必须大于零")
+    1.0 - math.pow(1.0 - successRate, k.toDouble)
+
+  /** 连续 k 次独立尝试全部成功的估算概率，即常称的 pass^k。 */
+  def estimatedPassPowerK(k: Int): Double =
+    require(k > 0, "pass^k 的 k 必须大于零")
+    math.pow(successRate, k.toDouble)
+
+  /** 对面向用户、必须稳定成功的路径，优先使用这个最严格的离线门禁。 */
+  def passedEveryTrial: Boolean = successes == trials.length
+
+/** 多试验套件报告；用例顺序与输入数据集一致。 */
+final case class AgentEvalReliabilityReport(cases: Chunk[AgentEvalCaseReliability]) derives JsonCodec:
+  def passedEveryTrial: Boolean = cases.nonEmpty && cases.forall(_.passedEveryTrial)
+
+  def meanSuccessRate: Double =
+    if cases.isEmpty then 0.0 else cases.map(_.successRate).sum / cases.length.toDouble
+
 /** 确定性规则评分器。
   *
   * LLM-as-judge 可作为额外维度，但工具选择、引用 ID、恢复副作用和预算都能用确定性规则判断， 不应把这些硬事实交给另一个模型猜测。
@@ -214,3 +271,44 @@ final class AgentEvalRunner(maxParallelism: Int):
       .foreachPar(cases)(evalCase => execute(evalCase).map(AgentEvalGrader.grade(evalCase, _)))
       .withParallelism(maxParallelism)
       .map(AgentEvalSuiteReport(_))
+
+  /** 对每个用例执行固定次数的独立试验，并保留确定性的用例/attempt 顺序。
+    *
+    * 整个 job 集合共享 `maxParallelism`，不会把“用例并发 × 重复次数”意外放大成无界 Provider 或数据库压力。任一执行返回 typed failure 时，ZIO
+    * 会中断仍在运行的兄弟 Fiber，本次报告不会以部分数据假装完成。
+    *
+    * @param cases
+    *   版本化评测数据集
+    * @param trialsPerCase
+    *   每个用例的独立试验次数
+    * @param execute
+    *   将用例与从 1 开始的 attempt 运行成标准观测值
+    */
+  def runRepeated(
+      cases: Chunk[AgentEvalCase],
+      trialsPerCase: Int
+  )(
+      execute: (AgentEvalCase, Int) => IO[AgentError, AgentEvalObservation]
+  ): IO[AgentError, AgentEvalReliabilityReport] =
+    require(trialsPerCase > 0, "trialsPerCase 必须大于零")
+    val jobs = cases.zipWithIndex.flatMap { case (evalCase, caseIndex) =>
+      Chunk.fromIterable(1 to trialsPerCase).map(attempt => (caseIndex, evalCase, attempt))
+    }
+    ZIO
+      .foreachPar(jobs) { case (caseIndex, evalCase, attempt) =>
+        execute(evalCase, attempt)
+          .map(AgentEvalGrader.grade(evalCase, _))
+          .map(report => (caseIndex, AgentEvalTrialReport(attempt, report)))
+      }
+      .withParallelism(maxParallelism)
+      .map { completed =>
+        AgentEvalReliabilityReport(
+          cases.zipWithIndex.map { case (evalCase, caseIndex) =>
+            AgentEvalCaseReliability(
+              evalCase.id,
+              evalCase.datasetVersion,
+              completed.collect { case (`caseIndex`, trial) => trial }
+            )
+          }
+        )
+      }

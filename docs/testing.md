@@ -47,7 +47,7 @@ Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基
   25 项 PostgreSQL 16/pgvector 契约通过、0 失败、0 忽略；
 - 其中 Workflow 为 11 项 core 契约与 4 项真实 PostgreSQL 契约。
 
-2026-07-26 的独立仓库发布准备复核：
+2026-07-26 的独立仓库 `0.1.0` 发布准备复核：
 
 - `testFull`：所有已执行的确定性测试通过，0 失败；19 项 PostgreSQL 用例按默认开关忽略；
 - `0.1.0-local publishM2`：11 个公开 artifact 的 POM、binary、sources 与 Scaladoc JAR 完整；

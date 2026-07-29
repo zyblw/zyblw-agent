@@ -3,7 +3,7 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
-## Unreleased (target: 0.2.0)
+## 0.2.0 - 2026-07-29
 
 ### Added
 
@@ -23,16 +23,26 @@ All notable user-visible changes will be recorded here. The project follows
   ZLayer graph for jobs, controllers and tools.
 - Shared in-memory and PostgreSQL `KnowledgeIndexStore & VectorStore` layers so indexing and retrieval use the same active
   knowledge snapshot without application-side vector copying.
+- `AgentEvalRunner.runRepeated` and reliability reports with one bounded ZIO job set, deterministic case/attempt ordering,
+  observed success rate, estimated `pass@k` / `pass^k`, and an all-trials hard signal.
+- Agent Application Runtime architecture decision: Agent/Harness/Workflow boundaries, eight capability planes, and an evidence-gated
+  order for durable execution, RAG, Harness, interoperability and multi-agent work.
 
 ### Changed
 
 - **Breaking, Experimental API:** Workflow nodes now return `NodeOutcome` only; control flow moved from the former `NodeResult` into
   `WorkflowDefinition`, which now requires `WorkflowId` and `WorkflowVersion`. `WorkflowCheckpointStore` now persists definition/session
-  identity, cursor, state, step and visit counters as one monotonic checkpoint. No compatibility shim is provided on the unreleased
-  `0.2.0` evolution line; immutable `0.1.0` artifacts remain unchanged.
+  identity, cursor, state, step and visit counters as one monotonic checkpoint. No compatibility shim is provided in `0.2.0`;
+  immutable `0.1.0` artifacts remain unchanged.
 - **Breaking, Experimental RAG API:** `SourceDocument` records `DocumentRepresentation`, every `Chunker` exposes a stable
   parameter-complete `strategyId`, and `KnowledgeIndexer` derives its default manifest strategy from the actual Chunker instead of the
   former hard-coded sliding-window label.
+
+### Upgrade
+
+- See [`docs/upgrading-to-0.2.0.md`](docs/upgrading-to-0.2.0.md). Applications using custom Workflow nodes/checkpoint stores or custom
+  RAG Chunkers must migrate and rebuild their index version. The stable Agent Runtime, Tool, Provider and HTTP v1 paths do not require
+  an intentional API migration, but every consumer must recompile and run its own contract tests.
 
 ## 0.1.0 - 2026-07-27
 
