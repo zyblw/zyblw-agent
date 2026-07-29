@@ -175,7 +175,7 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 
 ### P0：开发体验和真实发布
 
-- 已发布首个可解析的 Maven Central `0.1.0`，按 Early SemVer 和破坏性变更范围收口第二版 `0.2.0`；
+- Maven Central `0.1.0` 与第二版 `0.2.0` 均已发布；后者按 Early SemVer 正确承载明确记录的破坏性改进；
 - 维持已经可运行的五分钟纯内存 sample，并补一个独立 PostgreSQL sample；
 - 以 `0.1.0` 为已发布基线持续检查 Scala API、JSON 快照、HTTP schema 和数据库 migration；
 - 用发布制品而不是源码完整验证 `zyblw-server`；

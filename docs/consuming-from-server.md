@@ -9,7 +9,7 @@
 业务项目的 CI 和生产构建固定 Maven Central 精确版本：
 
 ```scala
-val zyblwAgentVersion = "0.1.0"
+val zyblwAgentVersion = "0.2.0"
 
 libraryDependencies ++= Seq(
   "io.github.zyblw" %% "zyblw-agent-core"      % zyblwAgentVersion,

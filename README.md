@@ -11,7 +11,7 @@
 
 - Maven 坐标：`io.github.zyblw`
 - 源码仓库：`https://github.com/zyblw/zyblw-agent`
-- 当前版本：[`0.1.0`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.1.0)，已发布到 Maven Central。
+- 当前版本：[`0.2.0`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.2.0)，已发布到 Maven Central。
 - 当前发布线：`0.x`，遵循 Early SemVer；公开 API 在形成真实使用证据前仍允许有计划地调整。
 - 许可证：Apache License 2.0。
 - Git tag：`vX.Y.Z` 触发框架发布。
@@ -27,8 +27,8 @@ Central namespace、短期发布 token、GPG 签名密钥和 GitHub release envi
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.1.0",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.1.0"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.2.0",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.2.0"
 )
 ```
 

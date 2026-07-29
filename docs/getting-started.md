@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-27
+> 最后核验：2026-07-29
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -12,16 +12,16 @@
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.1.0",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.1.0"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.2.0",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.2.0"
 )
 ```
 
 需要 ZIO HTTP 控制面再加入 `zyblw-agent-zio-http`；需要 PostgreSQL 耐久化再加入
 `zyblw-agent-postgres`。完整矩阵见 [模块选择](modules.md)。
 
-`0.1.0` 已发布到 Maven Central。验证后续尚未发布的候选时，可以在框架目录执行
-`sbt -batch 'set ThisBuild / version := "0.1.1-local.1"; publishM2'`，宿主临时使用同一唯一版本并显式启用 Maven
+`0.2.0` 已发布到 Maven Central。验证后续尚未发布的候选时，可以在框架目录执行
+`sbt -batch 'set ThisBuild / version := "0.2.1-local.1"; publishM2'`，宿主临时使用同一唯一版本并显式启用 Maven
 Local；不要覆盖旧本地版本，也不要把本地版本或 `SNAPSHOT` 当作可重复生产发布物。完整命令见
 [server 消费指南](consuming-from-server.md)。
 
