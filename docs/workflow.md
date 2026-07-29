@@ -1,8 +1,8 @@
 # 声明式 Workflow Graph
 
 > 状态：Experimental
-> 最后核验：2026-07-29
-> 事实来源：`core.workflow` 源码、`WorkflowSpec` 与 `GraphWorkflowExample`
+> 最后核验：2026-07-30
+> 事实来源：`core.workflow` 源码、`WorkflowSpec`、PostgreSQL 16 集成测试与 `GraphWorkflowExample`
 
 `zyblw-agent` 的 Workflow 是一个小型、类型化、可恢复的 StateGraph。它用于“步骤和控制边在运行前可以声明”的确定性长流程，
 不是把普通 Agent loop 包装成图，也不是通用分布式调度平台。
@@ -97,7 +97,7 @@ WorkflowTransition.FanOut(
 
 当前分支必须是单步且不能暂停。多节点子图、quorum、race/first-success 和部分成功策略要在状态与恢复契约明确后再加入。
 
-## checkpoint、恢复与事件
+## checkpoint、执行台账与恢复
 
 每个可继续的节点边界原子保存：
 
@@ -109,8 +109,8 @@ WorkflowTransition.FanOut(
 - 每节点访问次数。
 
 `resume` 会先验证 workflow、定义版本与 Session identity，再从最近 checkpoint 继续；已完成 Run 再恢复只返回同一个
-`Completed`。暂停节点会从节点入口重新执行，因此节点在 `Suspended` 之前产生的外部副作用必须拥有业务幂等键。当前事件
-包含节点开始/完成、fan-out 开始/完成、暂停和完成，可用于构造实际执行路径，但事件正文是否可持久化仍由宿主决定。
+`Completed`。当前事件包含节点开始/完成、fan-out 开始/完成、暂停和完成，可用于构造实际执行路径，但事件正文是否可持久化
+仍由宿主决定。
 
 内存 Store 与 PostgreSQL Store 使用相同的单调写契约：
 
@@ -120,16 +120,44 @@ WorkflowTransition.FanOut(
 - 陈旧 step、同 step 不同内容或 identity 漂移返回 `WorkflowCheckpointConflict`；
 - PostgreSQL Adapter 对完整 JSON 执行容量限制、SHA-256、JSONB/确定性 TEXT 一致性和冗余列校验。
 
-应用状态需要 `JsonCodec[S]` 才能使用 PostgreSQL Adapter：
+普通 `WorkflowEngine.make` 继续使用 checkpoint-only 模式，适合单进程、节点本身幂等或由外部调度器拥有执行权的场景。
+生产多 Worker 推荐 `WorkflowEngine.makeDurable` 与 `WorkflowExecutionStore`：
 
 ```scala
-val checkpointLayer: URLayer[DataSource, WorkflowCheckpointStore[ReviewState]] =
-  PostgresAgentPersistence.workflowCheckpoints[ReviewState]
+val workflowLayer: URLayer[DataSource, WorkflowExecutionStore[ReviewState]] =
+  PostgresAgentPersistence.workflowExecutions[ReviewState]
+
+val engine = WorkflowEngine.makeDurable(
+  definition,
+  executionStore,
+  reducer,
+  WorkflowExecutionPolicy(
+    owner = WorkerId("review-worker-7"),
+    leaseDuration = 30.seconds,
+    heartbeatInterval = 10.seconds
+  )
+)
 ```
+
+Durable 模式对每次节点访问建立稳定 `(runId, step, nodeId)` 台账：
+
+1. claim 生成随机 token，并递增 generation；活跃 lease 返回 `Busy`，不会并发执行同一节点；
+2. 节点执行期间由作用域化 watchdog heartbeat；心跳失败会中断仍在运行的节点 Fiber；
+3. 节点成功后先写 `Prepared` outcome，再把一个节点或整个 fan-out 的 execution 与下一 checkpoint 在同一事务提交；
+4. 若进程在 prepare 后、commit 前崩溃，新 owner 在 lease 过期后领取更高 generation，并直接复用 Prepared outcome；
+5. 旧 owner 的 heartbeat、prepare 或 commit 会被 owner/token/generation/expiry fencing 拒绝。
+
+暂停 outcome 也先进入 ledger 并与暂停 checkpoint 原子提交；后续 `resume` 使用新的 step/visit 再次进入同一业务节点。应用状态
+和 pending outcome 需要 `JsonCodec[S]` 才能使用 PostgreSQL Adapter。V009 同时保存确定性 TEXT、JSONB 和 SHA-256，
+读取时对 identity、状态不变量、容量与 checksum fail-closed。
+
+这关闭了“节点结果已经返回、checkpoint 尚未提交”造成的框架级重复调用窗口，但不宣称任意外部副作用 exactly-once。节点若
+直接调用支付、发信或第三方写 API，仍需稳定业务幂等键；需要本地业务写与消息发布一致时使用
+[Outbox/Inbox 与补偿](side-effects.md)。
 
 ## 最小运行示例
 
-仓库中的 diamond graph 示例无需模型和数据库：
+仓库中的 diamond graph 示例无需模型和数据库，使用内存 execution ledger 演示同一套 durable API：
 
 ```bash
 sbt -batch "examples/runMain com.zyblw.agent.examples.GraphWorkflowExample"
@@ -140,15 +168,14 @@ sbt -batch "examples/runMain com.zyblw.agent.examples.GraphWorkflowExample"
 
 ## 当前边界与下一步
 
-当前已经实现“可验证图内核 + PostgreSQL 节点边界 checkpoint”，但仍不是分布式耐久工作流承诺。尚未实现：
+当前已经实现“可验证图内核 + PostgreSQL checkpoint + 节点 execution ledger/pending outcome/fencing”，并用故障注入证明
+prepare 后崩溃可恢复且节点不重复执行。尚未实现：
 
-- 节点级 pending writes 和崩溃窗口恢复；
 - timer、外部 signal、人工任务和 durable sleep；
 - 多节点子图、checkpoint fork/time travel；
-- 分布式 claim、lease 和 fencing；
 - quorum/race 等更多 fan-in policy；
 - Graph Inspector 和图级质量/成本 eval。
 
-下一纵向切片是“节点 execution ledger + pending writes + 进程崩溃故障注入”，复用现有 PostgreSQL RunStore
-的事务、租约和 fencing 经验。当前 Store 不提供执行所有权：多个 Worker 不能只凭 checkpoint 同时执行同一 Run。只有真实
-任务证明单 Agent 受角色或上下文隔离限制时，才在这个内核上增加 Agent handoff 或多 Agent 调度。
+下一纵向切片优先做“耐久 timer/signal + 可查询 execution timeline”，并补数据库重启、进程 kill 与多 Worker soak；随后才根据
+真实业务证据选择人工任务、子图或更多 fan-in policy。只有固定任务证明单 Agent 受角色或上下文隔离限制时，才在这个内核上
+增加 Agent handoff 或多 Agent 调度。

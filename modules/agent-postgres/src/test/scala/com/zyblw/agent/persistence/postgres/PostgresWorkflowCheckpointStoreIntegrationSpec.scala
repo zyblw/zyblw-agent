@@ -2,6 +2,7 @@ package com.zyblw.agent.persistence.postgres
 
 import com.dimafeng.testcontainers.PostgreSQLContainer
 import com.zyblw.agent.core.*
+import com.zyblw.agent.memory.WorkerId
 import com.zyblw.agent.workflow.*
 import javax.sql.DataSource
 import org.flywaydb.core.Flyway
@@ -202,6 +203,60 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
         },
         resumed.lastOption.contains(WorkflowEvent.Completed(WorkflowState(2, Chunk.empty)))
       )).provideLayer(harnessLayer)
+    },
+    test("V009 Prepared outcome 跨 owner 恢复，并以新 generation 原子提交 ledger 与 checkpoint") {
+      (for
+        harness <- ZIO.service[Harness]
+        runId   <- RunId.random
+        session <- SessionId.random
+        key = WorkflowExecutionKey(
+          runId,
+          workflowId,
+          workflowVersion,
+          session,
+          entry,
+          step = 0,
+          visit = 1
+        )
+        outcome = NodeOutcome.Succeeded(WorkflowState(1, Chunk("prepared-once")))
+        firstClaim  <- harness.storeA.claim(key, WorkerId("postgres-worker-old"), 1.second)
+        first       <- acquired(firstClaim)
+        prepared    <- harness.storeA.prepare(first, outcome)
+        busy        <- harness.storeB.claim(key, WorkerId("postgres-worker-busy"), 1.second)
+        _           <- Live.live(ZIO.sleep(1100.millis))
+        secondClaim <- harness.storeB.claim(key, WorkerId("postgres-worker-new"), 1.second)
+        second      <- acquired(secondClaim)
+        oldWrite    <- harness.storeA.prepare(first, outcome).either
+        checkpointValue = checkpoint(
+          session,
+          WorkflowCursor.Completed,
+          WorkflowState(1, Chunk("prepared-once")),
+          step = 1,
+          visits = Map(entry -> 1)
+        )
+        _      <- harness.storeB.commit(NonEmptyChunk(second), checkpointValue)
+        record <- harness.storeA.get(key)
+        loaded <- harness.storeA.load(runId)
+        count  <- executionRowCount(harness.dataSource, runId)
+      yield assertTrue(
+        prepared.status == WorkflowExecutionStatus.Prepared,
+        busy match
+          case WorkflowExecutionClaim.Busy(owner, 1L, _) =>
+            owner == WorkerId("postgres-worker-old")
+          case _ => false,
+        second.generation == first.generation + 1,
+        secondClaim match
+          case WorkflowExecutionClaim.Acquired(_, Some(value)) => value == outcome
+          case _                                               => false,
+        oldWrite.left.exists(_.isInstanceOf[AgentError.LeaseLost]),
+        record.exists(value =>
+          value.status == WorkflowExecutionStatus.Committed &&
+            value.generation == 2 &&
+            value.completedAt.nonEmpty
+        ),
+        loaded.contains(checkpointValue),
+        count == 1
+      )).provideLayer(harnessLayer)
     }
   ) @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@ TestAspect.timeout(
     3.minutes
@@ -235,6 +290,30 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
       finally statement.close()
     finally connection.close()
   }
+
+  private def executionRowCount(dataSource: DataSource, runId: RunId): Task[Int] = ZIO.attemptBlocking {
+    val connection = dataSource.getConnection
+    try
+      val statement = connection.prepareStatement(
+        "SELECT count(*) FROM agent_workflow_node_executions WHERE run_id = ?::uuid"
+      )
+      try
+        statement.setString(1, runId.asString)
+        val result = statement.executeQuery()
+        result.next()
+        result.getInt(1)
+      finally statement.close()
+    finally connection.close()
+  }
+
+  private def acquired[S](
+      claim: WorkflowExecutionClaim[S]
+  ): IO[StoreError, WorkflowExecutionLease] = claim match
+    case WorkflowExecutionClaim.Acquired(lease, _) => ZIO.succeed(lease)
+    case WorkflowExecutionClaim.Busy(_, _, _)      =>
+      ZIO.fail(AgentError.PersistenceFailure("unexpected busy workflow execution"))
+    case WorkflowExecutionClaim.Committed(_, _) =>
+      ZIO.fail(AgentError.PersistenceFailure("unexpected committed workflow execution"))
 
   private def tamperChecksum(dataSource: DataSource, runId: RunId): Task[Unit] = ZIO.attemptBlocking {
     val connection = dataSource.getConnection

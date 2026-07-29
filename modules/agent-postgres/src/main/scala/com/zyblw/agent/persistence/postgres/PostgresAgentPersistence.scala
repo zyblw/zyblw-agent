@@ -3,7 +3,7 @@ package com.zyblw.agent.persistence.postgres
 import com.zyblw.agent.memory.{MemoryStore, RunCommandStore, RunStore, RunSubmissionStore}
 import com.zyblw.agent.rag.{EmbeddingCacheStore, EmbeddingQuotaStore, KnowledgeIndexStore, VectorStore}
 import com.zyblw.agent.evals.EvalTrendStore
-import com.zyblw.agent.workflow.WorkflowCheckpointStore
+import com.zyblw.agent.workflow.{WorkflowCheckpointStore, WorkflowExecutionStore}
 import javax.sql.DataSource
 import zio.*
 import zio.json.JsonCodec
@@ -70,6 +70,14 @@ object PostgresAgentPersistence:
     */
   def workflowCheckpoints[S: JsonCodec: Tag]: URLayer[DataSource, WorkflowCheckpointStore[S]] =
     PostgresWorkflowCheckpointStore.layer[S]
+
+  /** Workflow 的推荐生产耐久层。
+    *
+    * 同一 Adapter 在一个事务中提交节点 execution ledger、Prepared outcome 与 checkpoint，并通过 owner/token/generation/expiry
+    * fencing 拒绝迟到 worker。
+    */
+  def workflowExecutions[S: JsonCodec: Tag]: URLayer[DataSource, WorkflowExecutionStore[S]] =
+    PostgresWorkflowCheckpointStore.executionLayer[S]
 
   /** 控制面与评测发布事实源的常用组合。
     *

@@ -1,10 +1,11 @@
 package com.zyblw.agent.examples
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.memory.WorkerId
 import com.zyblw.agent.workflow.*
 import zio.*
 
-/** 不调用模型的最小 diamond graph：显式 fan-out、AllSucceeded fan-in、确定性 reducer 与完成 checkpoint。
+/** 不调用模型的耐久 diamond graph：显式 fan-out、AllSucceeded fan-in、节点 execution ledger 与完成 checkpoint。
   *
   * 真实业务可把任意分支实现成 Agent 节点，但图的边、循环预算和汇合语义仍由代码声明。
   */
@@ -64,10 +65,16 @@ object GraphWorkflowExample extends ZIOAppDefault:
 
   def run: ZIO[Any, Any, Unit] =
     (for
-      store     <- ZIO.service[WorkflowCheckpointStore[ResearchState]]
+      store     <- ZIO.service[WorkflowExecutionStore[ResearchState]]
       runId     <- RunId.random
       sessionId <- SessionId.random
-      engine = WorkflowEngine.make(definition, store, reducer, maxParallelism = 2)
+      engine = WorkflowEngine.makeDurable(
+        definition,
+        store,
+        reducer,
+        WorkflowExecutionPolicy(WorkerId("graph-example")),
+        maxParallelism = 2
+      )
       events <- engine
         .run(ResearchState(Chunk.empty), WorkflowContext(runId, sessionId))
         .runCollect
@@ -75,7 +82,7 @@ object GraphWorkflowExample extends ZIOAppDefault:
         .fromOption(events.collectFirst { case WorkflowEvent.Completed(state) => state })
         .orElseFail(AgentError.Unexpected("graph example 没有完成"))
       _ <- Console.printLine(completed.report.getOrElse("<empty report>"))
-    yield ()).provide(WorkflowCheckpointStore.inMemory[ResearchState])
+    yield ()).provide(WorkflowExecutionStore.inMemory[ResearchState])
 
   private def node(id0: NodeId)(
       execute0: ResearchState => IO[WorkflowError, NodeOutcome[ResearchState]]

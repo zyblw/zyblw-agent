@@ -1,7 +1,7 @@
 # zyblw-agent 能力审计、框架对照与演进判断
 
 > 状态：当前审计
-> 最后核验：2026-07-29
+> 最后核验：2026-07-30
 > 事实来源：当前源码、测试、构建、迁移、发布工作流，以及文末列出的官方框架资料
 
 本文回答四个问题：
@@ -88,10 +88,11 @@
 - 高成本、不可逆和权限升级决策保留人工审批。
 
 本轮据此重构 `core.workflow`：节点不再通过返回值隐藏下一跳；`WorkflowDefinition.make` 先验证完整图；
-`WorkflowCheckpoint` 保存访问预算；fan-out 明确采用 `AllSucceeded`，由 ZIO 结构化并发传播失败与取消。当前故意只支持单步
-fan-out 分支，避免在没有 pending writes、耐久账本和故障注入前假装拥有完整图平台。
+`WorkflowCheckpoint` 保存访问预算；fan-out 明确采用 `AllSucceeded`，由 ZIO 结构化并发传播失败与取消。随后完成的
+`WorkflowExecutionStore` 和 V009 已补上 pending outcome、耐久账本、lease/fencing 与 prepare→checkpoint 故障注入；
+当前仍故意只支持单步 fan-out 分支，避免在没有 timer/signal、子图命名空间和多节点 soak 前假装拥有完整图平台。
 
-这条路的下一步不是堆 Agent，而是 PostgreSQL checkpoint、节点 execution ledger、进程崩溃恢复和 Graph Inspector。
+这条路的下一步不是堆 Agent，而是 durable timer/signal、execution timeline、进程 kill/数据库重启 soak 和 Graph Inspector。
 完整契约与边界见[声明式 Workflow Graph](workflow.md)。
 
 ### zyblw-agent 的差异化优势

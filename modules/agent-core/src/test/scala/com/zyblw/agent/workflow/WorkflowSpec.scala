@@ -1,6 +1,7 @@
 package com.zyblw.agent.workflow
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.memory.WorkerId
 import zio.*
 import zio.test.*
 
@@ -319,6 +320,156 @@ object WorkflowSpec extends ZIOSpecDefault:
         loaded.contains(advanced)
       )
     }.provide(WorkflowCheckpointStore.inMemory[Int]),
+    test("execution lease 过期后递增 generation 并拒绝旧 owner 的迟到写") {
+      for
+        runId        <- RunId.random
+        session      <- SessionId.random
+        otherSession <- SessionId.random
+        store        <- ZIO.service[WorkflowExecutionStore[Int]]
+        entry = NodeId("entry")
+        key   = WorkflowExecutionKey(
+          runId,
+          testWorkflowId,
+          testWorkflowVersion,
+          session,
+          entry,
+          step = 0,
+          visit = 1
+        )
+        firstClaim    <- store.claim(key, WorkerId("worker-old"), 30.seconds)
+        first         <- acquired(firstClaim)
+        busy          <- store.claim(key, WorkerId("worker-busy"), 30.seconds)
+        identityDrift <- store
+          .claim(key.copy(sessionId = otherSession), WorkerId("worker-drift"), 30.seconds)
+          .either
+        _           <- TestClock.adjust(31.seconds)
+        secondClaim <- store.claim(key, WorkerId("worker-new"), 30.seconds)
+        second      <- acquired(secondClaim)
+        oldWrite    <- store.prepare(first, NodeOutcome.Succeeded(1)).either
+        prepared    <- store.prepare(second, NodeOutcome.Succeeded(1))
+        checkpoint = savedCheckpoint(
+          session,
+          WorkflowCursor.Completed,
+          state = 1,
+          step = 1,
+          visits = Map(entry -> 1)
+        )
+        _      <- store.commit(NonEmptyChunk(second), checkpoint)
+        record <- store.get(key)
+        loaded <- store.load(runId)
+      yield assertTrue(
+        busy match
+          case WorkflowExecutionClaim.Busy(owner, 1L, _) => owner == WorkerId("worker-old")
+          case _                                         => false,
+        identityDrift.left.exists {
+          case AgentError.WorkflowCheckpointConflict(_, reason) =>
+            reason.endsWith(":execution-identity")
+          case _ => false
+        },
+        second.generation == first.generation + 1,
+        oldWrite.left.exists(_.isInstanceOf[AgentError.LeaseLost]),
+        prepared.status == WorkflowExecutionStatus.Prepared,
+        record.exists(_.status == WorkflowExecutionStatus.Committed),
+        loaded.contains(checkpoint)
+      )
+    }.provide(WorkflowExecutionStore.inMemory[Int]),
+    test("checkpoint 提交前失败后复用 Prepared outcome，节点不会重复执行") {
+      for
+        runId      <- RunId.random
+        sessionId  <- SessionId.random
+        baseStore  <- ZIO.service[WorkflowExecutionStore[Int]]
+        failOnce   <- Ref.make(true)
+        executions <- Ref.make(0)
+        entry      = NodeId("entry")
+        definition = validDefinition(
+          entry,
+          Map(
+            entry -> node(entry)(state => executions.update(_ + 1).as(NodeOutcome.Succeeded(state + 1)))
+          ),
+          Map(entry -> WorkflowTransition.Complete())
+        )
+        initial = savedCheckpoint(
+          sessionId,
+          WorkflowCursor.At(entry),
+          state = 0,
+          step = 0,
+          visits = Map.empty
+        )
+        _ <- baseStore.save(runId, initial)
+        flakyStore = new WorkflowExecutionStore[Int]:
+          def save(runId: RunId, checkpoint: WorkflowCheckpoint[Int]) =
+            baseStore.save(runId, checkpoint)
+          def load(runId: RunId) = baseStore.load(runId)
+          def claim(key: WorkflowExecutionKey, owner: WorkerId, leaseDuration: Duration) =
+            baseStore.claim(key, owner, leaseDuration)
+          def heartbeat(lease: WorkflowExecutionLease, leaseDuration: Duration) =
+            baseStore.heartbeat(lease, leaseDuration)
+          def prepare(lease: WorkflowExecutionLease, outcome: NodeOutcome[Int]) =
+            baseStore.prepare(lease, outcome)
+          def commit(
+              leases: NonEmptyChunk[WorkflowExecutionLease],
+              checkpoint: WorkflowCheckpoint[Int]
+          ) =
+            failOnce.getAndSet(false).flatMap {
+              case true  => ZIO.fail(AgentError.PersistenceFailure("injected-before-checkpoint"))
+              case false => baseStore.commit(leases, checkpoint)
+            }
+          def get(key: WorkflowExecutionKey) = baseStore.get(key)
+        policy = WorkflowExecutionPolicy(
+          WorkerId("worker-a"),
+          leaseDuration = 30.seconds,
+          heartbeatInterval = 10.seconds
+        )
+        firstExit <- WorkflowEngine
+          .makeDurable(definition, flakyStore, sumReducer, policy)
+          .resume(context(runId, sessionId))
+          .runCollect
+          .exit
+        countAfterFailure <- executions.get
+        prepared          <- baseStore.get(
+          WorkflowExecutionKey(
+            runId,
+            testWorkflowId,
+            testWorkflowVersion,
+            sessionId,
+            entry,
+            step = 0,
+            visit = 1
+          )
+        )
+        _       <- TestClock.adjust(31.seconds)
+        resumed <- WorkflowEngine
+          .makeDurable(
+            definition,
+            baseStore,
+            sumReducer,
+            policy.copy(owner = WorkerId("worker-b"))
+          )
+          .resume(context(runId, sessionId))
+          .runCollect
+        finalCount <- executions.get
+        committed  <- baseStore.get(
+          WorkflowExecutionKey(
+            runId,
+            testWorkflowId,
+            testWorkflowVersion,
+            sessionId,
+            entry,
+            step = 0,
+            visit = 1
+          )
+        )
+      yield assertTrue(
+        firstExit.isFailure,
+        countAfterFailure == 1,
+        prepared.exists(_.status == WorkflowExecutionStatus.Prepared),
+        resumed.lastOption.contains(WorkflowEvent.Completed(1)),
+        finalCount == 1,
+        committed.exists(record =>
+          record.status == WorkflowExecutionStatus.Committed && record.generation == 2
+        )
+      )
+    }.provide(WorkflowExecutionStore.inMemory[Int]),
     test("AllSucceeded 分支失败会中断仍在运行的兄弟 Fiber 且不提交 join checkpoint") {
       for
         runId       <- RunId.random
@@ -402,3 +553,12 @@ object WorkflowSpec extends ZIOSpecDefault:
   private val sumReducer = new StateReducer[Int]:
     def merge(base: Int, branches: Chunk[Int]): IO[WorkflowError, Int] =
       ZIO.succeed(base + branches.sum)
+
+  private def acquired[S](
+      claim: WorkflowExecutionClaim[S]
+  ): IO[StoreError, WorkflowExecutionLease] = claim match
+    case WorkflowExecutionClaim.Acquired(lease, _) => ZIO.succeed(lease)
+    case WorkflowExecutionClaim.Busy(_, _, _)      =>
+      ZIO.fail(AgentError.PersistenceFailure("unexpected busy workflow execution"))
+    case WorkflowExecutionClaim.Committed(_, _) =>
+      ZIO.fail(AgentError.PersistenceFailure("unexpected committed workflow execution"))

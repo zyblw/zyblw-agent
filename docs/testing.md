@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-29
+> 最后核验：2026-07-30
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -46,6 +46,14 @@ Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基
 - `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`：正式 V001/V007/V008 与 optional pgvector migration 全部执行，
   25 项 PostgreSQL 16/pgvector 契约通过、0 失败、0 忽略；
 - 其中 Workflow 为 11 项 core 契约与 4 项真实 PostgreSQL 契约。
+
+2026-07-30 的 Workflow G2-B 增量复核：
+
+- 新增 execution lease generation/fencing 与 prepare 后、checkpoint 前故障注入，Workflow core 契约增至 13 项；
+- V009 在 PostgreSQL 16 验证活跃 owner 互斥、过期 Prepared outcome 跨 owner 复用、旧 generation 拒绝，以及 ledger 与
+  checkpoint 同事务提交；Workflow PostgreSQL 契约增至 5 项；
+- `scalafmtCheckAll; scalafmtSbtCheck; testFull` 全部通过；`RUN_POSTGRES_INTEGRATION=1 postgres/testFull` 执行正式
+  V001/V007/V008/V009 与 optional pgvector migration，26 项 PostgreSQL 16/pgvector 契约通过、0 失败、0 忽略。
 
 2026-07-26 的独立仓库 `0.1.0` 发布准备复核：
 
@@ -189,9 +197,9 @@ Eval 趋势用例验证 V007 低敏表、跨 Store 并发 `ON CONFLICT` 仲裁�
 - 工具空白名单默认拒绝。
 - Workflow 声明式边的启动校验、不可达/缺失目标诊断、循环访问上限、完成/暂停 checkpoint 恢复、
   definition/session identity、单调写冲突、未声明动态路由拒绝，以及 `AllSucceeded` fan-out 失败时的兄弟 Fiber 中断和
-  join checkpoint 隔离。
-- PostgreSQL Workflow checkpoint：V008、跨 Store 并发幂等与单调 step、identity 漂移拒绝、checksum 损坏
-  fail-closed，以及暂停后跨 Adapter 实例恢复。
+  join checkpoint 隔离；durable 模式另覆盖 lease generation/fencing 和 Prepared outcome 故障恢复。
+- PostgreSQL Workflow：V008/V009、跨 Store 并发幂等与单调 step、identity 漂移拒绝、checksum 损坏 fail-closed、
+  暂停后跨 Adapter 实例恢复，以及 execution ledger/checkpoint 原子提交。
 - RAG tenant/permission 前置过滤。
 
 Testkit 提供 Scripted/Recording Provider、Stub/Failing/Slow/NonInterruptible Tool、固定 TokenCounter 和确定性 ID。

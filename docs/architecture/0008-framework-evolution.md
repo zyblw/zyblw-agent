@@ -36,7 +36,8 @@ LLM4S、Rig 和 LangGraph 已分别在 Scala、Rust 和 Python 生态形成较�
 2. `RunStore` 是唯一生产耐久事实来源，Runtime 直接提交版本化 `AgentState` 与精选领域事件。
 3. Workflow 每个节点显式输出 `NodeStarted`，checkpoint 保存的是下一恢复游标。
 4. fan-out 必须声明独立 join 节点，不能隐式把最后一个 worker 当作 join。
-5. 暂停恢复会从节点入口重放，因此暂停前副作用必须幂等，危险动作应放在审批之后或使用幂等账本。
+5. checkpoint-only 模式从节点入口重放；durable 模式先保存 Prepared outcome 并以 execution lease/fencing 恢复。两种模式
+   都不能自动让节点内部外部 API exactly-once，危险动作仍应放在审批后并使用业务幂等键或 outbox/inbox。
 6. 多 Agent 与容器沙箱继续留在 experimental，不进入稳定 core；分布式 command 调度通过独立 scheduler 模块接入。
 7. core 内 `app` package 只组合稳定 SPI；生产 `durable` 不提供内存 fallback，`inMemoryDefaults` 必须明确标记为教程/测试入口。
 8. Builder 保持不可变，并在启动期校验 Agent 工具白名单是全局执行策略的子集；它不能成为隐藏依赖的 Service Locator。
@@ -49,7 +50,7 @@ LLM4S、Rig 和 LangGraph 已分别在 Scala、Rust 和 Python 生态形成较�
 
 ## 风险
 
-- Workflow 恢复要求节点作者理解重放与幂等规则。
+- Workflow 节点作者仍需理解 prepare 前重试、外部副作用幂等与 lease 到期边界。
 - 过多公共 API 会增加长期二进制兼容成本，稳定 API 必须以业务接入和契约测试为准入条件。
 - 真实业务 adapter、Provider 原生协议和跨主机混沌/soak 仍须通过发布门禁，基础 SPI 存在不代表这些外围能力成熟。
 

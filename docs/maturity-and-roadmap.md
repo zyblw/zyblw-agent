@@ -1,7 +1,7 @@
 # zyblw-agent 成熟度、取舍与路线
 
 > 状态：路线图
-> 最后核验：2026-07-29
+> 最后核验：2026-07-30
 > 事实来源：`build.sbt`、模块源码、测试、发布工作流、迁移与当前文档
 
 ## 成熟度语义
@@ -41,7 +41,7 @@
 | Eval/趋势门禁 | evals；仓库内 eval-cli | Experimental | snapshot、trend、release gate、有界多试验与 `pass@k`/`pass^k` | outcome/trajectory 分离、固定真实数据集与人工校准 |
 | MCP client | mcp / `mcp` | Beta/Experimental | 协议与测试基础 | OAuth/server/Roots、供应链与隔离 |
 | 可靠写工具 | core / `sideeffects` | Experimental | outbox/inbox/补偿抽象 | 真实 transport 与业务案例 |
-| Workflow Graph | core + postgres / `workflow` | Experimental | 显式 nodes/edges、identity/version、启动校验、单调 checkpoint、`AllSucceeded` 取消、11 个 core 测试与 4 个 PostgreSQL 16 契约 | 节点账本/pending writes、timer/signal、子图、分布式 lease、图级 eval |
+| Workflow Graph | core + postgres / `workflow` | Experimental | 显式 nodes/edges、identity/version、启动校验、单调 checkpoint、`AllSucceeded` 取消、execution ledger/pending outcome、lease/fencing、13 个 core 测试与 5 个 PostgreSQL 16 契约 | timer/signal、子图、多 Worker soak、Inspector 与图级 eval |
 | Workspace/Sandbox | mcp / `workspace` | Experimental | 能力边界 | 真实 OCI 隔离与攻击测试 |
 | Multimodal | core / `multimodal` | Experimental | 抽象 | 产品场景、Provider 与 eval |
 
@@ -133,9 +133,12 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
 3. **已完成 G1**：单步 fan-out 显式采用 `AllSucceeded`，有界并发且失败会中断兄弟 Fiber，不写 join checkpoint；
 4. **已完成 G2-A**：V008 `PostgresWorkflowCheckpointStore` 绑定 workflow/version/session，提供容量/checksum/JSONB
    完整性、幂等重放、单调 step 与跨 Store 暂停恢复；
-5. **下一步 G2-B**：节点 execution ledger、pending writes、execution lease/fencing 与进程崩溃故障注入；
-6. **随后 G3**：基于真实需求加入 timer、外部 signal、人工任务、子图或更多 fan-in policy；
-7. Graph Inspector、实际路径 trace、质量/延迟/token/费用 eval 达标后，才讨论通用 Agent 节点和多 Agent 调度。
+5. **已完成 G2-B**：`WorkflowExecutionStore` 把节点 execution ledger、Prepared outcome、lease heartbeat/fencing 与
+   checkpoint 组成一个原子提交边界；V009 PostgreSQL Adapter 支持过期 Prepared 跨 owner/generation 恢复，故障注入证明
+   prepare 后、checkpoint 前失败不会重复执行节点；
+6. **下一步 G3-A**：耐久 timer、外部 signal 与可查询 execution timeline，并补数据库重启、进程 kill 和多 Worker soak；
+7. **随后 G3-B**：基于真实需求加入人工任务、子图或更多 fan-in policy；
+8. Graph Inspector、实际路径 trace、质量/延迟/token/费用 eval 达标后，才讨论通用 Agent 节点和多 Agent 调度。
 
 不把普通单 Agent loop 或几个顺序函数强制图化。完整当前契约见[声明式 Workflow Graph](workflow.md)。
 

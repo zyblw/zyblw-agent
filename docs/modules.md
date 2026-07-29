@@ -1,7 +1,7 @@
 # 模块与发布坐标
 
 > 状态：当前
-> 最后核验：2026-07-29
+> 最后核验：2026-07-30
 > 事实来源：`build.sbt`、各模块 `src/main`、`maturity-and-roadmap.md`
 
 ## 先理解两个不同的边界
@@ -48,7 +48,7 @@ libraryDependencies ++= Seq(
 | `zyblw-agent-rag` | `RagApplication`、结构切分、版本化摄取、知识检索、引用回答 | RAG 是可选业务能力，不污染最小 tool loop |
 | `zyblw-agent-document-loaders` | PDF/EPUB/Office 摄取 | Apache Tika 与 Docling Serve HTTP 都是可选重型/协议边界 |
 | `zyblw-agent-rerank` | 调用外部 reranker | 会产生网络和数据驻留边界 |
-| `zyblw-agent-postgres` | 耐久 Run、Workflow checkpoint、Memory、RAG、评测 | JDBC、Flyway、数据库 schema 与生命周期独立 |
+| `zyblw-agent-postgres` | 耐久 Run、Workflow execution/checkpoint、Memory、RAG、评测 | JDBC、Flyway、数据库 schema 与生命周期独立 |
 | `zyblw-agent-zio-http` | 暴露控制面或独立 Agent 服务 | ZIO HTTP Endpoint、routes、host 属于传输边界 |
 | `zyblw-agent-mcp` | MCP client 与受控 workspace | 外部工具互操作和执行安全边界独立；server 仍在路线图 |
 | `zyblw-agent-opentelemetry` | OTLP traces/metrics | SDK/exporter 有资源与后台线程，不进入零成本 SPI |
@@ -87,7 +87,7 @@ RAG 业务还需加入 `zyblw-agent-rag`；PDF/EPUB 再加入 `zyblw-agent-docum
 | `observability` | 无 exporter 的 trace/metrics SPI |
 | `app` | 面向业务宿主的 Builder 与 ZLayer 装配入口 |
 | `sideeffects` | 有副作用工具的 outbox/idempotency 模型 |
-| `workflow` | 显式确定性图、identity/version 与 checkpoint SPI；不是多 Agent 编排平台 |
+| `workflow` | 显式确定性图、identity/version、checkpoint 与 execution ledger/fencing SPI；不是多 Agent 编排平台 |
 | `multimodal` | Provider-neutral 内容部件 ADT |
 
 把这些 package 拆成十几个 artifact 的收益很小：它们共享 ZIO 基础依赖、经常共同变更，业务也几乎总是一起使用。过去的拆法

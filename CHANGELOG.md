@@ -3,6 +3,23 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
+## Unreleased (target: 0.2.1)
+
+### Added
+
+- Additive `WorkflowExecutionStore`, `WorkflowExecutionPolicy` and `WorkflowEngine.makeDurable` APIs with node
+  Running/Prepared/Committed ledger state, scoped lease heartbeat, owner/token/generation/expiry fencing, recoverable pending outcomes,
+  and atomic fan-out execution/checkpoint commits.
+- V009 `agent_workflow_node_executions` plus PostgreSQL 16 contracts for active-owner exclusion, expired Prepared outcome recovery,
+  stale-worker rejection, checksum/domain validation, and transactionally aligned ledger/checkpoint completion.
+- Failure-injection coverage proving a process failure after outcome preparation and before checkpoint commit resumes under a new
+  generation without invoking the node twice.
+
+### Changed
+
+- `GraphWorkflowExample` now demonstrates the durable in-memory execution API; checkpoint-only `WorkflowEngine.make` remains available
+  and unchanged for compatible 0.2.x consumers.
+
 ## 0.2.0 - 2026-07-29
 
 ### Added
