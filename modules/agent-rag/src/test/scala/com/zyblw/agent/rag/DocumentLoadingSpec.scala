@@ -153,17 +153,14 @@ object DocumentLoadingSpec extends ZIOSpecDefault:
           failureMode = DocumentIngestionFailureMode.FailFast
         )
         result <- service
-          .ingest(
-            ZStream.succeed(
-              DocumentIngestionRequest(
-                input("failed"),
-                TenantId("tenant-a"),
-                Set("read"),
-                "ingest-failed"
-              )
+          .ingestOne(
+            DocumentIngestionRequest(
+              input("failed"),
+              TenantId("tenant-a"),
+              Set("read"),
+              "ingest-failed"
             )
           )
-          .runCollect
           .exit
       yield assertTrue(result.isFailure)
     }

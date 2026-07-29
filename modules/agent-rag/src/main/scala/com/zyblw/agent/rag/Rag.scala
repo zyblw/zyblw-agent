@@ -3,11 +3,19 @@ package com.zyblw.agent.rag
 import com.zyblw.agent.core.*
 import zio.*
 
+/** Loader 交给切分器的正文表示。
+  *
+  * `Markdown` 表示标题、列表、表格、代码块等结构来自受控解析器；它仍然是不可信资料，不能因此提升为 Agent 指令。
+  */
+enum DocumentRepresentation:
+  case PlainText, Markdown
+
 final case class SourceDocument(
     id: String,
     text: String,
     sourceUri: String,
-    metadata: Map[String, String] = Map.empty
+    metadata: Map[String, String] = Map.empty,
+    representation: DocumentRepresentation = DocumentRepresentation.PlainText
 )
 final case class DocumentChunk(
     id: String,
@@ -92,12 +100,17 @@ final case class Citation(id: String, sourceUri: String, excerpt: String, score:
 final case class RetrievalResult(hits: Chunk[RetrievalHit], citations: Chunk[Citation])
 
 trait Chunker:
+  /** 能完整区分算法及其影响输出参数的稳定标识；索引 manifest 默认使用它阻止错误重放。 */
+  def strategyId: String
+
   /** 切分时绑定 tenant 和权限，确保权限过滤可在相似度计算之前发生。 */
   def split(document: SourceDocument, tenantId: TenantId, permissions: Set[String]): UIO[Chunk[DocumentChunk]]
 
 /** 按字符窗口确定性切分，保留 overlap；生产可替换为 token/语义切分器。 */
 final class SlidingWindowChunker(maxCharacters: Int = 1200, overlap: Int = 120) extends Chunker:
   require(maxCharacters > 0 && overlap >= 0 && overlap < maxCharacters)
+
+  override val strategyId: String = s"sliding-window-v1:max=$maxCharacters:overlap=$overlap"
 
   /** 按滑动字符窗口切分；overlap 保留跨边界上下文，空文档返回空 Chunk。 */
   def split(

@@ -11,7 +11,60 @@ import zio.*
   */
 final class InMemoryKnowledgeIndexStore private (
     state: Ref.Synchronized[InMemoryKnowledgeIndexStore.State]
-) extends KnowledgeIndexStore:
+) extends KnowledgeIndexStore,
+      VectorStore:
+
+  /** 立即写入本地已发布快照。
+    *
+    * 该入口只用于直接测试 `VectorStore` SPI；正常知识摄取应使用 `KnowledgeIndexer` 的 Building→stage→activate 协议。相同
+    * tenant/document/chunk ID 的条目被原子替换。
+    */
+  override def upsert(chunks: Chunk[IndexedChunk]): UIO[Unit] =
+    state.update { current =>
+      val updated = chunks
+        .groupBy(item => KnowledgeDocumentKey(item.chunk.tenantId, item.chunk.documentId))
+        .foldLeft(
+          current.published
+        ) { case (published, (key, incoming)) =>
+          val incomingIds = incoming.map(_.chunk.id).toSet
+          val retained    =
+            published.getOrElse(key, Chunk.empty).filterNot(item => incomingIds.contains(item.chunk.id))
+          published.updated(key, retained ++ incoming)
+        }
+      current.copy(published = updated)
+    }
+
+  /** 对当前 active 快照执行 tenant/permission 前置过滤，再计算 cosine。
+    *
+    * 该实现让本地开发与生产 PostgreSQL 使用同一套 Loader→Indexer→Retriever 接线，不再要求示例绕过正式知识发布协议。
+    */
+  override def search(
+      query: Embedding,
+      scope: RetrievalScope,
+      limit: Int
+  ): UIO[Chunk[RetrievalHit]] =
+    if limit <= 0 then ZIO.succeed(Chunk.empty)
+    else
+      state.get.map { current =>
+        Chunk.fromIterable(
+          current.published.valuesIterator
+            .flatMap(_.iterator)
+            .filter(item =>
+              item.chunk.tenantId == scope.tenantId &&
+                item.chunk.permissions.subsetOf(scope.permissions)
+            )
+            .map(item => RetrievalHit(item.chunk, cosine(query, item.embedding)))
+            .toVector
+            .sortBy(hit => (-hit.score, hit.chunk.id))
+            .take(limit)
+        )
+      }
+
+  /** 删除指定租户文档的本地发布快照。耐久业务应优先调用 `KnowledgeIndexStore.retire` 保留 manifest 状态。 */
+  override def deleteByDocument(documentId: String, tenantId: TenantId): UIO[Unit] =
+    state.update(current =>
+      current.copy(published = current.published - KnowledgeDocumentKey(tenantId, documentId))
+    )
 
   /** 分配新版本，或对同一幂等请求返回原构建句柄。 */
   def begin(request: BeginKnowledgeIndex): IO[RetrievalError, KnowledgeIndexBuild] =
@@ -271,6 +324,15 @@ final class InMemoryKnowledgeIndexStore private (
   def published(key: KnowledgeDocumentKey): UIO[Chunk[IndexedChunk]] =
     state.get.map(_.published.getOrElse(key, Chunk.empty))
 
+  private def cosine(left: Embedding, right: Embedding): Double =
+    if left.values.length != right.values.length then 0.0
+    else
+      val pairs = left.values.zip(right.values)
+      val dot   = pairs.foldLeft(0.0)((sum, pair) => sum + pair._1.toDouble * pair._2.toDouble)
+      val normL = math.sqrt(left.values.foldLeft(0.0)((sum, value) => sum + value.toDouble * value.toDouble))
+      val normR = math.sqrt(right.values.foldLeft(0.0)((sum, value) => sum + value.toDouble * value.toDouble))
+      if normL == 0.0 || normR == 0.0 then 0.0 else dot / (normL * normR)
+
   /** 比较幂等请求的所有不可变字段，防止复用 ingestionId 覆盖另一份内容。 */
   private def sameRequest(manifest: KnowledgeIndexManifest, request: BeginKnowledgeIndex): Boolean =
     manifest.build.contentHash == request.contentHash &&
@@ -301,3 +363,13 @@ object InMemoryKnowledgeIndexStore:
 
   /** 以接口类型暴露的标准 ZLayer。 */
   val layer: ULayer[KnowledgeIndexStore] = ZLayer.fromZIO(make)
+
+  /** 本地开发的推荐同源组合层。
+    *
+    * 同一个实例同时承担版本化知识发布和查询，确保 `KnowledgeIndexer` 激活的新版本立即成为 `Retriever` 的唯一可见快照。生产环境使用
+    * `PostgresAgentPersistence.knowledge` 获得相同服务形状。
+    */
+  val knowledge: ULayer[KnowledgeIndexStore & VectorStore] =
+    ZLayer.fromZIOEnvironment(
+      make.map(store => ZEnvironment[KnowledgeIndexStore](store).add[VectorStore](store))
+    )

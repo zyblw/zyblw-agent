@@ -1,7 +1,7 @@
 # zyblw-agent 文档地图
 
 > 状态：当前
-> 最后核验：2026-07-28
+> 最后核验：2026-07-29
 > 事实来源：`build.sbt`、发布工作流、模块源码、测试与数据库迁移
 
 ## 推荐学习路径
@@ -14,12 +14,13 @@
 6. [核心概念](core-concepts.md)：认识 ID、Definition、Run、State、Event、Command。
 7. [架构总览](architecture.md)：理解模块依赖和端到端时序。
 8. [运行时](runtime.md)：阅读单 Agent loop、预算、工具计划、审批、恢复。
-9. [指令、Context 与成本](instruction-context-cost.md)：理解可信指令、动态资料、缓存和推理 token。
-10. [工具](tools.md) 与 [可靠写工具](side-effects.md)：理解能力、权限、副作用和幂等。
-11. [Context/Memory/RAG](context-memory-rag.md)：区分短期上下文、长期记忆和外部知识。
-12. [持久化](persistence.md) 与 [数据库 Schema](database-schema.md)：理解耐久性。
-13. [Run Inspector](run-inspection.md)、[测试](testing.md)、[可观测性](observability.md)、[评测趋势门禁](eval-trend-and-release-gate.md)。
-14. [成熟度与路线](maturity-and-roadmap.md)：客观看待哪些能力可依赖。
+9. [声明式 Workflow Graph](workflow.md)：理解显式边、启动校验、循环预算、并行汇合和 checkpoint。
+10. [指令、Context 与成本](instruction-context-cost.md)：理解可信指令、动态资料、缓存和推理 token。
+11. [工具](tools.md) 与 [可靠写工具](side-effects.md)：理解能力、权限、副作用和幂等。
+12. [Context/Memory/RAG](context-memory-rag.md)：区分短期上下文、长期记忆和外部知识。
+13. [持久化](persistence.md) 与 [数据库 Schema](database-schema.md)：理解耐久性。
+14. [Run Inspector](run-inspection.md)、[测试](testing.md)、[可观测性](observability.md)、[评测趋势门禁](eval-trend-and-release-gate.md)。
+15. [成熟度与路线](maturity-and-roadmap.md)：客观看待哪些能力可依赖。
 
 ## 开源维护与发布
 
@@ -39,6 +40,7 @@
 
 - [快速开始](getting-started.md)
 - [AgentApplication 与 Builder](application-builder.md)
+- [声明式 Workflow Graph](workflow.md)
 - [Provider 与能力协商](providers.md)
 - [ProviderContract 2.0](provider-contract-2.md)
 - [真实 Provider smoke](provider-live-smoke.md)
@@ -56,7 +58,7 @@
 - [长期记忆治理](memory-governance.md)
 - [Embedding 治理](embedding-governance.md)
 - [Reranker](reranker.md)
-- [文档 Loader](document-loaders.md)
+- [文档 Loader、PDF→Markdown 与结构切分](document-loaders.md)
 - [RAG 评测](rag-evaluation.md)
 
 ## 安全与扩展

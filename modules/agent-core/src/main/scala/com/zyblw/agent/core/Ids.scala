@@ -184,6 +184,33 @@ object PromptId:
   extension (id: PromptId) def value: String = id
   given JsonCodec[PromptId]                  = JsonCodec.string.transformOrFail(fromString, _.value)
 
+/** Artifact 在其隔离域内的稳定名称。
+  *
+  * Artifact 不是文件系统路径：禁止根路径、反斜杠和 `.`/`..` 段，避免调用方把模型生成的名称直接传给本地或对象存储 Adapter 时产生路径逃逸。
+  */
+opaque type ArtifactName = String
+object ArtifactName:
+  /** 构造已经校验的 Artifact 名称；外部输入优先使用 `fromString`。 */
+  def apply(value: String): ArtifactName =
+    fromString(value).fold(message => throw new IllegalArgumentException(message), identity)
+
+  /** 规范化并校验外部 Artifact 名称。 */
+  def fromString(value: String): Either[String, ArtifactName] =
+    val normalized = value.trim
+    Either.cond(
+      normalized.nonEmpty &&
+        normalized.length <= 255 &&
+        !normalized.startsWith("/") &&
+        !normalized.contains('\\') &&
+        normalized.split('/').forall(segment => segment.nonEmpty && segment != "." && segment != "..") &&
+        !normalized.exists(_.isControl),
+      normalized,
+      "ArtifactName 必须是长度 1..255 的相对名称，且不能包含路径逃逸或控制字符"
+    )
+
+  extension (name: ArtifactName) def value: String = name
+  given JsonCodec[ArtifactName]                    = JsonCodec.string.transformOrFail(fromString, _.value)
+
 opaque type EventId = UUID
 object EventId:
   /** 包装可信 UUID 为事件 ID。 */

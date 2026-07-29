@@ -2,16 +2,17 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-22
+> 最后核验：2026-07-29
 >
 > 事实来源：对应模块源码、测试与构建定义
 
-更新时间：2026-07-15。
+更新时间：2026-07-29。
 
-## 1. 三个边界不能混为一谈
+## 1. 四类边界不能混为一谈
 
 - `AgentState` 是当前 Run 的权威工作状态，用于崩溃恢复。
 - `MemoryStore` 保存跨回合、跨 Run 的提炼事实，不等于原始聊天记录。
+- `ArtifactStore` 保存版本化二进制对象与不含正文的描述符；它不进入 `AgentState`、模型 Context 或 SSE。
 - `Retriever` 从外部知识索引返回带 tenant、permission、source 和 score 的资料。
 - `ContextSourceResolver` 负责“本回合选择哪些来源”。
 - `ContextManager` 最后执行 token 分区、稳定前缀排序、历史裁剪与压缩。
@@ -180,7 +181,40 @@ PostgreSQL 删除会把 `value_json/search_text` 清空，保留不含正文的 
 `put` 仅用于明确的管理员导入/覆盖。中医业务不能把症状、诊断猜测、处方或剂量当普通偏好自动长期保存；这类
 数据需要独立合规策略、明确目的、用户知情和更严格保留期。
 
-### 6.1 LLM MemoryExtractor
+### 6.1 Artifact：大对象引用，不是消息内容
+
+报告、图片、音频和其它二进制大对象应放入 `ArtifactStore`，而不是序列化到 `AgentState`、`ToolResult` 或 Prompt。核心 SPI 当前
+提供具有完整版本/隔离语义的内存 Adapter，适合开发与测试：
+
+```scala
+import com.zyblw.agent.artifacts.*
+import com.zyblw.agent.core.*
+
+val artifacts: ULayer[ArtifactStore] =
+  ArtifactStore.inMemory(
+    ArtifactStorePolicy(maxArtifactBytes = 8L * 1024L * 1024L)
+  )
+
+val scope = ArtifactScope.Session(state.sessionId) // 由权威 AgentState 推导
+val saveReport = ZIO.serviceWithZIO[ArtifactStore](_.save(
+  scope,
+  ArtifactName("reports/answer.pdf"),
+  ArtifactInput(pdfBytes, "application/pdf", Map("kind" -> "answer-report"))
+))
+```
+
+`save` 对同一 `scope/name` 追加不可变版本，`read(..., Some(version))` 可读取历史版本，而无 version 的读取返回最新版本。`list`
+只返回描述符，绝不返回正文。`ArtifactScope.User` 强制同时携带 tenant 和 user；业务 HTTP/CLI/Tool 边界必须从认证上下文或权威
+Run State 推导 scope，不能采信模型输出或请求 JSON 给出的 scope。
+
+名称是相对、受限的 `ArtifactName`，拒绝根路径、反斜杠、`.`/`..` 段和控制字符；Store 还限制单对象字节数、每 scope 名称数、media
+type 和 metadata。metadata 也可能是业务敏感信息，因此不自动进入 telemetry、公开 API 或 Context。`ArtifactStore` 不会自动将
+二进制转换为模型可见图片/文本；业务必须选择经过 Provider 能力协商、内容扫描和权限校验的显式 Tool 或 Adapter。
+
+当前内存实现不会跨进程保存，也不提供“删除即物理抹除”的虚假承诺。持久化对象存储/PostgreSQL metadata、保留期、用户删除与授权审计会在
+真实业务需求和数据治理策略明确后作为独立 Adapter 实现，不能修改已经发布的 Flyway migration。
+
+### 6.2 LLM MemoryExtractor
 
 `zyblw-agent-core` 的可选 `memory.llm` 组件提供基于现有 `ChatModel` 的真实提炼器。它不要求某一家 SDK，而是要求模型具备工具调用能力，
 并让模型恰好调用唯一工具 `submit_memory_candidates`：
@@ -314,11 +348,12 @@ val indexStoreLayer: ZLayer[DataSource, Nothing, KnowledgeIndexStore] =
   PostgresKnowledgeIndexStore.layer(dimension = 1536)
 
 val indexer = KnowledgeIndexer(
-  chunker = SlidingWindowChunker(maxCharacters = 1200, overlap = 120),
+  chunker = MarkdownStructureChunker(
+    MarkdownStructureChunkerConfig(maxCharacters = 1200, overlapCharacters = 120)
+  ),
   embeddings = embeddingService,
   store = knowledgeIndexStore,
-  stageBatchSize = 200,
-  indexingStrategy = "tcm-sliding-window-v1"
+  stageBatchSize = 200
 )
 
 val result = indexer.index(
@@ -329,6 +364,25 @@ val result = indexer.index(
   expectation = ActiveVersionExpectation.Exact(currentVersion)
 )
 ```
+
+业务接入优先使用同源组合层，避免摄取与查询接到不同数据库或维度：
+
+```scala
+val knowledgePersistence
+    : URLayer[DataSource, KnowledgeIndexStore & VectorStore] =
+  PostgresAgentPersistence.knowledge(
+    dimension = 1536,
+    hybridConfig = PostgresHybridSearchConfig()
+  )
+```
+
+本地开发对应 `InMemoryKnowledgeIndexStore.knowledge`。两个环境都可以继续通过
+`KnowledgeIndexer.layer + DocumentIngestionService.layer + DefaultRetriever.layer + RagApplication.layer` 组成同一
+业务入口。`RagApplication` 不复制检索实现，只统一摄取/查询依赖以及 query/topK 的调用前硬限制。
+
+`Chunker.strategyId` 默认包含算法与影响输出的参数，并由 `KnowledgeIndexer` 固化到 manifest。只有还存在额外清洗或
+中文分词步骤时，业务才显式覆盖 `indexingStrategy`；修改切分参数后复用旧 ingestion ID 会产生冲突，不会把新正文
+错误绑定到旧暂存块。
 
 `ingestionId` 是业务幂等键：进程在发布成功、确认命令之前崩溃时，重试会直接返回 Ready manifest，不再次调用付费
 Provider。同一键绑定不同 content hash、Embedding 描述、权限、metadata 或 `indexingStrategy` 会失败。切分、清洗、
@@ -352,16 +406,45 @@ PostgreSQL `activate` 通过文档级 advisory transaction lock 串行化首次�
 `purgeInactive(updatedBefore, limit)` 只领取 Superseded/Failed/Retired，使用稳定顺序与 `SKIP LOCKED` 有界删除；
 Building 和 Ready/active 永不进入 retention 候选。暂存块由 manifest 外键级联清理。
 
-## 10. 当前诚实边界
+## 10. PDF→Markdown→向量索引的推荐边界
+
+完整通用路径已经可以由框架组合：
+
+```text
+业务对象存储/上传授权
+  → DocumentInput(ZStream[Byte])
+  → DoclingDocumentLoader(PDF→Markdown) 或 TikaDocumentLoader(轻量文本)
+  → DocumentLoaderRegistry(身份/MIME/metadata/容量)
+  → MarkdownStructureChunker(标题路径/表格/代码块/稳定 ID)
+  → GovernedEmbeddingService(tenant cache/quota)
+  → KnowledgeIndexer(Building→stage→activate)
+  → Postgres pgvector + FTS weighted RRF
+  → ModelReranker
+  → Retriever/citation
+  → RagApplication(业务摄取/查询门面)
+  → MemoryRagContextSourceResolver
+  → Agent Runtime
+```
+
+框架提供机制和安全不变量，业务提供来源授权、tenant/permission、知识库归属、Docling/OCR/Embedding 选型、保留策略、
+领域数据集与拒答阈值。不要把上传 API、产品知识库表、医学资料许可或业务角色写入公共框架。
+
+Docling Adapter 默认 HTTPS、请求/响应/Markdown 硬上限、API Key 脱敏且不透明重试；同步转换可能已消耗大量计算，重试
+必须由带稳定任务 ID 的业务 Worker 决定。Markdown chunk ID 使用章节路径和正文内容寻址，比全局序号更适合增量重建，
+但当前索引仍会为一个新文档版本重新调用 Embedding；跨版本 chunk-level 向量复用由租户隔离 Embedding cache 承担。
+
+## 11. 当前诚实边界
 
 本轮已经完成真实 OpenAI-compatible Embedding、HTTP stub 契约、租户隔离精确缓存与 PostgreSQL 事务化硬配额、
 PostgreSQL FTS+pgvector weighted RRF、索引 manifest/暂存/原子发布、真实 pgvector Testcontainers，以及有界
-`DocumentInput`/Loader 注册/并发摄取和可选 Tika 3.3.1 text/Markdown/HTML/PDF/EPUB Adapter。RAG eval 已能对
+`DocumentInput`/Loader 注册/并发摄取、可选 Tika 3.3.1 text/Markdown/HTML/PDF/EPUB Adapter、Docling Serve v1
+PDF→Markdown Adapter，以及标题/表格/fenced-code 感知的稳定 Markdown Chunker。RAG eval 已能对
 Recall/Precision/MRR/NDCG、引用证据、租户授权、禁止片段、数值完整性和延迟做独立硬门禁。仍需继续完成：
 
 - 部署侧运行 LLM Extractor 真实 Provider smoke、前端治理页面、审计归档策略和业务级敏感信息分类；
 - Redis Embedding 缓存/配额 Adapter、命中与节省成本指标、更多厂商原生 Embedding Adapter；
-- 隔离式 OCI/OCR/网页 Loader、语义切分器、真实厂商 Reranker HTTP Adapter 与业务保留期调度；
+- 真实 Docling/OCR smoke、恶意 PDF corpus、Docling JSON block/page lineage、网页 Loader、parent-child/late-interaction
+  retrieval 与业务保留期调度；
 - 基于真实中医资料的数据集、趋势存储和 CI 门禁，验证召回、引用支持率、延迟、token 与成本；
 - 大规模索引重建的连接池、WAL、HNSW 构建和 vacuum 容量结论。
 

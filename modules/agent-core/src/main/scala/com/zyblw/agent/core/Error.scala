@@ -287,6 +287,22 @@ object AgentError:
       extends StoreError:
     val category = if retryable then ErrorCategory.Unavailable else ErrorCategory.Validation
 
+  /** Artifact 输入未通过名称之外的存储策略，例如容量、media type 或 metadata 边界。
+    *
+    * `reason` 必须是稳定原因码，不能包含二进制正文、metadata 值或路径；调用方可据此映射为安全的 4xx 响应而不泄漏内容。
+    */
+  final case class ArtifactPolicyRejected(name: String, reason: String) extends StoreError:
+    val message               = s"Artifact policy rejected: name=$name, reason=$reason"
+    val category              = ErrorCategory.Validation
+    override val safeToExpose = true
+
+  /** Workflow checkpoint 试图覆盖更新的 step、用同一 step 写入不同内容，或复用不一致的定义/Session identity。 */
+  final case class WorkflowCheckpointConflict(runId: RunId, reason: String) extends StoreError:
+    val message             = s"Workflow checkpoint conflict: run=${runId.asString}, reason=$reason"
+    val category            = ErrorCategory.Conflict
+    override val retryable  = true
+    override val diagnostic = Map("reason" -> reason)
+
   /** 保留 PostgreSQL SQLSTATE 的持久化错误，便于重试器区分瞬时连接/序列化失败与约束错误。 `message` 不包含 SQL、参数或凭据，可安全进入内部日志；对外仍应映射为通用错误。
     */
   final case class DatabaseFailure(
@@ -324,6 +340,15 @@ object AgentError:
   final case class WorkflowFailed(node: String, message: String) extends WorkflowError:
     val category            = ErrorCategory.Unexpected
     override val diagnostic = Map("node" -> node)
+
+  /** Workflow 持久化边界失败；保留底层错误分类和重试语义，但不携带 checkpoint 状态正文。 */
+  final case class WorkflowPersistenceFailed(
+      operation: String,
+      message: String,
+      category: ErrorCategory,
+      override val retryable: Boolean
+  ) extends WorkflowError:
+    override val diagnostic = Map("operation" -> operation)
 
   final case class Cancelled(runId: RunId) extends AgentError:
     val message               = s"Run cancelled: ${runId.asString}"

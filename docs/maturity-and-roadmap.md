@@ -1,7 +1,7 @@
 # zyblw-agent 成熟度、取舍与路线
 
 > 状态：路线图
-> 最后核验：2026-07-25
+> 最后核验：2026-07-29
 > 事实来源：`build.sbt`、模块源码、测试、发布工作流、迁移与当前文档
 
 ## 成熟度语义
@@ -29,9 +29,10 @@
 | HTTP v1 公共协议 | zio-http / `http.contract`,`http` | Foundation/Beta | 独立 DTO、Endpoint、OpenAPI、route test | 客户端 SDK、兼容升级演练 |
 | Run Inspector / Timeline | core + zio-http / `inspection` | Foundation/Beta | 低敏投影、分页、授权、结构诊断与泄漏测试 | CLI/UI、筛选导出、真实事故验证 |
 | Context | core / `context` | Beta | 有界装配、确定性压缩测试 | 真实长会话数据集 |
+| Artifact | core / `artifacts` | Experimental | session/user 隔离、不可变版本、二进制不进入 State/JSON、容量与 metadata 限制、内存契约测试 | durable Adapter、保留/删除审计、Tool 与多模态接入证据 |
 | 模型辅助压缩 | core / `context.llm` | Beta | evidence 校验和 eval | 多 Provider 质量/成本基线 |
 | Memory | core / `memory`,`memory.llm` | Beta | Store/SPI 与治理设计 | 用户查看/删除 UX、长期质量 |
-| RAG | rag、document-loaders、rerank | Beta/Experimental | retriever、citation、eval 和 adapters | 大规模 ingestion、ACL、撤回、线上质量 |
+| RAG | rag、document-loaders、rerank | Beta/Experimental | `RagApplication`、同源存储层、Docling/Tika、结构切分、版本化 ingestion、hybrid retrieval、rerank、citation 与 eval | block/page lineage、parent-child、恶意 PDF/真实 OCR、线上质量 |
 | PostgreSQL | postgres | Beta | Testcontainers、迁移、并发、连接耗尽测试 | 大库升级、备份恢复、性能 |
 | OpenAI-compatible | providers / `integrations.openai` | Beta | stream/tool/error stub 与 smoke | 长期真实 Provider 观测 |
 | Anthropic/Gemini | providers / 对应 package | Beta | Provider contract tests | zyblw QA 业务尚未启用 |
@@ -40,7 +41,7 @@
 | Eval/趋势门禁 | evals；仓库内 eval-cli | Experimental | snapshot、trend、release gate | 固定真实数据集与人工校准 |
 | MCP client | mcp / `mcp` | Beta/Experimental | 协议与测试基础 | OAuth/server/Roots、供应链与隔离 |
 | 可靠写工具 | core / `sideeffects` | Experimental | outbox/inbox/补偿抽象 | 真实 transport 与业务案例 |
-| Workflow | core / `workflow` | Experimental | 边界和基础类型 | 尚无证据需要扩展 |
+| Workflow Graph | core + postgres / `workflow` | Experimental | 显式 nodes/edges、identity/version、启动校验、单调 checkpoint、`AllSucceeded` 取消、11 个 core 测试与 4 个 PostgreSQL 16 契约 | 节点账本/pending writes、timer/signal、子图、分布式 lease、图级 eval |
 | Workspace/Sandbox | mcp / `workspace` | Experimental | 能力边界 | 真实 OCI 隔离与攻击测试 |
 | Multimodal | core / `multimodal` | Experimental | 抽象 | 产品场景、Provider 与 eval |
 
@@ -111,13 +112,37 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
 
 退出标准：真实路径和故障恢复有可重复证据，而不只是单测绿色。
 
-## P1：可信 RAG 生产化
+## P1-A：耐久 Workflow Graph
 
-- 来源许可、hash/version、chunk lineage、撤回和 tenant ACL；
-- ingestion 幂等、重试、批量、失败隔离和观测；
-- embedding model/version、缓存、配额和重建；
-- recall、rerank、citation 与权限泄露 gate；
-- 低证据时诚实拒答/降级。
+图工程方向可行，但优先级是执行语义而不是 Agent 数量：
+
+1. **已完成 G1**：节点与边分离；定义在运行前验证缺失目标、不可达节点、重复目标和无访问预算循环；
+2. **已完成 G1**：checkpoint 同时保存游标、不可变状态、step 和访问次数；动态 Route 只能选择已声明目标；
+3. **已完成 G1**：单步 fan-out 显式采用 `AllSucceeded`，有界并发且失败会中断兄弟 Fiber，不写 join checkpoint；
+4. **已完成 G2-A**：V008 `PostgresWorkflowCheckpointStore` 绑定 workflow/version/session，提供容量/checksum/JSONB
+   完整性、幂等重放、单调 step 与跨 Store 暂停恢复；
+5. **下一步 G2-B**：节点 execution ledger、pending writes、execution lease/fencing 与进程崩溃故障注入；
+6. **随后 G3**：基于真实需求加入 timer、外部 signal、人工任务、子图或更多 fan-in policy；
+7. Graph Inspector、实际路径 trace、质量/延迟/token/费用 eval 达标后，才讨论通用 Agent 节点和多 Agent 调度。
+
+不把普通单 Agent loop 或几个顺序函数强制图化。完整当前契约见[声明式 Workflow Graph](workflow.md)。
+
+退出标准：进程可在任一节点边界崩溃并恢复，不重复已登记的外部副作用；静态定义错误不能进入运行期；并发失败和恢复路径有
+PostgreSQL Testcontainers 与故障注入证据。
+
+## P1-B：可信 RAG 生产化
+
+1. **已完成 R1**：来源 URI、content hash/index version、tenant ACL、乐观撤回和原子 active 发布；
+2. **已完成 R1**：ingestion 幂等、Building/stage/activate、批量有界并发、失败隔离与取消传播；
+3. **已完成 R1**：Embedding model/dimension 身份、租户缓存、原子配额、pgvector+FTS weighted RRF 与模型 Reranker；
+4. **已完成 R2-A**：可选 Tika 与 Docling Serve v1 PDF→Markdown Adapter，Markdown 标题/表格/fenced code 感知切分，
+   Unicode 有界窗口、内容寻址 chunk ID、自动 `Chunker.strategyId`；
+5. **已完成 R2-A**：Recall/Precision/MRR/NDCG、citation evidence、tenant authorization、禁止片段、数值与延迟 gate；
+6. **已完成 R2-A 接入收口**：`RagApplication` 固定业务主入口，内存/PostgreSQL 同源组合层保证
+   `KnowledgeIndexStore & VectorStore` 指向相同 active snapshot，示例不再绕过 Loader/Indexer；
+7. **下一步 R2-B**：保留 Docling JSON block/page/bbox lineage，建立 parent-child retrieval 与相邻块扩展，同时保证 ACL
+   过滤仍发生在候选排名之前；
+8. **随后 R2-C**：真实 Docling/OCR smoke、恶意 PDF corpus、索引构建性能/成本/质量趋势、低证据拒答门禁和保留期 Worker。
 
 退出标准：质量和权限评测通过，语料可追溯/撤回，成本可预测。
 
@@ -125,13 +150,12 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
 
 长期记忆先完成用户可见、编辑、删除、过期、来源和审计；健康信息更严格。写工具从 draft-only 开始，使用稳定幂等键、approval、outbox/inbox、补偿和审计。
 
-## P3：Plan/Goal/Artifact/Skill、MCP、Workflow、多 Agent
+## P3：Plan/Goal/Artifact/Skill、MCP、多 Agent
 
-1. 先把 Plan/Goal/Todo、Artifact 引用和按需 Skill 做成小型可持久化 ADT，不先拆新 artifact；
+1. Artifact 已先以 core 内的独立、不可变二进制 SPI 起步；Plan/Goal/Todo 与按需 Skill 仍应先做成小型可持久化 ADT，不先拆新 Maven artifact；
 2. MCP 先解决 OAuth、server identity、Roots、allowlist、脱敏、注入与隔离；
-3. Workflow 只承载确定性长流程，不强制图化简单逻辑；
-4. checkpoint fork/time travel 必须隔离已发生的非幂等副作用；
-5. 多 Agent 只在固定 eval 中持续胜过单 Agent且成本可接受时采用。
+3. checkpoint fork/time travel 必须隔离已发生的非幂等副作用；
+4. 多 Agent 只在固定 eval 中持续胜过单 Agent且成本可接受时采用，并复用已经验证的 Workflow Graph 控制面。
 
 ## 不建议投入
 

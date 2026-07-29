@@ -167,10 +167,12 @@ final class KnowledgeIndexer(
     embeddings: EmbeddingService,
     store: KnowledgeIndexStore,
     stageBatchSize: Int = 200,
-    indexingStrategy: String = "sliding-window-v1"
+    indexingStrategy: String = ""
 ):
   require(stageBatchSize > 0, "stageBatchSize 必须为正数")
-  require(indexingStrategy.trim.nonEmpty, "indexingStrategy 不能为空")
+  private val resolvedIndexingStrategy =
+    Option(indexingStrategy.trim).filter(_.nonEmpty).getOrElse(chunker.strategyId)
+  require(resolvedIndexingStrategy.trim.nonEmpty, "Chunker strategyId 不能为空")
 
   /** 为一份文档建立并发布新索引版本。
     *
@@ -203,7 +205,7 @@ final class KnowledgeIndexer(
       permissions = permissions,
       metadata = document.metadata,
       embedding = embeddings.descriptor,
-      indexingStrategy = indexingStrategy,
+      indexingStrategy = resolvedIndexingStrategy,
       expectation = expectation
     )
     for
@@ -260,7 +262,7 @@ object KnowledgeIndexer:
   /** 从三个可替换服务和显式 batch 配置构造 Layer。 */
   def layer(
       stageBatchSize: Int = 200,
-      indexingStrategy: String = "sliding-window-v1"
+      indexingStrategy: String = ""
   ): URLayer[Chunker & EmbeddingService & KnowledgeIndexStore, KnowledgeIndexer] =
     ZLayer.fromFunction((chunker: Chunker, embeddings: EmbeddingService, store: KnowledgeIndexStore) =>
       KnowledgeIndexer(chunker, embeddings, store, stageBatchSize, indexingStrategy)

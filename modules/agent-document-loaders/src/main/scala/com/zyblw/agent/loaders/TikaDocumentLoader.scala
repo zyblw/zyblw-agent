@@ -150,7 +150,11 @@ final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLo
           s"文档提取正文 $count 超过 Tika 字符上限 ${config.maxExtractedCodePoints}"
         )
       )
-    else ZIO.succeed(SourceDocument(input.id, parsed.text, input.sourceUri, parsed.metadata))
+    else
+      val representation =
+        if input.declaredMediaType == "text/markdown" then DocumentRepresentation.Markdown
+        else DocumentRepresentation.PlainText
+      ZIO.succeed(SourceDocument(input.id, parsed.text, input.sourceUri, parsed.metadata, representation))
 
   /** MIME 参数不参与比较；只允许少量有明确语义的等价检测结果。 */
   private def compatible(declared: String, detected: String): Boolean =

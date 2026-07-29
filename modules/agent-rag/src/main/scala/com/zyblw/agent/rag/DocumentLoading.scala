@@ -141,6 +141,13 @@ object DocumentLoaderRegistry:
                   loader.load(input).flatMap(document => validate(input, loader, document, policy))
         )
 
+  /** 把一组显式 Loader 变成可组合 ZLayer；重复 MIME 或无效注册会在应用启动时失败。 */
+  def layer(
+      loaders: Chunk[DocumentLoader],
+      policy: DocumentLoadPolicy = DocumentLoadPolicy()
+  ): ZLayer[Any, RetrievalError, DocumentLoaderRegistry] =
+    ZLayer.fromZIO(make(loaders, policy))
+
   /** Loader 是不可信解析边界：不得改变 ID/sourceUri，不得用文档内 metadata 覆盖业务字段。 框架固定写入 `contentTrust=untrusted`，提醒 Context
     * 层把文档文本始终当数据而非指令。
     */
@@ -243,3 +250,18 @@ final class DocumentIngestionService(
             ZIO.succeed(DocumentIngestionOutcome.Failed(request.input.id, error.category, error.retryable))
           )
     }
+
+  /** 单文档便捷入口；仍复用与批量流完全相同的失败模式、取消和治理语义。 */
+  def ingestOne(request: DocumentIngestionRequest): IO[RetrievalError, DocumentIngestionOutcome] =
+    ingest(ZStream.succeed(request)).runHead
+      .someOrFail(AgentError.RetrievalFailed("Document ingestion 未产生结果"))
+
+object DocumentIngestionService:
+  /** 从注册表与索引器构造高层摄取服务，避免宿主手写无状态 glue layer。 */
+  def layer(
+      maxParallelism: Int = 2,
+      failureMode: DocumentIngestionFailureMode = DocumentIngestionFailureMode.Continue
+  ): URLayer[DocumentLoaderRegistry & KnowledgeIndexer, DocumentIngestionService] =
+    ZLayer.fromFunction((loaders: DocumentLoaderRegistry, indexer: KnowledgeIndexer) =>
+      DocumentIngestionService(loaders, indexer, maxParallelism, failureMode)
+    )

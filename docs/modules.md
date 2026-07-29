@@ -1,7 +1,7 @@
 # 模块与发布坐标
 
-> 状态：当前  
-> 最后核验：2026-07-25  
+> 状态：当前
+> 最后核验：2026-07-29
 > 事实来源：`build.sbt`、各模块 `src/main`、`maturity-and-roadmap.md`
 
 ## 先理解两个不同的边界
@@ -45,10 +45,10 @@ libraryDependencies ++= Seq(
 |---|---|---|
 | `zyblw-agent-core` | 所有应用 | 稳定、Provider-neutral、无数据库和 HTTP Server |
 | `zyblw-agent-providers` | 调用内置模型 Provider | 独立外部协议；只依赖 ZIO HTTP，不引入厂商 SDK |
-| `zyblw-agent-rag` | 知识检索、引用回答 | RAG 是可选业务能力，不污染最小 tool loop |
-| `zyblw-agent-document-loaders` | PDF/EPUB/Office 摄取 | Apache Tika 依赖大，必须按需选择 |
+| `zyblw-agent-rag` | `RagApplication`、结构切分、版本化摄取、知识检索、引用回答 | RAG 是可选业务能力，不污染最小 tool loop |
+| `zyblw-agent-document-loaders` | PDF/EPUB/Office 摄取 | Apache Tika 与 Docling Serve HTTP 都是可选重型/协议边界 |
 | `zyblw-agent-rerank` | 调用外部 reranker | 会产生网络和数据驻留边界 |
-| `zyblw-agent-postgres` | 耐久 Run、Memory、RAG、评测 | JDBC、Flyway、数据库 schema 与生命周期独立 |
+| `zyblw-agent-postgres` | 耐久 Run、Workflow checkpoint、Memory、RAG、评测 | JDBC、Flyway、数据库 schema 与生命周期独立 |
 | `zyblw-agent-zio-http` | 暴露控制面或独立 Agent 服务 | ZIO HTTP Endpoint、routes、host 属于传输边界 |
 | `zyblw-agent-mcp` | MCP client 与受控 workspace | 外部工具互操作和执行安全边界独立；server 仍在路线图 |
 | `zyblw-agent-opentelemetry` | OTLP traces/metrics | SDK/exporter 有资源与后台线程，不进入零成本 SPI |
@@ -66,6 +66,9 @@ libraryDependencies ++= Seq(
 )
 ```
 
+RAG 业务还需加入 `zyblw-agent-rag`；PDF/EPUB 再加入 `zyblw-agent-document-loaders`，模型 rerank 再加入
+`zyblw-agent-rerank`。不要因为只想使用结构切分就被迫引入 Tika、Docling 或远程 reranker。
+
 ## 内核中的 package
 
 下列能力属于同一个 `zyblw-agent-core` artifact，但保持独立 package：
@@ -78,12 +81,13 @@ libraryDependencies ++= Seq(
 | `guardrails` | 输入、输出和工具调用策略 |
 | `context` | 上下文预算、确定性压缩与可选模型摘要 |
 | `memory` | 短期/长期记忆 SPI、命令队列和租约模型 |
+| `artifacts` | 版本化二进制 Artifact SPI 与开发/测试内存 Adapter；不把正文放入 State 或 Prompt |
 | `runtime` | 单 Agent loop、预算、重试、审批、恢复 |
 | `scheduler` | Worker 调度与任务领取 |
 | `observability` | 无 exporter 的 trace/metrics SPI |
 | `app` | 面向业务宿主的 Builder 与 ZLayer 装配入口 |
 | `sideeffects` | 有副作用工具的 outbox/idempotency 模型 |
-| `workflow` | 显式确定性步骤；不是多 Agent 编排平台 |
+| `workflow` | 显式确定性图、identity/version 与 checkpoint SPI；不是多 Agent 编排平台 |
 | `multimodal` | Provider-neutral 内容部件 ADT |
 
 把这些 package 拆成十几个 artifact 的收益很小：它们共享 ZIO 基础依赖、经常共同变更，业务也几乎总是一起使用。过去的拆法

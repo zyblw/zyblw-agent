@@ -1,7 +1,7 @@
 # zyblw-agent 能力审计、框架对照与演进判断
 
-> 状态：当前审计  
-> 最后核验：2026-07-25  
+> 状态：当前审计
+> 最后核验：2026-07-29
 > 事实来源：当前源码、测试、构建、迁移、发布工作流，以及文末列出的官方框架资料
 
 本文回答四个问题：
@@ -21,7 +21,7 @@
 
 - 陌生开发者的五分钟成功体验；
 - 真实长会话下的 Context 质量与 Prompt Cache 成本证据；
-- 一等的计划、目标、任务清单、Artifact 与按需 Skill；
+- 一等的计划、目标、任务清单与按需 Skill；Artifact 现有实验性的隔离/版本化 SPI，但尚无耐久 Adapter；
 - 跨版本数据库/JSON/API 兼容演练；
 - trace viewer、调试 UI、客户端 SDK 和独立外部用户反馈；
 - 多节点 soak、容量模型、SLO、备份恢复与真实攻击测试。
@@ -46,10 +46,12 @@
 ### 2. 可用但仍需生产证据
 
 - OpenAI-compatible、OpenAI Responses、Anthropic、Gemini 都有真实协议 Adapter 和 stub contract test，但真实流量历史仍短。
-- RAG 已有 hybrid retrieval、rerank、citation、ingestion 和 eval 组件，但语料许可、撤回、ACL 与线上质量需要持续验证。
+- RAG 已有 Tika/Docling PDF 摄取、结构感知 Markdown chunk、版本化原子发布、hybrid retrieval、rerank、citation 和 eval；
+  仍缺 block/page lineage、parent-child retrieval、恶意 PDF/真实 OCR 证据与线上领域质量。
 - 长期 Memory 有治理和删除语义，但业务 UI、人工纠错和健康敏感信息的真实运营流程不足。
 - MCP 客户端已经覆盖主要协议能力；server、OAuth、Roots 和第三方供应链治理还没有形成完整发布承诺。
-- Workflow 是一个小型确定性编排器，不是成熟的分布式图执行平台。
+- Workflow 已是显式 nodes/edges、运行前验证、循环访问预算和可恢复 checkpoint 的小型 StateGraph；仍不是成熟的
+  分布式图执行平台。
 - OpenTelemetry 和 Langfuse 已有安全投影，仍需真实 dashboard、告警阈值和事故演练。
 
 ### 3. 尚不应承诺
@@ -70,10 +72,27 @@
 |---|---|---|---|
 | OpenAI Agents SDK | 少量核心原语、动态指令、tools/handoffs/guardrails/sessions、HITL、trace、详细 usage | 单 Agent loop、工具/审批/guardrail、耐久 session、trace；新增分层指令和缓存/推理 token | 把 Provider 托管能力直接变成 core 唯一语义 |
 | LangGraph | checkpoint、interrupt/resume、pending writes、time travel、fork | snapshot+event、审批恢复、工具批次账本、worker 恢复 | 在没有复杂确定性流程需求时强制所有业务画图 |
-| Google ADK | session/memory/artifact、context filter、workflow/multi-agent、action confirmation、eval | session/memory、Context 分区、审批、eval；Artifact 仍缺 | 因示例丰富就提前构建多 Agent 平台 |
+| Google ADK | session/memory/artifact、context filter、workflow/multi-agent、action confirmation、eval | session/memory、Context 分区、审批、eval；Artifact 具备内存版本化/隔离 SPI | 因示例丰富就提前构建多 Agent 平台 |
 | Pydantic AI | 类型化开发体验、toolset/deferred tool、compaction、durable execution 适配、test/eval | Scala 类型化 Tool、Context 压缩、原生耐久 Runtime、testkit/evals | 追逐 Python 生态每个集成或 workflow backend |
 | Anthropic 工程实践 | 最简单可行架构、区分 workflow/agent、重视工具说明和测试、最小高信号 Context | 单 Agent 优先、Workflow 实验化、工具契约、分区 Context | 用自动反思或角色数量掩盖工具/数据质量 |
 | ZIO / ZIO HTTP | typed effect、Scope、Fiber、Queue/Stream 背压、ZLayer 资源图、声明式 Endpoint | 是项目最有辨识度的执行语义 | 在 Builder 中藏全局可变单例或绕开 Scope 启 daemon |
+
+### 图工程讨论的判断
+
+三篇图工程讨论给出的方向有价值，但值得吸收的是控制面纪律，而不是“更多 Agent”：
+
+- 节点是有边界的状态变换，边表达真实数据依赖；
+- 静态边、条件路由目标、循环上限和 fan-in policy 必须在运行前可见；
+- 每个耐久节点边界都能 checkpoint，失败是结构化数据，实际路径可以追踪；
+- 并行只放在天然独立的分支，关键结论由独立 verifier/reviewer 检查；
+- 高成本、不可逆和权限升级决策保留人工审批。
+
+本轮据此重构 `core.workflow`：节点不再通过返回值隐藏下一跳；`WorkflowDefinition.make` 先验证完整图；
+`WorkflowCheckpoint` 保存访问预算；fan-out 明确采用 `AllSucceeded`，由 ZIO 结构化并发传播失败与取消。当前故意只支持单步
+fan-out 分支，避免在没有 pending writes、耐久账本和故障注入前假装拥有完整图平台。
+
+这条路的下一步不是堆 Agent，而是 PostgreSQL checkpoint、节点 execution ledger、进程崩溃恢复和 Graph Inspector。
+完整契约与边界见[声明式 Workflow Graph](workflow.md)。
 
 ### zyblw-agent 的差异化优势
 
@@ -89,7 +108,8 @@
 1. **易用性仍落后**：主流 Python/TypeScript 框架通常能用更少代码完成第一个结果；本项目生产装配更安全，但学习曲线更陡。
 2. **文档示例密度不足**：需要按“最小内存 → 真实 Provider → 工具 → PostgreSQL → HTTP → RAG”逐步递进。
 3. **Context 工程仍缺线上闭环**：已有预算和压缩机制，但缓存命中率、上下文丢弃与答案质量的关联还没有长期数据。
-4. **计划/目标/Artifact/Skill 不是一等状态**：长任务仍主要依靠消息和 Workflow 状态，缺少统一持久化协议。
+4. **计划/目标/Skill 不是一等状态**：长任务仍主要依靠消息和 Workflow 状态，缺少统一持久化协议；Artifact 已有实验性 SPI，
+   但生产耐久、治理和 Tool 接入仍待真实需求验证。
 5. **开发工具仍处早期**：已有安全 Run Inspector、分页 Timeline 和机械一致性诊断，但尚无成熟 CLI/UI、筛选导出和
    checkpoint fork/time-travel。
 6. **生态小**：没有独立下游、第三方 Provider/Tool 插件和真实公开发布反馈。
@@ -159,7 +179,8 @@ HTTP `1.1.0` 已提供授权后的 `/api/v1/runs/{runId}/inspection`。
 不是先新增四个 artifact，而是先设计四个小型 Provider-neutral ADT：
 
 - Plan/Goal/Todo 是可恢复任务状态，不只是 Prompt；
-- Artifact 是可寻址的大对象，消息只放引用和摘要；
+- Artifact 已完成最小 core SPI：独立二进制、session/user 隔离、不可变版本、名称/容量/metadata 边界；下一步必须由真实需求
+  决定 durable Adapter、保留期、删除审计和经过审查的 Tool 接入；
 - Skill 是版本化说明与能力清单，按需加载，不在每轮塞入完整正文；
 - approval 和外部副作用继续由现有 Runtime/Store 承担。
 
@@ -218,3 +239,12 @@ HTTP `1.1.0` 已提供授权后的 `/api/v1/runs/{runId}/inspection`。
 - [ZIO ZLayer](https://zio.dev/reference/contextual/zlayer/)
 - [ZIO resource management](https://zio.dev/reference/resource/)
 - [ZIO HTTP Endpoint](https://ziohttp.com/concepts/endpoint/)
+
+## 本轮图工程讨论来源
+
+- [0xCodez：Graph Engineering with Claude](https://x.com/0xCodez/status/2079165300625330317)
+- [wandermist：Graph Engineering System Design](https://x.com/wandermist/status/2080974834851340400)
+- [0xMorlex：图执行的状态、校验、checkpoint 与恢复约束](https://x.com/0xMorlex/status/2080598414576812378)
+- [ZIO Fiber 与结构化并发](https://zio.dev/reference/fiber/)
+- [ZIO Ref](https://zio.dev/reference/concurrency/ref/)
+- [ZStream](https://zio.dev/reference/stream/zstream/)

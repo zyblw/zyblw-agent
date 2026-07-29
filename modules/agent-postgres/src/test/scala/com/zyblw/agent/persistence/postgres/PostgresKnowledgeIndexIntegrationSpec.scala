@@ -17,7 +17,7 @@ import zio.test.*
 object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
 
   /** 同时暴露版本 Store 与检索 Store，确保二者操作同一份真实 schema。 */
-  final private case class Harness(index: PostgresKnowledgeIndexStore, vectors: PostgresPgVectorStore)
+  final private case class Harness(index: KnowledgeIndexStore, vectors: VectorStore)
 
   /** 启动 `pgvector/pgvector:pg16` 并只执行 optional pgvector baseline。 */
   private val harnessLayer: ZLayer[Any, Throwable, Harness] = ZLayer.scoped {
@@ -45,14 +45,14 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
           .load()
           .migrate()
       }
-    yield Harness(
-      PostgresKnowledgeIndexStore(dataSource, 1536),
-      PostgresPgVectorStore(
-        dataSource,
-        1536,
-        PostgresHybridSearchConfig(enableHnswIterativeScan = false)
-      )
-    )
+      knowledge <- PostgresAgentPersistence
+        .knowledge(
+          1536,
+          PostgresHybridSearchConfig(enableHnswIterativeScan = false)
+        )
+        .build
+        .provideSome[Scope](ZLayer.succeed[DataSource](dataSource))
+    yield Harness(knowledge.get[KnowledgeIndexStore], knowledge.get[VectorStore])
   }
 
   /** 创建 1536 维单位向量；slot 用于制造可预测 cosine 排名。 */

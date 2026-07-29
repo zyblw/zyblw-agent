@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-26
+> 最后核验：2026-07-29
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -24,6 +24,28 @@ Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基
 `sbt-scalafmt` 锁定，不以某位开发者的编辑器配置为准。
 
 ### 最近一次完整本地证据
+
+2026-07-29 的结构化文档 RAG R2-A 复核：
+
+- `scalafmtCheckAll; scalafmtSbtCheck; testFull`：所有已执行测试通过，0 失败；23 项 PostgreSQL 用例按默认开关忽略；
+- `rag/test; documentLoaders/test; examples/compile`：RAG 32 项、Document Loader 9 项全部通过，示例编译成功；
+- Docling Serve v1 合同测试 4 项：multipart/API Key/Markdown 解码、HTTP 错误分类与脱敏、输入/响应上限和
+  `partial_success` fail-closed；
+- `RUN_POSTGRES_INTEGRATION=1 postgres/testOnly ...PostgresKnowledgeIndexIntegrationSpec`：PostgreSQL 16 +
+  pgvector 真实迁移与知识索引发布契约 1 项通过；
+- `RagAgentExample` 实际运行到 `Completed`，输出 `ingestion=Indexed`；Loader、Markdown 结构分块、active
+  知识发布、检索与引用链路闭合；
+- `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`：V001/V007/V008、optional pgvector 迁移及 25 项 PostgreSQL
+  契约全部通过，0 失败、0 忽略；
+- `0.2.0-local publishM2` 生成 11 个公开 artifact 的 POM、binary、sources 与 Scaladoc JAR；独立
+  `integration-tests/maven-consumer` 只从 Maven Local 解析这些坐标并编译成功。
+
+2026-07-29 的 Workflow G2-A 复核：
+
+- `scalafmtCheckAll; scalafmtSbtCheck; testFull`：所有已执行测试通过，0 失败；23 项 PostgreSQL 用例按默认开关忽略；
+- `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`：正式 V001/V007/V008 与 optional pgvector migration 全部执行，
+  25 项 PostgreSQL 16/pgvector 契约通过、0 失败、0 忽略；
+- 其中 Workflow 为 11 项 core 契约与 4 项真实 PostgreSQL 契约。
 
 2026-07-26 的独立仓库发布准备复核：
 
@@ -115,7 +137,12 @@ Anthropic 与 Gemini 密钥均未配置，因此没有执行真实付费 Provide
 - Embedding 治理：请求内去重、同租户缓存命中、跨租户隔离、并发原子配额、requestId 幂等/冲突和裸调用拒绝。
 - KnowledgeIndexer：ingestion 幂等、active 乐观条件、失败 manifest、版本化块与完成后不重复调用 Provider。
 - DocumentLoader：重复 MIME 拒绝、身份漂移、可信 metadata 优先级、并发输出顺序、Continue/FailFast 和 Fiber 取消；
-  Tika 使用内存夹具真实解析纯文本、HTML、PDF、EPUB，并验证预声明/实际字节上限与伪装 PDF。
+  Tika 使用内存夹具真实解析纯文本、HTML、PDF、EPUB，并验证预声明/实际字节上限与伪装 PDF；Docling Serve v1
+  适配器验证有界 PDF multipart、API Key、Markdown 响应、超时/状态分类和错误脱敏。
+- MarkdownStructureChunker：标题路径、表格、围栏代码、Unicode code point 上限与 overlap、内容寻址稳定 ID、
+  重复片段确定性消歧，以及 Knowledge manifest 使用实际参数化 `strategyId`。
+- RagApplication：正式 Loader→Indexer→active snapshot→Retriever 主路径、tenant/permission 前置过滤，以及 query/topK
+  在 Retriever/Embedding 前的硬限制；内存知识 Store 同一实例承担发布与查询。
 - MemoryLifecycle：CAS 冲突、删除 tombstone、分批过期、证据优先、敏感推断/低置信/未授权删除拒绝。
 - Memory 用户治理：自有/跨租户/Session/匿名授权矩阵、纠正字段投影与 CAS、删除幂等、query/正文/key/scopes/
   attributes 不进入审计；Retention Worker 验证最大批次、固定 cutoff、瞬时错误 Schedule 重试、永久错误和 Scope 中断。
@@ -143,6 +170,7 @@ RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.po
 RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.postgres.PostgresMemoryStoreIntegrationSpec"
 RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.postgres.PostgresEmbeddingGovernanceIntegrationSpec"
 RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.postgres.PostgresEvalTrendStoreIntegrationSpec"
+RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.postgres.PostgresWorkflowCheckpointStoreIntegrationSpec"
 ```
 
 该测试使用 PostgreSQL 16 而不是 H2，执行正式 Flyway migration，并验证事务、乐观锁、审批状态恢复、工具
@@ -156,10 +184,14 @@ tenant+user 隔离、中文检索、tombstone 真实清空正文、多 worker �
 低敏审计同事务。
 Embedding 治理用例另外验证 V001 三张治理表、REAL[] 批量编解码、跨 Store 实例缓存、tenant 隔离、窗口行锁、并发硬配额、
 requestId/hash 幂等冲突与窗口清理级联释放。
-Eval 趋势用例验证 V001 低敏表、跨 Store 并发 `ON CONFLICT` 仲裁、同 ID 内容冲突、kind 隔离、精确时间排序、最近成功
+Eval 趋势用例验证 V007 低敏表、跨 Store 并发 `ON CONFLICT` 仲裁、同 ID 内容冲突、kind 隔离、精确时间排序、最近成功
 部分索引语义、TEXT/JSONB 双表示一致性、checksum 篡改拒绝和原始 grade details 不落库。
 - 工具空白名单默认拒绝。
-- Workflow 节点事件、暂停恢复和显式 fan-out/join。
+- Workflow 声明式边的启动校验、不可达/缺失目标诊断、循环访问上限、完成/暂停 checkpoint 恢复、
+  definition/session identity、单调写冲突、未声明动态路由拒绝，以及 `AllSucceeded` fan-out 失败时的兄弟 Fiber 中断和
+  join checkpoint 隔离。
+- PostgreSQL Workflow checkpoint：V008、跨 Store 并发幂等与单调 step、identity 漂移拒绝、checksum 损坏
+  fail-closed，以及暂停后跨 Adapter 实例恢复。
 - RAG tenant/permission 前置过滤。
 
 Testkit 提供 Scripted/Recording Provider、Stub/Failing/Slow/NonInterruptible Tool、固定 TokenCounter 和确定性 ID。

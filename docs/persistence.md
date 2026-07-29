@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-24
+> 最后核验：2026-07-29
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -41,7 +41,8 @@ modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/m
 `model_calls`、`tool_executions`、`approval_requests`、`usage_records`、`agent_business_operations`、
 `agent_outbox_events`、`agent_inbox_messages`、`agent_compensations`、`agent_memories`、`agent_embedding_cache`、
 `agent_embedding_quota_windows`、`agent_embedding_quota_reservations`；V007 新增 `agent_eval_snapshots`。新数据库会顺序
-执行全部 migration 得到当前完整结构。V001 已被真实测试环境使用，内容与 checksum 永久冻结，后续只通过更高版本
+执行全部 migration 得到当前完整结构；V008 新增独立的 `agent_workflow_checkpoints`。V001 已被真实测试环境使用，内容与
+checksum 永久冻结，后续只通过更高版本
 migration 演进。
 
 框架不会因 JAR 被加载而自动修改数据库。宿主显式调用 `AgentPostgresMigrations.migrate`，默认使用独立历史表
@@ -61,7 +62,12 @@ RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.po
 RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.postgres.PostgresRunCommandStoreIntegrationSpec"
 RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.postgres.PostgresEmbeddingGovernanceIntegrationSpec"
 RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.postgres.PostgresEvalTrendStoreIntegrationSpec"
+RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.postgres.PostgresWorkflowCheckpointStoreIntegrationSpec"
 ```
+
+`PostgresWorkflowCheckpointStore[S: JsonCodec]` 保存完整 Workflow identity、Session、游标、状态、step 和访问预算。相同
+快照幂等，相同 identity 只能推进到更大的 step；checksum、JSON、identity 或冗余列异常全部 fail-closed。它目前不提供
+execution lease，因此不能单独阻止两个 Worker 同时执行同一节点。
 
 删除使用 `DELETE FROM agent_runs`，所有子表依赖 migration 中的 `ON DELETE CASCADE` 由 PostgreSQL 原子清理。
 

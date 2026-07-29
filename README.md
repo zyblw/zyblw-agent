@@ -95,7 +95,11 @@ libraryDependencies ++= Seq(
 - PostgreSQL FTS + pgvector hybrid/RRF，多租户 tenant/permission 在候选排名前过滤，并暴露可解释排名信号。
 - Cohere v2 原生 Reranker Adapter：HTTPS/Bearer、请求/响应硬上限、index 映射、search units、429/5xx 有界重试、总超时、取消传播和真实 ZIO HTTP stub 契约。
 - 知识索引版本生命周期：ingestion 幂等、Building 暂存、短事务原子发布、失败恢复与 active 版本乐观条件。
-- 独立文档加载流水线：有界 `ZStream[Byte]`、MIME 唯一注册、身份/元数据复核、并发摄取和取消传播；可选 Tika 3.3.1 Adapter 已真实解析 text/Markdown/HTML/PDF/EPUB，OCR 默认关闭。
+- `RagApplication` 统一业务摄取/查询入口；内存与 PostgreSQL 都提供 `KnowledgeIndexStore & VectorStore` 同源
+  ZLayer，避免业务手工复制向量或让示例绕过 active 发布协议。
+- 独立文档加载流水线：有界 `ZStream[Byte]`、MIME 唯一注册、身份/元数据复核、单文件/并发摄取和取消传播；可选
+  Tika 3.3.1 提供轻量 text/Markdown/HTML/PDF/EPUB 解析，Docling Serve v1 Adapter 提供受限 PDF→结构化 Markdown；
+  `MarkdownStructureChunker` 保留标题、表格、代码块、Unicode 边界与稳定内容寻址 ID。
 - Context 分区硬预算、完整消息 token 计数、工具结果压缩、原子 tool-call 回合裁剪、重复来源去重、低敏 Debug View 与 Context Rot 信号；`ContextSourceResolver` 已把长期 Memory 与带引用 RAG 按可信 tenant/user/scopes 接入主 Runtime。
 - `zyblw-agent-core` 内可选的 `context.llm` 组件：统一 ChatModel + 唯一 strict tool 的逐字证据压缩、有限 repair、确定性降级、辅助模型预算/usage，
   `coveredMessages/sourceDigest` 耐久摘要 checkpoint、ZIO Config 加载器和
@@ -106,9 +110,13 @@ libraryDependencies ++= Seq(
   Scope 和 `SKIP LOCKED` 支持多 worker 安全清理。
 - MemoryLifecycle：确定性策略拒绝、证据优先合并；可选 LLM Extractor 通过单一 strict tool、逐字 quote 和真实消息角色派生证据，默认禁止敏感记忆且没有删除协议。
 - Input/Output/Tool/Run Guardrail、脱敏、持续时间 Trace、低基数 Metrics、OpenTelemetry OTLP、Langfuse Trace 与幂等 Scores、Prometheus/Grafana 基线。
-- 轻量 Workflow、检查点、有界 fan-out、受控 Handoff。
+- 声明式 Workflow Graph：节点与控制边分离，启动前检查缺失/不可达节点、未声明目标和无界循环；完整 checkpoint
+  绑定 workflow/version/session 并保存游标、状态、step 与访问预算。
+- V008 `PostgresWorkflowCheckpointStore`：完整快照容量/checksum/JSONB 校验、同 identity 单调 step、跨 Store
+  暂停恢复；当前明确不冒充节点 execution lease。
+- 有界 fan-out 与显式 `AllSucceeded` fan-in；分支失败会按 ZIO 结构化并发中断兄弟 Fiber，并隔离未完成的 join checkpoint。
 - HTTP、示例、测试与 PostgreSQL 全部使用同一个 `AgentState/RunStore` 生产路径。
-- Workflow 节点开始/完成事件、checkpoint resume 与显式 fan-out/join。
+- 受深度、上下文与工具策略限制的 Handoff；不把它宣传为已成熟的多 Agent 调度平台。
 - MCP 2025-11-25 客户端（stdio、Streamable HTTP、SSE/session 恢复、Tools/Resources/Prompts、受治理 sampling/elicitation、实验 Tasks）。
 - 防路径/symlink 逃逸、原子写入和容量配额的 Workspace；默认断网、只读根文件系统、非 root、不可变镜像、CPU/内存/PID/时间/输出限额与 Fiber 取消传播的 OCI Sandbox。
 - 多模态和 Knowledge Graph 的独立 SPI 模块。
@@ -154,6 +162,7 @@ sbt compile
 sbt testFull
 RUN_POSTGRES_INTEGRATION=1 sbt "postgres / Test / testFull"
 sbt "examples/runMain com.zyblw.agent.examples.QuickstartAgentExample"
+sbt "examples/runMain com.zyblw.agent.examples.GraphWorkflowExample"
 sbt "examples/runMain com.zyblw.agent.examples.BasicAgentExample"
 sbt "examples/runMain com.zyblw.agent.examples.ApprovalAgentExample"
 sbt "examples/runMain com.zyblw.agent.examples.RagAgentExample"

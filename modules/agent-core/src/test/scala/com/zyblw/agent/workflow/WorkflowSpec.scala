@@ -1,86 +1,404 @@
 package com.zyblw.agent.workflow
 
-// 覆盖节点边界事件、暂停恢复和显式 fan-out/join，确保工作流行为可观察且可重放。
-
 import com.zyblw.agent.core.*
 import zio.*
 import zio.test.*
 
+/** 显式边、静态校验、节点 checkpoint、有界循环与结构化 fan-out 的确定性契约。 */
 object WorkflowSpec extends ZIOSpecDefault:
+  private val testWorkflowId      = WorkflowId("workflow-spec")
+  private val testWorkflowVersion = WorkflowVersion(1)
+
   private def context(runId: RunId, sessionId: SessionId) = WorkflowContext(runId, sessionId)
 
   def spec = suite("WorkflowEngine")(
-    test("每个节点输出 Started/Completed，并在最终节点完成") {
+    test("Workflow、版本和节点 ID 在配置边界使用有界安全格式") {
+      assertTrue(
+        WorkflowId.fromString("article-review.v2").contains(WorkflowId("article-review.v2")),
+        WorkflowId.fromString("../other").isLeft,
+        WorkflowId.fromString("line\nbreak").isLeft,
+        WorkflowVersion.fromInt(1).contains(WorkflowVersion(1)),
+        WorkflowVersion.fromInt(0).isLeft,
+        NodeId.fromString("review_1").contains(NodeId("review_1")),
+        NodeId.fromString("review/../../secret").isLeft
+      )
+    },
+    test("显式静态边逐节点执行并保存 Completed checkpoint") {
       for
         runId     <- RunId.random
         sessionId <- SessionId.random
         store     <- ZIO.service[WorkflowCheckpointStore[Int]]
-        entry  = NodeId("entry")
-        finish = NodeId("finish")
-        nodes  = Map[NodeId, WorkflowNode[Any, Int]](
-          entry  -> node(entry)(state => ZIO.succeed(NodeResult.Next(state + 1, finish))),
-          finish -> node(finish)(state => ZIO.succeed(NodeResult.Complete(state + 1)))
+        entry      = NodeId("entry")
+        finish     = NodeId("finish")
+        definition = validDefinition(
+          entry,
+          Map(
+            entry  -> node(entry)(state => ZIO.succeed(NodeOutcome.Succeeded(state + 1))),
+            finish -> node(finish)(state => ZIO.succeed(NodeOutcome.Succeeded(state + 1)))
+          ),
+          Map(
+            entry  -> WorkflowTransition.Next(finish),
+            finish -> WorkflowTransition.Complete()
+          )
         )
-        engine = new WorkflowEngine[Any, Int](nodes, store, sumReducer)
-        events <- engine.run(entry, 0, context(runId, sessionId)).runCollect
+        engine = WorkflowEngine.make(definition, store, sumReducer)
+        events     <- engine.run(0, context(runId, sessionId)).runCollect
+        checkpoint <- store.load(runId)
+        resumed    <- engine.resume(context(runId, sessionId)).runCollect
       yield assertTrue(
         events == Chunk(
-          WorkflowEvent.NodeStarted(entry, 0),
+          WorkflowEvent.NodeStarted(entry, 0, 1),
           WorkflowEvent.NodeCompleted(entry, 0, 1),
-          WorkflowEvent.NodeStarted(finish, 1),
+          WorkflowEvent.NodeStarted(finish, 1, 1),
+          WorkflowEvent.NodeCompleted(finish, 1, 2),
+          WorkflowEvent.Completed(2)
+        ),
+        checkpoint.contains(
+          savedCheckpoint(
+            sessionId,
+            WorkflowCursor.Completed,
+            2,
+            2,
+            Map(entry -> 1, finish -> 1)
+          )
+        ),
+        resumed == Chunk(WorkflowEvent.Completed(2))
+      )
+    }.provide(WorkflowCheckpointStore.inMemory[Int]),
+    test("暂停后从同一节点和持久化访问预算恢复") {
+      for
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        store     <- ZIO.service[WorkflowCheckpointStore[Int]]
+        approval   = NodeId("approval")
+        definition = validDefinition(
+          approval,
+          Map(
+            approval -> node(approval) { state =>
+              if state == 0 then ZIO.succeed(NodeOutcome.Suspended(1, "等待审批"))
+              else ZIO.succeed(NodeOutcome.Succeeded(state + 1))
+            }
+          ),
+          Map(approval -> WorkflowTransition.Complete())
+        )
+        engine = WorkflowEngine.make(definition, store, sumReducer)
+        first   <- engine.run(0, context(runId, sessionId)).runCollect
+        resumed <- engine.resume(context(runId, sessionId)).runCollect
+      yield assertTrue(
+        first == Chunk(
+          WorkflowEvent.NodeStarted(approval, 0, 1),
+          WorkflowEvent.Suspended(approval, "等待审批", 1)
+        ),
+        resumed == Chunk(
+          WorkflowEvent.NodeStarted(approval, 1, 2),
+          WorkflowEvent.NodeCompleted(approval, 1, 2),
           WorkflowEvent.Completed(2)
         )
       )
     }.provide(WorkflowCheckpointStore.inMemory[Int]),
-    test("暂停后从同一节点和状态恢复") {
-      for
-        runId     <- RunId.random
-        sessionId <- SessionId.random
-        store     <- ZIO.service[WorkflowCheckpointStore[Int]]
-        approval = NodeId("approval")
-        nodes    = Map[NodeId, WorkflowNode[Any, Int]](
-          approval -> node(approval) { state =>
-            if state == 0 then ZIO.succeed(NodeResult.Suspend(1, "等待审批"))
-            else ZIO.succeed(NodeResult.Complete(state + 1))
-          }
-        )
-        engine = new WorkflowEngine[Any, Int](nodes, store, sumReducer)
-        first   <- engine.run(approval, 0, context(runId, sessionId)).runCollect
-        resumed <- engine.resume(context(runId, sessionId)).runCollect
-      yield assertTrue(
-        first.lastOption.contains(WorkflowEvent.Suspended(approval, "等待审批", 1)),
-        resumed == Chunk(WorkflowEvent.NodeStarted(approval, 0), WorkflowEvent.Completed(2))
-      )
-    }.provide(WorkflowCheckpointStore.inMemory[Int]),
-    test("fan-out 使用显式 join，worker 各执行一次") {
+    test("fan-out 显式声明 AllSucceeded 和 join，分支按目标顺序确定性归并") {
       for
         runId      <- RunId.random
         sessionId  <- SessionId.random
         executions <- Ref.make(0)
         store      <- ZIO.service[WorkflowCheckpointStore[Int]]
-        start   = NodeId("start")
-        worker1 = NodeId("worker-1")
-        worker2 = NodeId("worker-2")
-        join    = NodeId("join")
-        nodes   = Map[NodeId, WorkflowNode[Any, Int]](
-          start -> node(start)(state =>
-            ZIO.succeed(NodeResult.FanOut(state, NonEmptyChunk(worker1, worker2), join))
+        start      = NodeId("start")
+        worker1    = NodeId("worker-1")
+        worker2    = NodeId("worker-2")
+        join       = NodeId("join")
+        definition = validDefinition(
+          start,
+          Map(
+            start   -> node(start)(state => ZIO.succeed(NodeOutcome.Succeeded(state))),
+            worker1 -> node(worker1)(state => executions.update(_ + 1).as(NodeOutcome.Succeeded(state + 1))),
+            worker2 -> node(worker2)(state => executions.update(_ + 1).as(NodeOutcome.Succeeded(state + 2))),
+            join    -> node(join)(state => ZIO.succeed(NodeOutcome.Succeeded(state)))
           ),
-          worker1 -> node(worker1)(state => executions.update(_ + 1).as(NodeResult.Complete(state + 1))),
-          worker2 -> node(worker2)(state => executions.update(_ + 1).as(NodeResult.Complete(state + 2))),
-          join    -> node(join)(state => ZIO.succeed(NodeResult.Complete(state)))
+          Map(
+            start -> WorkflowTransition.FanOut(
+              NonEmptyChunk(worker1, worker2),
+              join,
+              FanInPolicy.AllSucceeded
+            ),
+            worker1 -> WorkflowTransition.Complete(),
+            worker2 -> WorkflowTransition.Complete(),
+            join    -> WorkflowTransition.Complete()
+          )
         )
-        engine = new WorkflowEngine[Any, Int](nodes, store, sumReducer, maxParallelism = 2)
-        events <- engine.run(start, 0, context(runId, sessionId)).runCollect
-        count  <- executions.get
-      yield assertTrue(count == 2, events.lastOption.contains(WorkflowEvent.Completed(3)))
+        engine = WorkflowEngine.make(definition, store, sumReducer, maxParallelism = 2)
+        events     <- engine.run(0, context(runId, sessionId)).runCollect
+        count      <- executions.get
+        checkpoint <- store.load(runId)
+      yield assertTrue(
+        count == 2,
+        events.contains(
+          WorkflowEvent.FanOutStarted(
+            start,
+            Chunk(worker1, worker2),
+            join,
+            FanInPolicy.AllSucceeded,
+            0
+          )
+        ),
+        events.contains(WorkflowEvent.FanOutCompleted(start, 2, 0)),
+        events.contains(WorkflowEvent.NodeStarted(join, 3, 1)),
+        events.lastOption.contains(WorkflowEvent.Completed(3)),
+        checkpoint.contains(
+          savedCheckpoint(
+            sessionId,
+            WorkflowCursor.Completed,
+            3,
+            4,
+            Map(start -> 1, worker1 -> 1, worker2 -> 1, join -> 1)
+          )
+        )
+      )
+    }.provide(WorkflowCheckpointStore.inMemory[Int]),
+    test("fan-out 在启动分支前预检全局节点预算") {
+      for
+        runId      <- RunId.random
+        sessionId  <- SessionId.random
+        executions <- Ref.make(0)
+        store      <- ZIO.service[WorkflowCheckpointStore[Int]]
+        start      = NodeId("start")
+        worker     = NodeId("worker")
+        join       = NodeId("join")
+        definition = validDefinition(
+          start,
+          Map(
+            start  -> node(start)(state => ZIO.succeed(NodeOutcome.Succeeded(state))),
+            worker -> node(worker)(state => executions.update(_ + 1).as(NodeOutcome.Succeeded(state))),
+            join   -> node(join)(state => ZIO.succeed(NodeOutcome.Succeeded(state)))
+          ),
+          Map(
+            start -> WorkflowTransition.FanOut(
+              NonEmptyChunk(worker),
+              join,
+              FanInPolicy.AllSucceeded
+            ),
+            worker -> WorkflowTransition.Complete(),
+            join   -> WorkflowTransition.Complete()
+          )
+        )
+        exit <- WorkflowEngine
+          .make(definition, store, sumReducer, maxSteps = 2)
+          .run(0, context(runId, sessionId))
+          .runCollect
+          .exit
+        count      <- executions.get
+        checkpoint <- store.load(runId)
+      yield assertTrue(exit.isFailure, count == 0, checkpoint.isEmpty)
+    }.provide(WorkflowCheckpointStore.inMemory[Int]),
+    test("静态校验一次报告缺失目标、不可达节点和没有访问上限的循环") {
+      val entry       = NodeId("entry")
+      val loop        = NodeId("loop")
+      val missing     = NodeId("missing")
+      val unreachable = NodeId("unreachable")
+      val nodes       = Map[NodeId, WorkflowNode[Any, Int]](
+        entry       -> node(entry)(state => ZIO.succeed(NodeOutcome.Succeeded(state))),
+        loop        -> node(loop)(state => ZIO.succeed(NodeOutcome.Succeeded(state))),
+        unreachable -> node(unreachable)(state => ZIO.succeed(NodeOutcome.Succeeded(state)))
+      )
+      val issues = WorkflowDefinition.validate(
+        entry,
+        nodes,
+        Map(
+          entry       -> WorkflowTransition.Next(loop),
+          loop        -> WorkflowTransition.Route(NonEmptyChunk(loop, missing), _ => Right(loop)),
+          unreachable -> WorkflowTransition.Complete()
+        )
+      )
+      assertTrue(
+        issues.contains(WorkflowValidationIssue.TransitionTargetMissing(loop, missing)),
+        issues.contains(WorkflowValidationIssue.NodeUnreachable(unreachable)),
+        issues.contains(WorkflowValidationIssue.CycleVisitLimitMissing(loop))
+      )
+    },
+    test("运行时拒绝 Route 选择未声明目标") {
+      for
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        store     <- ZIO.service[WorkflowCheckpointStore[Int]]
+        entry      = NodeId("entry")
+        declared   = NodeId("declared")
+        rogue      = NodeId("rogue")
+        definition = validDefinition(
+          entry,
+          Map(
+            entry    -> node(entry)(state => ZIO.succeed(NodeOutcome.Succeeded(state))),
+            declared -> node(declared)(state => ZIO.succeed(NodeOutcome.Succeeded(state)))
+          ),
+          Map(
+            entry -> WorkflowTransition.Route(
+              NonEmptyChunk(declared),
+              _ => Right(rogue)
+            ),
+            declared -> WorkflowTransition.Complete()
+          )
+        )
+        result <- WorkflowEngine
+          .make(definition, store, sumReducer)
+          .run(0, context(runId, sessionId))
+          .runCollect
+          .exit
+      yield assertTrue(result.isFailure)
+    }.provide(WorkflowCheckpointStore.inMemory[Int]),
+    test("循环访问预算随 checkpoint 推进并在上限处终止") {
+      for
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        store     <- ZIO.service[WorkflowCheckpointStore[Int]]
+        loop       = NodeId("loop")
+        definition = validDefinition(
+          loop,
+          Map(loop -> node(loop)(state => ZIO.succeed(NodeOutcome.Succeeded(state + 1)))),
+          Map(loop -> WorkflowTransition.Next(loop)),
+          Map(loop -> 2)
+        )
+        exit <- WorkflowEngine
+          .make(definition, store, sumReducer)
+          .run(0, context(runId, sessionId))
+          .runCollect
+          .exit
+        checkpoint <- store.load(runId)
+      yield assertTrue(
+        exit.isFailure,
+        checkpoint.contains(
+          savedCheckpoint(sessionId, WorkflowCursor.At(loop), 2, 2, Map(loop -> 2))
+        )
+      )
+    }.provide(WorkflowCheckpointStore.inMemory[Int]),
+    test("checkpoint identity 不匹配时拒绝恢复") {
+      for
+        runId          <- RunId.random
+        storedSession  <- SessionId.random
+        resumedSession <- SessionId.random
+        store          <- ZIO.service[WorkflowCheckpointStore[Int]]
+        entry      = NodeId("entry")
+        definition = validDefinition(
+          entry,
+          Map(entry -> node(entry)(state => ZIO.succeed(NodeOutcome.Succeeded(state + 1)))),
+          Map(entry -> WorkflowTransition.Complete())
+        )
+        _ <- store.save(
+          runId,
+          savedCheckpoint(storedSession, WorkflowCursor.At(entry), 0, 0, Map.empty)
+        )
+        exit <- WorkflowEngine
+          .make(definition, store, sumReducer)
+          .resume(context(runId, resumedSession))
+          .runCollect
+          .exit
+      yield assertTrue(
+        exit.isFailure,
+        exit.causeOption.exists(
+          _.failureOption.exists(_.message == "checkpoint-session-mismatch")
+        )
+      )
+    }.provide(WorkflowCheckpointStore.inMemory[Int]),
+    test("checkpoint store 只允许 identity 内单调推进并保持相同快照幂等") {
+      for
+        runId   <- RunId.random
+        session <- SessionId.random
+        store   <- ZIO.service[WorkflowCheckpointStore[Int]]
+        entry     = NodeId("entry")
+        first     = savedCheckpoint(session, WorkflowCursor.At(entry), 1, 1, Map(entry -> 1))
+        advanced  = savedCheckpoint(session, WorkflowCursor.Completed, 2, 2, Map(entry -> 2))
+        divergent = savedCheckpoint(session, WorkflowCursor.At(entry), 999, 2, Map(entry -> 2))
+        reopened  = savedCheckpoint(session, WorkflowCursor.At(entry), 999, 3, Map(entry -> 3))
+        _                <- store.save(runId, first)
+        same             <- store.save(runId, first).either
+        _                <- store.save(runId, advanced)
+        conflict         <- store.save(runId, divergent).either
+        terminalConflict <- store.save(runId, reopened).either
+        loaded           <- store.load(runId)
+      yield assertTrue(
+        same.isRight,
+        conflict.left.exists(_.category == ErrorCategory.Conflict),
+        terminalConflict.left.exists(_.category == ErrorCategory.Conflict),
+        loaded.contains(advanced)
+      )
+    }.provide(WorkflowCheckpointStore.inMemory[Int]),
+    test("AllSucceeded 分支失败会中断仍在运行的兄弟 Fiber 且不提交 join checkpoint") {
+      for
+        runId       <- RunId.random
+        sessionId   <- SessionId.random
+        store       <- ZIO.service[WorkflowCheckpointStore[Int]]
+        slowReady   <- Promise.make[Nothing, Unit]
+        interrupted <- Ref.make(false)
+        start      = NodeId("start")
+        failing    = NodeId("failing")
+        slow       = NodeId("slow")
+        join       = NodeId("join")
+        definition = validDefinition(
+          start,
+          Map(
+            start   -> node(start)(state => ZIO.succeed(NodeOutcome.Succeeded(state))),
+            failing -> node(failing)(_ =>
+              slowReady.await *> ZIO.fail(AgentError.WorkflowFailed("failing", "boom"))
+            ),
+            slow -> node(slow)(_ =>
+              (slowReady.succeed(()) *> ZIO.never)
+                .onInterrupt(interrupted.set(true))
+            ),
+            join -> node(join)(state => ZIO.succeed(NodeOutcome.Succeeded(state)))
+          ),
+          Map(
+            start -> WorkflowTransition.FanOut(
+              NonEmptyChunk(failing, slow),
+              join,
+              FanInPolicy.AllSucceeded
+            ),
+            failing -> WorkflowTransition.Complete(),
+            slow    -> WorkflowTransition.Complete(),
+            join    -> WorkflowTransition.Complete()
+          )
+        )
+        exit <- WorkflowEngine
+          .make(definition, store, sumReducer, maxParallelism = 2)
+          .run(0, context(runId, sessionId))
+          .runCollect
+          .exit
+        wasInterrupted <- interrupted.get
+        checkpoint     <- store.load(runId)
+      yield assertTrue(exit.isFailure, wasInterrupted, checkpoint.isEmpty)
     }.provide(WorkflowCheckpointStore.inMemory[Int])
   )
 
-  private def node(id0: NodeId)(run: Int => IO[WorkflowError, NodeResult[Int]]): WorkflowNode[Any, Int] =
+  private def node(id0: NodeId)(
+      run: Int => IO[WorkflowError, NodeOutcome[Int]]
+  ): WorkflowNode[Any, Int] =
     new WorkflowNode[Any, Int]:
-      val id                                                                                = id0
-      def execute(state: Int, context: WorkflowContext): IO[WorkflowError, NodeResult[Int]] = run(state)
+      val id                                                                                 = id0
+      def execute(state: Int, context: WorkflowContext): IO[WorkflowError, NodeOutcome[Int]] = run(state)
+
+  private def validDefinition(
+      entry: NodeId,
+      nodes: Map[NodeId, WorkflowNode[Any, Int]],
+      transitions: Map[NodeId, WorkflowTransition[Int]],
+      visitLimits: Map[NodeId, Int] = Map.empty
+  ): WorkflowDefinition[Any, Int] =
+    WorkflowDefinition
+      .make(testWorkflowId, testWorkflowVersion, entry, nodes, transitions, visitLimits)
+      .fold(issues => throw new IllegalArgumentException(issues.map(_.message).mkString("; ")), identity)
+
+  private def savedCheckpoint(
+      sessionId: SessionId,
+      cursor: WorkflowCursor,
+      state: Int,
+      step: Int,
+      visits: Map[NodeId, Int]
+  ): WorkflowCheckpoint[Int] =
+    WorkflowCheckpoint(
+      testWorkflowId,
+      testWorkflowVersion,
+      sessionId,
+      cursor,
+      state,
+      step,
+      visits
+    )
 
   private val sumReducer = new StateReducer[Int]:
-    def merge(base: Int, branches: Chunk[Int]): IO[WorkflowError, Int] = ZIO.succeed(base + branches.sum)
+    def merge(base: Int, branches: Chunk[Int]): IO[WorkflowError, Int] =
+      ZIO.succeed(base + branches.sum)

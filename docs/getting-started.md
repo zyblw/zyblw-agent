@@ -161,3 +161,34 @@ transaction。
 
 独立启动 `OutboxPublisher` 执行事务外发送；下游若也使用 PostgreSQL，使用 `PostgresTransactionalInbox` 将去重记录
 与下游业务 mutation 同事务提交。完整代码、幂等键设计、补偿激活和运维边界见 [side-effects.md](side-effects.md)。
+
+## 10. 接入知识库 RAG
+
+业务 Controller、Job 和 Tool 优先依赖 `RagApplication`，不要分别调用 Loader、Indexer 和 VectorStore：
+
+```scala
+val localRagLayer = ZLayer.make[RagApplication](
+  DocumentLoaderRegistry.layer(Chunk(markdownLoader)),
+  ZLayer.succeed[EmbeddingService](embeddingService),
+  InMemoryKnowledgeIndexStore.knowledge,
+  MarkdownStructureChunker.layer,
+  KnowledgeIndexer.layer(),
+  DocumentIngestionService.layer(
+    maxParallelism = 2,
+    failureMode = DocumentIngestionFailureMode.FailFast
+  ),
+  Reranker.identity,
+  DefaultRetriever.layer,
+  RagApplication.configured(RagApplicationConfig(defaultTopK = 5, maxTopK = 20))
+)
+```
+
+生产环境把 `InMemoryKnowledgeIndexStore.knowledge` 替换为
+`PostgresAgentPersistence.knowledge(dimension = 1536)`；后者同时提供版本化摄取和 hybrid 查询所需 SPI，并共享宿主
+`DataSource`、向量维度和正式快照。仍需显式执行匹配维度的 optional pgvector migration，不会因构建 ZLayer 自动改库。
+
+单文档调用 `rag.ingestOne(request)`；队列调用 `rag.ingest(requestStream)`；查询使用
+`rag.retrieve(RagQuery(text, trustedScope, limit))`。门面会在 Embedding/数据库之前拒绝空 query、超长 query 和越界
+topK。完整可运行路径见
+[RagAgentExample.scala](../modules/agent-examples/src/main/scala/com/zyblw/agent/examples/RagAgentExample.scala)，PDF/Tika/Docling
+配置见 [文档 Loader](document-loaders.md)。

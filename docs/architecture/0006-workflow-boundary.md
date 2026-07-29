@@ -12,7 +12,18 @@
 
 ## 决定
 
-采用方案 3。Workflow 节点返回显式 `NodeResult`，支持下一节点、完成、暂停和有界 fan-out；节点状态由应用定义，持久化通过 SPI。Handoff 是受深度、上下文和工具策略限制的 Agent 转移，不自动继承全部权限。
+采用方案 3，但把节点计算与控制边进一步分离：
+
+- `WorkflowNode` 只返回 `NodeOutcome.Succeeded` 或 `NodeOutcome.Suspended`；
+- `WorkflowTransition` 在节点外声明 `Next`、`Route`、`FanOut` 和 `Complete`；
+- `WorkflowDefinition.make` 在运行前验证入口、目标、可达性、重复边、fan-out 约束与循环访问上限；
+- `WorkflowDefinition` 必须声明稳定 `WorkflowId/WorkflowVersion`；`WorkflowCheckpoint` 同时保存该 identity、Session、
+  游标、不可变状态、step 和访问次数；
+- 第一阶段 fan-in 只提供 `AllSucceeded`，任一失败由 ZIO 结构化并发中断兄弟 Fiber，且不提交 join checkpoint。
+- 内存与 PostgreSQL checkpoint Store 都只允许相同 identity 内按 step 单调推进；V008 提供经过 PostgreSQL 16
+  Testcontainers 验证的完整快照、checksum 和损坏拒绝。
+
+节点状态由应用定义，持久化通过 SPI。Handoff 是受深度、上下文和工具策略限制的 Agent 转移，不自动继承全部权限。
 
 ## 未选择原因
 
@@ -20,4 +31,8 @@
 
 ## 风险与演化
 
-第一版不提供分布式调度。保留 Temporal/zio-temporal Adapter 边界，不让 core 依赖具体工作流引擎。
+当前实现有意限定 fan-out 分支为单步 `Complete` 节点，不提供 pending writes、durable timer、子图、分布式调度或
+quorum/race join。下一阶段先用节点执行账本、pending writes 和故障注入补齐 checkpoint 之间的崩溃窗口，再决定是否增加这些语义。
+保留 Temporal/zio-temporal Adapter 边界，不让 core 依赖具体工作流引擎。
+
+简单 Agent loop 和顺序 ZIO 组合不强制图化；多 Agent 只有在固定 eval 中持续优于单 Agent时才进入图调度。

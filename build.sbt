@@ -124,6 +124,8 @@ lazy val documentLoaders = project
     name := "zyblw-agent-document-loaders",
     libraryDependencies ++= Seq(
       "dev.zio"        %% "zio-streams"                   % zioVersion,
+      "dev.zio"        %% "zio-http"                      % zioHttpVersion,
+      "dev.zio"        %% "zio-http-testkit"              % zioHttpVersion % Test,
       "org.apache.tika" % "tika-core"                     % tikaVersion,
       "org.apache.tika" % "tika-parsers-standard-package" % tikaVersion
     )

@@ -3,6 +3,37 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
+## Unreleased (target: 0.2.0)
+
+### Added
+
+- Experimental `core.artifacts` SPI: trusted session/user scopes, append-only immutable versions, safe artifact names, content SHA-256,
+  bounded media type/metadata/capacity policy, and an in-memory development/test Adapter. Artifact bytes are deliberately excluded from
+  `AgentState`, JSON descriptors, prompts, telemetry and event streams.
+- Experimental declarative Workflow Graph: explicit transitions, pre-run structural validation, bounded cycles, complete/suspended
+  checkpoints, structured fan-out/fan-in events, `AllSucceeded` sibling cancellation, and an executable diamond example.
+- V008 `agent_workflow_checkpoints` and `PostgresWorkflowCheckpointStore`: bounded/checksummed full snapshots, monotonic step writes,
+  workflow/version/session identity validation, cross-Adapter resume, and PostgreSQL 16 contract tests.
+- Optional Docling Serve v1 `DocumentLoader` for bounded PDF-to-Markdown multipart conversion with HTTPS/API-key controls, response
+  limits, typed retryability, cancellation and redacted failures.
+- `MarkdownStructureChunker` with heading-path context, fenced-code/table preservation, Unicode-safe hard splitting, source-line metadata,
+  content-addressed stable chunk IDs, and executable RAG example coverage.
+- `DocumentLoaderRegistry`/`DocumentIngestionService` ZLayers and a single-document `ingestOne` convenience path.
+- `RagApplication` as the recommended business-facing ingestion/query facade, with pre-provider query/top-k limits and one
+  ZLayer graph for jobs, controllers and tools.
+- Shared in-memory and PostgreSQL `KnowledgeIndexStore & VectorStore` layers so indexing and retrieval use the same active
+  knowledge snapshot without application-side vector copying.
+
+### Changed
+
+- **Breaking, Experimental API:** Workflow nodes now return `NodeOutcome` only; control flow moved from the former `NodeResult` into
+  `WorkflowDefinition`, which now requires `WorkflowId` and `WorkflowVersion`. `WorkflowCheckpointStore` now persists definition/session
+  identity, cursor, state, step and visit counters as one monotonic checkpoint. No compatibility shim is provided on the unreleased
+  `0.2.0` evolution line; immutable `0.1.0` artifacts remain unchanged.
+- **Breaking, Experimental RAG API:** `SourceDocument` records `DocumentRepresentation`, every `Chunker` exposes a stable
+  parameter-complete `strategyId`, and `KnowledgeIndexer` derives its default manifest strategy from the actual Chunker instead of the
+  former hard-coded sliding-window label.
+
 ## 0.1.0 - 2026-07-27
 
 ### Added

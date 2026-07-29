@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-24
+> 最后核验：2026-07-29
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -37,6 +37,7 @@
 | `agent_embedding_quota_windows` | 租户、窗口长度和窗口起点范围内的请求/文本/字符硬计数 | 行锁保证跨 Worker 原子检查与累加 |
 | `agent_embedding_quota_reservations` | requestId/hash 幂等预留 | 随所属窗口级联清理；同 ID 不同 hash 拒绝 |
 | `agent_eval_snapshots` | Agent/RAG/Context Compression 的低敏不可变评测快照与发布基线 | 不含业务正文；按数据集治理策略归档，不能静默覆盖 |
+| `agent_workflow_checkpoints` | Workflow identity、Session、游标、应用状态、step 与访问预算的完整恢复快照 | 独立于 `agent_runs`；按 Workflow Run 的保留策略删除 |
 
 可选 RAG baseline 还包含：
 
@@ -50,9 +51,13 @@
 原子删除正式块并写 Retired；`purgeInactive` 通过部分索引和 `SKIP LOCKED` 只清理截止时间前的非活动终态，绝不删除
 Building 或 Ready/active。
 
-`agent_checkpoints` 不存在于全新基线。Runtime 直接保存 `AgentState`。生产异步创建通过
+通用 `agent_checkpoints` 不存在于全新基线。Agent Runtime 直接保存 `AgentState`。生产异步创建通过
 `PostgresRunSubmissionStore` 在同一事务写 `agent_runs + agent_events + agent_run_commands + agent_run_dispatch`；任一插入
 失败全部回滚。`start_scope_hash/start_request_hash` 是 SHA-256，只有 `start_idempotency_key` 保存客户端不透明键。
+
+V008 的 `agent_workflow_checkpoints` 是另一条明确边界：它只服务声明式 Workflow，不复制 Agent Runtime 状态。每个 runId
+一行，完整 checkpoint 同时保存确定性 TEXT、JSONB 与 SHA-256；冗余 identity/cursor/step 列用于约束和诊断。表不引用
+`agent_runs`，因为无模型的确定性 Workflow 也可以独立运行。
 
 `agent_memories` 不属于 Run checkpoint：Run 删除不会级联删除用户长期记忆。User scope 同时保存 tenant/user，并以
 无歧义 canonical scope key 建主键；相同 userId 在不同 tenant 中是不同命名空间。删除会清空 `value_json` 与

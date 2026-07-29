@@ -7,20 +7,46 @@ import com.zyblw.agent.model.*
 import com.zyblw.agent.rag.*
 import com.zyblw.agent.testkit.*
 import com.zyblw.agent.tools.*
+import java.nio.charset.StandardCharsets
 import zio.*
 import zio.json.*
 import zio.json.ast.Json
 
-/** Markdown → 分块 → embedding → 带租户权限检索 → Agent 引用回答的最小可运行示例。 */
+/** DocumentInput → Loader → 原子索引 → 权限检索 → Agent 引用回答的最小可运行示例。 */
 object RagAgentExample extends ZIOAppDefault:
   final case class LookupInput(query: String) derives JsonCodec
   final case class LookupOutput(excerpts: Chunk[String], citations: Chunk[String]) derives JsonCodec
 
-  private val markdown = SourceDocument(
-    "doc-yinyang",
-    "# 阴阳\n阴阳用于描述相互关联事物的对立统一关系。本示例仅用于中医学习，不提供诊疗建议。",
-    "memory://docs/yinyang.md"
-  )
+  private val markdown =
+    "# 阴阳\n\n## 定义\n\n阴阳用于描述相互关联事物的对立统一关系。本示例仅用于中医学习，不提供诊疗建议。"
+
+  private val markdownLoader = new DocumentLoader:
+    override val id: String                       = "example-markdown"
+    override val supportedMediaTypes: Set[String] = Set("text/markdown")
+
+    override def load(input: DocumentInput): IO[RetrievalError, SourceDocument] =
+      input.content.runCollect.map(bytes =>
+        SourceDocument(
+          input.id,
+          String(bytes.toArray, StandardCharsets.UTF_8),
+          input.sourceUri,
+          representation = DocumentRepresentation.Markdown
+        )
+      )
+
+  /** 业务 composition root：编译器会检查 Loader、Indexer、Retriever 两侧都已接入同一个知识快照。 */
+  private val localRagLayer: ZLayer[Any, RetrievalError, RagApplication] =
+    ZLayer.make[RagApplication](
+      DocumentLoaderRegistry.layer(Chunk(markdownLoader)),
+      ZLayer.succeed[EmbeddingService](HashEmbedding(64)),
+      InMemoryKnowledgeIndexStore.knowledge,
+      MarkdownStructureChunker.layer,
+      KnowledgeIndexer.layer(),
+      DocumentIngestionService.layer(failureMode = DocumentIngestionFailureMode.FailFast),
+      Reranker.identity,
+      DefaultRetriever.layer,
+      RagApplication.layer
+    )
 
   private val script = Chunk(
     ChatResponse(
@@ -37,30 +63,41 @@ object RagAgentExample extends ZIOAppDefault:
 
   def run =
     (for
-      vectorStore <- ZIO.service[VectorStore]
-      embeddings = HashEmbedding(64)
-      tenant     = TenantId("demo-tenant")
-      chunks  <- SlidingWindowChunker().split(markdown, tenant, Set("knowledge:read"))
-      vectors <- embeddings.embed(chunks.map(_.text))
-      _       <- vectorStore.upsert(chunks.zip(vectors).map(IndexedChunk.apply))
-      reranker = new Reranker:
-        def rerank(query: String, hits: Chunk[RetrievalHit], limit: Int) = ZIO.succeed(hits.take(limit))
-      retriever = DefaultRetriever(embeddings, vectorStore, reranker)
-      lookup    = Tool.json[Any, LookupInput, AgentError.ToolExecutionFailed, LookupOutput](
+      rag <- ZIO.service[RagApplication]
+      tenant = TenantId("demo-tenant")
+      input  = DocumentInput.fromBytes(
+        "doc-yinyang",
+        "memory://docs/yinyang.md",
+        "yinyang.md",
+        "text/markdown",
+        Chunk.fromArray(markdown.getBytes(StandardCharsets.UTF_8))
+      )
+      indexed <- rag.ingestOne(
+        DocumentIngestionRequest(
+          input,
+          tenant,
+          Set("knowledge:read"),
+          "rag-example-upload-1",
+          ActiveVersionExpectation.NoActiveVersion
+        )
+      )
+      lookup = Tool.json[Any, LookupInput, AgentError.ToolExecutionFailed, LookupOutput](
         ToolName("knowledge_lookup"),
         "检索有来源的学习资料",
         TestSchemas.stringObject("query", "问题"),
         None,
         ToolMetadata(ToolRisk.UserScopedRead, SideEffect.None, requiredScopes = Set("knowledge:read"))
       ) { (input, context) =>
-        retriever
+        rag
           .retrieve(
-            input.query,
-            RetrievalScope(
-              TenantId(context.runContext.tenantId.getOrElse("demo-tenant")),
-              context.runContext.scopes
-            ),
-            3
+            RagQuery(
+              input.query,
+              RetrievalScope(
+                TenantId(context.runContext.tenantId.getOrElse("demo-tenant")),
+                context.runContext.scopes
+              ),
+              Some(3)
+            )
           )
           .map(result => LookupOutput(result.hits.map(_.chunk.text), result.citations.map(_.id)))
           .mapError(error =>
@@ -95,6 +132,7 @@ object RagAgentExample extends ZIOAppDefault:
         AgentApplication.inMemoryDefaults(WorkerId("rag-example-worker"), appConfig)
       )
       _ <- Console.printLine(
-        s"RAG Run 状态=${outcome.status}, answer=${outcome.messages.lastOption.map(_.text).getOrElse("")}"
+        s"RAG ingestion=${indexed.productPrefix}, Run 状态=${outcome.status}, " +
+          s"answer=${outcome.messages.lastOption.map(_.text).getOrElse("")}"
       )
-    yield ()).provide(InMemoryVectorStore.layer)
+    yield ()).provide(localRagLayer)

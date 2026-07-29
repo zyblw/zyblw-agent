@@ -1,10 +1,12 @@
 package com.zyblw.agent.persistence.postgres
 
 import com.zyblw.agent.memory.{MemoryStore, RunCommandStore, RunStore, RunSubmissionStore}
-import com.zyblw.agent.rag.{EmbeddingCacheStore, EmbeddingQuotaStore}
+import com.zyblw.agent.rag.{EmbeddingCacheStore, EmbeddingQuotaStore, KnowledgeIndexStore, VectorStore}
 import com.zyblw.agent.evals.EvalTrendStore
+import com.zyblw.agent.workflow.WorkflowCheckpointStore
 import javax.sql.DataSource
 import zio.*
+import zio.json.JsonCodec
 
 /** Agent 耐久控制面的推荐 PostgreSQL 组合层。
   *
@@ -43,6 +45,17 @@ object PostgresAgentPersistence:
   val embeddingGovernance: URLayer[DataSource, EmbeddingCacheStore & EmbeddingQuotaStore] =
     PostgresEmbeddingCacheStore.layer ++ PostgresEmbeddingQuotaStore.layer
 
+  /** 版本化知识摄取与 hybrid retrieval 的推荐同源组合层。
+    *
+    * 两个 Adapter 共享同一个 DataSource、固定向量维度和 `agent_knowledge_chunks` 正式快照： `KnowledgeIndexStore` 负责
+    * Building→stage→activate，`VectorStore` 只查询 active 发布结果。 业务仍需显式执行对应维度的 optional pgvector migration。
+    */
+  def knowledge(
+      dimension: Int,
+      hybridConfig: PostgresHybridSearchConfig = PostgresHybridSearchConfig()
+  ): URLayer[DataSource, KnowledgeIndexStore & VectorStore] =
+    PostgresKnowledgeIndexStore.layer(dimension) ++ PostgresPgVectorStore.layer(dimension, hybridConfig)
+
   /** 生产评测趋势仓库。
     *
     * 该层只保存已经脱敏的 `EvalSuiteSnapshot`，不会运行 Eval、调用模型或自动决定发布。CI/发布任务应显式调用
@@ -50,6 +63,13 @@ object PostgresAgentPersistence:
     */
   val evalTrends: URLayer[DataSource, EvalTrendStore] =
     PostgresEvalTrendStore.layer
+
+  /** 声明式 Workflow 的耐久 checkpoint。
+    *
+    * 状态类型必须提供 `JsonCodec`；完整快照会经过容量、checksum、identity 和单调 step 校验。该层不包含 Workflow Engine 或分布式 lease。
+    */
+  def workflowCheckpoints[S: JsonCodec: Tag]: URLayer[DataSource, WorkflowCheckpointStore[S]] =
+    PostgresWorkflowCheckpointStore.layer[S]
 
   /** 控制面与评测发布事实源的常用组合。
     *
