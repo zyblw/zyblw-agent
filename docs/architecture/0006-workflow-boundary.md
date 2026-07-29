@@ -22,6 +22,10 @@
 - 第一阶段 fan-in 只提供 `AllSucceeded`，任一失败由 ZIO 结构化并发中断兄弟 Fiber，且不提交 join checkpoint。
 - 内存与 PostgreSQL checkpoint Store 都只允许相同 identity 内按 step 单调推进；V008 提供经过 PostgreSQL 16
   Testcontainers 验证的完整快照、checksum 和损坏拒绝。
+- 生产耐久模式使用 `WorkflowExecutionStore`：claim 比较 owner/token/generation/expiry，节点结果先进入 `Prepared`，
+  再把一个节点或整个 fan-out 的 execution 与 checkpoint 在同一原子临界区/数据库事务提交；
+- V009 保存节点 execution ledger。进程在 prepare 后、checkpoint 前失败时，新 owner 领取更高 generation 并复用
+  pending outcome；旧 owner 的 heartbeat、prepare 与 commit 均被 fencing 拒绝。
 
 节点状态由应用定义，持久化通过 SPI。Handoff 是受深度、上下文和工具策略限制的 Agent 转移，不自动继承全部权限。
 
@@ -31,8 +35,9 @@
 
 ## 风险与演化
 
-当前实现有意限定 fan-out 分支为单步 `Complete` 节点，不提供 pending writes、durable timer、子图、分布式调度或
-quorum/race join。下一阶段先用节点执行账本、pending writes 和故障注入补齐 checkpoint 之间的崩溃窗口，再决定是否增加这些语义。
+当前实现有意限定 fan-out 分支为单步 `Complete` 节点，不提供 durable timer/signal、人工任务、子图或 quorum/race join。
+下一阶段先补 timer/signal、execution timeline、进程 kill/数据库重启与多 Worker soak，再由真实业务和 eval 决定是否增加
+更复杂图语义。
 保留 Temporal/zio-temporal Adapter 边界，不让 core 依赖具体工作流引擎。
 
 简单 Agent loop 和顺序 ZIO 组合不强制图化；多 Agent 只有在固定 eval 中持续优于单 Agent时才进入图调度。

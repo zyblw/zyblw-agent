@@ -112,8 +112,8 @@ libraryDependencies ++= Seq(
 - Input/Output/Tool/Run Guardrail、脱敏、持续时间 Trace、低基数 Metrics、OpenTelemetry OTLP、Langfuse Trace 与幂等 Scores、Prometheus/Grafana 基线。
 - 声明式 Workflow Graph：节点与控制边分离，启动前检查缺失/不可达节点、未声明目标和无界循环；完整 checkpoint
   绑定 workflow/version/session 并保存游标、状态、step 与访问预算。
-- V008 `PostgresWorkflowCheckpointStore`：完整快照容量/checksum/JSONB 校验、同 identity 单调 step、跨 Store
-  暂停恢复；当前明确不冒充节点 execution lease。
+- V008/V009 `PostgresWorkflowCheckpointStore`：完整 checkpoint 与节点 execution ledger；Prepared outcome 跨进程复用，
+  owner/token/generation/expiry fencing，以及 ledger + checkpoint 同事务提交。
 - 有界 fan-out 与显式 `AllSucceeded` fan-in；分支失败会按 ZIO 结构化并发中断兄弟 Fiber，并隔离未完成的 join checkpoint。
 - HTTP、示例、测试与 PostgreSQL 全部使用同一个 `AgentState/RunStore` 生产路径。
 - 受深度、上下文与工具策略限制的 Handoff；不把它宣传为已成熟的多 Agent 调度平台。

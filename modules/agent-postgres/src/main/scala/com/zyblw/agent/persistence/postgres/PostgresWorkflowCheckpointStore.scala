@@ -1,10 +1,12 @@
 package com.zyblw.agent.persistence.postgres
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.memory.{LeaseToken, WorkerId}
 import com.zyblw.agent.workflow.*
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.sql.{Connection, ResultSet, SQLException, Types}
+import java.time.{Instant, OffsetDateTime}
 import javax.sql.DataSource
 import zio.*
 import zio.json.*
@@ -31,12 +33,13 @@ final case class PostgresWorkflowCheckpointStoreConfig(
   * 每个 `runId` 只有一行权威 checkpoint。写入允许相同内容幂等重放，或在相同 workflow/version/session identity 内推进到更大 step；陈旧写入、同 step
   * 不同内容和 identity 漂移均 fail-closed。完整 JSON 同时保存确定性 TEXT、JSONB 分析投影和 SHA-256，读取时重新验证容量、checksum、领域约束与冗余列。
   *
-  * 该 Store 只解决节点边界的耐久恢复，不提供分布式执行所有权。多 Worker 调度仍需后续 execution lease/fencing，节点外部 副作用仍必须幂等。
+  * V009 起同一 Adapter 还实现 `WorkflowExecutionStore`：节点 pending outcome、execution ledger 与 checkpoint 可在一个事务中
+  * fenced 提交。节点内部外部副作用仍必须使用业务幂等键或 outbox/inbox。
   */
 final class PostgresWorkflowCheckpointStore[S: JsonCodec](
     dataSource: DataSource,
     config: PostgresWorkflowCheckpointStoreConfig = PostgresWorkflowCheckpointStoreConfig()
-) extends WorkflowCheckpointStore[S]:
+) extends WorkflowExecutionStore[S]:
   import PostgresWorkflowCheckpointStore.*
 
   override def save(runId: RunId, checkpoint: WorkflowCheckpoint[S]): IO[StoreError, Unit] =
@@ -66,6 +69,516 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
   override def load(runId: RunId): IO[StoreError, Option[WorkflowCheckpoint[S]]] =
     withConnection(connection => select(connection, runId))
       .flatMap(row => ZIO.foreach(row)(decode))
+
+  override def claim(
+      key: WorkflowExecutionKey,
+      owner: WorkerId,
+      leaseDuration: Duration
+  ): IO[StoreError, WorkflowExecutionClaim[S]] =
+    validateDuration(leaseDuration) *> LeaseToken.random.flatMap { token =>
+      withTransaction { connection =>
+        for
+          inserted  <- insertExecution(connection, key, owner, token, leaseDuration)
+          reclaimed <-
+            if inserted then ZIO.succeed(false)
+            else reclaimExecution(connection, key, owner, token, leaseDuration)
+          record <- selectExecution(connection, key, forUpdate = true).flatMap {
+            case Some(row) => decodeExecution(row)
+            case None      => ZIO.fail(executionCorrupted("claim-row-missing"))
+          }
+          _ <- ZIO
+            .fail(executionConflict(key, "execution-identity"))
+            .unless(record.key == key)
+          acquired = inserted || reclaimed
+          result <-
+            if acquired then
+              ZIO
+                .fromOption(record.expiresAt)
+                .mapError(_ => executionCorrupted("acquired-expires-at"))
+                .map(expiresAt =>
+                  WorkflowExecutionClaim.Acquired(
+                    WorkflowExecutionLease(
+                      record.key,
+                      record.owner,
+                      record.token,
+                      record.generation,
+                      record.claimedAt,
+                      expiresAt
+                    ),
+                    record.outcome
+                  )
+                )
+            else
+              record.status match
+                case WorkflowExecutionStatus.Committed =>
+                  ZIO.succeed(
+                    WorkflowExecutionClaim.Committed(
+                      record.generation,
+                      record.completedAt.getOrElse(record.updatedAt)
+                    )
+                  )
+                case _ =>
+                  ZIO
+                    .fromOption(record.expiresAt)
+                    .mapError(_ => executionCorrupted("busy-expires-at"))
+                    .map(expiresAt => WorkflowExecutionClaim.Busy(record.owner, record.generation, expiresAt))
+        yield result
+      }
+    }
+
+  override def heartbeat(
+      lease: WorkflowExecutionLease,
+      leaseDuration: Duration
+  ): IO[StoreError, WorkflowExecutionLease] =
+    validateDuration(leaseDuration) *> withConnection { connection =>
+      jdbc("execution-heartbeat") {
+        val statement = connection.prepareStatement(
+          """UPDATE agent_workflow_node_executions
+            |SET lease_expires_at = CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond'),
+            |    heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
+            |  AND status IN ('Running', 'Prepared')
+            |  AND lease_owner = ? AND lease_token = ?::uuid AND generation = ?
+            |  AND lease_expires_at > CURRENT_TIMESTAMP
+            |RETURNING lease_expires_at""".stripMargin
+        )
+        try
+          statement.setLong(1, leaseDuration.toMillis)
+          bindFence(statement, 2, lease)
+          val result = statement.executeQuery()
+          if result.next() then lease.copy(expiresAt = result.getObject(1, classOf[OffsetDateTime]).toInstant)
+          else throw LostWorkflowExecutionLease(lease)
+        finally statement.close()
+      }
+    }
+
+  override def prepare(
+      lease: WorkflowExecutionLease,
+      outcome: NodeOutcome[S]
+  ): IO[StoreError, WorkflowExecutionRecord[S]] =
+    for
+      encoded <- encodeOutcome(outcome)
+      record  <- withTransaction { connection =>
+        updatePrepared(connection, lease, encoded).flatMap {
+          case true =>
+            selectExecution(connection, lease.key, forUpdate = true).flatMap {
+              case Some(row) => decodeExecution(row)
+              case None      => ZIO.fail(executionCorrupted("prepare-row-missing"))
+            }
+          case false =>
+            selectExecution(connection, lease.key, forUpdate = true).flatMap {
+              case Some(row) =>
+                decodeExecution(row).flatMap { existing =>
+                  if sameFence(existing, lease) &&
+                    row.leaseActive &&
+                    existing.status == WorkflowExecutionStatus.Prepared &&
+                    existing.outcome.contains(outcome)
+                  then ZIO.succeed(existing)
+                  else ZIO.fail(lost(lease))
+                }
+              case None => ZIO.fail(lost(lease))
+            }
+        }
+      }
+    yield record
+
+  override def commit(
+      leases: NonEmptyChunk[WorkflowExecutionLease],
+      checkpoint: WorkflowCheckpoint[S]
+  ): IO[StoreError, Unit] =
+    val values = Chunk.fromIterable(leases)
+    for
+      _       <- validateCommitIdentity(values, checkpoint)
+      encoded <- encode(checkpoint)
+      _       <- withTransaction { connection =>
+        for
+          records <- ZIO.foreach(values) { lease =>
+            selectExecution(connection, lease.key, forUpdate = true).flatMap {
+              case Some(row) => decodeExecution(row).map(_ -> row.leaseActive)
+              case None      => ZIO.fail(lost(lease))
+            }
+          }
+          fencedRecords  = records.zip(values)
+          activePrepared = fencedRecords.forall { case (record, active, lease) =>
+            active && sameFence(record, lease) && record.status == WorkflowExecutionStatus.Prepared
+          }
+          idempotentCommitted = fencedRecords.forall { case (record, _, lease) =>
+            sameFence(record, lease) && record.status == WorkflowExecutionStatus.Committed
+          }
+          _ <-
+            if activePrepared || idempotentCommitted then ZIO.unit
+            else ZIO.fail(executionConflict(values.head.key, "commit-fence-or-status"))
+          checkpointWritten <- upsert(
+            connection,
+            values.head.key.runId,
+            checkpoint,
+            encoded
+          )
+          _ <-
+            if checkpointWritten then ZIO.unit
+            else
+              select(connection, values.head.key.runId).flatMap {
+                case Some(row) =>
+                  decode(row).flatMap { existing =>
+                    if existing == checkpoint then ZIO.unit
+                    else
+                      ZIO.fail(
+                        AgentError.WorkflowCheckpointConflict(
+                          values.head.key.runId,
+                          "non-monotonic-write"
+                        )
+                      )
+                  }
+                case None => ZIO.fail(corrupted("commit-checkpoint-row-missing"))
+              }
+          _ <-
+            if idempotentCommitted then ZIO.unit
+            else ZIO.foreachDiscard(values)(lease => markCommitted(connection, lease))
+        yield ()
+      }
+    yield ()
+
+  override def get(
+      key: WorkflowExecutionKey
+  ): IO[StoreError, Option[WorkflowExecutionRecord[S]]] =
+    withConnection(connection => selectExecution(connection, key, forUpdate = false))
+      .flatMap(row => ZIO.foreach(row)(decodeExecution))
+      .flatMap {
+        case Some(record) if record.key != key =>
+          ZIO.fail(executionConflict(key, "execution-identity"))
+        case value => ZIO.succeed(value)
+      }
+
+  private def insertExecution(
+      connection: Connection,
+      key: WorkflowExecutionKey,
+      owner: WorkerId,
+      token: LeaseToken,
+      leaseDuration: Duration
+  ): IO[StoreError, Boolean] =
+    jdbc("execution-claim-insert") {
+      val statement = connection.prepareStatement(
+        """INSERT INTO agent_workflow_node_executions
+          |(run_id, workflow_id, definition_version, session_id, node_id, step, visit, status,
+          | generation, lease_owner, lease_token, claimed_at, lease_expires_at, heartbeat_at,
+          | created_at, updated_at)
+          |VALUES (?::uuid, ?, ?, ?::uuid, ?, ?, ?, 'Running', 1, ?, ?::uuid,
+          | CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond'),
+          | CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          |ON CONFLICT (run_id, step, node_id) DO NOTHING""".stripMargin
+      )
+      try
+        bindExecutionKey(statement, 1, key)
+        statement.setString(8, owner.value)
+        statement.setString(9, token.value)
+        statement.setLong(10, leaseDuration.toMillis)
+        statement.executeUpdate() == 1
+      finally statement.close()
+    }
+
+  private def reclaimExecution(
+      connection: Connection,
+      key: WorkflowExecutionKey,
+      owner: WorkerId,
+      token: LeaseToken,
+      leaseDuration: Duration
+  ): IO[StoreError, Boolean] =
+    jdbc("execution-claim-reclaim") {
+      val statement = connection.prepareStatement(
+        """UPDATE agent_workflow_node_executions
+          |SET generation = generation + 1, lease_owner = ?, lease_token = ?::uuid,
+          |    claimed_at = CURRENT_TIMESTAMP,
+          |    lease_expires_at = CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond'),
+          |    heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
+          |  AND workflow_id = ? AND definition_version = ? AND session_id = ?::uuid AND visit = ?
+          |  AND status IN ('Running', 'Prepared')
+          |  AND lease_expires_at <= CURRENT_TIMESTAMP""".stripMargin
+      )
+      try
+        statement.setString(1, owner.value)
+        statement.setString(2, token.value)
+        statement.setLong(3, leaseDuration.toMillis)
+        statement.setString(4, key.runId.asString)
+        statement.setInt(5, key.step)
+        statement.setString(6, key.nodeId.value)
+        statement.setString(7, key.workflowId.value)
+        statement.setInt(8, key.definitionVersion.value)
+        statement.setString(9, key.sessionId.asString)
+        statement.setInt(10, key.visit)
+        statement.executeUpdate() == 1
+      finally statement.close()
+    }
+
+  private def updatePrepared(
+      connection: Connection,
+      lease: WorkflowExecutionLease,
+      encoded: EncodedOutcome
+  ): IO[StoreError, Boolean] =
+    jdbc("execution-prepare") {
+      val statement = connection.prepareStatement(
+        """UPDATE agent_workflow_node_executions
+          |SET status = 'Prepared', outcome_sha256 = ?, outcome_payload = ?,
+          |    outcome_json = ?::jsonb, updated_at = CURRENT_TIMESTAMP
+          |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
+          |  AND status = 'Running'
+          |  AND lease_owner = ? AND lease_token = ?::uuid AND generation = ?
+          |  AND lease_expires_at > CURRENT_TIMESTAMP""".stripMargin
+      )
+      try
+        statement.setString(1, encoded.sha256)
+        statement.setString(2, encoded.json)
+        statement.setString(3, encoded.json)
+        bindFence(statement, 4, lease)
+        statement.executeUpdate() == 1
+      finally statement.close()
+    }
+
+  private def markCommitted(
+      connection: Connection,
+      lease: WorkflowExecutionLease
+  ): IO[StoreError, Unit] =
+    jdbc("execution-commit") {
+      val statement = connection.prepareStatement(
+        """UPDATE agent_workflow_node_executions
+          |SET status = 'Committed', lease_expires_at = NULL, heartbeat_at = NULL,
+          |    completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
+          |  AND status = 'Prepared'
+          |  AND lease_owner = ? AND lease_token = ?::uuid AND generation = ?
+          |  AND lease_expires_at > CURRENT_TIMESTAMP""".stripMargin
+      )
+      try
+        bindFence(statement, 1, lease)
+        if statement.executeUpdate() != 1 then throw LostWorkflowExecutionLease(lease)
+      finally statement.close()
+    }
+
+  private def selectExecution(
+      connection: Connection,
+      key: WorkflowExecutionKey,
+      forUpdate: Boolean
+  ): IO[StoreError, Option[StoredExecutionRow]] =
+    jdbc("execution-load") {
+      val lock      = if forUpdate then " FOR UPDATE" else ""
+      val statement = connection.prepareStatement(
+        s"""SELECT workflow_id, definition_version, session_id::text, node_id, step, visit, status,
+           | generation, lease_owner, lease_token::text, claimed_at, lease_expires_at,
+           | updated_at, completed_at, outcome_sha256, outcome_payload,
+           | COALESCE(lease_expires_at > CURRENT_TIMESTAMP, FALSE) AS lease_active
+           |FROM agent_workflow_node_executions
+           |WHERE run_id = ?::uuid AND step = ? AND node_id = ?$lock""".stripMargin
+      )
+      try
+        statement.setString(1, key.runId.asString)
+        statement.setInt(2, key.step)
+        statement.setString(3, key.nodeId.value)
+        val result = statement.executeQuery()
+        if result.next() then Some(readExecutionRow(key.runId, result)) else None
+      finally statement.close()
+    }
+
+  private def readExecutionRow(runId: RunId, result: ResultSet): StoredExecutionRow =
+    StoredExecutionRow(
+      runId,
+      result.getString(1),
+      result.getInt(2),
+      result.getString(3),
+      result.getString(4),
+      result.getInt(5),
+      result.getInt(6),
+      result.getString(7),
+      result.getLong(8),
+      result.getString(9),
+      result.getString(10),
+      result.getObject(11, classOf[OffsetDateTime]).toInstant,
+      Option(result.getObject(12, classOf[OffsetDateTime])).map(_.toInstant),
+      result.getObject(13, classOf[OffsetDateTime]).toInstant,
+      Option(result.getObject(14, classOf[OffsetDateTime])).map(_.toInstant),
+      Option(result.getString(15)),
+      Option(result.getString(16)),
+      result.getBoolean(17)
+    )
+
+  private def encodeOutcome(outcome: NodeOutcome[S]): IO[StoreError, EncodedOutcome] =
+    ZIO
+      .attempt {
+        val stored = outcome match
+          case NodeOutcome.Succeeded(state) =>
+            StoredOutcome(CurrentOutcomeSchemaVersion, "Succeeded", state, None)
+          case NodeOutcome.Suspended(state, reason) =>
+            StoredOutcome(CurrentOutcomeSchemaVersion, "Suspended", state, Some(reason))
+        val json  = stored.toJson
+        val bytes = json.getBytes(StandardCharsets.UTF_8)
+        EncodedOutcome(json, bytes.length, sha256(bytes))
+      }
+      .mapError(_ => AgentError.PersistenceFailure("PostgreSQL workflow outcome encode-failed"))
+      .flatMap { encoded =>
+        ZIO
+          .fail(AgentError.PersistenceFailure("PostgreSQL workflow outcome record-too-large"))
+          .when(encoded.byteLength > config.maxCheckpointBytes)
+          .as(encoded)
+      }
+
+  private def decodeExecution(row: StoredExecutionRow): IO[StoreError, WorkflowExecutionRecord[S]] =
+    for
+      workflowId <- ZIO
+        .fromEither(WorkflowId.fromString(row.workflowId))
+        .mapError(_ => executionCorrupted("workflow-id"))
+      definitionVersion <- ZIO
+        .fromEither(WorkflowVersion.fromInt(row.definitionVersion))
+        .mapError(_ => executionCorrupted("definition-version"))
+      sessionId <- ZIO
+        .fromEither(SessionId.fromString(row.sessionId))
+        .mapError(_ => executionCorrupted("session-id"))
+      nodeId <- ZIO
+        .fromEither(NodeId.fromString(row.nodeId))
+        .mapError(_ => executionCorrupted("node-id"))
+      status <- row.status match
+        case "Running"   => ZIO.succeed(WorkflowExecutionStatus.Running)
+        case "Prepared"  => ZIO.succeed(WorkflowExecutionStatus.Prepared)
+        case "Committed" => ZIO.succeed(WorkflowExecutionStatus.Committed)
+        case _           => ZIO.fail(executionCorrupted("status"))
+      owner <- ZIO
+        .attempt(WorkerId(row.owner))
+        .mapError(_ => executionCorrupted("owner"))
+      outcome <-
+        if status == WorkflowExecutionStatus.Running then
+          ZIO
+            .fail(executionCorrupted("running-outcome-present"))
+            .when(row.outcomeJson.nonEmpty || row.outcomeSha256.nonEmpty)
+            .as(None)
+        else decodeOutcome(row)
+      key = WorkflowExecutionKey(
+        row.runId,
+        workflowId,
+        definitionVersion,
+        sessionId,
+        nodeId,
+        row.step,
+        row.visit
+      )
+      record <- ZIO
+        .attempt(
+          WorkflowExecutionRecord(
+            key,
+            status,
+            outcome,
+            row.generation,
+            owner,
+            LeaseToken(row.token),
+            row.claimedAt,
+            row.expiresAt,
+            row.updatedAt,
+            row.completedAt
+          )
+        )
+        .mapError(_ => executionCorrupted("invalid-domain"))
+    yield record
+
+  private def decodeOutcome(row: StoredExecutionRow): IO[StoreError, Option[NodeOutcome[S]]] =
+    val json     = row.outcomeJson.getOrElse("")
+    val checksum = row.outcomeSha256.getOrElse("")
+    val bytes    = json.getBytes(StandardCharsets.UTF_8)
+    val actual   = sha256(bytes)
+    for
+      _ <- ZIO
+        .fail(executionCorrupted("outcome-record-too-large"))
+        .when(bytes.length > config.maxCheckpointBytes)
+      _ <- ZIO
+        .fail(executionCorrupted("outcome-checksum"))
+        .unless(
+          checksum.matches("[0-9a-f]{64}") &&
+            MessageDigest.isEqual(
+              actual.getBytes(StandardCharsets.US_ASCII),
+              checksum.getBytes(StandardCharsets.US_ASCII)
+            )
+        )
+      stored <- ZIO
+        .fromEither(json.fromJson[StoredOutcome[S]])
+        .mapError(_ => executionCorrupted("outcome-json"))
+      _ <- ZIO
+        .fail(executionCorrupted("outcome-schema-version"))
+        .unless(stored.schemaVersion == CurrentOutcomeSchemaVersion)
+      outcome <- stored.kind match
+        case "Succeeded" if stored.reason.isEmpty =>
+          ZIO.succeed(NodeOutcome.Succeeded(stored.state))
+        case "Suspended" =>
+          ZIO
+            .fromOption(stored.reason)
+            .map(reason => NodeOutcome.Suspended(stored.state, reason))
+            .orElseFail(executionCorrupted("outcome-reason"))
+        case _ => ZIO.fail(executionCorrupted("outcome-kind"))
+    yield Some(outcome)
+
+  private def validateDuration(duration: Duration): IO[StoreError, Unit] =
+    if duration > Duration.Zero then ZIO.unit
+    else ZIO.fail(AgentError.PersistenceFailure("workflow execution leaseDuration 必须大于零"))
+
+  private def validateCommitIdentity(
+      leases: Chunk[WorkflowExecutionLease],
+      checkpoint: WorkflowCheckpoint[S]
+  ): IO[StoreError, Unit] =
+    val first = leases.head.key
+    val valid = leases.nonEmpty &&
+      leases.map(_.key).distinct.length == leases.length &&
+      leases.forall { lease =>
+        val key = lease.key
+        key.runId == first.runId &&
+        key.workflowId == checkpoint.workflowId &&
+        key.definitionVersion == checkpoint.definitionVersion &&
+        key.sessionId == checkpoint.sessionId &&
+        checkpoint.step > key.step
+      }
+    if valid then ZIO.unit else ZIO.fail(executionConflict(first, "checkpoint-identity"))
+
+  private def sameFence(
+      record: WorkflowExecutionRecord[S],
+      lease: WorkflowExecutionLease
+  ): Boolean =
+    record.key == lease.key &&
+      record.owner == lease.owner &&
+      record.token == lease.token &&
+      record.generation == lease.generation
+
+  private def bindExecutionKey(
+      statement: java.sql.PreparedStatement,
+      start: Int,
+      key: WorkflowExecutionKey
+  ): Unit =
+    statement.setString(start, key.runId.asString)
+    statement.setString(start + 1, key.workflowId.value)
+    statement.setInt(start + 2, key.definitionVersion.value)
+    statement.setString(start + 3, key.sessionId.asString)
+    statement.setString(start + 4, key.nodeId.value)
+    statement.setInt(start + 5, key.step)
+    statement.setInt(start + 6, key.visit)
+
+  private def bindFence(
+      statement: java.sql.PreparedStatement,
+      start: Int,
+      lease: WorkflowExecutionLease
+  ): Unit =
+    statement.setString(start, lease.key.runId.asString)
+    statement.setInt(start + 1, lease.key.step)
+    statement.setString(start + 2, lease.key.nodeId.value)
+    statement.setString(start + 3, lease.owner.value)
+    statement.setString(start + 4, lease.token.value)
+    statement.setLong(start + 5, lease.generation)
+
+  private def executionConflict(key: WorkflowExecutionKey, reason: String): StoreError =
+    AgentError.WorkflowCheckpointConflict(
+      key.runId,
+      s"execution:${key.nodeId.value}:${key.step}:$reason"
+    )
+
+  private def lost(lease: WorkflowExecutionLease): StoreError =
+    AgentError.LeaseLost(
+      lease.key.runId,
+      lease.owner.value,
+      lease.generation,
+      s"workflow-node=${lease.key.nodeId.value},step=${lease.key.step}"
+    )
 
   private def encode(checkpoint: WorkflowCheckpoint[S]): IO[StoreError, EncodedCheckpoint] =
     validateCheckpoint(checkpoint, corrupted = false) *>
@@ -287,11 +800,24 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         .flatMap(use)
     }
 
+  /** execution ledger 与 checkpoint 必须共享同一短事务；任何 fenced 校验或解码失败都会回滚。 */
+  private def withTransaction[A](use: Connection => IO[StoreError, A]): IO[StoreError, A] =
+    withConnection { connection =>
+      jdbc("begin-transaction")(connection.setAutoCommit(false)) *>
+        use(connection)
+          .tapBoth(
+            _ => ZIO.attemptBlocking(connection.rollback()).orDie,
+            _ => ZIO.attemptBlocking(connection.commit()).orDie
+          )
+          .ensuring(ZIO.attemptBlocking(connection.setAutoCommit(true)).orDie)
+    }
+
   private def jdbc[A](operation: String)(effect: => A): IO[StoreError, A] =
     ZIO.attemptBlocking(effect).mapError(error => databaseError(operation, error))
 
   private def databaseError(operation: String, error: Throwable): StoreError = error match
-    case sql: SQLException =>
+    case LostWorkflowExecutionLease(lease) => lost(lease)
+    case sql: SQLException                 =>
       val state     = Option(sql.getSQLState).getOrElse("unknown")
       val retryable =
         state.startsWith("08") ||
@@ -312,7 +838,8 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
       )
 
 object PostgresWorkflowCheckpointStore:
-  private val CurrentSchemaVersion = 1
+  private val CurrentSchemaVersion        = 1
+  private val CurrentOutcomeSchemaVersion = 1
 
   final private case class StoredCursor(kind: String, nodeId: Option[String]) derives JsonCodec
   final private case class StoredVisit(nodeId: String, count: Int) derives JsonCodec
@@ -328,6 +855,33 @@ object PostgresWorkflowCheckpointStore:
   ) derives JsonCodec
 
   final private case class EncodedCheckpoint(json: String, byteLength: Int, sha256: String)
+  final private case class StoredOutcome[S](
+      schemaVersion: Int,
+      kind: String,
+      state: S,
+      reason: Option[String]
+  ) derives JsonCodec
+  final private case class EncodedOutcome(json: String, byteLength: Int, sha256: String)
+  final private case class StoredExecutionRow(
+      runId: RunId,
+      workflowId: String,
+      definitionVersion: Int,
+      sessionId: String,
+      nodeId: String,
+      step: Int,
+      visit: Int,
+      status: String,
+      generation: Long,
+      owner: String,
+      token: String,
+      claimedAt: Instant,
+      expiresAt: Option[Instant],
+      updatedAt: Instant,
+      completedAt: Option[Instant],
+      outcomeSha256: Option[String],
+      outcomeJson: Option[String],
+      leaseActive: Boolean
+  )
   private enum SaveResult:
     case Written
     case Existing(row: StoredRow)
@@ -358,6 +912,15 @@ object PostgresWorkflowCheckpointStore:
       retryable = false
     )
 
+  private def executionCorrupted(code: String): StoreError =
+    AgentError.DatabaseFailure(
+      s"PostgreSQL workflow execution 数据损坏 (code=$code)",
+      "data-corruption",
+      retryable = false
+    )
+
+  final private case class LostWorkflowExecutionLease(lease: WorkflowExecutionLease) extends RuntimeException
+
   def layer[S: JsonCodec: Tag]: URLayer[DataSource, WorkflowCheckpointStore[S]] =
     ZLayer.fromFunction((dataSource: DataSource) =>
       PostgresWorkflowCheckpointStore[S](dataSource): WorkflowCheckpointStore[S]
@@ -368,4 +931,17 @@ object PostgresWorkflowCheckpointStore:
   ): URLayer[DataSource, WorkflowCheckpointStore[S]] =
     ZLayer.fromFunction((dataSource: DataSource) =>
       PostgresWorkflowCheckpointStore[S](dataSource, config): WorkflowCheckpointStore[S]
+    )
+
+  /** 节点执行台账、pending outcome 与 checkpoint 的统一耐久层。 */
+  def executionLayer[S: JsonCodec: Tag]: URLayer[DataSource, WorkflowExecutionStore[S]] =
+    ZLayer.fromFunction((dataSource: DataSource) =>
+      PostgresWorkflowCheckpointStore[S](dataSource): WorkflowExecutionStore[S]
+    )
+
+  def configuredExecution[S: JsonCodec: Tag](
+      config: PostgresWorkflowCheckpointStoreConfig
+  ): URLayer[DataSource, WorkflowExecutionStore[S]] =
+    ZLayer.fromFunction((dataSource: DataSource) =>
+      PostgresWorkflowCheckpointStore[S](dataSource, config): WorkflowExecutionStore[S]
     )

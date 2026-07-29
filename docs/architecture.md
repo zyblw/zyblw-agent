@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-29
+> 最后核验：2026-07-30
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -35,6 +35,7 @@ Schema 不再等于外部 wire Schema。首次公开版本不再为这个很小�
 ```mermaid
 flowchart LR
   Business[业务应用] --> Host[zio-http / host 可选部署宿主]
+  Business --> Workflow[Workflow Engine]
   Host --> App[core / app 易用装配层]
   Host --> HTTP[HTTP Adapter + Health]
   HTTP --> Contract[HTTP v1 Contract + OpenAPI]
@@ -63,6 +64,8 @@ flowchart LR
   Queue --> PostgreSQL
   Effects --> PostgreSQL
   Effects --> Transport[Kafka/NATS/SQS/Webhook Adapter]
+  Workflow --> WorkflowStore[Execution Store + Checkpoint]
+  WorkflowStore --> PostgreSQL
 ```
 
 Inspector 从授权后的权威 State 与耐久 Event 生成只读 Timeline 和一致性诊断。它不承担恢复和重放，因此不会成为与
