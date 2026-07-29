@@ -2,7 +2,6 @@ package com.zyblw.agent.observability.otlp
 
 import com.zyblw.agent.core.*
 import com.zyblw.agent.evals.*
-import java.net.ServerSocket
 import java.time.Instant
 import java.util.UUID
 import zio.*
@@ -18,14 +17,6 @@ import zio.test.*
   * Recording client 证明不会上传 input、答案和 grade details。
   */
 object LangfuseScoreClientSpec extends ZIOSpecDefault:
-
-  /** 向操作系统申请测试端口，避免并行构建使用固定端口。 */
-  private def freePort: Task[Int] = ZIO.attemptBlocking {
-    val socket = ServerSocket(0)
-    try socket.getLocalPort
-    finally socket.close()
-  }
-
   /** 测试服务器按 Score name 注入 429、401、大响应和无限 Body，其余请求返回成功。 */
   private def routes(
       requests: Ref[Chunk[(String, String)]],
@@ -86,18 +77,16 @@ object LangfuseScoreClientSpec extends ZIOSpecDefault:
   def spec = suite("Langfuse Score client")(
     test("POST 完整 Numeric Score 并使用 Basic Auth，配置和回执不泄漏 secret") {
       for
-        port         <- freePort
         requests     <- Ref.make(Chunk.empty[(String, String)])
         attempts     <- Ref.make(0)
         cancelClosed <- Promise.make[Nothing, Unit]
         result       <- (for
-          _      <- Server.serve(routes(requests, attempts, cancelClosed)).forkScoped
-          _      <- ZIO.sleep(50.millis)
+          port   <- Server.install(routes(requests, attempts, cancelClosed))
           client <- ZIO.service[Client]
           scoreClient = ZioHttpLangfuseScoreClient(client, config(port))
           receipt  <- scoreClient.publish(numericScore("correctness"))
           recorded <- requests.get
-        yield receipt -> recorded).provideSome[Scope](Client.default, Server.defaultWithPort(port))
+        yield receipt -> recorded).provide(Client.default, Server.defaultWith(_.onAnyOpenPort))
         (authorization, body) = result._2.head
         parsed                = body.fromJson[Json].toOption
       yield assertTrue(
@@ -114,18 +103,16 @@ object LangfuseScoreClientSpec extends ZIOSpecDefault:
             "traceId"   -> Json.Str("123e4567-e89b-12d3-a456-426614174000")
           )
         ),
-        !config(port).toString.contains("sk-test-secret")
+        !config(0).toString.contains("sk-test-secret")
       )
     },
     test("429 使用完全相同的 id/name/timestamp/body 安全重试，401 不重试且错误不含响应正文") {
       for
-        port         <- freePort
         requests     <- Ref.make(Chunk.empty[(String, String)])
         attempts     <- Ref.make(0)
         cancelClosed <- Promise.make[Nothing, Unit]
         result       <- (for
-          _      <- Server.serve(routes(requests, attempts, cancelClosed)).forkScoped
-          _      <- ZIO.sleep(50.millis)
+          port   <- Server.install(routes(requests, attempts, cancelClosed))
           client <- ZIO.service[Client]
           scoreClient = ZioHttpLangfuseScoreClient(client, config(port))
           retryReceipt  <- scoreClient.publish(numericScore("retry_score", "retry-id"))
@@ -135,7 +122,7 @@ object LangfuseScoreClientSpec extends ZIOSpecDefault:
           unauthorized  <- scoreClient.publish(numericScore("unauthorized_score", "unauthorized-id")).exit
           unauthorizedRequests <- requests.get
         yield (retryReceipt, retryRequests, unauthorized, unauthorizedRequests))
-          .provideSome[Scope](Client.default, Server.defaultWithPort(port))
+          .provide(Client.default, Server.defaultWith(_.onAnyOpenPort))
         unauthorizedMessage = result._3.causeOption.flatMap(_.failureOption).map(_.message).getOrElse("")
       yield assertTrue(
         result._1.id == "retry-id",
@@ -149,13 +136,11 @@ object LangfuseScoreClientSpec extends ZIOSpecDefault:
     },
     test("响应大小有硬上限，调用 Fiber 取消会关闭无限 HTTP Body") {
       for
-        port         <- freePort
         requests     <- Ref.make(Chunk.empty[(String, String)])
         attempts     <- Ref.make(0)
         cancelClosed <- Promise.make[Nothing, Unit]
         result       <- (for
-          _      <- Server.serve(routes(requests, attempts, cancelClosed)).forkScoped
-          _      <- ZIO.sleep(50.millis)
+          port   <- Server.install(routes(requests, attempts, cancelClosed))
           client <- ZIO.service[Client]
           scoreClient = ZioHttpLangfuseScoreClient(
             client,
@@ -166,7 +151,10 @@ object LangfuseScoreClientSpec extends ZIOSpecDefault:
           _         <- ZIO.sleep(50.millis)
           cancelled <- fiber.interrupt
           closed    <- cancelClosed.await.timeout(2.seconds)
-        yield (oversized, cancelled, closed)).provideSome[Scope](Client.default, Server.defaultWithPort(port))
+        yield (oversized, cancelled, closed)).provide(
+          Client.default,
+          Server.defaultWith(_.onAnyOpenPort)
+        )
       yield assertTrue(result._1.isFailure, result._2.isInterrupted, result._3.isDefined)
     },
     test("默认拒绝自由文本、comment、NaN 和白名单外名称，校验失败前不发送 HTTP") {

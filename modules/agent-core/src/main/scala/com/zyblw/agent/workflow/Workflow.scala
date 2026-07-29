@@ -17,21 +17,28 @@ object WorkflowId:
       "WorkflowId 必须是 1..160 位字母、数字、点、下划线或连字符，且以字母或数字开头"
     )
 
+  /** 为源码中已知常量提供便捷构造；配置、数据库和协议输入应优先调用 `fromString` 处理错误。 */
   def apply(value: String): WorkflowId =
     fromString(value).fold(message => throw new IllegalArgumentException(message), identity)
 
+  /** 取得可安全用于持久化 identity、日志标签与定义比较的规范字符串。 */
   extension (id: WorkflowId) def value: String = id
 
+/** 正整数 Workflow 定义版本；一次耐久 Run 恢复时必须与创建时版本一致。 */
 opaque type WorkflowVersion = Int
 object WorkflowVersion:
+  /** 从不可信配置或持久化边界校验正整数版本。 */
   def fromInt(value: Int): Either[String, WorkflowVersion] =
     Either.cond(value > 0, value, "WorkflowVersion 必须大于零")
 
+  /** 为源码中的已知正整数版本提供便捷构造。 */
   def apply(value: Int): WorkflowVersion =
     fromInt(value).fold(message => throw new IllegalArgumentException(message), identity)
 
+  /** 取得用于 schema、数据库和诊断的整数版本。 */
   extension (version: WorkflowVersion) def value: Int = version
 
+/** Workflow 定义内部稳定节点身份；同时参与 checkpoint 游标、execution key 与 timeline 分页。 */
 opaque type NodeId = String
 object NodeId:
   private val Valid = "[A-Za-z0-9][A-Za-z0-9._-]{0,159}".r
@@ -52,6 +59,17 @@ object NodeId:
   /** 取出节点字符串用于 Map 查找、事件和诊断。 */
   extension (id: NodeId) def value: String = id
 
+/** 节点执行期间只读的可信上下文。
+  *
+  * `runId/sessionId` 由宿主控制面创建，不能由模型或 Workflow 状态自报；`attributes` 只适合低敏、有限的执行元数据， 不应承载凭据、正文或大型 payload。
+  *
+  * @param runId
+  *   当前 Workflow Run 的稳定身份
+  * @param sessionId
+  *   与 checkpoint 绑定的业务会话身份
+  * @param attributes
+  *   宿主提供的附加只读属性
+  */
 final case class WorkflowContext(
     runId: RunId,
     sessionId: SessionId,
@@ -63,7 +81,10 @@ final case class WorkflowContext(
   * 这种分离让 Runtime 能在执行前检查所有可能路径，并阻止节点把未声明的动态跳转藏在业务代码中。
   */
 enum NodeOutcome[S]:
+  /** 节点已完成本次访问，Runtime 可以根据声明式 transition 推进。 */
   case Succeeded(state: S)
+
+  /** 节点主动暂停并保存新状态；`reason` 用于低敏控制诊断，不应包含业务正文或凭据。 */
   case Suspended(state: S, reason: String)
 
 /** 确定性工作流节点；模型驱动的 Agent 只能作为一种节点实现。 */
@@ -89,16 +110,23 @@ enum FanInPolicy:
   * `Route` 的选择函数必须是纯、快速且无外部副作用的状态判定。需要模型判断时，应先建立一个普通 Agent 节点，把分类结果写入状态，再由纯 Route 选择已经声明的目标。
   */
 enum WorkflowTransition[S]:
+  /** 成功后进入唯一确定目标。 */
   case Next(node: NodeId)
+
+  /** 从预先声明的目标集合中用纯函数选择一个目标。 */
   case Route(
       targets: NonEmptyChunk[NodeId],
       select: S => Either[WorkflowError, NodeId]
   )
+
+  /** 并行执行独立分支，按显式 policy 归并后进入 join。 */
   case FanOut(
       branches: NonEmptyChunk[NodeId],
       join: NodeId,
       policy: FanInPolicy
   )
+
+  /** 当前节点成功后完成整个 Workflow。 */
   case Complete[S]() extends WorkflowTransition[S]
 
   /** 返回静态可见的全部可能目标，供定义校验、图投影和未来版本比较使用。 */
@@ -144,7 +172,23 @@ enum WorkflowValidationIssue:
     case WorkflowValidationIssue.CycleVisitLimitMissing(node) =>
       s"循环节点缺少访问上限: ${node.value}"
 
-/** 已通过静态校验的不可变工作流定义。 */
+/** 已通过静态校验的不可变工作流定义。
+  *
+  * 构造器私有，调用方只能通过 `WorkflowDefinition.make` 得到实例，避免把缺失边、不可达节点或无界循环带入运行期。
+  *
+  * @param id
+  *   跨部署稳定的 Workflow 名称
+  * @param version
+  *   与 checkpoint 恢复严格绑定的正整数定义版本
+  * @param entry
+  *   新 Run 的入口节点
+  * @param nodes
+  *   节点 ID 到执行实现的不可变映射
+  * @param transitions
+  *   每个节点完成后的声明式控制边
+  * @param visitLimits
+  *   循环节点的单 Run 最大访问次数
+  */
 final case class WorkflowDefinition[R, S] private (
     id: WorkflowId,
     version: WorkflowVersion,
@@ -271,11 +315,28 @@ object WorkflowDefinition:
       next == start || (!visited.contains(next) && returnsTo(start, next, adjacency, visited + next))
     }
 
+/** checkpoint 中保存的下一恢复位置；`Completed` 是不可重新打开的终态。 */
 enum WorkflowCursor:
   case At(node: NodeId)
   case Completed
 
-/** 每个节点边界的完整恢复快照；访问次数必须与状态一起保存，否则恢复会重置循环预算。 */
+/** 每个节点边界的完整恢复快照；访问次数必须与状态一起保存，否则恢复会重置循环预算。
+  *
+  * @param workflowId
+  *   创建 Run 时冻结的 Workflow identity
+  * @param definitionVersion
+  *   创建 Run 时冻结的定义版本
+  * @param sessionId
+  *   防止已知 runId 被另一 Session 误恢复的身份边界
+  * @param cursor
+  *   下一节点或已完成终态
+  * @param state
+  *   应用定义的不可变业务状态；外部协议不应默认暴露
+  * @param step
+  *   已访问节点总数，也是全局执行预算
+  * @param visits
+  *   各节点累计访问次数，用于有界循环恢复
+  */
 final case class WorkflowCheckpoint[S](
     workflowId: WorkflowId,
     definitionVersion: WorkflowVersion,
@@ -334,6 +395,7 @@ object WorkflowCheckpointStore:
       left.definitionVersion == right.definitionVersion &&
       left.sessionId == right.sessionId
 
+/** fan-out 分支状态的应用级确定性归并器。 */
 trait StateReducer[S]:
   /** 合并 fan-out 分支结果。
     * @param base
@@ -343,6 +405,10 @@ trait StateReducer[S]:
     */
   def merge(base: S, branches: Chunk[S]): IO[WorkflowError, S]
 
+/** 单次 Engine 拉取过程中产生的结构化事件。
+  *
+  * 事件可能包含应用状态，不能未经低敏投影直接进入 HTTP、Trace 或日志；跨进程耐久诊断优先读取 checkpoint、ledger 和 `WorkflowExecutionStore.timeline`。
+  */
 enum WorkflowEvent[S]:
   case NodeStarted(node: NodeId, step: Int, visit: Int)
   case NodeCompleted(node: NodeId, step: Int, state: S)
@@ -366,10 +432,25 @@ final class WorkflowEngine[R, S] private (
 ):
   require(maxSteps > 0 && maxParallelism > 0)
 
+  /** 从定义入口启动一个新 Workflow。
+    *
+    * @param initial
+    *   业务提供的初始不可变状态
+    * @param context
+    *   可信 Run/Session 上下文
+    * @return
+    *   惰性事件流；只有下游拉取时才执行节点，失败和取消遵循 ZIO Stream 语义
+    */
   def run(initial: S, context: WorkflowContext): ZStream[R, WorkflowError, WorkflowEvent[S]] =
     execute(definition.entry, initial, 0, Map.empty, context)
 
-  /** 从最近 checkpoint 恢复。暂停节点会从节点入口重新执行，因此节点在返回 `Suspend` 前的副作用必须幂等； 这与耐久工作流常见的 replay 语义一致。
+  /** 从最近 checkpoint 恢复。
+    *
+    * 暂停节点会从节点入口重新执行；durable 模式会复用相同 execution 的 Prepared outcome，但新 step/visit 仍代表一次新 节点访问。节点内部外部写必须使用业务幂等键或
+    * outbox/inbox。
+    *
+    * @param context
+    *   必须与 checkpoint 的 Run/Session identity 匹配
     */
   def resume(context: WorkflowContext): ZStream[R, WorkflowError, WorkflowEvent[S]] =
     ZStream.unwrap(

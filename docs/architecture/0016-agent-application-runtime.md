@@ -64,7 +64,7 @@ Telemetry 与 Eval，但如果没有统一的架构语义，新增能力仍可�
 |---|---|---|
 | Application SDK | `app`、Builder、Quickstart、HTTP host | PostgreSQL 最小应用与更少样板的生产 preset |
 | Intelligence | Provider、Instruction、Context、Tool、Memory、RAG | capability/native extension、真实长会话与 RAG lineage |
-| Execution | Agent Runtime、command worker、Workflow execution ledger | timer/signal、timeline、kill/recover 与多节点 soak |
+| Execution | Agent Runtime、command worker、Workflow execution ledger、低敏 timeline | timer/signal、kill/recover 与多节点 soak |
 | Control | Permission、Guardrail、Approval、Limit、Cost | policy 管理 UX、任务级总预算与保留策略 |
 | State | Run/Event/Command、checkpoint、Memory、Artifact | Goal/Plan/Todo SPI、Artifact durable Adapter、schema upcaster |
 | Quality / Ops | Inspector、OTLP、Eval、趋势门禁 | outcome/trajectory 分离、`pass@k`/`pass^k` 趋势、图级 eval |
@@ -90,7 +90,8 @@ MCP 是 Agent 与工具/资源/Prompt 的上下文交换边界，不负责 Agent
 
 ### 下一阶段
 
-1. Workflow G3-A：durable timer/signal、execution timeline、数据库重启/进程 kill 与多 Worker soak；
+1. Workflow G3-A2：durable timer/signal 的原子等待/接收/唤醒、数据库重启/进程 kill 与多 Worker soak；execution
+   timeline 的内存/PostgreSQL 复合游标投影已完成；
 2. RAG R2-B：block/page/bbox lineage、parent-child retrieval、相邻块扩展和 ACL 前置；
 3. Harness H1：小型 Goal/Plan/Todo/Skill ADT 与 Store SPI，复用 Artifact/Workspace/Approval；
 4. Quality Q1：结果与轨迹评分分离，多试验趋势和 failure corpus；
@@ -131,4 +132,6 @@ MCP 是 Agent 与工具/资源/Prompt 的上下文交换边界，不负责 Agent
 - [Anthropic：Demystifying evals for AI agents](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents)
 - [Model Context Protocol architecture](https://modelcontextprotocol.io/docs/learn/architecture)
 - [Agent2Agent Protocol](https://a2a-protocol.org/latest/)
+- [Temporal durable timers](https://docs.temporal.io/develop/java/workflows/timers)
+- [Temporal workflow message passing](https://docs.temporal.io/develop/java/workflows/message-passing)
 - [ZIO effect and parallelism](https://zio.dev/reference/core/zio/)

@@ -3,7 +3,7 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
-## Unreleased (target: 0.2.1)
+## 0.2.1 - 2026-07-30
 
 ### Added
 
@@ -14,11 +14,30 @@ All notable user-visible changes will be recorded here. The project follows
   stale-worker rejection, checksum/domain validation, and transactionally aligned ledger/checkpoint completion.
 - Failure-injection coverage proving a process failure after outcome preparation and before checkpoint commit resumes under a new
   generation without invoking the node twice.
+- Low-sensitivity `WorkflowExecutionStore.timeline` projection with exclusive `(step, nodeId)` cursor pagination in the official
+  in-memory and PostgreSQL Adapters. The projection excludes application state, pending outcomes and lease tokens; third-party Stores
+  retain a concrete typed-failure default for patch-line source compatibility.
+- Run-level Workflow/version/session identity arbitration across different execution steps. The PostgreSQL Adapter serializes
+  concurrent first claims for the same Run with a transaction-scoped advisory lock, preventing a split identity without adding a
+  long-lived process lock.
 
 ### Changed
 
 - `GraphWorkflowExample` now demonstrates the durable in-memory execution API; checkpoint-only `WorkflowEngine.make` remains available
   and unchanged for compatible 0.2.x consumers.
+- Reorganized the root README and documentation map around execution-mode selection, five-minute startup, production adoption,
+  architecture, capability maturity and source-learning paths; added a Chinese public-contract commenting standard.
+- ZIO HTTP contract stubs now let the bound Server allocate an open port and install routes inside the managed Scope, removing the
+  probe-close-bind race from concurrent Anthropic, Gemini and Langfuse tests.
+
+### Upgrade
+
+- Existing `0.2.0` Agent Runtime, Provider, HTTP v1 and checkpoint-only Workflow callers require no source migration.
+- Applications enabling durable Workflow execution must apply the new, append-only V009 migration before constructing
+  `PostgresWorkflowCheckpointStore` as a `WorkflowExecutionStore`.
+- Custom `WorkflowExecutionStore` implementations continue to compile because `timeline` has a concrete typed-failure default; implement
+  it before exposing Workflow inspection in production. Recompile and run application contract tests against all consumed `0.2.1`
+  artifacts.
 
 ## 0.2.0 - 2026-07-29
 

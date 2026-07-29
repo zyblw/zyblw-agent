@@ -373,6 +373,56 @@ object WorkflowSpec extends ZIOSpecDefault:
         loaded.contains(checkpoint)
       )
     }.provide(WorkflowExecutionStore.inMemory[Int]),
+    test("execution timeline 使用复合游标稳定分页且不暴露 outcome 与 lease token") {
+      for
+        runId   <- RunId.random
+        other   <- RunId.random
+        session <- SessionId.random
+        store   <- ZIO.service[WorkflowExecutionStore[Int]]
+        firstKey = WorkflowExecutionKey(
+          runId,
+          testWorkflowId,
+          testWorkflowVersion,
+          session,
+          NodeId("a-node"),
+          step = 0,
+          visit = 1
+        )
+        secondKey = firstKey.copy(nodeId = NodeId("b-node"))
+        otherKey  = firstKey.copy(runId = other, nodeId = NodeId("other-node"))
+        first <- store.claim(firstKey, WorkerId("worker-a"), 30.seconds).flatMap(acquired)
+        _     <- store.claim(secondKey, WorkerId("worker-b"), 30.seconds).flatMap(acquired)
+        _     <- store.claim(otherKey, WorkerId("worker-other"), 30.seconds)
+        drift <- store
+          .claim(
+            secondKey.copy(step = 1, workflowId = WorkflowId("other-workflow")),
+            WorkerId("worker-drift"),
+            30.seconds
+          )
+          .either
+        _            <- store.prepare(first, NodeOutcome.Succeeded(10))
+        page1        <- store.timeline(runId, limit = 1)
+        page2        <- store.timeline(runId, page1.lastOption.map(_.cursor), limit = 10)
+        invalidLimit <- store.timeline(runId, limit = 0).either
+      yield assertTrue(
+        page1.map(_.cursor.nodeId) == Chunk(NodeId("a-node")),
+        page1.headOption.exists(entry =>
+          entry.status == WorkflowExecutionStatus.Prepared &&
+            entry.outcomeAvailable &&
+            entry.generation == 1L
+        ),
+        page2.map(_.cursor.nodeId) == Chunk(NodeId("b-node")),
+        page2.headOption.exists(entry =>
+          entry.status == WorkflowExecutionStatus.Running && !entry.outcomeAvailable
+        ),
+        drift.left.exists {
+          case AgentError.WorkflowCheckpointConflict(_, reason) =>
+            reason.endsWith(":run-execution-identity")
+          case _ => false
+        },
+        invalidLimit.left.exists(_.category == ErrorCategory.Persistence)
+      )
+    }.provide(WorkflowExecutionStore.inMemory[Int]),
     test("checkpoint 提交前失败后复用 Prepared outcome，节点不会重复执行") {
       for
         runId      <- RunId.random
@@ -415,6 +465,8 @@ object WorkflowSpec extends ZIOSpecDefault:
               case false => baseStore.commit(leases, checkpoint)
             }
           def get(key: WorkflowExecutionKey) = baseStore.get(key)
+          override def timeline(runId: RunId, after: Option[WorkflowTimelineCursor], limit: Int) =
+            baseStore.timeline(runId, after, limit)
         policy = WorkflowExecutionPolicy(
           WorkerId("worker-a"),
           leaseDuration = 30.seconds,

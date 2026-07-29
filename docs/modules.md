@@ -118,4 +118,5 @@ RAG 业务还需加入 `zyblw-agent-rag`；PDF/EPUB 再加入 `zyblw-agent-docum
 - 同一 minor 的 patch 应保持源码和二进制兼容；
 - wire schema、数据库 migration 与 Scala API 分别维护兼容性；
 - 所有破坏性变化写入 `CHANGELOG.md` 和迁移指南；
-- 发布前必须通过 MiMa/下游二进制消费测试（在首次公开版本前补齐）。
+- patch 发布前必须执行独立 Maven consumer 与下游回归；当前 sbt 2 生态尚未接入可靠 MiMa 基线，因此不能把这些
+  实际消费测试误称为完整二进制兼容证明。

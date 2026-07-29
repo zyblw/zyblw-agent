@@ -41,7 +41,7 @@
 | Eval/趋势门禁 | evals；仓库内 eval-cli | Experimental | snapshot、trend、release gate、有界多试验与 `pass@k`/`pass^k` | outcome/trajectory 分离、固定真实数据集与人工校准 |
 | MCP client | mcp / `mcp` | Beta/Experimental | 协议与测试基础 | OAuth/server/Roots、供应链与隔离 |
 | 可靠写工具 | core / `sideeffects` | Experimental | outbox/inbox/补偿抽象 | 真实 transport 与业务案例 |
-| Workflow Graph | core + postgres / `workflow` | Experimental | 显式 nodes/edges、identity/version、启动校验、单调 checkpoint、`AllSucceeded` 取消、execution ledger/pending outcome、lease/fencing、13 个 core 测试与 5 个 PostgreSQL 16 契约 | timer/signal、子图、多 Worker soak、Inspector 与图级 eval |
+| Workflow Graph | core + postgres / `workflow` | Experimental | 显式 nodes/edges、identity/version、启动校验、单调 checkpoint、`AllSucceeded` 取消、execution ledger/pending outcome、lease/fencing、复合游标低敏 timeline、14 个 core 测试与 6 个 PostgreSQL 16 契约 | timer/signal、子图、多 Worker soak、完整 Inspector 与图级 eval |
 | Workspace/Sandbox | mcp / `workspace` | Experimental | 能力边界 | 真实 OCI 隔离与攻击测试 |
 | Multimodal | core / `multimodal` | Experimental | 抽象 | 产品场景、Provider 与 eval |
 
@@ -136,9 +136,12 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
 5. **已完成 G2-B**：`WorkflowExecutionStore` 把节点 execution ledger、Prepared outcome、lease heartbeat/fencing 与
    checkpoint 组成一个原子提交边界；V009 PostgreSQL Adapter 支持过期 Prepared 跨 owner/generation 恢复，故障注入证明
    prepare 后、checkpoint 前失败不会重复执行节点；
-6. **下一步 G3-A**：耐久 timer、外部 signal 与可查询 execution timeline，并补数据库重启、进程 kill 和多 Worker soak；
-7. **随后 G3-B**：基于真实需求加入人工任务、子图或更多 fan-in policy；
-8. Graph Inspector、实际路径 trace、质量/延迟/token/费用 eval 达标后，才讨论通用 Agent 节点和多 Agent 调度。
+6. **已完成 G3-A1**：内存与 PostgreSQL `WorkflowExecutionStore.timeline` 使用 `(step,nodeId)` 排他复合游标稳定分页；
+   低敏投影不暴露状态、pending outcome 或 lease token，并保留 generation/owner/时间戳用于抢占诊断；
+7. **下一步 G3-A2**：耐久 timer 与外部 signal 的原子注册、去重接收、唤醒命令和超时竞态；补数据库重启、进程 kill
+   与多 Worker soak；
+8. **随后 G3-B**：基于真实需求加入人工任务、子图或更多 fan-in policy；
+9. Graph Inspector、实际路径 trace、质量/延迟/token/费用 eval 达标后，才讨论通用 Agent 节点和多 Agent 调度。
 
 不把普通单 Agent loop 或几个顺序函数强制图化。完整当前契约见[声明式 Workflow Graph](workflow.md)。
 

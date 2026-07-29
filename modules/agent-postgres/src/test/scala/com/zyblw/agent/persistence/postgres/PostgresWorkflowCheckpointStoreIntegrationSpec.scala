@@ -14,7 +14,8 @@ import zio.test.*
 
 /** 真实 PostgreSQL 16 下的 Workflow checkpoint 契约。
   *
-  * 覆盖 V008 migration、跨 Store 幂等/单调仲裁、identity 隔离、checksum fail-closed，以及暂停后由另一 Adapter 实例恢复。
+  * 覆盖 V008/V009 migration、跨 Store 幂等/单调仲裁、identity 隔离、checksum fail-closed、execution timeline，以及 暂停后由另一
+  * Adapter 实例恢复。
   */
 object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
   final private case class WorkflowState(value: Int, notes: Chunk[String]) derives JsonCodec
@@ -256,6 +257,81 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
         ),
         loaded.contains(checkpointValue),
         count == 1
+      )).provideLayer(harnessLayer)
+    },
+    test("V009 execution timeline 跨 Store 使用复合游标分页并隔离其他 Run") {
+      (for
+        harness      <- ZIO.service[Harness]
+        runId        <- RunId.random
+        other        <- RunId.random
+        concurrent   <- RunId.random
+        session      <- SessionId.random
+        driftSession <- SessionId.random
+        firstKey = WorkflowExecutionKey(
+          runId,
+          workflowId,
+          workflowVersion,
+          session,
+          NodeId("a-node"),
+          step = 0,
+          visit = 1
+        )
+        secondKey = firstKey.copy(nodeId = NodeId("b-node"))
+        otherKey  = firstKey.copy(runId = other, nodeId = NodeId("other-node"))
+        first <- harness.storeA.claim(firstKey, WorkerId("worker-a"), 30.seconds).flatMap(acquired)
+        _     <- harness.storeA.prepare(first, NodeOutcome.Succeeded(WorkflowState(1, Chunk("private"))))
+        _     <- harness.storeA.claim(secondKey, WorkerId("worker-b"), 30.seconds)
+        _     <- harness.storeA.claim(otherKey, WorkerId("worker-other"), 30.seconds)
+        drift <- harness.storeB
+          .claim(
+            secondKey.copy(step = 1, sessionId = driftSession),
+            WorkerId("worker-drift"),
+            30.seconds
+          )
+          .either
+        identityRace <- ZIO.collectAllPar(
+          Chunk(
+            harness.storeA
+              .claim(
+                firstKey.copy(runId = concurrent, step = 0, nodeId = NodeId("left")),
+                WorkerId("worker-left"),
+                30.seconds
+              )
+              .either,
+            harness.storeB
+              .claim(
+                firstKey.copy(
+                  runId = concurrent,
+                  workflowId = WorkflowId("other-workflow"),
+                  step = 1,
+                  nodeId = NodeId("right")
+                ),
+                WorkerId("worker-right"),
+                30.seconds
+              )
+              .either
+          )
+        )
+        page1   <- harness.storeB.timeline(runId, limit = 1)
+        page2   <- harness.storeB.timeline(runId, page1.lastOption.map(_.cursor), limit = 10)
+        invalid <- harness.storeB.timeline(runId, limit = 501).either
+      yield assertTrue(
+        page1.map(_.cursor.nodeId) == Chunk(NodeId("a-node")),
+        page1.headOption.exists(entry =>
+          entry.status == WorkflowExecutionStatus.Prepared && entry.outcomeAvailable
+        ),
+        page2.map(_.cursor.nodeId) == Chunk(NodeId("b-node")),
+        page2.headOption.exists(entry =>
+          entry.status == WorkflowExecutionStatus.Running && !entry.outcomeAvailable
+        ),
+        drift.left.exists {
+          case AgentError.WorkflowCheckpointConflict(_, reason) =>
+            reason.endsWith(":run-execution-identity")
+          case _ => false
+        },
+        identityRace.count(_.isRight) == 1,
+        identityRace.count(_.isLeft) == 1,
+        invalid.left.exists(_.category == ErrorCategory.Persistence)
       )).provideLayer(harnessLayer)
     }
   ) @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@ TestAspect.timeout(

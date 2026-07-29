@@ -4,28 +4,46 @@
 > 最后核验：2026-07-30
 > 事实来源：`build.sbt`、发布工作流、模块源码、测试与数据库迁移
 
-## 推荐学习路径
+## 按目标选择阅读路径
 
-1. [快速开始](getting-started.md)：先从依赖、最小 Agent 和宿主装配跑通一条路径。
-2. [模块选择](modules.md)：只选择业务真正需要的模块，并理解 Stable/Beta/Experimental 边界。
-3. [能力审计与框架对照](framework-assessment.md)：先客观理解强项、缺口、取舍和演进证据。
-4. [学习指南](learning-guide.md)：建立 ZIO Agent 的完整心智模型。
-5. [源码阅读路线](source-tour.md)：按文件、方法、测试和完成标准深入主链路。
-6. [核心概念](core-concepts.md)：认识 ID、Definition、Run、State、Event、Command。
-7. [架构总览](architecture.md)：理解模块依赖和端到端时序。
-8. [Agent Application Runtime ADR](architecture/0016-agent-application-runtime.md)：理解 Agent、Harness、Workflow 与八个能力平面。
-9. [运行时](runtime.md)：阅读单 Agent loop、预算、工具计划、审批、恢复。
-10. [声明式 Workflow Graph](workflow.md)：理解显式边、启动校验、循环预算、并行汇合、execution ledger 与 checkpoint。
-11. [指令、Context 与成本](instruction-context-cost.md)：理解可信指令、动态资料、缓存和推理 token。
-12. [工具](tools.md) 与 [可靠写工具](side-effects.md)：理解能力、权限、副作用和幂等。
-13. [Context/Memory/RAG](context-memory-rag.md)：区分短期上下文、长期记忆和外部知识。
-14. [持久化](persistence.md) 与 [数据库 Schema](database-schema.md)：理解耐久性。
-15. [Run Inspector](run-inspection.md)、[测试](testing.md)、[可观测性](observability.md)、[评测趋势门禁](eval-trend-and-release-gate.md)。
-16. [成熟度与路线](maturity-and-roadmap.md)：客观看待哪些能力可依赖。
+### 我要先跑起来
+
+1. [快速开始](getting-started.md)
+2. [模块选择](modules.md)
+3. [AgentApplication 与 Builder](application-builder.md)
+4. [Provider 与能力协商](providers.md)
+
+### 我要理解内核
+
+1. [核心概念](core-concepts.md)
+2. [架构总览](architecture.md)
+3. [Agent Application Runtime ADR](architecture/0016-agent-application-runtime.md)
+4. [运行时](runtime.md)
+5. [工具](tools.md) 与 [可靠写工具](side-effects.md)
+6. [持久化](persistence.md) 与 [数据库 Schema](database-schema.md)
+7. [声明式 Workflow](workflow.md)
+
+### 我要深入读源码和参与开发
+
+1. [学习指南](learning-guide.md)
+2. [源码阅读路线](source-tour.md)
+3. [代码注释与源码阅读约定](code-commenting-guide.md)
+4. [测试](testing.md)
+5. [能力审计与框架对照](framework-assessment.md)
+6. [成熟度与路线](maturity-and-roadmap.md)
+
+### 我要接入知识库
+
+1. [Context、Memory 与 RAG](context-memory-rag.md)
+2. [文档 Loader、PDF→Markdown 与结构切分](document-loaders.md)
+3. [Embedding 治理](embedding-governance.md)
+4. [Reranker](reranker.md)
+5. [RAG 评测](rag-evaluation.md)
 
 ## 开源维护与发布
 
 - [贡献指南](../CONTRIBUTING.md)
+- [代码注释与源码阅读约定](code-commenting-guide.md)
 - [VS Code 与 Metals](vscode-metals.md)
 - [模块与依赖选择](modules.md)
 - [版本、Maven Central 发布与回滚](releasing.md)

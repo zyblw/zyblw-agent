@@ -65,6 +65,12 @@ Committed 必须清除有效期并记录完成时间；Prepared/Committed 必须
 覆盖已过期 Running/Prepared，并递增 generation、换发随机 token；`PostgresWorkflowCheckpointStore.commit` 锁定 ledger
 行后，在同一事务推进 V008 checkpoint 与全部 execution 终态。该表同样不引用 `agent_runs`。
 
+低敏 execution timeline 复用 V009 主键按 `(step,node_id)` 做排他游标扫描，不增加投影表或新 migration。Adapter 读取完整
+行并执行与单条 ledger 相同的 checksum/领域校验，随后只返回 node/step/visit、status、generation、owner 与时间戳；
+状态、pending outcome 和 lease token 不进入投影。调用方仍须在 Store 外验证 `runId` 的 tenant/user 权限。
+claim 事务还会按 `runId` 获取 transaction-scoped advisory lock，并同时检查 checkpoint 与其他 step 的冻结 identity；
+因此两个不同 Workflow/version/session 并发争用同一新 Run 时只能有一个身份胜出，锁随事务结束自动释放。
+
 `agent_memories` 不属于 Run checkpoint：Run 删除不会级联删除用户长期记忆。User scope 同时保存 tenant/user，并以
 无歧义 canonical scope key 建主键；相同 userId 在不同 tenant 中是不同命名空间。删除会清空 `value_json` 与
 `search_text`、写 `deleted_at` 并递增 version，防止迟到提炼任务以旧 CAS 版本复活内容。FTS 使用 `simple`，同时保留

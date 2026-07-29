@@ -26,14 +26,14 @@ MCP 或 OpenTelemetry 时按 [模块说明](modules.md) 追加对应 artifact。
 
 ```bash
 cd /path/to/zyblw-agent
-sbt -batch 'set ThisBuild / version := "0.2.0-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.2.1-local"; publishM2'
 
 cd /path/to/business-server
-ZYBLW_AGENT_VERSION=0.2.0-local sbt -batch test
+ZYBLW_AGENT_VERSION=0.2.1-local sbt -batch test
 ```
 
 业务 build 只有在显式本地开关下才添加 `Resolver.mavenLocal`。生产和普通 CI 不启用该 resolver，避免开发机
-`~/.m2` 中的同名内容覆盖可信 Central 制品。`0.2.0-local` 不得上传 Maven Central。
+`~/.m2` 中的同名内容覆盖可信 Central 制品。`0.2.1-local` 不得上传 Maven Central。
 
 ## 可选 sibling checkout
 

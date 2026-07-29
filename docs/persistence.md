@@ -72,7 +72,10 @@ RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.po
 `PostgresAgentPersistence.workflowExecutions[S]` 装配生产 Workflow。V009 为每次节点访问保存 Running/Prepared/Committed
 台账；claim、heartbeat、prepare 与 commit 比较 owner/token/generation/未过期时间。`commit` 在一个短事务中锁定全部
 Prepared execution、推进 V008 checkpoint，并把台账改为 Committed；任何一步失败都整体回滚。过期 Prepared 被新 owner
-领取时保留 outcome，恢复不重新调用节点。
+领取时保留 outcome，恢复不重新调用节点。`timeline` 复用 V009 主键按 `(step,nodeId)` 稳定分页并返回低敏投影；官方
+内存/PostgreSQL Adapter 已实现，第三方 `WorkflowExecutionStore` 若尚未实现会明确返回 typed persistence failure，而不是
+返回不完整数据。claim 还会在同一原子边界验证该 Run 已有 checkpoint/其他 step 的 Workflow/version/session identity；
+PostgreSQL 用 transaction-scoped advisory lock 关闭并发首次 claim 的检查-插入窗口。
 
 删除使用 `DELETE FROM agent_runs`，所有子表依赖 migration 中的 `ON DELETE CASCADE` 由 PostgreSQL 原子清理。
 

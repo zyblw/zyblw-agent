@@ -78,6 +78,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
     validateDuration(leaseDuration) *> LeaseToken.random.flatMap { token =>
       withTransaction { connection =>
         for
+          _         <- validateExecutionRunIdentity(connection, key)
           inserted  <- insertExecution(connection, key, owner, token, leaseDuration)
           reclaimed <-
             if inserted then ZIO.succeed(false)
@@ -249,6 +250,16 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         case value => ZIO.succeed(value)
       }
 
+  override def timeline(
+      runId: RunId,
+      after: Option[WorkflowTimelineCursor],
+      limit: Int
+  ): IO[StoreError, Chunk[WorkflowExecutionTimelineEntry]] =
+    validateTimelineLimit(limit) *>
+      withConnection(connection => selectExecutionTimeline(connection, runId, after, limit))
+        .flatMap(rows => ZIO.foreach(rows)(decodeExecution))
+        .map(_.map(record => WorkflowExecutionTimelineEntry.fromRecord(record)))
+
   private def insertExecution(
       connection: Connection,
       key: WorkflowExecutionKey,
@@ -274,6 +285,53 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         statement.setLong(10, leaseDuration.toMillis)
         statement.executeUpdate() == 1
       finally statement.close()
+    }
+
+  /** 在 claim 事务中串行化同一 Run 的首次 identity，并拒绝跨 step 的 Workflow/version/session 漂移。
+    *
+    * V009 没有额外 Run header 表，因此使用 PostgreSQL transaction advisory lock 关闭两个不同节点并发首次插入时的 check-then-insert
+    * 竞争。哈希碰撞只会让无关 Run 暂时串行，不会产生错误授权。
+    */
+  private def validateExecutionRunIdentity(
+      connection: Connection,
+      key: WorkflowExecutionKey
+  ): IO[StoreError, Unit] =
+    jdbc("execution-run-identity") {
+      val lock = connection.prepareStatement(
+        "SELECT pg_advisory_xact_lock(hashtextextended(?::text, 0))"
+      )
+      try
+        lock.setString(1, key.runId.asString)
+        lock.execute()
+      finally lock.close()
+
+      val statement = connection.prepareStatement(
+        """SELECT workflow_id, definition_version, session_id::text
+          |FROM agent_workflow_checkpoints
+          |WHERE run_id = ?::uuid
+          |UNION
+          |SELECT workflow_id, definition_version, session_id::text
+          |FROM agent_workflow_node_executions
+          |WHERE run_id = ?::uuid AND NOT (step = ? AND node_id = ?)""".stripMargin
+      )
+      try
+        statement.setString(1, key.runId.asString)
+        statement.setString(2, key.runId.asString)
+        statement.setInt(3, key.step)
+        statement.setString(4, key.nodeId.value)
+        val result   = statement.executeQuery()
+        var conflict = false
+        while result.next() do
+          conflict ||= result.getString(1) != key.workflowId.value ||
+            result.getInt(2) != key.definitionVersion.value ||
+            result.getString(3) != key.sessionId.asString
+        conflict
+      finally statement.close()
+    }.flatMap { conflict =>
+      ZIO
+        .fail(executionConflict(key, "run-execution-identity"))
+        .when(conflict)
+        .unit
     }
 
   private def reclaimExecution(
@@ -375,6 +433,49 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         statement.setString(3, key.nodeId.value)
         val result = statement.executeQuery()
         if result.next() then Some(readExecutionRow(key.runId, result)) else None
+      finally statement.close()
+    }
+
+  /** 使用 `(step, node_id)` 排他游标读取稳定页面。
+    *
+    * 查询只选择现有 V009 列，不需要新增迁移；`run_id, step, node_id` 主键同时承担过滤和有序扫描索引。外层继续复用 `decodeExecution`，因此 timeline
+    * 与单条读取具有相同的 checksum、枚举和领域约束校验。
+    */
+  private def selectExecutionTimeline(
+      connection: Connection,
+      runId: RunId,
+      after: Option[WorkflowTimelineCursor],
+      limit: Int
+  ): IO[StoreError, Chunk[StoredExecutionRow]] =
+    jdbc("execution-timeline") {
+      val cursorClause =
+        if after.isDefined then """ AND (step > ? OR
+            |      (step = ? AND node_id COLLATE "C" > (?::text COLLATE "C")))""".stripMargin
+        else ""
+      val statement = connection.prepareStatement(
+        s"""SELECT workflow_id, definition_version, session_id::text, node_id, step, visit, status,
+           | generation, lease_owner, lease_token::text, claimed_at, lease_expires_at,
+           | updated_at, completed_at, outcome_sha256, outcome_payload,
+           | COALESCE(lease_expires_at > CURRENT_TIMESTAMP, FALSE) AS lease_active
+           |FROM agent_workflow_node_executions
+           |WHERE run_id = ?::uuid$cursorClause
+           |ORDER BY step ASC, node_id COLLATE "C" ASC
+           |LIMIT ?""".stripMargin
+      )
+      try
+        statement.setString(1, runId.asString)
+        val limitIndex = after match
+          case Some(cursor) =>
+            statement.setInt(2, cursor.step)
+            statement.setInt(3, cursor.step)
+            statement.setString(4, cursor.nodeId.value)
+            5
+          case None => 2
+        statement.setInt(limitIndex, limit)
+        val result  = statement.executeQuery()
+        val builder = ChunkBuilder.make[StoredExecutionRow]()
+        while result.next() do builder += readExecutionRow(runId, result)
+        builder.result()
       finally statement.close()
     }
 
@@ -514,6 +615,15 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
   private def validateDuration(duration: Duration): IO[StoreError, Unit] =
     if duration > Duration.Zero then ZIO.unit
     else ZIO.fail(AgentError.PersistenceFailure("workflow execution leaseDuration 必须大于零"))
+
+  private def validateTimelineLimit(limit: Int): IO[StoreError, Unit] =
+    if limit >= 1 && limit <= 500 then ZIO.unit
+    else
+      ZIO.fail(
+        AgentError.PersistenceFailure(
+          "PostgreSQL workflow execution timeline limit 必须位于 1..500"
+        )
+      )
 
   private def validateCommitIdentity(
       leases: Chunk[WorkflowExecutionLease],

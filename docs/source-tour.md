@@ -5,7 +5,9 @@
 > 事实来源：`build.sbt`、`modules/*/src/main`、`modules/*/src/test`
 
 本页解决“从哪个文件开始、读到什么程度、如何证明自己理解了”的问题。概念解释仍以
-[学习指南](learning-guide.md) 为准，模块稳定度以 [成熟度与路线](maturity-and-roadmap.md) 为准。
+[学习指南](learning-guide.md) 为准，模块稳定度以 [成熟度与路线](maturity-and-roadmap.md) 为准。阅读前也请了解
+[代码注释与源码阅读约定](code-commenting-guide.md)：公共契约、安全/耐久不变量和非直观算法会详细说明；显然的
+getter、局部变量和 Scala 语法不会机械逐行翻译。
 
 ## 阅读原则
 

@@ -1,7 +1,7 @@
 # 开源发布与版本维护
 
 > 状态：运行手册  
-> 最后核验：2026-07-29
+> 最后核验：2026-07-30
 > 事实来源：`build.sbt`、`project/plugins.sbt`、`.github/workflows/*.yml`、`integration-tests/maven-consumer`
 
 ## 发布目标
@@ -68,13 +68,13 @@ Central artifact 不可覆盖；失败修复必须用新版本。
 
 ## 日常版本策略
 
-- `0.1.x`：二进制/源码兼容修复，不删除或改变已有公共签名。
-- `0.2.0`：允许明确记录的破坏性 API 改进。
+- `0.2.x`：patch 版本只做兼容增强和修复，不删除或改变该 minor 已有公共签名。
+- `0.3.0`：如确有必要，可承载明确记录、带迁移指南的破坏性 API 改进。
 - `1.x`：公共核心、迁移、HTTP 契约和运维承诺达到稳定后再进入。
 - Provider、Beta/Experimental 模块也跟随统一版本，减少多模块组合矩阵。
 
-当前 build 使用 `early-semver`。第一版发布后应接入可支持当前 sbt 版本的 MiMa/version-policy 门禁；在不存在历史
-artifact 时，兼容检查没有可靠基线，不能用一个空检查假装已经完成。
+当前 build 使用 `early-semver`。项目已经进入公开发布后的 patch 兼容阶段；待 sbt 2 生态存在经过验证的
+MiMa/version-policy 组合后应接入真实历史 artifact 基线，不能用空检查假装已经完成。
 
 在 sbt 2 的 MiMa/version-policy 生态完成当前版本兼容性验证前，现有的独立 Maven consumer 与平台下游回归仍是必须
 执行的实际二进制门禁；它们不能证明所有二进制兼容性，但能证明公开 POM、资源和一条真实宿主消费路径。

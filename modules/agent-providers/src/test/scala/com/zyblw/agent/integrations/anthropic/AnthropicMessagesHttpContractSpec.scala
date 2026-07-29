@@ -2,7 +2,6 @@ package com.zyblw.agent.integrations.anthropic
 
 import com.zyblw.agent.core.*
 import com.zyblw.agent.testkit.*
-import java.net.{InetSocketAddress, ServerSocket, Socket}
 import zio.*
 import zio.http.*
 import zio.stream.*
@@ -13,24 +12,6 @@ import zio.test.*
   * 纯 wire test 无法证明 headers、状态分类、慢流、断流和取消会正确穿过 ZIO HTTP Scope， 因此这里使用真实本机 socket，但全部响应都是确定性假数据，不消耗模型额度。
   */
 object AnthropicMessagesHttpContractSpec extends ZIOSpecDefault:
-  /** 向操作系统申请空闲端口，避免并行测试固定端口冲突。 */
-  private def freePort: Task[Int] = ZIO.attemptBlocking {
-    val socket = ServerSocket(0)
-    try socket.getLocalPort
-    finally socket.close()
-  }
-
-  /** 等待真实 socket 开始接受连接，避免用固定 sleep 猜测 CI 机器的启动速度。 */
-  private def awaitServer(port: Int): Task[Unit] =
-    ZIO
-      .attemptBlocking {
-        val socket = Socket()
-        try socket.connect(InetSocketAddress("127.0.0.1", port), 250)
-        finally socket.close()
-      }
-      .retry(Schedule.spaced(50.millis) && Schedule.recurs(100))
-      .unit
-
   /** 根据请求 model 选择正常、故障或取消场景，并记录必需 headers。 */
   private def routes(
       apiKeys: Ref[Chunk[Boolean]],
@@ -149,14 +130,12 @@ object AnthropicMessagesHttpContractSpec extends ZIOSpecDefault:
   def spec: Spec[TestEnvironment & Scope, Any] = suite("Anthropic HTTP ProviderContract 2.0")(
     test("成功、429/500、负 usage、断流、取消和脱敏 cassette 全部通过统一门禁") {
       for
-        port          <- freePort
         apiKeys       <- Ref.make(Chunk.empty[Boolean])
         versions      <- Ref.make(Chunk.empty[Boolean])
         cancelClosed  <- Promise.make[Nothing, Unit]
         cancelStarted <- Promise.make[Nothing, Unit]
         result        <- (for
-          _      <- Server.serve(routes(apiKeys, versions, cancelClosed)).forkScoped
-          _      <- awaitServer(port)
+          port   <- Server.install(routes(apiKeys, versions, cancelClosed))
           client <- ZIO.service[Client]
           model = AnthropicMessagesChatModel(
             client,
@@ -210,9 +189,9 @@ object AnthropicMessagesHttpContractSpec extends ZIOSpecDefault:
           recorded    <- cassette.entries
           keys        <- apiKeys.get
           apiVersions <- versions.get
-        yield (suite, recorded, keys, apiVersions)).provideSome[Scope](
+        yield (suite, recorded, keys, apiVersions)).provide(
           Client.default,
-          Server.defaultWithPort(port)
+          Server.defaultWith(_.onAnyOpenPort)
         )
       yield assertTrue(
         result._1.passed,
@@ -224,13 +203,11 @@ object AnthropicMessagesHttpContractSpec extends ZIOSpecDefault:
     } @@ TestAspect.withLiveClock @@ TestAspect.sequential,
     test("慢流在超时预算内正常完成") {
       for
-        port         <- freePort
         apiKeys      <- Ref.make(Chunk.empty[Boolean])
         versions     <- Ref.make(Chunk.empty[Boolean])
         cancelClosed <- Promise.make[Nothing, Unit]
         response     <- (for
-          _      <- Server.serve(routes(apiKeys, versions, cancelClosed)).forkScoped
-          _      <- awaitServer(port)
+          port   <- Server.install(routes(apiKeys, versions, cancelClosed))
           client <- ZIO.service[Client]
           model = AnthropicMessagesChatModel(
             client,
@@ -243,7 +220,7 @@ object AnthropicMessagesHttpContractSpec extends ZIOSpecDefault:
           )
           events <- model.stream(request("slow-stream")).runCollect
         yield events.collectFirst { case com.zyblw.agent.model.ModelStreamEvent.Completed(value) => value })
-          .provideSome[Scope](Client.default, Server.defaultWithPort(port))
+          .provide(Client.default, Server.defaultWith(_.onAnyOpenPort))
       yield assertTrue(response.exists(_.usage == TokenUsage(2, 1)))
     } @@ TestAspect.withLiveClock @@ TestAspect.sequential
   )

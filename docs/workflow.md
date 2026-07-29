@@ -151,6 +151,31 @@ Durable 模式对每次节点访问建立稳定 `(runId, step, nodeId)` 台账�
 和 pending outcome 需要 `JsonCodec[S]` 才能使用 PostgreSQL Adapter。V009 同时保存确定性 TEXT、JSONB 和 SHA-256，
 读取时对 identity、状态不变量、容量与 checksum fail-closed。
 
+### 低敏 execution timeline
+
+`WorkflowExecutionStore.timeline` 按 `(step, nodeId)` 稳定排序并使用排他复合游标分页：
+
+```scala
+val firstPage =
+  executionStore.timeline(runId, limit = 100)
+
+val nextPage =
+  firstPage.flatMap { entries =>
+    executionStore.timeline(runId, entries.lastOption.map(_.cursor), limit = 100)
+  }
+```
+
+返回的 `WorkflowExecutionTimelineEntry` 只包含 node/step/visit、Running/Prepared/Committed、generation、owner 与时间戳，
+并用 `outcomeAvailable` 表示是否已有耐久结果。它故意不包含：
+
+- 应用状态或节点输入；
+- Prepared outcome 正文；
+- lease token；
+- Prompt、工具参数或工具结果。
+
+timeline 是 Inspector/CLI/运维诊断的只读投影，不能用于恢复或重放。Store 接口不掌握业务 tenant，因此 Adapter/HTTP 在调用前
+必须使用可信身份验证 `runId` 的读取权限。`limit` 被限制在 1..500；内存和 PostgreSQL 实现共享同一分页、排序和低敏契约。
+
 这关闭了“节点结果已经返回、checkpoint 尚未提交”造成的框架级重复调用窗口，但不宣称任意外部副作用 exactly-once。节点若
 直接调用支付、发信或第三方写 API，仍需稳定业务幂等键；需要本地业务写与消息发布一致时使用
 [Outbox/Inbox 与补偿](side-effects.md)。
@@ -168,14 +193,15 @@ sbt -batch "examples/runMain com.zyblw.agent.examples.GraphWorkflowExample"
 
 ## 当前边界与下一步
 
-当前已经实现“可验证图内核 + PostgreSQL checkpoint + 节点 execution ledger/pending outcome/fencing”，并用故障注入证明
-prepare 后崩溃可恢复且节点不重复执行。尚未实现：
+当前已经实现“可验证图内核 + PostgreSQL checkpoint + 节点 execution ledger/pending outcome/fencing + 低敏 timeline”，
+并用故障注入证明 prepare 后崩溃可恢复且节点不重复执行。尚未实现：
 
 - timer、外部 signal、人工任务和 durable sleep；
 - 多节点子图、checkpoint fork/time travel；
 - quorum/race 等更多 fan-in policy；
-- Graph Inspector 和图级质量/成本 eval。
+- 完整 Graph Inspector UI/CLI 和图级质量/成本 eval。
 
-下一纵向切片优先做“耐久 timer/signal + 可查询 execution timeline”，并补数据库重启、进程 kill 与多 Worker soak；随后才根据
-真实业务证据选择人工任务、子图或更多 fan-in policy。只有固定任务证明单 Agent 受角色或上下文隔离限制时，才在这个内核上
-增加 Agent handoff 或多 Agent 调度。
+下一纵向切片优先做“耐久 timer/signal 的原子注册、去重接收与唤醒命令”，并补数据库重启、进程 kill 与多 Worker soak；
+不能让一个 JVM Fiber `sleep` 数天，也不能出现 signal 已接收但 checkpoint/恢复命令丢失。随后才根据真实业务证据选择人工
+任务、子图或更多 fan-in policy。只有固定任务证明单 Agent 受角色或上下文隔离限制时，才在这个内核上增加 Agent handoff
+或多 Agent 调度。

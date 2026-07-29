@@ -25,6 +25,18 @@ Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基
 
 ### 最近一次完整本地证据
 
+2026-07-30 的 `0.2.1` 发布候选复核：
+
+- `scalafmtCheckAll; scalafmtSbtCheck; testFull`：所有已执行确定性测试通过、0 失败；PostgreSQL 用例按默认开关忽略；
+- Workflow 为 14 项 core 契约与 6 项真实 PostgreSQL 契约；新增低敏 timeline 复合游标、跨 Run 隔离、分页上限，以及
+  同一 Run 跨 step 的 Workflow/version/session identity 串行仲裁；
+- Anthropic、Gemini 与 Langfuse 的本机 ZIO HTTP 契约改用 Server 原子分配动态端口，目标用例分别为 2、2、6 项，
+  消除了探测端口后关闭再绑定的竞争；
+- `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`：PostgreSQL 16.14 下正式 V001/V007/V008/V009 与 optional pgvector
+  migration 全部执行，27 项通过、0 失败、0 忽略；
+- `0.2.1-local publishM2`：11 个公开 artifact 的 POM、binary、sources 与 Scaladoc JAR 完整；
+  `integration-tests/maven-consumer` 只从 Maven Local 解析这些坐标并编译成功。
+
 2026-07-29 的结构化文档 RAG R2-A 复核：
 
 - `scalafmtCheckAll; scalafmtSbtCheck; testFull`：所有已执行测试通过，0 失败；23 项 PostgreSQL 用例按默认开关忽略；

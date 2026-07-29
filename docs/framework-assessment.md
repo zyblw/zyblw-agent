@@ -92,8 +92,9 @@
 `WorkflowExecutionStore` 和 V009 已补上 pending outcome、耐久账本、lease/fencing 与 prepare→checkpoint 故障注入；
 当前仍故意只支持单步 fan-out 分支，避免在没有 timer/signal、子图命名空间和多节点 soak 前假装拥有完整图平台。
 
-这条路的下一步不是堆 Agent，而是 durable timer/signal、execution timeline、进程 kill/数据库重启 soak 和 Graph Inspector。
-完整契约与边界见[声明式 Workflow Graph](workflow.md)。
+本轮已补内存/PostgreSQL 共享的低敏 execution timeline；下一步不是堆 Agent，而是 durable timer/signal 的原子等待、
+去重接收与唤醒命令、进程 kill/数据库重启 soak 和完整 Graph Inspector。完整契约与边界见
+[声明式 Workflow Graph](workflow.md)。
 
 ### zyblw-agent 的差异化优势
 
@@ -173,6 +174,42 @@ HTTP `1.1.0` 已提供授权后的 `/api/v1/runs/{runId}/inspection`。
 
 需要收敛或延后的部分也很明确：不是所有任务都需要 Graph；A2A 和多 Agent 不能早于单 Agent、Harness 和 durable
 execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替代真实数据、恢复与发布证据。
+
+#### 逐项采纳判断
+
+| 提案内容 | 判断 | 进入 zyblw-agent 的方式 |
+|---|---|---|
+| Function → Workflow → Agent 的最小复杂度原则 | 采纳 | 由业务用例确定性选型；不让模型默认决定执行模式 |
+| Agent / Harness / Workflow 分工 | 采纳 | 作为 `agent-core` 内可组合概念，复用唯一 Runtime |
+| model proposer / runtime enforcer | 已是核心不变量 | 继续覆盖 capability、权限、审批、预算、fencing 与审计 |
+| execution ledger、pending writes、lease/fencing | 已落地并继续加深 | V009 + `WorkflowExecutionStore`；下一步做 wait/signal 竞态 |
+| timer、signal、human task | 采纳但尚未实现 | 必须是数据库耐久等待与唤醒命令，不能是长寿命 Fiber 或 Prompt 约定 |
+| 低敏 execution timeline | 本轮落地 | 复合游标分页；不泄露状态、outcome 或 lease token |
+| Goal/Plan/Todo/Completion/Verification | 采纳为 Harness H1 | 先做小型 ADT/Store SPI 和 eval，不一次构造通用项目管理平台 |
+| 定义版本/指纹冻结 | 部分采纳 | Workflow version、Instruction fingerprint 已有；Skill/Policy/Tool schema snapshot 后续补齐 |
+| Context pipeline、RAG/Memory 分治 | 已有基础并继续演进 | 接入 lineage、parent-child、ACL 前置、长期质量与保留治理 |
+| Artifact 与 Message 分离 | 采纳 | 现有实验 SPI；下一步 durable metadata/object-store、ACL 与 retention |
+| Provider-neutral + native capability | 采纳 | 公共最小契约加 capability/受控扩展，不伪装 Provider 完全等价 |
+| MCP 与 A2A 分工 | 采纳边界，A2A 延后 | MCP 先完成身份/OAuth/Roots/信任；A2A 不替代内部 Workflow |
+| outcome/trajectory/safety/resource 分离 | 采纳 | Eval Q1，先完成结果与过程评分及多试验趋势 |
+
+#### 必须修正或不适合直接照搬的部分
+
+1. **PostgreSQL 是参考耐久控制面，不是 core 的唯一语义。** 当前 PostgreSQL Adapter 最成熟，也适合事务、lease 和
+   outbox；但领域契约仍依赖 Store SPI，内存实现服务确定性测试，未来其他后端必须通过同一契约测试，而不是把 JDBC
+   类型放入 core。
+2. **八层图是审计视角，不是代码目录和部署拓扑。** 把每一层都拆 artifact/服务会增加发布、故障和认知成本；只有依赖、
+   生命周期、协议、安全或许可证边界成立才拆模块。
+3. **不能一次引入完整领域名词表。** `AgentIdentity`、Definition Snapshot、Remote Task、Workspace、Skill、Plan、
+   Timer 等都需要权限、序列化、迁移、删除和恢复语义。只增加 case class 会制造“看起来完整”的空壳架构。
+4. **普通函数/Workflow/Agent 不是由一个万能 Selector 自动推断。** 业务契约、风险和合规决定模式；模型最多提出建议，
+   不能自行升级到更高权限或更高成本执行层。
+5. **Timer/Signal 不等于 `ZIO.sleep`/`Promise`。** ZIO 的内存并发原语适合进程内协调和确定性测试，但跨重启等待必须保存
+   `fireAt`/deduplication identity，并把接收、状态推进与恢复命令放入明确事务边界。
+6. **“所有代码都逐行中文注释”不是质量目标。** 公共契约、安全/耐久不变量和非直观算法必须详细说明；显然 getter 和局部
+   语法不应机械翻译。统一标准见[代码注释与源码阅读约定](code-commenting-guide.md)。
+7. **大型 Studio、自动 Swarm、无限反思和动态下载 Skill 暂不进入稳定核心。** 它们晚于可靠性、Eval、权限、保留/删除和
+   外部用户证据。
 
 ### P0：开发体验和真实发布
 
@@ -255,8 +292,11 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 - [Anthropic：Building effective agents](https://www.anthropic.com/engineering/building-effective-agents)
 - [Anthropic：Demystifying evals for AI agents](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents)
 - [Anthropic：Effective context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
+- [Temporal：Durable timers](https://docs.temporal.io/develop/java/workflows/timers)
+- [Temporal：Workflow signals 与 message passing](https://docs.temporal.io/develop/java/workflows/message-passing)
 - [ZIO ZLayer](https://zio.dev/reference/contextual/zlayer/)
 - [ZIO resource management](https://zio.dev/reference/resource/)
+- [ZIO TestClock](https://zio.dev/reference/test/services/clock/)
 - [ZIO HTTP Endpoint](https://ziohttp.com/concepts/endpoint/)
 
 ## 本轮图工程讨论来源

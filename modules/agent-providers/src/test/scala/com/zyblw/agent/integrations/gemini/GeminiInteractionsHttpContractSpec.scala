@@ -3,7 +3,6 @@ package com.zyblw.agent.integrations.gemini
 import com.zyblw.agent.core.*
 import com.zyblw.agent.model.ModelStreamEvent
 import com.zyblw.agent.testkit.*
-import java.net.{InetSocketAddress, ServerSocket, Socket}
 import zio.*
 import zio.http.*
 import zio.json.ast.Json
@@ -16,24 +15,6 @@ import zio.test.*
   * Client/Server Scope。
   */
 object GeminiInteractionsHttpContractSpec extends ZIOSpecDefault:
-  /** 让操作系统分配测试端口，避免并行 CI 中硬编码端口冲突。 */
-  private def freePort: Task[Int] = ZIO.attemptBlocking {
-    val socket = ServerSocket(0)
-    try socket.getLocalPort
-    finally socket.close()
-  }
-
-  /** 等待真实 socket 开始接受连接，避免用固定 sleep 猜测 CI 机器的启动速度。 */
-  private def awaitServer(port: Int): Task[Unit] =
-    ZIO
-      .attemptBlocking {
-        val socket = Socket()
-        try socket.connect(InetSocketAddress("127.0.0.1", port), 250)
-        finally socket.close()
-      }
-      .retry(Schedule.spaced(50.millis) && Schedule.recurs(100))
-      .unit
-
   /** 根据请求 model 选择确定性 stub 场景，并只记录认证/版本是否正确。 */
   private def routes(
       apiKeys: Ref[Chunk[Boolean]],
@@ -156,15 +137,13 @@ object GeminiInteractionsHttpContractSpec extends ZIOSpecDefault:
   def spec: Spec[TestEnvironment & Scope, Any] = suite("Gemini HTTP ProviderContract 2.0")(
     test("成功、429/500、负 usage、断流、取消、无状态和 cassette 脱敏通过统一门禁") {
       for
-        port          <- freePort
         apiKeys       <- Ref.make(Chunk.empty[Boolean])
         revisions     <- Ref.make(Chunk.empty[Boolean])
         stores        <- Ref.make(Chunk.empty[Boolean])
         cancelClosed  <- Promise.make[Nothing, Unit]
         cancelStarted <- Promise.make[Nothing, Unit]
         result        <- (for
-          _      <- Server.serve(routes(apiKeys, revisions, stores, cancelClosed)).forkScoped
-          _      <- awaitServer(port)
+          port   <- Server.install(routes(apiKeys, revisions, stores, cancelClosed))
           client <- ZIO.service[Client]
           model = GeminiInteractionsChatModel(
             client,
@@ -219,9 +198,9 @@ object GeminiInteractionsHttpContractSpec extends ZIOSpecDefault:
           keys      <- apiKeys.get
           revs      <- revisions.get
           stateless <- stores.get
-        yield (suite, recorded, keys, revs, stateless)).provideSome[Scope](
+        yield (suite, recorded, keys, revs, stateless)).provide(
           Client.default,
-          Server.defaultWithPort(port)
+          Server.defaultWith(_.onAnyOpenPort)
         )
       yield assertTrue(
         result._1.passed,
@@ -234,14 +213,12 @@ object GeminiInteractionsHttpContractSpec extends ZIOSpecDefault:
     } @@ TestAspect.withLiveClock @@ TestAspect.sequential,
     test("慢流在总超时预算内完成并报告 usage") {
       for
-        port         <- freePort
         apiKeys      <- Ref.make(Chunk.empty[Boolean])
         revisions    <- Ref.make(Chunk.empty[Boolean])
         stores       <- Ref.make(Chunk.empty[Boolean])
         cancelClosed <- Promise.make[Nothing, Unit]
         response     <- (for
-          _      <- Server.serve(routes(apiKeys, revisions, stores, cancelClosed)).forkScoped
-          _      <- awaitServer(port)
+          port   <- Server.install(routes(apiKeys, revisions, stores, cancelClosed))
           client <- ZIO.service[Client]
           model = GeminiInteractionsChatModel(
             client,
@@ -254,7 +231,7 @@ object GeminiInteractionsHttpContractSpec extends ZIOSpecDefault:
           )
           events <- model.stream(request("slow-stream")).runCollect
         yield events.collectFirst { case ModelStreamEvent.Completed(value) => value })
-          .provideSome[Scope](Client.default, Server.defaultWithPort(port))
+          .provide(Client.default, Server.defaultWith(_.onAnyOpenPort))
       yield assertTrue(response.exists(_.usage == TokenUsage(2, 1)))
     } @@ TestAspect.withLiveClock @@ TestAspect.sequential
   )
