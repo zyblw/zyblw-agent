@@ -35,7 +35,11 @@ Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基
 - `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`：PostgreSQL 16.14 下正式 V001/V007/V008/V009 与 optional pgvector
   migration 全部执行，27 项通过、0 失败、0 忽略；
 - `0.2.1-local publishM2`：11 个公开 artifact 的 POM、binary、sources 与 Scaladoc JAR 完整；
-  `integration-tests/maven-consumer` 只从 Maven Local 解析这些坐标并编译成功。
+  `integration-tests/maven-consumer` 只从 Maven Local 解析这些坐标并执行 clean compile 成功；
+- `QuickstartAgentExample` 实际完成异步 command/worker/runtime 主线，`GraphWorkflowExample` 实际完成 durable
+  execution 示例；
+- release provenance gate 的隔离成功用例通过，并确认旧 `v0.2.0` 对当前 `0.2.1` CHANGELOG 会 fail-closed；正式标签还会
+  验证 annotated tag、升级指南和 tag commit 已位于远端 `main`。
 
 2026-07-29 的结构化文档 RAG R2-A 复核：
 

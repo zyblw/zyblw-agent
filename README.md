@@ -136,6 +136,26 @@ flowchart TB
 
 逐项证据和下一验收条件以 [成熟度与路线](docs/maturity-and-roadmap.md) 为准，不以 README 的宣传文字为准。
 
+## 依赖怎么选
+
+不要一次引入全部模块。每个公开 artifact 都对应依赖、生命周期、协议或安全边界：
+
+| 需要的能力 | 引入 artifact | 说明 |
+|---|---|---|
+| Agent Runtime、Tool、Context、Memory、Workflow SPI | `zyblw-agent-core` | 所有业务的最小起点 |
+| OpenAI-compatible、Responses、Anthropic、Gemini | `zyblw-agent-providers` | 只在接真实模型时加入 |
+| Knowledge Index、Embedding、Retrieval | `zyblw-agent-rag` | 不包含 PDF 解析器 |
+| Tika、Docling、PDF/Markdown Loader | `zyblw-agent-document-loaders` | 重型解析依赖保持可选 |
+| 外部模型 Rerank | `zyblw-agent-rerank` | 与基础检索分离 |
+| PostgreSQL、Flyway、pgvector | `zyblw-agent-postgres` | 生产耐久控制面与知识索引 |
+| HTTP v1、OpenAPI、Routes、Host | `zyblw-agent-zio-http` | 可嵌入既有 ZIO HTTP Server |
+| MCP client 与 Workspace 边界 | `zyblw-agent-mcp` | 外部内容始终按不可信输入处理 |
+| OTLP、Langfuse | `zyblw-agent-opentelemetry` | SDK、Exporter 和后台资源不进入 core |
+| Eval 与 release gate | `zyblw-agent-evals` | 固定数据集和趋势质量门禁 |
+| 确定性 Fake/Stub | `zyblw-agent-testkit` | 业务测试依赖 |
+
+所有模块统一版本，完整依赖图和 Maven 坐标见 [公开 artifact 与依赖](docs/modules.md)。
+
 ## RAG 业务接入
 
 框架负责可复用的摄取与检索机制，业务负责语料选择、权限映射、领域 metadata、拒答规则和质量标准。业务 Controller、Job
@@ -169,6 +189,43 @@ PDF/Markdown
 ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`/ZIO Schema 维护 `/api/v1` 与 OpenAPI；Server 和
 关键 worker 由同一 Scope 管生命周期。它不会创建 DataSource、匿名认证或 Provider Secret。详见
 [ZIO HTTP 宿主](docs/http-host.md) 和 [HTTP 兼容](docs/http-api-versioning.md)。
+
+## 上生产前必须回答的问题
+
+框架提供机制，业务仍拥有最终策略和运行责任：
+
+1. **身份与权限**：`RunContext` 的 user/tenant/scope 是否来自已经验签的可信身份，而不是请求正文或模型输出？
+2. **预算与过载**：步骤、模型、工具、token、费用、wall-clock、队列和并发是否都有上限？达到上限时如何降级？
+3. **外部副作用**：写工具是否有稳定业务幂等键、审批、outbox/inbox、补偿和审计？
+4. **数据与隐私**：Prompt、工具结果、RAG 文档、Memory、Trace 和 Eval 的保留、删除、脱敏策略是什么？
+5. **恢复**：数据库重启、worker 被杀、Provider 断流、lease 过期和重复命令是否经过演练？
+6. **可观测性**：能否从低敏 Timeline、typed error、指标和 trace 判断排队、运行、工具、恢复和投影阶段？
+7. **质量**：是否有固定业务数据集分别评估 outcome、trajectory、safety、latency、token 和 cost？
+8. **升级**：是否验证 Scala API、HTTP Schema、State JSON、Flyway migration 和活跃 Workflow Run？
+
+只通过单元测试而没有容量、故障、升级和真实业务质量证据时，应标记为可运行或 Experimental，不能宣称生产就绪。
+
+## 兼容、升级与故障定位
+
+`0.2.x` patch 不删除或改变该 minor 已有公共 Scala 签名；Scala API、HTTP/Schema、持久化 JSON、Maven 坐标和 Flyway
+migration 是分别验证的兼容表面。完整承诺见 [兼容性契约](docs/compatibility.md)，`0.2.1` durable Workflow 候选的数据库
+与滚动升级步骤见 [从 0.2.0 升级到 0.2.1](docs/upgrading-to-0.2.1.md)。
+
+常见问题先按边界定位：
+
+| 现象 | 首先检查 | 不应采用的“修复” |
+|---|---|---|
+| Run 一直排队 | command worker、lease、数据库健康、队列指标 | 在生产入口静默改用内存 Store |
+| 工具被拒绝 | allowlist、scope、risk、approval 和 schema error | 让模型自行声明权限 |
+| 同一动作重复 | idempotency key、execution ledger、outbox/inbox | 无限增加 retry |
+| SSE 中断 | `Last-Event-ID`、耐久 Event、认证与反向代理超时 | 把内存 Hub 当历史事实源 |
+| RAG 无结果 | active index、tenant ACL、embedding identity、候选过滤 | 绕过 ACL 直接向量检索 |
+| Workflow 无法恢复 | definition/version/session、checkpoint checksum、V008/V009 | 强行覆盖旧 migration 或忽略 identity |
+| 测试耗尽 native thread | 是否并行启动多个 sbt、Netty stub 生命周期 | 删除并发/流式契约测试 |
+| Provider 行为差异 | capability、wire contract、原始 HTTP 状态的低敏诊断 | 假设所有 Provider 字段等价 |
+
+系统化排查路径见 [测试](docs/testing.md)、[Run Inspector](docs/run-inspection.md)、
+[可观测性](docs/observability.md) 与 [安全](docs/security.md)。
 
 ## 学习与源码阅读路线
 

@@ -20,6 +20,8 @@ All notable user-visible changes will be recorded here. The project follows
 - Run-level Workflow/version/session identity arbitration across different execution steps. The PostgreSQL Adapter serializes
   concurrent first claims for the same Run with a transaction-scoped advisory lock, preventing a split identity without adding a
   long-lived process lock.
+- A canonical compatibility matrix and `0.2.1` upgrade guide covering Scala APIs, HTTP/schema contracts, persisted state, Flyway
+  migrations, Workflow rolling upgrades and custom Store responsibilities.
 
 ### Changed
 
@@ -29,6 +31,8 @@ All notable user-visible changes will be recorded here. The project follows
   architecture, capability maturity and source-learning paths; added a Chinese public-contract commenting standard.
 - ZIO HTTP contract stubs now let the bound Server allocate an open port and install routes inside the managed Scope, removing the
   probe-close-bind race from concurrent Anthropic, Gemini and Langfuse tests.
+- Release tags now fail closed unless they are annotated, match the latest CHANGELOG and upgrade guide, and point to a commit already
+  contained in remote `main`.
 
 ### Upgrade
 

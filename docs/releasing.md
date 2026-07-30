@@ -82,14 +82,15 @@ MiMa/version-policy 组合后应接入真实历史 artifact 基线，不能用�
 ## 发布前清单
 
 1. CHANGELOG 中有用户可理解的变化、升级方式和风险。
-2. `sbt -batch testFull` 成功。
-3. `RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull` 成功。
-4. `sbt -batch publishM2` 成功，所有公开模块生成 POM/source/doc。
-5. `integration-tests/maven-consumer` 设置 `ZYBLW_AGENT_VERSION` 后仅依赖本地发布物也能编译。
-6. 数据库迁移在空库和代表性升级库成功，已发布 migration 未被修改。
-7. POM 包含 name、description、URL、license、developer 和 SCM。
-8. 无密钥、真实用户数据或敏感 trace 进入 Git 历史和 artifact。
-9. 标签与 CHANGELOG 版本一致，工作树基于已审查 commit。
+2. annotated tag、CHANGELOG 顶部版本与 `docs/upgrading-to-X.Y.Z.md` 一致，且 tag commit 已经包含在远端 `main`；
+   release workflow 会通过 `.github/scripts/verify-release.sh` fail-closed 校验。
+3. `sbt -batch testFull` 成功。
+4. `RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull` 成功。
+5. `sbt -batch publishM2` 成功，所有公开模块生成 POM/source/doc。
+6. `integration-tests/maven-consumer` 设置 `ZYBLW_AGENT_VERSION` 后仅依赖本地发布物也能编译。
+7. 数据库迁移在空库和代表性升级库成功，已发布 migration 未被修改。
+8. POM 包含 name、description、URL、license、developer 和 SCM。
+9. 无密钥、真实用户数据或敏感 trace 进入 Git 历史和 artifact。
 10. 私有业务仓库使用相同 Maven-local 版本完成下游兼容验证，但任何私有源码、token 或日志都不进入公开 workflow。
 11. Central Portal 显示 Published 后，在私有 `zyblw-platform` 仓库手动运行 `zyblw-server CI`，输入刚发布的精确
     `agent_version`；该回归只从 Maven Central 解析制品，并包含 PostgreSQL 契约测试。

@@ -96,7 +96,8 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
 3. **已完成**：第二版 `0.2.0` 的签名制品、独立 Maven consumer、GitHub Release 与 Central 公共解析均已验证。
 4. **已完成**：`zyblw-server` 已分别通过源码、Maven-local 候选和正式 Central `0.1.0` 的 PostgreSQL 门禁；`0.2.0`
    发布后下游 Central 回归仍需按 runbook 执行。
-5. **部分完成**：HTTP/OpenAPI 兼容测试、格式门禁和已发布 JVM 基线已建立；结构化 OpenAPI diff 仍待自动化。
+5. **部分完成**：HTTP/OpenAPI 兼容测试、格式门禁、兼容面文档和 tag/main/CHANGELOG/升级指南一致性门禁已建立；
+   结构化 OpenAPI diff 与真实历史 artifact 的二进制 diff 仍待自动化。
 6. **部分完成**：五分钟最小应用已通过；独立 PostgreSQL 教程仍待补充，PostgreSQL 16/pgvector CI job 已定义并在本地
    完整通过。
 7. **部分完成**：安全 timeline/inspection 读模型与故障诊断文档已落地；CLI、轻量 UI 和真实事故验证仍待完成。

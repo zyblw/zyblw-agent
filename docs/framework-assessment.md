@@ -150,7 +150,7 @@ fail-closed。框架仍不会保存隐藏推理正文。
 
 `AgentQuickstart.run` 用隔离内存控制面完整走过提交、claim、Runtime 和读取，不维护第二套演示循环；仓库示例无需 API Key
 或数据库即可运行。`RunInspection` 则把权威状态和事件投影为低敏 Timeline，检查 sequence、审批、usage 与终态一致性，
-HTTP `1.1.0` 已提供授权后的 `/api/v1/runs/{runId}/inspection`。
+OpenAPI `1.1.0` 已提供授权后的 `/api/v1/runs/{runId}/inspection`。
 
 这只是调试基础，不是成熟 Run Studio，也不是可执行 time-travel。详细边界见
 [Run Inspector、Timeline 与安全调试](run-inspection.md)。
@@ -215,7 +215,8 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 
 - Maven Central `0.1.0` 与第二版 `0.2.0` 均已发布；后者按 Early SemVer 正确承载明确记录的破坏性改进；
 - 维持已经可运行的五分钟纯内存 sample，并补一个独立 PostgreSQL sample；
-- 以 `0.1.0` 为已发布基线持续检查 Scala API、JSON 快照、HTTP schema 和数据库 migration；
+- 以 `0.2.0` 为当前 patch 兼容基线持续检查 Scala API、JSON 快照、HTTP schema 和数据库 migration，并以
+  [兼容性契约](compatibility.md) 分开记录各兼容表面；
 - 用发布制品而不是源码完整验证 `zyblw-server`；
 - 在已有安全 Timeline/inspect HTTP 读模型上增加 CLI 与轻量界面，不急着做大型 Web Studio。
 
