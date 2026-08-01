@@ -1,7 +1,7 @@
 # zyblw-agent 能力审计、框架对照与演进判断
 
 > 状态：当前审计
-> 最后核验：2026-07-30
+> 最后核验：2026-08-01
 > 事实来源：当前源码、测试、构建、迁移、发布工作流，以及文末列出的官方框架资料
 
 本文回答四个问题：
@@ -213,7 +213,8 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 
 ### P0：开发体验和真实发布
 
-- Maven Central `0.1.0` 与第二版 `0.2.0` 均已发布；后者按 Early SemVer 正确承载明确记录的破坏性改进；
+- Maven Central `0.1.0`、`0.2.0` 与兼容 patch `0.2.1` 均已发布；`0.2.0` 按 Early SemVer 承载明确记录的破坏性
+  改进，`0.2.1` 保持同 minor 公共 Scala API 兼容并增加 durable Workflow ledger/timeline；
 - 维持已经可运行的五分钟纯内存 sample，并补一个独立 PostgreSQL sample；
 - 以 `0.2.0` 为当前 patch 兼容基线持续检查 Scala API、JSON 快照、HTTP schema 和数据库 migration，并以
   [兼容性契约](compatibility.md) 分开记录各兼容表面；

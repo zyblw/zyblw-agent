@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-30
+> 最后核验：2026-08-01
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -25,7 +25,7 @@ Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基
 
 ### 最近一次完整本地证据
 
-2026-07-30 的 `0.2.1` 发布候选复核：
+2026-07-30 至 2026-08-01 的 `0.2.1` 发布复核：
 
 - `scalafmtCheckAll; scalafmtSbtCheck; testFull`：所有已执行确定性测试通过、0 失败；PostgreSQL 用例按默认开关忽略；
 - Workflow 为 14 项 core 契约与 6 项真实 PostgreSQL 契约；新增低敏 timeline 复合游标、跨 Run 隔离、分页上限，以及
@@ -38,8 +38,13 @@ Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基
   `integration-tests/maven-consumer` 只从 Maven Local 解析这些坐标并执行 clean compile 成功；
 - `QuickstartAgentExample` 实际完成异步 command/worker/runtime 主线，`GraphWorkflowExample` 实际完成 durable
   execution 示例；
-- release provenance gate 的隔离成功用例通过，并确认旧 `v0.2.0` 对当前 `0.2.1` CHANGELOG 会 fail-closed；正式标签还会
-  验证 annotated tag、升级指南和 tag commit 已位于远端 `main`。
+- release provenance gate 的隔离成功用例通过，并确认旧 `v0.2.0` 对当前 `0.2.1` CHANGELOG 会 fail-closed；正式
+  annotated `v0.2.1` 已验证升级指南、CHANGELOG 与远端 `main` 一致；
+- [GitHub CI #15](https://github.com/zyblw/zyblw-agent/actions/runs/30547389663) 与
+  [Release workflow](https://github.com/zyblw/zyblw-agent/actions/runs/30547847643) 全部成功；GitHub Release 标记为 Latest，
+  Maven Central 已公开解析 `io.github.zyblw:zyblw-agent-core_3:0.2.1` 的 POM；
+- 独立 consumer 使用全新 Coursier cache，并把 repository 限定为 Maven Central 后，成功下载正式 `core/providers 0.2.1`
+  JAR 并执行 clean compile；没有读取 Maven Local 候选。
 
 2026-07-29 的结构化文档 RAG R2-A 复核：
 

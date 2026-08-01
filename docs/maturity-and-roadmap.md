@@ -1,7 +1,7 @@
 # zyblw-agent 成熟度、取舍与路线
 
 > 状态：路线图
-> 最后核验：2026-07-30
+> 最后核验：2026-08-01
 > 事实来源：`build.sbt`、模块源码、测试、发布工作流、迁移与当前文档
 
 ## 成熟度语义
@@ -93,7 +93,8 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
 
 1. **已完成**：Maven Central namespace、签名密钥和 GitHub release environment 已配置，短期 token 可独立轮换。
 2. **已完成**：`0.1.0` 的 11 个 POM、binary、sources、Scaladoc JAR 和签名已发布并可从 Central 解析。
-3. **已完成**：第二版 `0.2.0` 的签名制品、独立 Maven consumer、GitHub Release 与 Central 公共解析均已验证。
+3. **已完成**：`0.2.0` 与兼容 patch `0.2.1` 的签名制品、独立 Maven consumer、GitHub Release 与 Central
+   公共解析均已验证；`0.2.1` 还验证了 tag/main/CHANGELOG/升级指南来源一致性门禁。
 4. **已完成**：`zyblw-server` 已分别通过源码、Maven-local 候选和正式 Central `0.1.0` 的 PostgreSQL 门禁；`0.2.0`
    发布后下游 Central 回归仍需按 runbook 执行。
 5. **部分完成**：HTTP/OpenAPI 兼容测试、格式门禁、兼容面文档和 tag/main/CHANGELOG/升级指南一致性门禁已建立；

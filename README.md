@@ -10,7 +10,8 @@ Service、Agent、Harness 或 Durable Workflow。
         → 暂停/恢复/取消 → 低敏 Inspector、Trace 与 Eval
 ```
 
-当前最新发布版是 [`0.2.0`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.2.0)，已发布到 Maven Central。项目仍处于
+当前最新发布版是 [`0.2.1`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.2.1)，已发布到
+[Maven Central](https://central.sonatype.com/artifact/io.github.zyblw/zyblw-agent-core_3/0.2.1)。项目仍处于
 `0.x` 演进期：核心单 Agent 控制面已经形成闭环，外围 Adapter 和 Durable Workflow 等能力按证据标记为 Beta 或
 Experimental；“有实现”不等于已经经过大规模生产验证。
 
@@ -38,8 +39,8 @@ Harness 不是第二套模型循环；Workflow 也不替代普通函数。多 Ag
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.2.0",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.2.0"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.2.1",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.2.1"
 )
 ```
 
@@ -208,7 +209,7 @@ ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`
 ## 兼容、升级与故障定位
 
 `0.2.x` patch 不删除或改变该 minor 已有公共 Scala 签名；Scala API、HTTP/Schema、持久化 JSON、Maven 坐标和 Flyway
-migration 是分别验证的兼容表面。完整承诺见 [兼容性契约](docs/compatibility.md)，`0.2.1` durable Workflow 候选的数据库
+migration 是分别验证的兼容表面。完整承诺见 [兼容性契约](docs/compatibility.md)，`0.2.1` durable Workflow 的数据库
 与滚动升级步骤见 [从 0.2.0 升级到 0.2.1](docs/upgrading-to-0.2.1.md)。
 
 常见问题先按边界定位：
@@ -243,7 +244,7 @@ migration 是分别验证的兼容表面。完整承诺见 [兼容性契约](doc
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.2.1-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.2.2-local"; publishM2'
 ```
 
 sbt 2 的普通 `test` 是增量测试；CI、发布和 PostgreSQL 契约必须使用 `testFull`。真实 Provider 测试默认关闭，避免普通
