@@ -155,7 +155,7 @@ val configured: URLayer[DataSource, EvalTrendStore] =
   )
 ```
 
-Flyway V007 创建 `agent_eval_snapshots`。每行同时保存：
+0.3 fresh baseline 创建 `agent_eval_snapshots`。每行同时保存：
 
 - `snapshot_payload TEXT`：保留应用生成的确定性 UTF-8 字节，供 SHA-256 校验；
 - `snapshot_json JSONB`：供 SQL 分析和 dashboard 查询；

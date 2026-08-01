@@ -14,8 +14,8 @@ import zio.test.*
 
 /** 真实 PostgreSQL 16 下的 Workflow checkpoint 契约。
   *
-  * 覆盖 V008/V009 migration、跨 Store 幂等/单调仲裁、identity 隔离、checksum fail-closed、execution timeline，以及 暂停后由另一
-  * Adapter 实例恢复。
+  * 覆盖 0.3 fresh baseline、跨 Store 幂等/单调仲裁、identity 隔离、checksum fail-closed、execution timeline、durable wait，
+  * 以及暂停后由另一 Adapter 实例恢复。
   */
 object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
   final private case class WorkflowState(value: Int, notes: Chunk[String]) derives JsonCodec
@@ -205,7 +205,7 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
         resumed.lastOption.contains(WorkflowEvent.Completed(WorkflowState(2, Chunk.empty)))
       )).provideLayer(harnessLayer)
     },
-    test("V009 Prepared outcome 跨 owner 恢复，并以新 generation 原子提交 ledger 与 checkpoint") {
+    test("Prepared outcome 跨 owner 恢复，并以新 generation 原子提交 ledger 与 checkpoint") {
       (for
         harness <- ZIO.service[Harness]
         runId   <- RunId.random
@@ -259,7 +259,7 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
         count == 1
       )).provideLayer(harnessLayer)
     },
-    test("V009 execution timeline 跨 Store 使用复合游标分页并隔离其他 Run") {
+    test("execution timeline 跨 Store 使用复合游标分页并隔离其他 Run") {
       (for
         harness      <- ZIO.service[Harness]
         runId        <- RunId.random
@@ -332,6 +332,157 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
         identityRace.count(_.isRight) == 1,
         identityRace.count(_.isLeft) == 1,
         invalid.left.exists(_.category == ErrorCategory.Persistence)
+      )).provideLayer(harnessLayer)
+    },
+    test("wait 与 checkpoint 原子注册，signal 跨 Store 去重并且只消费一次") {
+      (for
+        harness <- ZIO.service[Harness]
+        runId   <- RunId.random
+        session <- SessionId.random
+        now     <- Live.live(Clock.instant)
+        signalName = WorkflowSignalName("approval.received")
+        firstKey   = WorkflowExecutionKey(
+          runId,
+          workflowId,
+          workflowVersion,
+          session,
+          entry,
+          step = 0,
+          visit = 1
+        )
+        request = WorkflowWaitRequest(
+          WorkflowWaitCondition.Signal(signalName),
+          now.plusSeconds(30)
+        )
+        first <- harness.storeA
+          .claim(firstKey, WorkerId("wait-register"), 10.seconds)
+          .flatMap(acquired)
+        _ <- harness.storeA.prepare(
+          first,
+          NodeOutcome.Awaiting(WorkflowState(1, Chunk.empty), request)
+        )
+        waitingCheckpoint = checkpoint(
+          session,
+          WorkflowCursor.At(entry),
+          WorkflowState(1, Chunk.empty),
+          step = 1,
+          visits = Map(entry -> 1)
+        )
+        _ <- harness.storeA.commit(
+          NonEmptyChunk(first),
+          waitingCheckpoint,
+          WorkflowWaitCommit(None, Some(firstKey -> request))
+        )
+        wait <- harness.storeB
+          .currentWait(runId)
+          .someOrFail(AgentError.PersistenceFailure("postgres wait missing"))
+        accepted <- harness.storeB.signal(
+          wait.key,
+          WorkflowSignalId("webhook-1"),
+          signalName,
+          "approved"
+        )
+        duplicate <- harness.storeA.signal(
+          wait.key,
+          WorkflowSignalId("webhook-1"),
+          signalName,
+          "approved"
+        )
+        conflict <- harness.storeB
+          .signal(wait.key, WorkflowSignalId("webhook-1"), signalName, "changed")
+          .either
+        resolved <- harness.storeA
+          .currentWait(runId)
+          .someOrFail(AgentError.PersistenceFailure("resolved wait missing"))
+        nextKey = firstKey.copy(step = 1, visit = 2)
+        next <- harness.storeB
+          .claim(nextKey, WorkerId("wait-consume"), 10.seconds)
+          .flatMap(acquired)
+        _ <- harness.storeB.prepare(
+          next,
+          NodeOutcome.Succeeded(WorkflowState(2, Chunk.empty))
+        )
+        completedCheckpoint = checkpoint(
+          session,
+          WorkflowCursor.Completed,
+          WorkflowState(2, Chunk.empty),
+          step = 2,
+          visits = Map(entry -> 2)
+        )
+        _ <- harness.storeB.commit(
+          NonEmptyChunk(next),
+          completedCheckpoint,
+          WorkflowWaitCommit(Some(wait.key), None)
+        )
+        remaining <- harness.storeA.currentWait(runId)
+      yield assertTrue(
+        wait.status == WorkflowWaitStatus.Pending,
+        wait.deadline == request.deadline,
+        request.deadline.getNano % 1_000_000 == 0,
+        accepted.disposition == WorkflowSignalDisposition.Accepted,
+        duplicate.disposition == WorkflowSignalDisposition.Duplicate,
+        conflict.left.exists(_.category == ErrorCategory.Conflict),
+        resolved.status == WorkflowWaitStatus.Signaled,
+        resolved.signal.exists(_.payload == "approved"),
+        remaining.isEmpty
+      )).provideLayer(harnessLayer)
+    },
+    test("数据库 deadline 后 signal 与 expireDue 并发时只产生 TimedOut 唯一胜者") {
+      (for
+        harness <- ZIO.service[Harness]
+        runId   <- RunId.random
+        session <- SessionId.random
+        now     <- Live.live(Clock.instant)
+        signalName = WorkflowSignalName("external.completed")
+        key        = WorkflowExecutionKey(
+          runId,
+          workflowId,
+          workflowVersion,
+          session,
+          entry,
+          step = 0,
+          visit = 1
+        )
+        request = WorkflowWaitRequest(
+          WorkflowWaitCondition.Signal(signalName),
+          now.plusSeconds(1)
+        )
+        lease <- harness.storeA
+          .claim(key, WorkerId("deadline-register"), 10.seconds)
+          .flatMap(acquired)
+        _ <- harness.storeA.prepare(
+          lease,
+          NodeOutcome.Awaiting(WorkflowState(1, Chunk.empty), request)
+        )
+        _ <- harness.storeA.commit(
+          NonEmptyChunk(lease),
+          checkpoint(
+            session,
+            WorkflowCursor.At(entry),
+            WorkflowState(1, Chunk.empty),
+            step = 1,
+            visits = Map(entry -> 1)
+          ),
+          WorkflowWaitCommit(None, Some(key -> request))
+        )
+        wait <- harness.storeB
+          .currentWait(runId)
+          .someOrFail(AgentError.PersistenceFailure("postgres wait missing"))
+        _     <- Live.live(ZIO.sleep(1200.millis))
+        raced <- harness.storeA
+          .signal(wait.key, WorkflowSignalId("late-webhook"), signalName, "late")
+          .zipPar(harness.storeB.expireDue())
+        resolved <- harness.storeA
+          .currentWait(runId)
+          .someOrFail(AgentError.PersistenceFailure("resolved wait missing"))
+      yield assertTrue(
+        Set(
+          WorkflowSignalDisposition.Late,
+          WorkflowSignalDisposition.AlreadyResolved
+        ).contains(raced._1.disposition),
+        raced._2.size <= 1,
+        resolved.status == WorkflowWaitStatus.TimedOut,
+        resolved.signal.isEmpty
       )).provideLayer(harnessLayer)
     }
   ) @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@ TestAspect.timeout(

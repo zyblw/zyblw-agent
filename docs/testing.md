@@ -25,6 +25,19 @@ Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基
 
 ### 最近一次完整本地证据
 
+2026-08-01 的 `0.3.0` breaking development line 复核：
+
+- `scalafmtCheckAll; scalafmtSbtCheck; testFull`：全部已执行确定性测试通过、0 失败；PostgreSQL 用例按默认开关忽略；
+- Workflow core 共 17 项契约，新增 `Awaiting` 原子注册/消费、signal 幂等/冲突、Pending 恢复拒绝、wait identity
+  fail-closed、deadline 后 signal/timeout 唯一胜者与 typed wakeup；整个 core 模块 99 项通过；
+- `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`：PostgreSQL 16.14 只执行一个
+  `V001__zyblw_agent_0_3_baseline.sql`，连同 optional pgvector 共 29 项通过、0 失败、0 忽略；
+- PostgreSQL Workflow 共 8 项：除 checkpoint/ledger/timeline/fencing 外，真实验证 wait 与 checkpoint 原子注册、跨 Store
+  signal 去重、毫秒 deadline 身份，以及数据库时钟下 signal/`expireDue` 并发只有 TimedOut 一个权威胜者；
+- `0.3.0-local publishM2` 生成 11 个公开模块的 POM、binary、sources 与 Scaladoc JAR；独立
+  `integration-tests/maven-consumer` 仅解析 Maven Local 坐标并完成 clean compile；
+- 尚未执行长期 process kill/数据库 restart/multi-worker soak；上述证据证明事务与契约正确性，不等同于生产容量结论。
+
 2026-07-30 至 2026-08-01 的 `0.2.1` 发布复核：
 
 - `scalafmtCheckAll; scalafmtSbtCheck; testFull`：所有已执行确定性测试通过、0 失败；PostgreSQL 用例按默认开关忽略；
@@ -211,16 +224,16 @@ RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.po
 块数失败回滚、active 原子切换、RRF ranking signals 和 tenant/permission 过滤。Memory 用例验证并发 CAS 仅一个胜出、
 tenant+user 隔离、中文检索、tombstone 真实清空正文、多 worker 过期领取，以及审计约束失败时纠正回滚和成功纠正/
 低敏审计同事务。
-Embedding 治理用例另外验证 V001 三张治理表、REAL[] 批量编解码、跨 Store 实例缓存、tenant 隔离、窗口行锁、并发硬配额、
+Embedding 治理用例另外验证 0.3 基线中的三张治理表、REAL[] 批量编解码、跨 Store 实例缓存、tenant 隔离、窗口行锁、并发硬配额、
 requestId/hash 幂等冲突与窗口清理级联释放。
-Eval 趋势用例验证 V007 低敏表、跨 Store 并发 `ON CONFLICT` 仲裁、同 ID 内容冲突、kind 隔离、精确时间排序、最近成功
+Eval 趋势用例验证低敏表、跨 Store 并发 `ON CONFLICT` 仲裁、同 ID 内容冲突、kind 隔离、精确时间排序、最近成功
 部分索引语义、TEXT/JSONB 双表示一致性、checksum 篡改拒绝和原始 grade details 不落库。
 - 工具空白名单默认拒绝。
 - Workflow 声明式边的启动校验、不可达/缺失目标诊断、循环访问上限、完成/暂停 checkpoint 恢复、
   definition/session identity、单调写冲突、未声明动态路由拒绝，以及 `AllSucceeded` fan-out 失败时的兄弟 Fiber 中断和
   join checkpoint 隔离；durable 模式另覆盖 lease generation/fencing 和 Prepared outcome 故障恢复。
-- PostgreSQL Workflow：V008/V009、跨 Store 并发幂等与单调 step、identity 漂移拒绝、checksum 损坏 fail-closed、
-  暂停后跨 Adapter 实例恢复，以及 execution ledger/checkpoint 原子提交。
+- PostgreSQL Workflow：0.3 fresh baseline、跨 Store 并发幂等与单调 step、identity 漂移拒绝、checksum 损坏 fail-closed、
+  暂停后跨 Adapter 实例恢复、execution ledger/checkpoint/wait 原子提交、signal 去重与数据库时钟 deadline 竞态。
 - RAG tenant/permission 前置过滤。
 
 Testkit 提供 Scripted/Recording Provider、Stub/Failing/Slow/NonInterruptible Tool、固定 TokenCounter 和确定性 ID。

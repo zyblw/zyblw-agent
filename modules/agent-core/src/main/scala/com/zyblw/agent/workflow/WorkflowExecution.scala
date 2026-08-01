@@ -233,8 +233,23 @@ trait WorkflowExecutionStore[S] extends WorkflowCheckpointStore[S]:
   /** 在一个原子边界内把全部 Prepared execution 标记为 Committed 并推进 checkpoint。 */
   def commit(
       leases: NonEmptyChunk[WorkflowExecutionLease],
-      checkpoint: WorkflowCheckpoint[S]
+      checkpoint: WorkflowCheckpoint[S],
+      waitCommit: WorkflowWaitCommit = WorkflowWaitCommit.empty
   ): IO[StoreError, Unit]
+
+  /** 返回当前尚未消费的唯一等待；同一 Run 出现多个活跃等待属于数据损坏并 fail-closed。 */
+  def currentWait(runId: RunId): IO[StoreError, Option[WorkflowWaitRecord]]
+
+  /** 接收并去重一个外部 signal。数据库/测试时钟达到 deadline 后 timeout 必然胜出。 */
+  def signal(
+      waitKey: WorkflowWaitKey,
+      signalId: WorkflowSignalId,
+      name: WorkflowSignalName,
+      payload: String
+  ): IO[StoreError, WorkflowSignalReceipt]
+
+  /** 原子决议已到期等待；返回本次从 Pending 转为 TimedOut 的记录，供宿主提交唤醒任务。 */
+  def expireDue(limit: Int = 100): IO[StoreError, Chunk[WorkflowWaitRecord]]
 
   /** 按完整 execution identity 读取权威账本记录；该记录可能包含状态正文，不适合直接暴露给外部协议。 */
   def get(key: WorkflowExecutionKey): IO[StoreError, Option[WorkflowExecutionRecord[S]]]
@@ -257,15 +272,23 @@ trait WorkflowExecutionStore[S] extends WorkflowCheckpointStore[S]:
 
 object WorkflowExecutionStore:
   final private case class MemoryExecutionSlot(runId: RunId, step: Int, nodeId: NodeId)
+  final private case class MemorySignalSlot(waitKey: WorkflowWaitKey, signalId: WorkflowSignalId)
+  final private case class MemorySignal(
+      receipt: WorkflowSignalReceipt,
+      name: WorkflowSignalName,
+      payload: String
+  )
 
   final private case class MemoryState[S](
       checkpoints: Map[RunId, WorkflowCheckpoint[S]],
-      executions: Map[MemoryExecutionSlot, WorkflowExecutionRecord[S]]
+      executions: Map[MemoryExecutionSlot, WorkflowExecutionRecord[S]],
+      waits: Map[WorkflowWaitKey, WorkflowWaitRecord],
+      signals: Map[MemorySignalSlot, MemorySignal]
   )
 
   /** 单进程开发与测试实现；`Ref.Synchronized` 让 ledger 与 checkpoint 在同一原子临界区推进。 */
   def inMemory[S: Tag]: ULayer[WorkflowExecutionStore[S]] = ZLayer.fromZIO {
-    Ref.Synchronized.make(MemoryState[S](Map.empty, Map.empty)).map { state =>
+    Ref.Synchronized.make(MemoryState[S](Map.empty, Map.empty, Map.empty, Map.empty)).map { state =>
       new WorkflowExecutionStore[S]:
         override def save(runId: RunId, checkpoint: WorkflowCheckpoint[S]): IO[StoreError, Unit] =
           state.modifyZIO { current =>
@@ -386,7 +409,8 @@ object WorkflowExecutionStore:
 
         override def commit(
             leases: NonEmptyChunk[WorkflowExecutionLease],
-            checkpoint: WorkflowCheckpoint[S]
+            checkpoint: WorkflowCheckpoint[S],
+            waitCommit: WorkflowWaitCommit
         ): IO[StoreError, Unit] =
           Clock.instant.flatMap { now =>
             state.modifyZIO { current =>
@@ -415,7 +439,7 @@ object WorkflowExecutionStore:
                         current.checkpoints,
                         checkpointRunId(values),
                         checkpoint
-                      ).map { checkpoints =>
+                      ).flatMap { checkpoints =>
                         val executions =
                           records.zip(values).foldLeft(current.executions) { case (acc, (record, lease)) =>
                             acc.updated(
@@ -428,7 +452,13 @@ object WorkflowExecutionStore:
                               )
                             )
                           }
-                        () -> current.copy(checkpoints = checkpoints, executions = executions)
+                        applyWaitCommit(current.waits, values, waitCommit, now).map { waits =>
+                          () -> current.copy(
+                            checkpoints = checkpoints,
+                            executions = executions,
+                            waits = waits
+                          )
+                        }
                       }
                   }
             }
@@ -440,6 +470,83 @@ object WorkflowExecutionStore:
               case Some(record) if record.key != key =>
                 ZIO.fail(conflict(key, "execution-identity"))
               case value => ZIO.succeed(value)
+          }
+
+        override def currentWait(runId: RunId): IO[StoreError, Option[WorkflowWaitRecord]] =
+          state.get.flatMap { current =>
+            val active = current.waits.valuesIterator
+              .filter(record => record.key.runId == runId && record.status != WorkflowWaitStatus.Consumed)
+              .toList
+              .sortBy(record => record.key.step -> record.key.nodeId.value)
+            active match
+              case Nil          => ZIO.none
+              case value :: Nil => ZIO.some(value)
+              case _            => ZIO.fail(waitConflict(runId, "multiple-active-waits"))
+          }
+
+        override def signal(
+            waitKey: WorkflowWaitKey,
+            signalId: WorkflowSignalId,
+            name: WorkflowSignalName,
+            payload: String
+        ): IO[StoreError, WorkflowSignalReceipt] =
+          validateSignalPayload(payload) *> Clock.instant.flatMap { now =>
+            state.modifyZIO { current =>
+              val signalSlot = MemorySignalSlot(waitKey, signalId)
+              current.signals.get(signalSlot) match
+                case Some(existing) if existing.name == name && existing.payload == payload =>
+                  ZIO.succeed(
+                    existing.receipt.copy(disposition = WorkflowSignalDisposition.Duplicate) -> current
+                  )
+                case Some(_) => ZIO.fail(waitConflict(waitKey.runId, "signal-id-payload-conflict"))
+                case None    =>
+                  current.waits.get(waitKey) match
+                    case None       => ZIO.fail(waitConflict(waitKey.runId, "wait-not-found"))
+                    case Some(wait) =>
+                      wait.condition match
+                        case WorkflowWaitCondition.Timer =>
+                          ZIO.fail(waitConflict(waitKey.runId, "timer-does-not-accept-signal"))
+                        case WorkflowWaitCondition.Signal(expected) if expected != name =>
+                          ZIO.fail(waitConflict(waitKey.runId, "signal-name-mismatch"))
+                        case WorkflowWaitCondition.Signal(_) =>
+                          val (updatedWait, disposition) = wait.status match
+                            case WorkflowWaitStatus.Pending if now.isBefore(wait.deadline) =>
+                              wait.copy(
+                                status = WorkflowWaitStatus.Signaled,
+                                signal = Some(WorkflowSignalValue(signalId, name, payload, now)),
+                                resolvedAt = Some(now)
+                              ) -> WorkflowSignalDisposition.Accepted
+                            case WorkflowWaitStatus.Pending =>
+                              wait.copy(status = WorkflowWaitStatus.TimedOut, resolvedAt = Some(now)) ->
+                                WorkflowSignalDisposition.Late
+                            case _ => wait -> WorkflowSignalDisposition.AlreadyResolved
+                          val receipt = WorkflowSignalReceipt(waitKey, signalId, disposition, now)
+                          val next    = current.copy(
+                            waits = current.waits.updated(waitKey, updatedWait),
+                            signals = current.signals.updated(
+                              signalSlot,
+                              MemorySignal(receipt, name, payload)
+                            )
+                          )
+                          ZIO.succeed(receipt -> next)
+            }
+          }
+
+        override def expireDue(limit: Int): IO[StoreError, Chunk[WorkflowWaitRecord]] =
+          validateWaitLimit(limit) *> Clock.instant.flatMap { now =>
+            state.modify { current =>
+              val due = current.waits.valuesIterator
+                .filter(record =>
+                  record.status == WorkflowWaitStatus.Pending && !record.deadline.isAfter(now)
+                )
+                .toList
+                .sortBy(record => record.deadline -> record.key.runId.asString)
+                .take(limit)
+              val resolved =
+                due.map(record => record.copy(status = WorkflowWaitStatus.TimedOut, resolvedAt = Some(now)))
+              val waits = resolved.foldLeft(current.waits)((acc, record) => acc.updated(record.key, record))
+              Chunk.fromIterable(resolved) -> current.copy(waits = waits)
+            }
           }
 
         override def timeline(
@@ -469,6 +576,15 @@ object WorkflowExecutionStore:
   private def validateTimelineLimit(limit: Int): IO[StoreError, Unit] =
     if limit >= 1 && limit <= 500 then ZIO.unit
     else ZIO.fail(AgentError.PersistenceFailure("workflow execution timeline limit 必须位于 1..500"))
+
+  private def validateWaitLimit(limit: Int): IO[StoreError, Unit] =
+    if limit >= 1 && limit <= 500 then ZIO.unit
+    else ZIO.fail(AgentError.PersistenceFailure("workflow wait limit 必须位于 1..500"))
+
+  private def validateSignalPayload(payload: String): IO[StoreError, Unit] =
+    val bytes = Option(payload).fold(Int.MaxValue)(_.getBytes(java.nio.charset.StandardCharsets.UTF_8).length)
+    if bytes <= 64 * 1024 then ZIO.unit
+    else ZIO.fail(AgentError.PersistenceFailure("workflow signal payload 不能超过 64KiB"))
 
   private def isAfter(key: WorkflowExecutionKey, cursor: WorkflowTimelineCursor): Boolean =
     key.step > cursor.step ||
@@ -509,6 +625,76 @@ object WorkflowExecutionStore:
         checkpoint.step > key.step
       }
     if valid then ZIO.unit else ZIO.fail(conflict(first, "checkpoint-identity"))
+
+  private def applyWaitCommit(
+      waits: Map[WorkflowWaitKey, WorkflowWaitRecord],
+      leases: Chunk[WorkflowExecutionLease],
+      commit: WorkflowWaitCommit,
+      now: Instant
+  ): IO[StoreError, Map[WorkflowWaitKey, WorkflowWaitRecord]] =
+    val runId    = leases.head.key.runId
+    val consumed = commit.consume match
+      case None                            => ZIO.succeed(waits)
+      case Some(key) if key.runId != runId => ZIO.fail(waitConflict(runId, "consume-run-mismatch"))
+      case Some(key)                       =>
+        waits.get(key) match
+          case Some(record) if record.status == WorkflowWaitStatus.Consumed => ZIO.succeed(waits)
+          case Some(record)
+              if record.status == WorkflowWaitStatus.Signaled ||
+                record.status == WorkflowWaitStatus.TimedOut =>
+            ZIO.succeed(
+              waits.updated(
+                key,
+                record.copy(status = WorkflowWaitStatus.Consumed, consumedAt = Some(now))
+              )
+            )
+          case Some(_) => ZIO.fail(waitConflict(runId, "consume-pending-wait"))
+          case None    => ZIO.fail(waitConflict(runId, "consume-wait-not-found"))
+
+    consumed.flatMap { afterConsume =>
+      commit.register match
+        case None                       => ZIO.succeed(afterConsume)
+        case Some((execution, request)) =>
+          val key             = WorkflowWaitKey(execution.runId, execution.step, execution.nodeId)
+          val executionOwned  = leases.exists(_.key == execution)
+          val identityMatches = execution.runId == runId &&
+            execution.workflowId == leases.head.key.workflowId &&
+            execution.definitionVersion == leases.head.key.definitionVersion &&
+            execution.sessionId == leases.head.key.sessionId
+          val otherActive = afterConsume.valuesIterator.exists(record =>
+            record.key.runId == runId && record.key != key && record.status != WorkflowWaitStatus.Consumed
+          )
+          if !executionOwned || !identityMatches then
+            ZIO.fail(waitConflict(runId, "register-execution-mismatch"))
+          else if !request.deadline.isAfter(now) then
+            ZIO.fail(waitConflict(runId, "register-deadline-not-future"))
+          else if otherActive then ZIO.fail(waitConflict(runId, "active-wait-exists"))
+          else
+            afterConsume.get(key) match
+              case Some(existing)
+                  if existing.workflowId == execution.workflowId &&
+                    existing.definitionVersion == execution.definitionVersion &&
+                    existing.sessionId == execution.sessionId &&
+                    existing.condition == request.condition &&
+                    existing.deadline == request.deadline =>
+                ZIO.succeed(afterConsume)
+              case Some(_) => ZIO.fail(waitConflict(runId, "wait-identity-conflict"))
+              case None    =>
+                val record = WorkflowWaitRecord(
+                  key,
+                  execution.workflowId,
+                  execution.definitionVersion,
+                  execution.sessionId,
+                  request.condition,
+                  request.deadline,
+                  WorkflowWaitStatus.Pending,
+                  None,
+                  now,
+                  None,
+                  None
+                )
+                ZIO.succeed(afterConsume.updated(key, record))
+    }
 
   private def checkpointRunId(leases: Chunk[WorkflowExecutionLease]): RunId = leases.head.key.runId
 
@@ -569,3 +755,6 @@ object WorkflowExecutionStore:
       lease.generation,
       s"workflow-node=${lease.key.nodeId.value},step=${lease.key.step}"
     )
+
+  private def waitConflict(runId: RunId, reason: String): StoreError =
+    AgentError.WorkflowCheckpointConflict(runId, s"wait:$reason")

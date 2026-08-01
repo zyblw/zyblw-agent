@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-30
+> 最后核验：2026-08-01
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -67,6 +67,7 @@ flowchart LR
   Workflow --> WorkflowStore[Execution Store + Checkpoint]
   WorkflowStore --> PostgreSQL
   WorkflowStore --> WorkflowTimeline[低敏 Execution Timeline]
+  WorkflowStore --> WorkflowWait[Durable Wait + Signal]
 ```
 
 Inspector 从授权后的权威 State 与耐久 Event 生成只读 Timeline 和一致性诊断。它不承担恢复和重放，因此不会成为与
@@ -74,8 +75,8 @@ Runtime 竞争的第二套状态；它也不复制 Prompt、消息、工具参�
 [Run Inspector、Timeline 与安全调试](run-inspection.md)。
 
 Workflow execution timeline 遵守同一原则：它从节点账本投影 node/step/status/generation/owner/时间戳，不复制应用状态、
-pending outcome 或 fencing token。恢复仍只读取权威 checkpoint 与 ledger；外部 Adapter 必须在查询前验证 Run 的
-tenant/user 读取权限。
+pending outcome 或 fencing token。durable wait 则保存条件、绝对 deadline 和唯一决议；signal payload 不进入 timeline。
+恢复仍只读取权威 checkpoint、ledger 与 wait；外部 Adapter 必须在查询前验证 Run 的 tenant/user 读取权限。
 
 ## Agent Run 时序
 

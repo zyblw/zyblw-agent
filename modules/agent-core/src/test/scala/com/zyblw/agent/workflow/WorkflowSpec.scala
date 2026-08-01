@@ -458,13 +458,22 @@ object WorkflowSpec extends ZIOSpecDefault:
             baseStore.prepare(lease, outcome)
           def commit(
               leases: NonEmptyChunk[WorkflowExecutionLease],
-              checkpoint: WorkflowCheckpoint[Int]
+              checkpoint: WorkflowCheckpoint[Int],
+              waitCommit: WorkflowWaitCommit
           ) =
             failOnce.getAndSet(false).flatMap {
               case true  => ZIO.fail(AgentError.PersistenceFailure("injected-before-checkpoint"))
-              case false => baseStore.commit(leases, checkpoint)
+              case false => baseStore.commit(leases, checkpoint, waitCommit)
             }
           def get(key: WorkflowExecutionKey) = baseStore.get(key)
+          def currentWait(runId: RunId)      = baseStore.currentWait(runId)
+          def signal(
+              waitKey: WorkflowWaitKey,
+              signalId: WorkflowSignalId,
+              name: WorkflowSignalName,
+              payload: String
+          ) = baseStore.signal(waitKey, signalId, name, payload)
+          def expireDue(limit: Int) = baseStore.expireDue(limit)
           override def timeline(runId: RunId, after: Option[WorkflowTimelineCursor], limit: Int) =
             baseStore.timeline(runId, after, limit)
         policy = WorkflowExecutionPolicy(
@@ -522,6 +531,192 @@ object WorkflowSpec extends ZIOSpecDefault:
         )
       )
     }.provide(WorkflowExecutionStore.inMemory[Int]),
+    test("耐久 signal 注册、幂等接收与唤醒消费都落在 execution/checkpoint 边界") {
+      for
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        store     <- ZIO.service[WorkflowExecutionStore[Int]]
+        approval   = NodeId("approval")
+        signalName = WorkflowSignalName("approval.received")
+        definition = validDefinition(
+          approval,
+          Map(
+            approval -> nodeWithContext(approval) { (state, workflowContext) =>
+              workflowContext.wakeup match
+                case Some(WorkflowWakeup.SignalReceived(_, value)) if value.name == signalName =>
+                  ZIO.succeed(NodeOutcome.Succeeded(state + 1))
+                case Some(WorkflowWakeup.DeadlineElapsed(_, _)) =>
+                  ZIO.succeed(NodeOutcome.Succeeded(state - 1))
+                case _ =>
+                  Clock.instant.map(now =>
+                    NodeOutcome.Awaiting(
+                      state,
+                      WorkflowWaitRequest(
+                        WorkflowWaitCondition.Signal(signalName),
+                        now.plusSeconds(3600)
+                      )
+                    )
+                  )
+            }
+          ),
+          Map(approval -> WorkflowTransition.Complete())
+        )
+        engine = WorkflowEngine.makeDurable(
+          definition,
+          store,
+          sumReducer,
+          WorkflowExecutionPolicy(WorkerId("wait-worker"))
+        )
+        first         <- engine.run(10, context(runId, sessionId)).runCollect
+        wait          <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
+        pendingResume <- engine.resume(context(runId, sessionId)).runCollect.either
+        accepted      <- store.signal(
+          wait.key,
+          WorkflowSignalId("signal-1"),
+          signalName,
+          "approved"
+        )
+        duplicate <- store.signal(
+          wait.key,
+          WorkflowSignalId("signal-1"),
+          signalName,
+          "approved"
+        )
+        conflicting <- store
+          .signal(wait.key, WorkflowSignalId("signal-1"), signalName, "different")
+          .either
+        resumed       <- engine.resume(context(runId, sessionId)).runCollect
+        remainingWait <- store.currentWait(runId)
+      yield assertTrue(
+        first.exists {
+          case WorkflowEvent.Waiting(`approval`, key, WorkflowWaitCondition.Signal(`signalName`), _, 10) =>
+            key == wait.key
+          case _ => false
+        },
+        wait.status == WorkflowWaitStatus.Pending,
+        pendingResume.left.exists(_.message == "workflow-wait-pending"),
+        accepted.disposition == WorkflowSignalDisposition.Accepted,
+        duplicate.disposition == WorkflowSignalDisposition.Duplicate,
+        conflicting.left.exists(_.category == ErrorCategory.Conflict),
+        resumed.lastOption.contains(WorkflowEvent.Completed(11)),
+        remainingWait.isEmpty
+      )
+    }.provide(WorkflowExecutionStore.inMemory[Int]),
+    test("恢复会拒绝 Store 注入另一节点身份的 wait") {
+      for
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        baseStore <- ZIO.service[WorkflowExecutionStore[Int]]
+        gate       = NodeId("identity-gate")
+        definition = validDefinition(
+          gate,
+          Map(
+            gate -> nodeWithContext(gate) { (state, _) =>
+              Clock.instant.map(now =>
+                NodeOutcome.Awaiting(
+                  state,
+                  WorkflowWaitRequest(WorkflowWaitCondition.Timer, now.plusSeconds(60))
+                )
+              )
+            }
+          ),
+          Map(gate -> WorkflowTransition.Complete())
+        )
+        policy = WorkflowExecutionPolicy(WorkerId("identity-worker"))
+        _ <- WorkflowEngine
+          .makeDurable(definition, baseStore, sumReducer, policy)
+          .run(1, context(runId, sessionId))
+          .runCollect
+        corruptingStore = new WorkflowExecutionStore[Int]:
+          def save(runId: RunId, checkpoint: WorkflowCheckpoint[Int]) =
+            baseStore.save(runId, checkpoint)
+          def load(runId: RunId) = baseStore.load(runId)
+          def claim(key: WorkflowExecutionKey, owner: WorkerId, leaseDuration: Duration) =
+            baseStore.claim(key, owner, leaseDuration)
+          def heartbeat(lease: WorkflowExecutionLease, leaseDuration: Duration) =
+            baseStore.heartbeat(lease, leaseDuration)
+          def prepare(lease: WorkflowExecutionLease, outcome: NodeOutcome[Int]) =
+            baseStore.prepare(lease, outcome)
+          def commit(
+              leases: NonEmptyChunk[WorkflowExecutionLease],
+              checkpoint: WorkflowCheckpoint[Int],
+              waitCommit: WorkflowWaitCommit
+          ) = baseStore.commit(leases, checkpoint, waitCommit)
+          def get(key: WorkflowExecutionKey) = baseStore.get(key)
+          def currentWait(runId: RunId)      =
+            baseStore
+              .currentWait(runId)
+              .map(_.map(record => record.copy(key = record.key.copy(nodeId = NodeId("other-node")))))
+          def signal(
+              waitKey: WorkflowWaitKey,
+              signalId: WorkflowSignalId,
+              name: WorkflowSignalName,
+              payload: String
+          ) = baseStore.signal(waitKey, signalId, name, payload)
+          def expireDue(limit: Int) = baseStore.expireDue(limit)
+          override def timeline(runId: RunId, after: Option[WorkflowTimelineCursor], limit: Int) =
+            baseStore.timeline(runId, after, limit)
+        resumed <- WorkflowEngine
+          .makeDurable(definition, corruptingStore, sumReducer, policy)
+          .resume(context(runId, sessionId))
+          .runCollect
+          .either
+      yield assertTrue(resumed.left.exists(_.message == "workflow-wait-identity-mismatch"))
+    }.provide(WorkflowExecutionStore.inMemory[Int]),
+    test("deadline 后 signal 与 timer worker 并发时只产生 TimedOut 唯一胜者") {
+      for
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        store     <- ZIO.service[WorkflowExecutionStore[Int]]
+        gate       = NodeId("timeout-gate")
+        signalName = WorkflowSignalName("external.done")
+        definition = validDefinition(
+          gate,
+          Map(
+            gate -> nodeWithContext(gate) { (state, workflowContext) =>
+              workflowContext.wakeup match
+                case Some(WorkflowWakeup.DeadlineElapsed(_, _)) =>
+                  ZIO.succeed(NodeOutcome.Succeeded(state + 100))
+                case Some(WorkflowWakeup.SignalReceived(_, _)) =>
+                  ZIO.succeed(NodeOutcome.Succeeded(state + 1))
+                case None =>
+                  Clock.instant.map(now =>
+                    NodeOutcome.Awaiting(
+                      state,
+                      WorkflowWaitRequest(
+                        WorkflowWaitCondition.Signal(signalName),
+                        now.plusSeconds(60)
+                      )
+                    )
+                  )
+            }
+          ),
+          Map(gate -> WorkflowTransition.Complete())
+        )
+        engine = WorkflowEngine.makeDurable(
+          definition,
+          store,
+          sumReducer,
+          WorkflowExecutionPolicy(WorkerId("timeout-worker"))
+        )
+        _       <- engine.run(1, context(runId, sessionId)).runCollect
+        wait    <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
+        _       <- TestClock.adjust(61.seconds)
+        results <- store
+          .signal(wait.key, WorkflowSignalId("late-signal"), signalName, "late")
+          .zipPar(store.expireDue())
+        resolved <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
+        resumed  <- engine.resume(context(runId, sessionId)).runCollect
+      yield assertTrue(
+        Set(
+          WorkflowSignalDisposition.Late,
+          WorkflowSignalDisposition.AlreadyResolved
+        ).contains(results._1.disposition),
+        results._2.size <= 1,
+        resolved.status == WorkflowWaitStatus.TimedOut,
+        resumed.lastOption.contains(WorkflowEvent.Completed(101))
+      )
+    }.provide(WorkflowExecutionStore.inMemory[Int]),
     test("AllSucceeded 分支失败会中断仍在运行的兄弟 Fiber 且不提交 join checkpoint") {
       for
         runId       <- RunId.random
@@ -574,6 +769,14 @@ object WorkflowSpec extends ZIOSpecDefault:
     new WorkflowNode[Any, Int]:
       val id                                                                                 = id0
       def execute(state: Int, context: WorkflowContext): IO[WorkflowError, NodeOutcome[Int]] = run(state)
+
+  private def nodeWithContext(id0: NodeId)(
+      run: (Int, WorkflowContext) => IO[WorkflowError, NodeOutcome[Int]]
+  ): WorkflowNode[Any, Int] =
+    new WorkflowNode[Any, Int]:
+      val id                                                                                 = id0
+      def execute(state: Int, context: WorkflowContext): IO[WorkflowError, NodeOutcome[Int]] =
+        run(state, context)
 
   private def validDefinition(
       entry: NodeId,

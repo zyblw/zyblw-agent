@@ -20,21 +20,23 @@ import zio.json.*
   */
 final case class PostgresWorkflowCheckpointStoreConfig(
     maxCheckpointBytes: Int = 2 * 1024 * 1024,
-    maxVisitEntries: Int = 10_000
+    maxVisitEntries: Int = 10_000,
+    maxSignalBytes: Int = 64 * 1024
 ):
   require(
     maxCheckpointBytes >= 1024 && maxCheckpointBytes <= 16 * 1024 * 1024,
     "maxCheckpointBytes 必须位于 1KiB..16MiB"
   )
   require(maxVisitEntries >= 1 && maxVisitEntries <= 100_000, "maxVisitEntries 必须位于 1..100000")
+  require(maxSignalBytes >= 0 && maxSignalBytes <= 64 * 1024, "maxSignalBytes 必须位于 0..64KiB")
 
 /** 使用 PostgreSQL 保存声明式 Workflow 的完整恢复快照。
   *
   * 每个 `runId` 只有一行权威 checkpoint。写入允许相同内容幂等重放，或在相同 workflow/version/session identity 内推进到更大 step；陈旧写入、同 step
   * 不同内容和 identity 漂移均 fail-closed。完整 JSON 同时保存确定性 TEXT、JSONB 分析投影和 SHA-256，读取时重新验证容量、checksum、领域约束与冗余列。
   *
-  * V009 起同一 Adapter 还实现 `WorkflowExecutionStore`：节点 pending outcome、execution ledger 与 checkpoint 可在一个事务中
-  * fenced 提交。节点内部外部副作用仍必须使用业务幂等键或 outbox/inbox。
+  * 同一 Adapter 还实现 `WorkflowExecutionStore`：节点 pending outcome、execution ledger、checkpoint 与 durable wait 可在一个
+  * 事务中 fenced 提交。节点内部外部副作用仍必须使用业务幂等键或 outbox/inbox。
   */
 final class PostgresWorkflowCheckpointStore[S: JsonCodec](
     dataSource: DataSource,
@@ -185,7 +187,8 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
 
   override def commit(
       leases: NonEmptyChunk[WorkflowExecutionLease],
-      checkpoint: WorkflowCheckpoint[S]
+      checkpoint: WorkflowCheckpoint[S],
+      waitCommit: WorkflowWaitCommit
   ): IO[StoreError, Unit] =
     val values = Chunk.fromIterable(leases)
     for
@@ -232,6 +235,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
                   }
                 case None => ZIO.fail(corrupted("commit-checkpoint-row-missing"))
               }
+          _ <- applyWaitCommit(connection, values, waitCommit)
           _ <-
             if idempotentCommitted then ZIO.unit
             else ZIO.foreachDiscard(values)(lease => markCommitted(connection, lease))
@@ -259,6 +263,366 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
       withConnection(connection => selectExecutionTimeline(connection, runId, after, limit))
         .flatMap(rows => ZIO.foreach(rows)(decodeExecution))
         .map(_.map(record => WorkflowExecutionTimelineEntry.fromRecord(record)))
+
+  override def currentWait(runId: RunId): IO[StoreError, Option[WorkflowWaitRecord]] =
+    withConnection(connection => selectCurrentWait(connection, runId, forUpdate = false))
+      .flatMap(row => ZIO.foreach(row)(decodeWait))
+
+  override def signal(
+      waitKey: WorkflowWaitKey,
+      signalId: WorkflowSignalId,
+      name: WorkflowSignalName,
+      payload: String
+  ): IO[StoreError, WorkflowSignalReceipt] =
+    for
+      payloadHash <- validateSignalPayload(payload)
+      receipt     <- withTransaction { connection =>
+        for
+          existing <- selectSignal(connection, waitKey, signalId)
+          result   <- existing match
+            case Some(row) =>
+              if row.name == name.value && row.payloadSha256 == payloadHash && row.payload == payload then
+                ZIO.succeed(
+                  WorkflowSignalReceipt(
+                    waitKey,
+                    signalId,
+                    WorkflowSignalDisposition.Duplicate,
+                    row.receivedAt
+                  )
+                )
+              else ZIO.fail(waitConflict(waitKey.runId, "signal-id-payload-conflict"))
+            case None => receiveSignal(connection, waitKey, signalId, name, payload, payloadHash)
+        yield result
+      }
+    yield receipt
+
+  override def expireDue(limit: Int): IO[StoreError, Chunk[WorkflowWaitRecord]] =
+    validateWaitLimit(limit) *> withTransaction(connection => expireWaitRows(connection, limit))
+      .flatMap(rows => ZIO.foreach(rows)(decodeWait))
+
+  private def selectCurrentWait(
+      connection: Connection,
+      runId: RunId,
+      forUpdate: Boolean
+  ): IO[StoreError, Option[StoredWaitRow]] =
+    jdbc("wait-current") {
+      val lock      = if forUpdate then " FOR UPDATE" else ""
+      val statement = connection.prepareStatement(
+        s"""SELECT run_id::text, step, node_id, workflow_id, definition_version, session_id::text,
+           | condition_kind, signal_name, deadline, status, accepted_signal_id,
+           | accepted_signal_payload, accepted_signal_sha256, signal_received_at,
+           | created_at, resolved_at, consumed_at
+           |FROM agent_workflow_waits
+           |WHERE run_id = ?::uuid AND status <> 'Consumed'
+           |ORDER BY step ASC, node_id COLLATE "C" ASC
+           |LIMIT 2$lock""".stripMargin
+      )
+      try
+        statement.setString(1, runId.asString)
+        val result = statement.executeQuery()
+        val rows   = ChunkBuilder.make[StoredWaitRow]()
+        while result.next() do rows += readWaitRow(result)
+        rows.result()
+      finally statement.close()
+    }.flatMap {
+      case rows if rows.length > 1 => ZIO.fail(waitConflict(runId, "multiple-active-waits"))
+      case rows                    => ZIO.succeed(rows.headOption)
+    }
+
+  private def selectWait(
+      connection: Connection,
+      key: WorkflowWaitKey,
+      forUpdate: Boolean
+  ): IO[StoreError, Option[StoredWaitRow]] =
+    jdbc("wait-load") {
+      val lock      = if forUpdate then " FOR UPDATE" else ""
+      val statement = connection.prepareStatement(
+        s"""SELECT run_id::text, step, node_id, workflow_id, definition_version, session_id::text,
+           | condition_kind, signal_name, deadline, status, accepted_signal_id,
+           | accepted_signal_payload, accepted_signal_sha256, signal_received_at,
+           | created_at, resolved_at, consumed_at
+           |FROM agent_workflow_waits
+           |WHERE run_id = ?::uuid AND step = ? AND node_id = ?$lock""".stripMargin
+      )
+      try
+        statement.setString(1, key.runId.asString)
+        statement.setInt(2, key.step)
+        statement.setString(3, key.nodeId.value)
+        val result = statement.executeQuery()
+        if result.next() then Some(readWaitRow(result)) else None
+      finally statement.close()
+    }
+
+  private def readWaitRow(result: ResultSet): StoredWaitRow =
+    StoredWaitRow(
+      result.getString(1),
+      result.getInt(2),
+      result.getString(3),
+      result.getString(4),
+      result.getInt(5),
+      result.getString(6),
+      result.getString(7),
+      Option(result.getString(8)),
+      result.getObject(9, classOf[OffsetDateTime]).toInstant,
+      result.getString(10),
+      Option(result.getString(11)),
+      Option(result.getString(12)),
+      Option(result.getString(13)),
+      Option(result.getObject(14, classOf[OffsetDateTime])).map(_.toInstant),
+      result.getObject(15, classOf[OffsetDateTime]).toInstant,
+      Option(result.getObject(16, classOf[OffsetDateTime])).map(_.toInstant),
+      Option(result.getObject(17, classOf[OffsetDateTime])).map(_.toInstant)
+    )
+
+  private def decodeWait(row: StoredWaitRow): IO[StoreError, WorkflowWaitRecord] =
+    for
+      runId      <- ZIO.fromEither(RunId.fromString(row.runId)).mapError(_ => waitCorrupted("run-id"))
+      nodeId     <- ZIO.fromEither(NodeId.fromString(row.nodeId)).mapError(_ => waitCorrupted("node-id"))
+      workflowId <- ZIO
+        .fromEither(WorkflowId.fromString(row.workflowId))
+        .mapError(_ => waitCorrupted("workflow-id"))
+      definitionVersion <- ZIO
+        .fromEither(WorkflowVersion.fromInt(row.definitionVersion))
+        .mapError(_ => waitCorrupted("definition-version"))
+      sessionId <- ZIO
+        .fromEither(SessionId.fromString(row.sessionId))
+        .mapError(_ => waitCorrupted("session-id"))
+      condition <- row.conditionKind match
+        case "Signal" =>
+          ZIO
+            .fromOption(row.signalName)
+            .flatMap(name => ZIO.fromEither(WorkflowSignalName.fromString(name)))
+            .map(WorkflowWaitCondition.Signal.apply)
+            .mapError(_ => waitCorrupted("signal-name"))
+        case "Timer" if row.signalName.isEmpty => ZIO.succeed(WorkflowWaitCondition.Timer)
+        case _                                 => ZIO.fail(waitCorrupted("condition"))
+      status <- row.status match
+        case "Pending"  => ZIO.succeed(WorkflowWaitStatus.Pending)
+        case "Signaled" => ZIO.succeed(WorkflowWaitStatus.Signaled)
+        case "TimedOut" => ZIO.succeed(WorkflowWaitStatus.TimedOut)
+        case "Consumed" => ZIO.succeed(WorkflowWaitStatus.Consumed)
+        case _          => ZIO.fail(waitCorrupted("status"))
+      signal <- (
+        row.acceptedSignalId,
+        row.acceptedSignalPayload,
+        row.acceptedSignalSha256,
+        row.signalReceivedAt
+      ) match
+        case (Some(id), Some(payload), Some(checksum), Some(receivedAt)) =>
+          for
+            signalId <- ZIO
+              .fromEither(WorkflowSignalId.fromString(id))
+              .mapError(_ => waitCorrupted("accepted-signal-id"))
+            signalName <- condition match
+              case WorkflowWaitCondition.Signal(name) => ZIO.succeed(name)
+              case WorkflowWaitCondition.Timer        => ZIO.fail(waitCorrupted("timer-signal"))
+            _ <- ZIO
+              .fail(waitCorrupted("accepted-signal-payload"))
+              .unless(
+                payload.getBytes(StandardCharsets.UTF_8).length <= config.maxSignalBytes &&
+                  checksum == sha256(payload.getBytes(StandardCharsets.UTF_8))
+              )
+          yield Some(WorkflowSignalValue(signalId, signalName, payload, receivedAt))
+        case (None, None, None, None) => ZIO.none
+        case _                        => ZIO.fail(waitCorrupted("partial-signal"))
+      record <- ZIO
+        .attempt(
+          WorkflowWaitRecord(
+            WorkflowWaitKey(runId, row.step, nodeId),
+            workflowId,
+            definitionVersion,
+            sessionId,
+            condition,
+            row.deadline,
+            status,
+            signal,
+            row.createdAt,
+            row.resolvedAt,
+            row.consumedAt
+          )
+        )
+        .mapError(_ => waitCorrupted("invalid-domain"))
+    yield record
+
+  private def selectSignal(
+      connection: Connection,
+      key: WorkflowWaitKey,
+      signalId: WorkflowSignalId
+  ): IO[StoreError, Option[StoredSignalRow]] =
+    jdbc("signal-load") {
+      val statement = connection.prepareStatement(
+        """SELECT signal_name, payload, payload_sha256, disposition, received_at
+          |FROM agent_workflow_signals
+          |WHERE run_id = ?::uuid AND wait_step = ? AND wait_node_id = ? AND signal_id = ?""".stripMargin
+      )
+      try
+        statement.setString(1, key.runId.asString)
+        statement.setInt(2, key.step)
+        statement.setString(3, key.nodeId.value)
+        statement.setString(4, signalId.value)
+        val result = statement.executeQuery()
+        if result.next() then
+          Some(
+            StoredSignalRow(
+              result.getString(1),
+              result.getString(2),
+              result.getString(3),
+              result.getString(4),
+              result.getObject(5, classOf[OffsetDateTime]).toInstant
+            )
+          )
+        else None
+      finally statement.close()
+    }
+
+  private def receiveSignal(
+      connection: Connection,
+      key: WorkflowWaitKey,
+      signalId: WorkflowSignalId,
+      name: WorkflowSignalName,
+      payload: String,
+      payloadHash: String
+  ): IO[StoreError, WorkflowSignalReceipt] =
+    for
+      row <- selectWait(connection, key, forUpdate = true)
+        .someOrFail(waitConflict(key.runId, "wait-not-found"))
+      wait <- decodeWait(row)
+      _    <- wait.condition match
+        case WorkflowWaitCondition.Timer =>
+          ZIO.fail(waitConflict(key.runId, "timer-does-not-accept-signal"))
+        case WorkflowWaitCondition.Signal(expected) if expected != name =>
+          ZIO.fail(waitConflict(key.runId, "signal-name-mismatch"))
+        case WorkflowWaitCondition.Signal(_) => ZIO.unit
+      now         <- databaseNow(connection)
+      disposition <- wait.status match
+        case WorkflowWaitStatus.Pending if now.isBefore(wait.deadline) =>
+          updateWaitSignaled(connection, key, signalId, payload, payloadHash, now)
+            .as(WorkflowSignalDisposition.Accepted)
+        case WorkflowWaitStatus.Pending =>
+          updateWaitTimedOut(connection, key, now).as(WorkflowSignalDisposition.Late)
+        case _ => ZIO.succeed(WorkflowSignalDisposition.AlreadyResolved)
+      receipt = WorkflowSignalReceipt(key, signalId, disposition, now)
+      _ <- insertSignal(connection, receipt, name, payload, payloadHash)
+    yield receipt
+
+  private def updateWaitSignaled(
+      connection: Connection,
+      key: WorkflowWaitKey,
+      signalId: WorkflowSignalId,
+      payload: String,
+      payloadHash: String,
+      now: Instant
+  ): IO[StoreError, Unit] =
+    jdbc("wait-signal") {
+      val statement = connection.prepareStatement(
+        """UPDATE agent_workflow_waits
+          |SET status = 'Signaled', accepted_signal_id = ?, accepted_signal_payload = ?,
+          |    accepted_signal_sha256 = ?, signal_received_at = ?, resolved_at = ?
+          |WHERE run_id = ?::uuid AND step = ? AND node_id = ? AND status = 'Pending'""".stripMargin
+      )
+      try
+        statement.setString(1, signalId.value)
+        statement.setString(2, payload)
+        statement.setString(3, payloadHash)
+        statement.setObject(4, OffsetDateTime.ofInstant(now, java.time.ZoneOffset.UTC))
+        statement.setObject(5, OffsetDateTime.ofInstant(now, java.time.ZoneOffset.UTC))
+        statement.setString(6, key.runId.asString)
+        statement.setInt(7, key.step)
+        statement.setString(8, key.nodeId.value)
+        if statement.executeUpdate() != 1 then throw IllegalStateException("wait signal transition lost")
+      finally statement.close()
+    }
+
+  private def updateWaitTimedOut(
+      connection: Connection,
+      key: WorkflowWaitKey,
+      now: Instant
+  ): IO[StoreError, Unit] =
+    jdbc("wait-timeout") {
+      val statement = connection.prepareStatement(
+        """UPDATE agent_workflow_waits SET status = 'TimedOut', resolved_at = ?
+          |WHERE run_id = ?::uuid AND step = ? AND node_id = ? AND status = 'Pending'""".stripMargin
+      )
+      try
+        statement.setObject(1, OffsetDateTime.ofInstant(now, java.time.ZoneOffset.UTC))
+        statement.setString(2, key.runId.asString)
+        statement.setInt(3, key.step)
+        statement.setString(4, key.nodeId.value)
+        if statement.executeUpdate() != 1 then throw IllegalStateException("wait timeout transition lost")
+      finally statement.close()
+    }
+
+  private def insertSignal(
+      connection: Connection,
+      receipt: WorkflowSignalReceipt,
+      name: WorkflowSignalName,
+      payload: String,
+      payloadHash: String
+  ): IO[StoreError, Unit] =
+    jdbc("signal-insert") {
+      val statement = connection.prepareStatement(
+        """INSERT INTO agent_workflow_signals
+          |(run_id, wait_step, wait_node_id, signal_id, signal_name, payload, payload_sha256,
+          | disposition, received_at)
+          |VALUES (?::uuid, ?, ?, ?, ?, ?, ?, ?, ?)""".stripMargin
+      )
+      try
+        statement.setString(1, receipt.waitKey.runId.asString)
+        statement.setInt(2, receipt.waitKey.step)
+        statement.setString(3, receipt.waitKey.nodeId.value)
+        statement.setString(4, receipt.signalId.value)
+        statement.setString(5, name.value)
+        statement.setString(6, payload)
+        statement.setString(7, payloadHash)
+        statement.setString(8, receipt.disposition.toString)
+        statement.setObject(9, OffsetDateTime.ofInstant(receipt.receivedAt, java.time.ZoneOffset.UTC))
+        statement.executeUpdate()
+      finally statement.close()
+    }.unit
+
+  private def expireWaitRows(connection: Connection, limit: Int): IO[StoreError, Chunk[StoredWaitRow]] =
+    jdbc("wait-expire-due") {
+      val statement = connection.prepareStatement(
+        """WITH due AS (
+          |  SELECT run_id, step, node_id
+          |  FROM agent_workflow_waits
+          |  WHERE status = 'Pending' AND deadline <= clock_timestamp()
+          |  ORDER BY deadline ASC, run_id ASC, step ASC, node_id COLLATE "C" ASC
+          |  FOR UPDATE SKIP LOCKED
+          |  LIMIT ?
+          |), updated AS (
+          |  UPDATE agent_workflow_waits AS waits
+          |  SET status = 'TimedOut', resolved_at = clock_timestamp()
+          |  FROM due
+          |  WHERE waits.run_id = due.run_id AND waits.step = due.step AND waits.node_id = due.node_id
+          |    AND waits.status = 'Pending'
+          |  RETURNING waits.*
+          |)
+          |SELECT run_id::text, step, node_id, workflow_id, definition_version, session_id::text,
+          | condition_kind, signal_name, deadline, status, accepted_signal_id,
+          | accepted_signal_payload, accepted_signal_sha256, signal_received_at,
+          | created_at, resolved_at, consumed_at
+          |FROM updated
+          |ORDER BY deadline ASC, run_id ASC, step ASC, node_id COLLATE "C" ASC""".stripMargin
+      )
+      try
+        statement.setInt(1, limit)
+        val result  = statement.executeQuery()
+        val builder = ChunkBuilder.make[StoredWaitRow]()
+        while result.next() do builder += readWaitRow(result)
+        builder.result()
+      finally statement.close()
+    }
+
+  private def databaseNow(connection: Connection): IO[StoreError, Instant] =
+    jdbc("database-clock") {
+      val statement = connection.prepareStatement("SELECT clock_timestamp()")
+      try
+        val result = statement.executeQuery()
+        if !result.next() then throw IllegalStateException("database clock row missing")
+        result.getObject(1, classOf[OffsetDateTime]).toInstant
+      finally statement.close()
+    }
 
   private def insertExecution(
       connection: Connection,
@@ -289,7 +653,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
 
   /** 在 claim 事务中串行化同一 Run 的首次 identity，并拒绝跨 step 的 Workflow/version/session 漂移。
     *
-    * V009 没有额外 Run header 表，因此使用 PostgreSQL transaction advisory lock 关闭两个不同节点并发首次插入时的 check-then-insert
+    * 0.3 基线没有额外 Run header 表，因此使用 PostgreSQL transaction advisory lock 关闭两个不同节点并发首次插入时的 check-then-insert
     * 竞争。哈希碰撞只会让无关 Run 暂时串行，不会产生错误授权。
     */
   private def validateExecutionRunIdentity(
@@ -438,7 +802,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
 
   /** 使用 `(step, node_id)` 排他游标读取稳定页面。
     *
-    * 查询只选择现有 V009 列，不需要新增迁移；`run_id, step, node_id` 主键同时承担过滤和有序扫描索引。外层继续复用 `decodeExecution`，因此 timeline
+    * 查询只选择 execution ledger 列；`run_id, step, node_id` 主键同时承担过滤和有序扫描索引。外层继续复用 `decodeExecution`，因此 timeline
     * 与单条读取具有相同的 checksum、枚举和领域约束校验。
     */
   private def selectExecutionTimeline(
@@ -506,9 +870,22 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
       .attempt {
         val stored = outcome match
           case NodeOutcome.Succeeded(state) =>
-            StoredOutcome(CurrentOutcomeSchemaVersion, "Succeeded", state, None)
+            StoredOutcome(CurrentOutcomeSchemaVersion, "Succeeded", state, None, None, None, None)
           case NodeOutcome.Suspended(state, reason) =>
-            StoredOutcome(CurrentOutcomeSchemaVersion, "Suspended", state, Some(reason))
+            StoredOutcome(CurrentOutcomeSchemaVersion, "Suspended", state, Some(reason), None, None, None)
+          case NodeOutcome.Awaiting(state, request) =>
+            val (condition, signalName) = request.condition match
+              case WorkflowWaitCondition.Signal(name) => "Signal" -> Some(name.value)
+              case WorkflowWaitCondition.Timer        => "Timer"  -> None
+            StoredOutcome(
+              CurrentOutcomeSchemaVersion,
+              "Awaiting",
+              state,
+              None,
+              Some(condition),
+              signalName,
+              Some(request.deadline.toEpochMilli)
+            )
         val json  = stored.toJson
         val bytes = json.getBytes(StandardCharsets.UTF_8)
         EncodedOutcome(json, bytes.length, sha256(bytes))
@@ -602,13 +979,32 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         .fail(executionCorrupted("outcome-schema-version"))
         .unless(stored.schemaVersion == CurrentOutcomeSchemaVersion)
       outcome <- stored.kind match
-        case "Succeeded" if stored.reason.isEmpty =>
+        case "Succeeded"
+            if stored.reason.isEmpty && stored.waitCondition.isEmpty && stored.deadlineEpochMilli.isEmpty =>
           ZIO.succeed(NodeOutcome.Succeeded(stored.state))
-        case "Suspended" =>
+        case "Suspended" if stored.waitCondition.isEmpty && stored.deadlineEpochMilli.isEmpty =>
           ZIO
             .fromOption(stored.reason)
             .map(reason => NodeOutcome.Suspended(stored.state, reason))
             .orElseFail(executionCorrupted("outcome-reason"))
+        case "Awaiting" if stored.reason.isEmpty =>
+          for
+            deadlineMillis <- ZIO
+              .fromOption(stored.deadlineEpochMilli)
+              .orElseFail(executionCorrupted("outcome-wait-deadline"))
+            deadline <- ZIO
+              .attempt(Instant.ofEpochMilli(deadlineMillis))
+              .mapError(_ => executionCorrupted("outcome-wait-deadline"))
+            condition <- stored.waitCondition match
+              case Some("Signal") =>
+                ZIO
+                  .fromOption(stored.signalName)
+                  .flatMap(name => ZIO.fromEither(WorkflowSignalName.fromString(name)))
+                  .map(WorkflowWaitCondition.Signal.apply)
+                  .mapError(_ => executionCorrupted("outcome-wait-signal"))
+              case Some("Timer") if stored.signalName.isEmpty => ZIO.succeed(WorkflowWaitCondition.Timer)
+              case _ => ZIO.fail(executionCorrupted("outcome-wait-condition"))
+          yield NodeOutcome.Awaiting(stored.state, WorkflowWaitRequest(condition, deadline))
         case _ => ZIO.fail(executionCorrupted("outcome-kind"))
     yield Some(outcome)
 
@@ -624,6 +1020,16 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
           "PostgreSQL workflow execution timeline limit 必须位于 1..500"
         )
       )
+
+  private def validateWaitLimit(limit: Int): IO[StoreError, Unit] =
+    if limit >= 1 && limit <= 500 then ZIO.unit
+    else ZIO.fail(AgentError.PersistenceFailure("PostgreSQL workflow wait limit 必须位于 1..500"))
+
+  private def validateSignalPayload(payload: String): IO[StoreError, String] =
+    val bytes = Option(payload).map(_.getBytes(StandardCharsets.UTF_8))
+    bytes match
+      case Some(value) if value.length <= config.maxSignalBytes => ZIO.succeed(sha256(value))
+      case _ => ZIO.fail(AgentError.PersistenceFailure("PostgreSQL workflow signal payload 超过容量上限"))
 
   private def validateCommitIdentity(
       leases: Chunk[WorkflowExecutionLease],
@@ -641,6 +1047,114 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         checkpoint.step > key.step
       }
     if valid then ZIO.unit else ZIO.fail(executionConflict(first, "checkpoint-identity"))
+
+  private def applyWaitCommit(
+      connection: Connection,
+      leases: Chunk[WorkflowExecutionLease],
+      commit: WorkflowWaitCommit
+  ): IO[StoreError, Unit] =
+    val runId = leases.head.key.runId
+    for
+      _ <- commit.consume match
+        case None                            => ZIO.unit
+        case Some(key) if key.runId != runId => ZIO.fail(waitConflict(runId, "consume-run-mismatch"))
+        case Some(key)                       => consumeWait(connection, key)
+      _ <- commit.register match
+        case None                       => ZIO.unit
+        case Some((execution, request)) =>
+          val identityMatches = execution.runId == runId &&
+            execution.workflowId == leases.head.key.workflowId &&
+            execution.definitionVersion == leases.head.key.definitionVersion &&
+            execution.sessionId == leases.head.key.sessionId
+          if !identityMatches || !leases.exists(_.key == execution) then
+            ZIO.fail(waitConflict(runId, "register-execution-mismatch"))
+          else registerWait(connection, execution, request)
+    yield ()
+
+  private def consumeWait(connection: Connection, key: WorkflowWaitKey): IO[StoreError, Unit] =
+    jdbc("wait-consume") {
+      val statement = connection.prepareStatement(
+        """UPDATE agent_workflow_waits
+          |SET status = 'Consumed', consumed_at = clock_timestamp()
+          |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
+          |  AND status IN ('Signaled', 'TimedOut')""".stripMargin
+      )
+      try
+        statement.setString(1, key.runId.asString)
+        statement.setInt(2, key.step)
+        statement.setString(3, key.nodeId.value)
+        statement.executeUpdate()
+      finally statement.close()
+    }.flatMap {
+      case 1 => ZIO.unit
+      case _ =>
+        selectWait(connection, key, forUpdate = true).flatMap {
+          case Some(row) if row.status == "Consumed" => ZIO.unit
+          case Some(row) if row.status == "Pending"  =>
+            ZIO.fail(waitConflict(key.runId, "consume-pending-wait"))
+          case Some(_) => ZIO.fail(waitConflict(key.runId, "consume-transition-lost"))
+          case None    => ZIO.fail(waitConflict(key.runId, "consume-wait-not-found"))
+        }
+    }
+
+  private def registerWait(
+      connection: Connection,
+      execution: WorkflowExecutionKey,
+      request: WorkflowWaitRequest
+  ): IO[StoreError, Unit] =
+    val key = WorkflowWaitKey(execution.runId, execution.step, execution.nodeId)
+    for
+      now <- databaseNow(connection)
+      _   <- ZIO
+        .fail(waitConflict(key.runId, "register-deadline-not-future"))
+        .unless(request.deadline.isAfter(now))
+      active <- selectCurrentWait(connection, key.runId, forUpdate = true)
+      _      <- active match
+        case Some(row) if row.step != key.step || row.nodeId != key.nodeId.value =>
+          ZIO.fail(waitConflict(key.runId, "active-wait-exists"))
+        case _ => ZIO.unit
+      inserted <- jdbc("wait-register") {
+        val statement = connection.prepareStatement(
+          """INSERT INTO agent_workflow_waits
+            |(run_id, step, node_id, workflow_id, definition_version, session_id,
+            | condition_kind, signal_name, deadline, status, created_at)
+            |VALUES (?::uuid, ?, ?, ?, ?, ?::uuid, ?, ?, ?, 'Pending', ?)
+            |ON CONFLICT (run_id, step, node_id) DO NOTHING""".stripMargin
+        )
+        try
+          statement.setString(1, execution.runId.asString)
+          statement.setInt(2, execution.step)
+          statement.setString(3, execution.nodeId.value)
+          statement.setString(4, execution.workflowId.value)
+          statement.setInt(5, execution.definitionVersion.value)
+          statement.setString(6, execution.sessionId.asString)
+          request.condition match
+            case WorkflowWaitCondition.Signal(name) =>
+              statement.setString(7, "Signal")
+              statement.setString(8, name.value)
+            case WorkflowWaitCondition.Timer =>
+              statement.setString(7, "Timer")
+              statement.setNull(8, Types.VARCHAR)
+          statement.setObject(9, OffsetDateTime.ofInstant(request.deadline, java.time.ZoneOffset.UTC))
+          statement.setObject(10, OffsetDateTime.ofInstant(now, java.time.ZoneOffset.UTC))
+          statement.executeUpdate() == 1
+        finally statement.close()
+      }
+      _ <-
+        if inserted then ZIO.unit
+        else
+          selectWait(connection, key, forUpdate = true)
+            .someOrFail(waitConflict(key.runId, "register-row-missing"))
+            .flatMap(decodeWait)
+            .flatMap { existing =>
+              val same = existing.workflowId == execution.workflowId &&
+                existing.definitionVersion == execution.definitionVersion &&
+                existing.sessionId == execution.sessionId &&
+                existing.condition == request.condition &&
+                existing.deadline == request.deadline
+              ZIO.fail(waitConflict(key.runId, "wait-identity-conflict")).unless(same)
+            }
+    yield ()
 
   private def sameFence(
       record: WorkflowExecutionRecord[S],
@@ -689,6 +1203,9 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
       lease.generation,
       s"workflow-node=${lease.key.nodeId.value},step=${lease.key.step}"
     )
+
+  private def waitConflict(runId: RunId, reason: String): StoreError =
+    AgentError.WorkflowCheckpointConflict(runId, s"wait:$reason")
 
   private def encode(checkpoint: WorkflowCheckpoint[S]): IO[StoreError, EncodedCheckpoint] =
     validateCheckpoint(checkpoint, corrupted = false) *>
@@ -949,7 +1466,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
 
 object PostgresWorkflowCheckpointStore:
   private val CurrentSchemaVersion        = 1
-  private val CurrentOutcomeSchemaVersion = 1
+  private val CurrentOutcomeSchemaVersion = 2
 
   final private case class StoredCursor(kind: String, nodeId: Option[String]) derives JsonCodec
   final private case class StoredVisit(nodeId: String, count: Int) derives JsonCodec
@@ -969,7 +1486,10 @@ object PostgresWorkflowCheckpointStore:
       schemaVersion: Int,
       kind: String,
       state: S,
-      reason: Option[String]
+      reason: Option[String],
+      waitCondition: Option[String],
+      signalName: Option[String],
+      deadlineEpochMilli: Option[Long]
   ) derives JsonCodec
   final private case class EncodedOutcome(json: String, byteLength: Int, sha256: String)
   final private case class StoredExecutionRow(
@@ -991,6 +1511,32 @@ object PostgresWorkflowCheckpointStore:
       outcomeSha256: Option[String],
       outcomeJson: Option[String],
       leaseActive: Boolean
+  )
+  final private case class StoredWaitRow(
+      runId: String,
+      step: Int,
+      nodeId: String,
+      workflowId: String,
+      definitionVersion: Int,
+      sessionId: String,
+      conditionKind: String,
+      signalName: Option[String],
+      deadline: Instant,
+      status: String,
+      acceptedSignalId: Option[String],
+      acceptedSignalPayload: Option[String],
+      acceptedSignalSha256: Option[String],
+      signalReceivedAt: Option[Instant],
+      createdAt: Instant,
+      resolvedAt: Option[Instant],
+      consumedAt: Option[Instant]
+  )
+  final private case class StoredSignalRow(
+      name: String,
+      payload: String,
+      payloadSha256: String,
+      disposition: String,
+      receivedAt: Instant
   )
   private enum SaveResult:
     case Written
@@ -1025,6 +1571,13 @@ object PostgresWorkflowCheckpointStore:
   private def executionCorrupted(code: String): StoreError =
     AgentError.DatabaseFailure(
       s"PostgreSQL workflow execution 数据损坏 (code=$code)",
+      "data-corruption",
+      retryable = false
+    )
+
+  private def waitCorrupted(code: String): StoreError =
+    AgentError.DatabaseFailure(
+      s"PostgreSQL workflow wait 数据损坏 (code=$code)",
       "data-corruption",
       retryable = false
     )

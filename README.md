@@ -128,7 +128,7 @@ flowchart TB
 | Agent Runtime | typed error、预算、审批、恢复、取消、流式事件 | Foundation；仍需长运行故障与负载证据 |
 | Tool / Side Effect | typed schema、scope、风险、冲突、幂等、outbox/inbox、补偿 | Foundation/Experimental；需要更多真实写业务 |
 | Durable Control | command queue、lease、heartbeat、generation fencing | Foundation；需要多节点 soak、SLO、备份恢复 |
-| Workflow | 静态图校验、循环预算、fan-out、checkpoint、execution ledger、低敏 timeline | Experimental；timer/signal、子图和多 worker soak 待完成 |
+| Workflow | 静态图校验、循环预算、fan-out、checkpoint、execution ledger、低敏 timeline、durable wait/signal 状态机 | Experimental；timer worker→wake command、人工任务、子图和多 worker soak 待完成 |
 | Context / Memory | 分区预算、压缩、可信来源、长期记忆治理 | Beta；需要真实长会话质量趋势 |
 | RAG | PDF/Markdown 摄取、结构切分、embedding 治理、hybrid、rerank、citation、eval | Beta；block/page lineage、parent-child、恶意 PDF/OCR 待完成 |
 | Provider | OpenAI-compatible、Responses、Anthropic、Gemini 与 capability contract | Beta；需要持续真实流量证据 |
@@ -208,9 +208,9 @@ ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`
 
 ## 兼容、升级与故障定位
 
-`0.2.x` patch 不删除或改变该 minor 已有公共 Scala 签名；Scala API、HTTP/Schema、持久化 JSON、Maven 坐标和 Flyway
-migration 是分别验证的兼容表面。完整承诺见 [兼容性契约](docs/compatibility.md)，`0.2.1` durable Workflow 的数据库
-与滚动升级步骤见 [从 0.2.0 升级到 0.2.1](docs/upgrading-to-0.2.1.md)。
+当前 `main` 是允许破坏性重构的 `0.3.0` 开发线，不承诺从 `0.2.x` 原地升级。公开的 `0.2.1` artifact/tag 保持不可变；
+试用当前源码必须使用空 schema/新数据库执行单一 0.3 baseline，并重新构建派生 RAG 索引。进入 `0.3.0` 正式发布后，
+后续 `0.3.x` patch 才恢复 minor 内兼容承诺。完整边界见 [兼容性契约](docs/compatibility.md)。
 
 常见问题先按边界定位：
 
@@ -221,7 +221,7 @@ migration 是分别验证的兼容表面。完整承诺见 [兼容性契约](doc
 | 同一动作重复 | idempotency key、execution ledger、outbox/inbox | 无限增加 retry |
 | SSE 中断 | `Last-Event-ID`、耐久 Event、认证与反向代理超时 | 把内存 Hub 当历史事实源 |
 | RAG 无结果 | active index、tenant ACL、embedding identity、候选过滤 | 绕过 ACL 直接向量检索 |
-| Workflow 无法恢复 | definition/version/session、checkpoint checksum、V008/V009 | 强行覆盖旧 migration 或忽略 identity |
+| Workflow 无法恢复 | definition/version/session、checkpoint/outcome checksum、wait 状态与 execution fence | 忽略 identity 或并行绕过 Store |
 | 测试耗尽 native thread | 是否并行启动多个 sbt、Netty stub 生命周期 | 删除并发/流式契约测试 |
 | Provider 行为差异 | capability、wire contract、原始 HTTP 状态的低敏诊断 | 假设所有 Provider 字段等价 |
 
@@ -244,7 +244,7 @@ migration 是分别验证的兼容表面。完整承诺见 [兼容性契约](doc
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.2.2-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.3.0-local"; publishM2'
 ```
 
 sbt 2 的普通 `test` 是增量测试；CI、发布和 PostgreSQL 契约必须使用 `testFull`。真实 Provider 测试默认关闭，避免普通

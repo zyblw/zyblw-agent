@@ -89,11 +89,12 @@
 
 本轮据此重构 `core.workflow`：节点不再通过返回值隐藏下一跳；`WorkflowDefinition.make` 先验证完整图；
 `WorkflowCheckpoint` 保存访问预算；fan-out 明确采用 `AllSucceeded`，由 ZIO 结构化并发传播失败与取消。随后完成的
-`WorkflowExecutionStore` 和 V009 已补上 pending outcome、耐久账本、lease/fencing 与 prepare→checkpoint 故障注入；
-当前仍故意只支持单步 fan-out 分支，避免在没有 timer/signal、子图命名空间和多节点 soak 前假装拥有完整图平台。
+`WorkflowExecutionStore` 已补上 pending outcome、耐久账本、lease/fencing 与 prepare→checkpoint 故障注入；0.3 又补齐
+durable wait/signal 的原子注册/消费、稳定 signal ID 去重与 deadline 竞态裁决。当前仍故意只支持单步 fan-out 分支，避免在
+没有 timer worker→wake command、子图命名空间和多节点 soak 前假装拥有完整图平台。
 
-本轮已补内存/PostgreSQL 共享的低敏 execution timeline；下一步不是堆 Agent，而是 durable timer/signal 的原子等待、
-去重接收与唤醒命令、进程 kill/数据库重启 soak 和完整 Graph Inspector。完整契约与边界见
+内存/PostgreSQL 共享低敏 execution timeline 与 wait 状态机；下一步不是堆 Agent，而是受监督 timer worker、耐久
+wake-command 交接、进程 kill/数据库重启 soak 和完整 Graph Inspector。完整契约与边界见
 [声明式 Workflow Graph](workflow.md)。
 
 ### zyblw-agent 的差异化优势
@@ -182,8 +183,9 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 | Function → Workflow → Agent 的最小复杂度原则 | 采纳 | 由业务用例确定性选型；不让模型默认决定执行模式 |
 | Agent / Harness / Workflow 分工 | 采纳 | 作为 `agent-core` 内可组合概念，复用唯一 Runtime |
 | model proposer / runtime enforcer | 已是核心不变量 | 继续覆盖 capability、权限、审批、预算、fencing 与审计 |
-| execution ledger、pending writes、lease/fencing | 已落地并继续加深 | V009 + `WorkflowExecutionStore`；下一步做 wait/signal 竞态 |
-| timer、signal、human task | 采纳但尚未实现 | 必须是数据库耐久等待与唤醒命令，不能是长寿命 Fiber 或 Prompt 约定 |
+| execution ledger、pending writes、lease/fencing | 已落地并继续加深 | 0.3 基线 + `WorkflowExecutionStore`；下一步补 kill/restart/multi-worker soak |
+| timer、signal | 核心状态机与 Store 已实现 | 下一步把 `expireDue` 接入受监督 worker 与耐久 wake command，不能使用长寿命 Fiber |
+| human task | 采纳但尚未实现 | 在 timer/signal 之上补可信主体、权限、撤销、升级与审计，不用 Prompt 约定冒充人工任务 |
 | 低敏 execution timeline | 本轮落地 | 复合游标分页；不泄露状态、outcome 或 lease token |
 | Goal/Plan/Todo/Completion/Verification | 采纳为 Harness H1 | 先做小型 ADT/Store SPI 和 eval，不一次构造通用项目管理平台 |
 | 定义版本/指纹冻结 | 部分采纳 | Workflow version、Instruction fingerprint 已有；Skill/Policy/Tool schema snapshot 后续补齐 |

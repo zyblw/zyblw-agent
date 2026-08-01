@@ -115,6 +115,7 @@ sbt 'testkit/testOnly com.zyblw.agent.runtime.AgentRuntimeSpec -- -t "关键词"
 | PostgreSQL | `memory/*Store.scala` | `PostgresAgentPersistence.scala`、迁移与 integration spec |
 | HTTP | `http/contract` | `AgentHttpApi.scala`、projection/contract/host specs |
 | RAG | `agent-rag` 公共契约 | retriever/citation/eval、PostgreSQL knowledge index |
+| Workflow | `workflow/Workflow.scala`、`WorkflowWait.scala`、`WorkflowExecution.scala` | `WorkflowSpec`、PostgreSQL checkpoint integration spec |
 | 观测 | `observability/*` | OTLP Adapter、脱敏与基数测试 |
 
 完成标准：能指出 Adapter 只负责什么、绝不能负责什么，并能新增一个测试替身而不改 Runtime。
@@ -138,7 +139,7 @@ sbt 'testkit/testOnly com.zyblw.agent.runtime.AgentRuntimeSpec -- -t "关键词"
 2. 一个现有测试的变体；
 3. 一段对失败恢复语义的解释；
 4. 一个只读工具和对应 policy/eval；
-5. 一个使用 Maven Central `0.2.1` 的独立最小消费者。
+5. 一个使用 Maven Central 最新正式版或唯一 `0.3.0-local.*` 候选的独立最小消费者。
 
 最后在 `zyblw-platform` 中用两条路径验证同一业务：
 

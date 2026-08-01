@@ -222,10 +222,10 @@ Metric/Span；接口没有正文参数，因此不会意外把 Memory 内容送�
 
 ## 7. 数据库与发布
 
-最新首次发布基线 `V001__zyblw_agent.sql` 已包含 `agent_memory_audit`。项目仍未正式发布，不保留旧 migration 历史负担。
-已经手工执行过旧基线的开发库需要重建；不能忽略 Flyway checksum 或直接修改生产库 schema history。
+0.3 fresh baseline `V001__zyblw_agent_0_3_baseline.sql` 已包含 `agent_memory_audit`。0.2 开发库必须重建；不能忽略
+Flyway checksum、修改 schema history 或假装原地升级。
 
-手工 SQL 见 [zyblw-agent-postgresql.sql](sql/zyblw-agent-postgresql.sql)。
+数据库唯一事实源见[数据库迁移契约](database-migrations.md)。
 
 ## 8. 测试与尚未完成的边界
 

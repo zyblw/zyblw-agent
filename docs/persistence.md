@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-30
+> 最后核验：2026-08-01
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -40,14 +40,16 @@ modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/m
 主要表：`agent_runs`、`agent_events`、`agent_run_commands`、`agent_run_dispatch`、`agent_messages`、`agent_steps`、
 `model_calls`、`tool_executions`、`approval_requests`、`usage_records`、`agent_business_operations`、
 `agent_outbox_events`、`agent_inbox_messages`、`agent_compensations`、`agent_memories`、`agent_embedding_cache`、
-`agent_embedding_quota_windows`、`agent_embedding_quota_reservations`；V007 新增 `agent_eval_snapshots`。新数据库会顺序
-执行全部 migration 得到当前完整结构；V008 新增独立的 `agent_workflow_checkpoints`，V009 新增
-`agent_workflow_node_executions`。V001 已被真实测试环境使用，内容与 checksum 永久冻结，后续只通过更高版本
-migration 演进。
+`agent_embedding_quota_windows`、`agent_embedding_quota_reservations`、`agent_eval_snapshots`、
+`agent_workflow_checkpoints`、`agent_workflow_node_executions`、`agent_workflow_waits` 与 `agent_workflow_signals`。
+
+当前 `main` 是明确不兼容 0.2 的 0.3 开发线，默认 location 只有一个
+`V001__zyblw_agent_0_3_baseline.sql`，只支持空 schema/新数据库。旧环境不能通过 `repair`、手改 history 或假装 baseline
+接管；应建立新 schema、重新导入业务允许保留的数据并重建派生索引。0.3.0 发布后才冻结该基线并恢复只追加 migration 的
+发布纪律。完整操作见[PostgreSQL 迁移发布契约](database-migrations.md)与[升级到 0.3.0](upgrading-to-0.3.0.md)。
 
 框架不会因 JAR 被加载而自动修改数据库。宿主显式调用 `AgentPostgresMigrations.migrate`，默认使用独立历史表
-`flyway_zyblw_agent_schema_history`。存量统一 history 的接管方式见
-[PostgreSQL 迁移发布契约](database-migrations.md)。
+`flyway_zyblw_agent_schema_history`。
 
 `PostgresRunStore`、`PostgresRunCommandStore` 与 `PostgresRunSubmissionStore` 使用同一个宿主 JDBC DataSource。
 `PostgresRunStore` 使用 blocking executor、连接 Scope、JSONB 状态和 `WHERE version = ?`
@@ -69,13 +71,18 @@ RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.po
 快照幂等，相同 identity 只能推进到更大的 step；checksum、JSON、identity 或冗余列异常全部 fail-closed。
 
 同一 Adapter 同时实现 `WorkflowExecutionStore[S]`，推荐通过
-`PostgresAgentPersistence.workflowExecutions[S]` 装配生产 Workflow。V009 为每次节点访问保存 Running/Prepared/Committed
+`PostgresAgentPersistence.workflowExecutions[S]` 装配生产 Workflow。0.3 基线为每次节点访问保存 Running/Prepared/Committed
 台账；claim、heartbeat、prepare 与 commit 比较 owner/token/generation/未过期时间。`commit` 在一个短事务中锁定全部
-Prepared execution、推进 V008 checkpoint，并把台账改为 Committed；任何一步失败都整体回滚。过期 Prepared 被新 owner
-领取时保留 outcome，恢复不重新调用节点。`timeline` 复用 V009 主键按 `(step,nodeId)` 稳定分页并返回低敏投影；官方
+Prepared execution、推进 checkpoint、注册/消费 durable wait，并把台账改为 Committed；任何一步失败都整体回滚。过期
+Prepared 被新 owner 领取时保留 outcome，恢复不重新调用节点。`timeline` 复用 execution 主键按 `(step,nodeId)` 稳定分页
+并返回低敏投影；官方
 内存/PostgreSQL Adapter 已实现，第三方 `WorkflowExecutionStore` 若尚未实现会明确返回 typed persistence failure，而不是
 返回不完整数据。claim 还会在同一原子边界验证该 Run 已有 checkpoint/其他 step 的 Workflow/version/session identity；
 PostgreSQL 用 transaction-scoped advisory lock 关闭并发首次 claim 的检查-插入窗口。
+
+`WorkflowExecutionStore.signal` 使用稳定 signal ID 和 payload hash 跨 Worker 去重；同 ID 不同 payload 冲突。
+`expireDue(limit)` 用有界 `FOR UPDATE SKIP LOCKED` 批次裁决到期 wait。两条路径锁定相同行并使用数据库时钟，确保 signal 与
+deadline 竞态只有一个胜者。宿主仍需提供受监督 timer worker 和耐久 wake-command 交接，不能把长时间等待实现成常驻 Fiber。
 
 删除使用 `DELETE FROM agent_runs`，所有子表依赖 migration 中的 `ON DELETE CASCADE` 由 PostgreSQL 原子清理。
 
@@ -91,4 +98,4 @@ PostgreSQL 用 transaction-scoped advisory lock 关闭并发首次 claim 的检�
 TEXT checksum 事实与 JSONB 分析投影。它通过 `PostgresAgentPersistence.evalTrends` 装配；详细语义见
 [eval-trend-and-release-gate.md](eval-trend-and-release-gate.md)。
 
-完整表说明、手工 SQL 与 pgvector 接入见 [database-schema.md](database-schema.md)。
+完整表说明、唯一 migration 事实源与 pgvector 接入见 [database-schema.md](database-schema.md)。

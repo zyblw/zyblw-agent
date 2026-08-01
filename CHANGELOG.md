@@ -3,6 +3,31 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
+## Unreleased - 0.3.0 development line
+
+### Added
+
+- Durable Workflow timer/signal contract: `NodeOutcome.Awaiting`, absolute deadlines, typed wakeups, atomic wait registration and
+  consumption in the execution/checkpoint commit, bounded signal payloads, stable signal IDs, duplicate/conflicting retry handling,
+  and a database-clock timeout race with one winner.
+- In-memory and PostgreSQL implementations of `currentWait`, `signal` and `expireDue`, with deterministic ZIO TestClock coverage and
+  real PostgreSQL 16 cross-Store integration tests.
+- `agent_workflow_waits` and `agent_workflow_signals`, including one-active-wait-per-Run, execution foreign keys, due-work indexes,
+  payload checksums and low-sensitivity receipt state.
+
+### Changed
+
+- **Breaking:** the development branch now targets `0.3.0` and intentionally drops `0.2.x` source, binary, persisted-outcome and
+  Flyway-history compatibility. All framework tables are described by one `V001__zyblw_agent_0_3_baseline.sql` fresh-install
+  migration; adopters must use an empty schema/new database and rebuild derived RAG indexes.
+- PostgreSQL Workflow outcome schema is version 2 so an Awaiting result and its absolute deadline survive prepare/reclaim without
+  recomputing time after a crash.
+
+### Remaining before release
+
+- Add the bounded timer worker and durable wake-command handoff, then exercise database restart, process kill and multi-Worker soak.
+- Complete RAG block/page/bbox lineage, parent-child retrieval and adjacent-block expansion against the new baseline.
+
 ## 0.2.1 - 2026-07-30
 
 ### Added

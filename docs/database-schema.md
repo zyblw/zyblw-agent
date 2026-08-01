@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-30
+> 最后核验：2026-08-01
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -39,6 +39,8 @@
 | `agent_eval_snapshots` | Agent/RAG/Context Compression 的低敏不可变评测快照与发布基线 | 不含业务正文；按数据集治理策略归档，不能静默覆盖 |
 | `agent_workflow_checkpoints` | Workflow identity、Session、游标、应用状态、step 与访问预算的完整恢复快照 | 独立于 `agent_runs`；按 Workflow Run 的保留策略删除 |
 | `agent_workflow_node_executions` | 节点 Running/Prepared/Committed 台账、pending outcome 与 owner/token/generation fencing | 与 Workflow checkpoint 同保留窗口；Prepared 需覆盖最长故障恢复期 |
+| `agent_workflow_waits` | 每个 Workflow Run 唯一活动的 signal/timer 条件、绝对 deadline、决议与消费状态 | 与 execution/checkpoint 同保留窗口；Pending 必须由有界 worker 扫描 |
+| `agent_workflow_signals` | 外部 signal 的稳定 ID、payload hash、接收 disposition 与时间 | 覆盖外部发送方最长重试窗口；payload 按业务敏感数据治理 |
 
 可选 RAG baseline 还包含：
 
@@ -56,20 +58,26 @@ Building 或 Ready/active。
 `PostgresRunSubmissionStore` 在同一事务写 `agent_runs + agent_events + agent_run_commands + agent_run_dispatch`；任一插入
 失败全部回滚。`start_scope_hash/start_request_hash` 是 SHA-256，只有 `start_idempotency_key` 保存客户端不透明键。
 
-V008 的 `agent_workflow_checkpoints` 是另一条明确边界：它只服务声明式 Workflow，不复制 Agent Runtime 状态。每个 runId
+`agent_workflow_checkpoints` 是另一条明确边界：它只服务声明式 Workflow，不复制 Agent Runtime 状态。每个 runId
 一行，完整 checkpoint 同时保存确定性 TEXT、JSONB 与 SHA-256；冗余 identity/cursor/step 列用于约束和诊断。表不引用
 `agent_runs`，因为无模型的确定性 Workflow 也可以独立运行。
 
-V009 的 `agent_workflow_node_executions` 以 `(run_id, step, node_id)` 建立执行槽。Running/Prepared 必须拥有有效期字段，
+`agent_workflow_node_executions` 以 `(run_id, step, node_id)` 建立执行槽。Running/Prepared 必须拥有有效期字段，
 Committed 必须清除有效期并记录完成时间；Prepared/Committed 必须同时拥有 outcome TEXT、JSONB 与 SHA-256。claim 只会
 覆盖已过期 Running/Prepared，并递增 generation、换发随机 token；`PostgresWorkflowCheckpointStore.commit` 锁定 ledger
-行后，在同一事务推进 V008 checkpoint 与全部 execution 终态。该表同样不引用 `agent_runs`。
+行后，在同一事务推进 checkpoint 与全部 execution 终态。该表同样不引用 `agent_runs`。
 
-低敏 execution timeline 复用 V009 主键按 `(step,node_id)` 做排他游标扫描，不增加投影表或新 migration。Adapter 读取完整
+低敏 execution timeline 复用 execution 主键按 `(step,node_id)` 做排他游标扫描，不增加投影表。Adapter 读取完整
 行并执行与单条 ledger 相同的 checksum/领域校验，随后只返回 node/step/visit、status、generation、owner 与时间戳；
 状态、pending outcome 和 lease token 不进入投影。调用方仍须在 Store 外验证 `runId` 的 tenant/user 权限。
 claim 事务还会按 `runId` 获取 transaction-scoped advisory lock，并同时检查 checkpoint 与其他 step 的冻结 identity；
 因此两个不同 Workflow/version/session 并发争用同一新 Run 时只能有一个身份胜出，锁随事务结束自动释放。
+
+`agent_workflow_waits` 以 producing execution 为外键，并用部分唯一索引保证每个 Run 只有一个未消费 wait。注册 wait、提交
+Prepared outcome 和推进 checkpoint 位于同一事务；恢复节点提交下一 checkpoint 时消费旧 wait，也可以同时注册下一 wait。
+`agent_workflow_signals` 以 `(run_id, wait_step, wait_node_id, signal_id)` 去重，同 ID 不同 payload hash 会 fail-closed。
+signal 与 `expireDue` 都锁定同一 wait 行并使用 PostgreSQL `clock_timestamp()` 判断 deadline，因此并发时只会有一个权威结果。
+恰好等于 deadline 视为超时，避免不同应用节点时钟产生双胜者。
 
 `agent_memories` 不属于 Run checkpoint：Run 删除不会级联删除用户长期记忆。User scope 同时保存 tenant/user，并以
 无歧义 canonical scope key 建主键；相同 userId 在不同 tenant 中是不同命名空间。删除会清空 `value_json` 与
@@ -197,7 +205,9 @@ HNSW 的参数不是通用最优值；应使用自己的中医文档、引用正
 ## 执行 SQL
 
 - 正式环境优先让 Flyway 执行 classpath 下的默认 migration。
-- 手工初始化可执行 [zyblw-agent-postgresql.sql](sql/zyblw-agent-postgresql.sql)。
+- 必需表只有一个可执行事实源：
+  [`V001__zyblw_agent_0_3_baseline.sql`](../modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/migration/V001__zyblw_agent_0_3_baseline.sql)。
+  不再维护一份容易漂移的手工 SQL 副本；生产优先由 Flyway 执行该资源。
 - 需要 RAG 时，再确认 extension 权限和 embedding 维度后执行 [zyblw-agent-pgvector-1536.sql](sql/zyblw-agent-pgvector-1536.sql)。
 - 不要把数据库密码写入 SQL、README 或 Git；通过部署平台 Secret 注入 DataSource 配置。
 

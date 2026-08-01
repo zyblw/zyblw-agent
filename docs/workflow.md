@@ -1,7 +1,7 @@
 # 声明式 Workflow Graph
 
 > 状态：Experimental
-> 最后核验：2026-07-30
+> 最后核验：2026-08-01
 > 事实来源：`core.workflow` 源码、`WorkflowSpec`、PostgreSQL 16 集成测试与 `GraphWorkflowExample`
 
 `zyblw-agent` 的 Workflow 是一个小型、类型化、可恢复的 StateGraph。它用于“步骤和控制边在运行前可以声明”的确定性长流程，
@@ -24,6 +24,7 @@
 enum NodeOutcome[S]:
   case Succeeded(state: S)
   case Suspended(state: S, reason: String)
+  case Awaiting(state: S, request: WorkflowWaitRequest)
 ```
 
 控制边单独声明：
@@ -148,8 +149,55 @@ Durable 模式对每次节点访问建立稳定 `(runId, step, nodeId)` 台账�
 5. 旧 owner 的 heartbeat、prepare 或 commit 会被 owner/token/generation/expiry fencing 拒绝。
 
 暂停 outcome 也先进入 ledger 并与暂停 checkpoint 原子提交；后续 `resume` 使用新的 step/visit 再次进入同一业务节点。应用状态
-和 pending outcome 需要 `JsonCodec[S]` 才能使用 PostgreSQL Adapter。V009 同时保存确定性 TEXT、JSONB 和 SHA-256，
+和 pending outcome 需要 `JsonCodec[S]` 才能使用 PostgreSQL Adapter。0.3 基线同时保存确定性 TEXT、JSONB 和 SHA-256，
 读取时对 identity、状态不变量、容量与 checksum fail-closed。
+
+### 耐久 timer 与 signal
+
+`Awaiting` 只允许用于 durable engine。节点第一次访问时返回绝对 deadline；signal 或 deadline 胜出后，宿主再次调用
+`resume`，同一节点从 `WorkflowContext.wakeup` 读取结构化结果：
+
+```scala
+val approval = WorkflowSignalName("approval.received")
+
+val approvalNode = new WorkflowNode[Any, ReviewState]:
+  val id = NodeId("approval")
+
+  def execute(state: ReviewState, context: WorkflowContext) =
+    context.wakeup match
+      case Some(WorkflowWakeup.SignalReceived(_, value)) if value.name == approval =>
+        ZIO.succeed(NodeOutcome.Succeeded(state.approve(value.payload)))
+      case Some(WorkflowWakeup.DeadlineElapsed(_, _)) =>
+        ZIO.succeed(NodeOutcome.Succeeded(state.expire))
+      case _ =>
+        Clock.instant.map(now =>
+          NodeOutcome.Awaiting(
+            state,
+            WorkflowWaitRequest(WorkflowWaitCondition.Signal(approval), now.plusSeconds(3600))
+          )
+        )
+```
+
+外部系统必须使用稳定 `WorkflowSignalId` 投递，不能以 payload 充当幂等键：
+
+```scala
+val receipt = executionStore.signal(
+  waitKey,
+  WorkflowSignalId("webhook-event-1842"),
+  approval,
+  payload
+)
+```
+
+- 注册 wait、Prepared execution 与 checkpoint 在同一事务提交；恢复提交时消费旧 wait，也可同时注册下一次 wait；
+- deadline 以 UTC 绝对时间保存并统一到毫秒精度；重启不会重新计时；
+- `(waitKey, signalId)` 是去重身份；相同 ID/相同 payload 返回 `Duplicate`，不同 payload 返回冲突；
+- signal 仅能在 deadline 前胜出；PostgreSQL 用数据库时钟和行锁裁决 signal/timeout，恰好等于 deadline 时 timeout 胜出；
+- payload 上限默认 64 KiB，不进入 timeline、通用指标或日志；
+- `currentWait` 只返回尚未消费的当前等待；Pending 状态下 `resume` 返回 `workflow-wait-pending`，不会轮询执行节点。
+
+框架已经提供 `expireDue(limit)` 这个有界、可并发领取的 timer 原语。生产宿主仍需把它接入受监督 Worker，并在决议后提交
+耐久 wake command；不要让单个 JVM Fiber `sleep` 到 deadline，也不要在 HTTP webhook 线程直接运行 Workflow。
 
 ### 低敏 execution timeline
 
@@ -193,15 +241,16 @@ sbt -batch "examples/runMain com.zyblw.agent.examples.GraphWorkflowExample"
 
 ## 当前边界与下一步
 
-当前已经实现“可验证图内核 + PostgreSQL checkpoint + 节点 execution ledger/pending outcome/fencing + 低敏 timeline”，
-并用故障注入证明 prepare 后崩溃可恢复且节点不重复执行。尚未实现：
+当前已经实现“可验证图内核 + PostgreSQL checkpoint + 节点 execution ledger/pending outcome/fencing + 低敏 timeline +
+耐久 timer/signal 状态机”，并用故障注入证明 prepare 后崩溃可恢复且节点不重复执行。当前仍未完成：
 
-- timer、外部 signal、人工任务和 durable sleep；
+- timer worker 到耐久 wake command 的完整运行回路，以及数据库重启、进程 kill、多 Worker soak；
+- 人工任务的身份、权限、撤销与升级协议；
 - 多节点子图、checkpoint fork/time travel；
 - quorum/race 等更多 fan-in policy；
 - 完整 Graph Inspector UI/CLI 和图级质量/成本 eval。
 
-下一纵向切片优先做“耐久 timer/signal 的原子注册、去重接收与唤醒命令”，并补数据库重启、进程 kill 与多 Worker soak；
-不能让一个 JVM Fiber `sleep` 数天，也不能出现 signal 已接收但 checkpoint/恢复命令丢失。随后才根据真实业务证据选择人工
-任务、子图或更多 fan-in policy。只有固定任务证明单 Agent 受角色或上下文隔离限制时，才在这个内核上增加 Agent handoff
-或多 Agent 调度。
+下一纵向切片是把已有等待状态机接入“有界 timer worker → 耐久 wake command → command worker 恢复”的原子交接，并补
+数据库重启、进程 kill 与多 Worker soak，关闭“状态已决议但恢复命令丢失”的窗口。随后才根据真实业务证据选择人工任务、
+子图或更多 fan-in policy。只有固定任务证明单 Agent 受角色或上下文隔离限制时，才在这个内核上增加 Agent handoff 或
+多 Agent 调度。

@@ -21,7 +21,7 @@ libraryDependencies ++= Seq(
 `zyblw-agent-postgres`。完整矩阵见 [模块选择](modules.md)。
 
 `0.2.1` 已发布到 Maven Central。验证后续尚未发布的候选时，可以在框架目录执行
-`sbt -batch 'set ThisBuild / version := "0.2.2-local.1"; publishM2'`，宿主临时使用同一唯一版本并显式启用 Maven
+`sbt -batch 'set ThisBuild / version := "0.3.0-local.1"; publishM2'`，宿主临时使用同一唯一版本并显式启用 Maven
 Local；不要覆盖旧本地版本，也不要把本地版本或 `SNAPSHOT` 当作可重复生产发布物。完整命令见
 [server 消费指南](consuming-from-server.md)。
 

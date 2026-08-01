@@ -43,13 +43,13 @@ GitHub 用户名，Central 不会自动授予该 namespace，必须按 Portal �
 Git、Actions cache 或日志。发布步骤还会先停止前序验证启动的持久化 sbt server，确保新的 sbt JVM 在启动时读取仅对发布
 步骤开放的 Central secrets；不要为了规避进程复用而把发布凭据暴露给普通测试步骤。
 
-## 首次发布
+## 发布触发方式
 
-首次建议发布 `0.1.0`，明确 API 尚处早期演进：
+使用与 CHANGELOG、升级指南一致的 annotated tag 触发发布，例如：
 
 ```bash
-git tag -a v0.1.0 -m "zyblw-agent v0.1.0"
-git push origin v0.1.0
+git tag -a v0.3.0 -m "zyblw-agent v0.3.0"
+git push origin v0.3.0
 ```
 
 标签触发 release workflow：
@@ -68,13 +68,15 @@ Central artifact 不可覆盖；失败修复必须用新版本。
 
 ## 日常版本策略
 
-- `0.2.x`：patch 版本只做兼容增强和修复，不删除或改变该 minor 已有公共签名。
-- `0.3.0`：如确有必要，可承载明确记录、带迁移指南的破坏性 API 改进。
+- 当前 `main` 是 0.3.0 的破坏性开发线：可以删除 0.2 API/state/schema，但必须让代码、fresh baseline、示例和权威文档
+  在同一提交中收敛，不能保留表面兼容层。
+- `0.3.0` 发布后：`0.3.x` patch 才开始保护该 minor 的公共 Scala API、state JSON、HTTP/OpenAPI 与 Flyway history；
+  破坏性演进进入下一个 minor。
 - `1.x`：公共核心、迁移、HTTP 契约和运维承诺达到稳定后再进入。
 - Provider、Beta/Experimental 模块也跟随统一版本，减少多模块组合矩阵。
 
-当前 build 使用 `early-semver`。项目已经进入公开发布后的 patch 兼容阶段；待 sbt 2 生态存在经过验证的
-MiMa/version-policy 组合后应接入真实历史 artifact 基线，不能用空检查假装已经完成。
+当前 build 使用 `early-semver`。0.2 发布物与 tag 保持不可变，但本轮明确不以它们约束 0.3 开发。0.3.0 发布后再把真实
+0.3.0 artifact 设为 patch 兼容基线；不能用空检查假装已经完成。
 
 在 sbt 2 的 MiMa/version-policy 生态完成当前版本兼容性验证前，现有的独立 Maven consumer 与平台下游回归仍是必须
 执行的实际二进制门禁；它们不能证明所有二进制兼容性，但能证明公开 POM、资源和一条真实宿主消费路径。
@@ -88,7 +90,8 @@ MiMa/version-policy 组合后应接入真实历史 artifact 基线，不能用�
 4. `RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull` 成功。
 5. `sbt -batch publishM2` 成功，所有公开模块生成 POM/source/doc。
 6. `integration-tests/maven-consumer` 设置 `ZYBLW_AGENT_VERSION` 后仅依赖本地发布物也能编译。
-7. 数据库迁移在空库和代表性升级库成功，已发布 migration 未被修改。
+7. 0.3.0 必须验证 fresh baseline 在空库成功，并证明旧 schema 会被明确拒绝；0.3.0 发布后的 patch 还必须验证代表性升级库，
+   且不得修改已发布 migration。
 8. POM 包含 name、description、URL、license、developer 和 SCM。
 9. 无密钥、真实用户数据或敏感 trace 进入 Git 历史和 artifact。
 10. 私有业务仓库使用相同 Maven-local 版本完成下游兼容验证，但任何私有源码、token 或日志都不进入公开 workflow。

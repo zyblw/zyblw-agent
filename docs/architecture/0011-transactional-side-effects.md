@@ -9,7 +9,7 @@
 原子 transaction。若 Runtime 在业务写成功后、发送消息前崩溃，会丢事件；若远端确认后、本地记录成功前崩溃，恢复时
 会重复发送。
 
-框架数据库以 `V001__zyblw_agent.sql` 作为首次正式发布基线，直接描述当前完整结构。
+框架数据库由 0.3 fresh baseline `V001__zyblw_agent_0_3_baseline.sql` 直接描述当前完整结构；不接管 0.2 history。
 
 ## 决策
 

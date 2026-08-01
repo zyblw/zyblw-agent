@@ -73,7 +73,8 @@ object NodeId:
 final case class WorkflowContext(
     runId: RunId,
     sessionId: SessionId,
-    attributes: Map[String, String] = Map.empty
+    attributes: Map[String, String] = Map.empty,
+    wakeup: Option[WorkflowWakeup] = None
 )
 
 /** 一个节点只负责产生新状态或显式暂停；下一条边由图定义而不是节点实现决定。
@@ -86,6 +87,9 @@ enum NodeOutcome[S]:
 
   /** 节点主动暂停并保存新状态；`reason` 用于低敏控制诊断，不应包含业务正文或凭据。 */
   case Suspended(state: S, reason: String)
+
+  /** 原子提交节点结果、checkpoint 与耐久等待；仅 durable engine 支持。 */
+  case Awaiting(state: S, request: WorkflowWaitRequest)
 
 /** 确定性工作流节点；模型驱动的 Agent 只能作为一种节点实现。 */
 trait WorkflowNode[-R, S]:
@@ -415,6 +419,13 @@ enum WorkflowEvent[S]:
   case FanOutStarted(node: NodeId, branches: Chunk[NodeId], join: NodeId, policy: FanInPolicy, step: Int)
   case FanOutCompleted(node: NodeId, branchCount: Int, step: Int)
   case Suspended(node: NodeId, reason: String, state: S)
+  case Waiting(
+      node: NodeId,
+      key: WorkflowWaitKey,
+      condition: WorkflowWaitCondition,
+      deadline: java.time.Instant,
+      state: S
+  )
   case Completed(state: S)
 
 /** 轻量、声明式 StateGraph：支持启动前校验、显式边、暂停、每节点 checkpoint 和有界 fan-out。
@@ -442,7 +453,7 @@ final class WorkflowEngine[R, S] private (
     *   惰性事件流；只有下游拉取时才执行节点，失败和取消遵循 ZIO Stream 语义
     */
   def run(initial: S, context: WorkflowContext): ZStream[R, WorkflowError, WorkflowEvent[S]] =
-    execute(definition.entry, initial, 0, Map.empty, context)
+    execute(definition.entry, initial, 0, Map.empty, context.copy(wakeup = None), None)
 
   /** 从最近 checkpoint 恢复。
     *
@@ -459,13 +470,66 @@ final class WorkflowEngine[R, S] private (
         .mapError(error => workflowStoreError("resume", error))
         .flatMap {
           case Some(checkpoint) =>
-            validateResumeIdentity(checkpoint, context).as {
-              checkpoint.cursor match
+            validateResumeIdentity(checkpoint, context) *>
+              (checkpoint.cursor match
                 case WorkflowCursor.At(nodeId) =>
-                  execute(nodeId, checkpoint.state, checkpoint.step, checkpoint.visits, context)
+                  durableExecution match
+                    case Some((executionStore, _)) =>
+                      executionStore
+                        .currentWait(context.runId)
+                        .mapError(error => workflowStoreError("resume-wait", error))
+                        .flatMap {
+                          case Some(record) =>
+                            validateWaitIdentity(checkpoint, nodeId, record, context) *>
+                              (record.status match
+                                case WorkflowWaitStatus.Pending =>
+                                  ZIO.fail(
+                                    AgentError.WorkflowFailed(nodeId.value, "workflow-wait-pending")
+                                  )
+                                case _ =>
+                                  ZIO
+                                    .fromOption(WorkflowWakeup.fromRecord(record))
+                                    .orElseFail(
+                                      AgentError.WorkflowFailed(
+                                        nodeId.value,
+                                        "workflow-wait-not-resumable"
+                                      )
+                                    )
+                                    .map(wakeup =>
+                                      execute(
+                                        nodeId,
+                                        checkpoint.state,
+                                        checkpoint.step,
+                                        checkpoint.visits,
+                                        context.copy(wakeup = Some(wakeup)),
+                                        Some(record.key)
+                                      )
+                                    ))
+                          case None =>
+                            ZIO.succeed(
+                              execute(
+                                nodeId,
+                                checkpoint.state,
+                                checkpoint.step,
+                                checkpoint.visits,
+                                context.copy(wakeup = None),
+                                None
+                              )
+                            )
+                        }
+                    case None =>
+                      ZIO.succeed(
+                        execute(
+                          nodeId,
+                          checkpoint.state,
+                          checkpoint.step,
+                          checkpoint.visits,
+                          context.copy(wakeup = None),
+                          None
+                        )
+                      )
                 case WorkflowCursor.Completed =>
-                  ZStream.succeed(WorkflowEvent.Completed(checkpoint.state))
-            }
+                  ZIO.succeed(ZStream.succeed(WorkflowEvent.Completed(checkpoint.state))))
           case None =>
             ZIO.fail(AgentError.WorkflowFailed("resume", s"Run ${context.runId.asString} 没有 checkpoint"))
         }
@@ -477,7 +541,8 @@ final class WorkflowEngine[R, S] private (
       state: S,
       step: Int,
       visits: Map[NodeId, Int],
-      context: WorkflowContext
+      context: WorkflowContext,
+      activeWait: Option[WorkflowWaitKey]
   ): ZStream[R, WorkflowError, WorkflowEvent[S]] =
     if step >= maxSteps then ZStream.fail(AgentError.WorkflowFailed(nodeId.value, s"超过最大节点数 $maxSteps"))
     else
@@ -495,11 +560,37 @@ final class WorkflowEngine[R, S] private (
                     context.runId,
                     checkpoint(WorkflowCursor.At(nodeId), suspended, step + 1, nextVisits, context),
                     nodeId,
-                    executed.leases
+                    executed.leases,
+                    WorkflowWaitCommit(activeWait, None)
                   ) ++ ZStream.succeed(WorkflowEvent.Suspended(nodeId, reason, suspended))
 
+                case NodeOutcome.Awaiting(waiting, request) =>
+                  durableExecution match
+                    case None =>
+                      ZStream.fail(
+                        AgentError.WorkflowFailed(nodeId.value, "durable wait 只能由 makeDurable engine 执行")
+                      )
+                    case Some(_) =>
+                      val execution = executed.leases.head.key
+                      val waitKey   = WorkflowWaitKey(context.runId, execution.step, nodeId)
+                      persist(
+                        context.runId,
+                        checkpoint(WorkflowCursor.At(nodeId), waiting, step + 1, nextVisits, context),
+                        nodeId,
+                        executed.leases,
+                        WorkflowWaitCommit(activeWait, Some(execution -> request))
+                      ) ++ ZStream.succeed(
+                        WorkflowEvent.Waiting(
+                          nodeId,
+                          waitKey,
+                          request.condition,
+                          request.deadline,
+                          waiting
+                        )
+                      )
+
                 case NodeOutcome.Succeeded(nextState) =>
-                  advance(nodeId, nextState, step, nextVisits, context, executed.leases)
+                  advance(nodeId, nextState, step, nextVisits, context, executed.leases, activeWait)
             }
 
   private def advance(
@@ -508,11 +599,12 @@ final class WorkflowEngine[R, S] private (
       step: Int,
       visits: Map[NodeId, Int],
       context: WorkflowContext,
-      leases: Chunk[WorkflowExecutionLease]
+      leases: Chunk[WorkflowExecutionLease],
+      activeWait: Option[WorkflowWaitKey]
   ): ZStream[R, WorkflowError, WorkflowEvent[S]] =
     definition.transitions(current) match
       case WorkflowTransition.Next(next) =>
-        continue(current, next, state, step, visits, context, leases)
+        continue(current, next, state, step, visits, context, leases, activeWait)
 
       case WorkflowTransition.Route(targets, select) =>
         ZStream
@@ -530,17 +622,18 @@ final class WorkflowEngine[R, S] private (
                   )
               }
           )
-          .flatMap(next => continue(current, next, state, step, visits, context, leases))
+          .flatMap(next => continue(current, next, state, step, visits, context, leases, activeWait))
 
       case WorkflowTransition.FanOut(branches, join, policy) =>
-        executeFanOut(current, state, branches, join, policy, step, visits, context, leases)
+        executeFanOut(current, state, branches, join, policy, step, visits, context, leases, activeWait)
 
       case WorkflowTransition.Complete() =>
         persist(
           context.runId,
           checkpoint(WorkflowCursor.Completed, state, step + 1, visits, context),
           current,
-          leases
+          leases,
+          WorkflowWaitCommit(activeWait, None)
         ) ++ ZStream(
           WorkflowEvent.NodeCompleted(current, step, state),
           WorkflowEvent.Completed(state)
@@ -553,16 +646,18 @@ final class WorkflowEngine[R, S] private (
       step: Int,
       visits: Map[NodeId, Int],
       context: WorkflowContext,
-      leases: Chunk[WorkflowExecutionLease]
+      leases: Chunk[WorkflowExecutionLease],
+      activeWait: Option[WorkflowWaitKey]
   ): ZStream[R, WorkflowError, WorkflowEvent[S]] =
     persist(
       context.runId,
       checkpoint(WorkflowCursor.At(next), state, step + 1, visits, context),
       current,
-      leases
+      leases,
+      WorkflowWaitCommit(activeWait, None)
     ) ++
       ZStream.succeed(WorkflowEvent.NodeCompleted(current, step, state)) ++
-      execute(next, state, step + 1, visits, context)
+      execute(next, state, step + 1, visits, context.copy(wakeup = None), None)
 
   private def executeFanOut(
       current: NodeId,
@@ -573,7 +668,8 @@ final class WorkflowEngine[R, S] private (
       step: Int,
       visits: Map[NodeId, Int],
       context: WorkflowContext,
-      currentLeases: Chunk[WorkflowExecutionLease]
+      currentLeases: Chunk[WorkflowExecutionLease],
+      activeWait: Option[WorkflowWaitKey]
   ): ZStream[R, WorkflowError, WorkflowEvent[S]] =
     val branchIds = Chunk.fromIterable(branches)
     val joinStep  = step + branchIds.length + 1
@@ -608,6 +704,8 @@ final class WorkflowEngine[R, S] private (
               case NodeOutcome.Succeeded(branchState) => ZIO.succeed(branchState -> executed.leases)
               case NodeOutcome.Suspended(_, _)        =>
                 ZIO.fail(AgentError.WorkflowFailed(branch.value, "fan-out 单步分支不能暂停"))
+              case NodeOutcome.Awaiting(_, _) =>
+                ZIO.fail(AgentError.WorkflowFailed(branch.value, "fan-out 单步分支不能注册耐久等待"))
           }
         }
         .withParallelism(maxParallelism)
@@ -626,11 +724,12 @@ final class WorkflowEngine[R, S] private (
               context.runId,
               checkpoint(WorkflowCursor.At(join), merged, joinStep, branchVisits, context),
               current,
-              currentLeases ++ branchLeases
+              currentLeases ++ branchLeases,
+              WorkflowWaitCommit(activeWait, None)
             ) ++ ZStream(
               WorkflowEvent.FanOutCompleted(current, branchIds.length, step),
               WorkflowEvent.NodeCompleted(current, step, merged)
-            ) ++ execute(join, merged, joinStep, branchVisits, context)
+            ) ++ execute(join, merged, joinStep, branchVisits, context.copy(wakeup = None), None)
           }
 
   /** 把 checkpoint 写 effect 转成不产出元素的流，以便用 `++` 保序衔接事件。 */
@@ -638,13 +737,14 @@ final class WorkflowEngine[R, S] private (
       runId: RunId,
       checkpoint: WorkflowCheckpoint[S],
       current: NodeId,
-      leases: Chunk[WorkflowExecutionLease]
+      leases: Chunk[WorkflowExecutionLease],
+      waitCommit: WorkflowWaitCommit
   ): ZStream[Any, WorkflowError, Nothing] =
     ZStream
       .fromZIO(
         (durableExecution match
           case Some((executionStore, _)) if leases.nonEmpty =>
-            executionStore.commit(NonEmptyChunk(leases.head, leases.drop(1)*), checkpoint)
+            executionStore.commit(NonEmptyChunk(leases.head, leases.drop(1)*), checkpoint, waitCommit)
           case _ => store.save(runId, checkpoint)
         )
           .mapError(error => workflowStoreError(s"save:${current.value}", error))
@@ -753,6 +853,24 @@ final class WorkflowEngine[R, S] private (
     else if !checkpoint.visits.keySet.subsetOf(definition.nodes.keySet) then
       ZIO.fail(AgentError.WorkflowFailed("resume", "checkpoint-visit-node-missing"))
     else ZIO.unit
+
+  /** 第三方 Store 或损坏数据不能把另一节点、Session 或 Workflow 的 wakeup 注入当前恢复节点。 */
+  private def validateWaitIdentity(
+      checkpoint: WorkflowCheckpoint[S],
+      nodeId: NodeId,
+      record: WorkflowWaitRecord,
+      context: WorkflowContext
+  ): IO[WorkflowError, Unit] =
+    val matches = record.key.runId == context.runId &&
+      record.key.nodeId == nodeId &&
+      record.key.step + 1 == checkpoint.step &&
+      record.workflowId == checkpoint.workflowId &&
+      record.definitionVersion == checkpoint.definitionVersion &&
+      record.sessionId == checkpoint.sessionId
+    ZIO
+      .fail(AgentError.WorkflowFailed(nodeId.value, "workflow-wait-identity-mismatch"))
+      .unless(matches)
+      .unit
 
   private def workflowStoreError(operation: String, error: StoreError): WorkflowError =
     AgentError.WorkflowPersistenceFailed(

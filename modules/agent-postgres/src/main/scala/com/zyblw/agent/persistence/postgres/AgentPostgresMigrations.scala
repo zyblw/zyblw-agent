@@ -5,15 +5,10 @@ import zio.*
 
 import javax.sql.DataSource
 
-/** Framework-owned Flyway resources and the opt-in migration entry point.
+/** 框架拥有的 Flyway 资源与显式 migration 入口。
   *
-  * The framework deliberately does not migrate a database merely because its JAR is on the classpath.
-  * Applications must call [[migrate]] during their controlled startup sequence, or add [[DefaultLocation]] to
-  * an existing Flyway instance.
-  *
-  * New applications should keep the dedicated history table. It prevents an application's own `V1`, `V2`, ...
-  * migrations from colliding with framework versions. Existing applications that already share one Flyway
-  * history must follow the documented legacy adoption path instead of silently switching history tables.
+  * JAR 出现在 classpath 不会自动修改数据库；宿主必须在受控启动阶段调用 [[migrate]]，或把 [[DefaultLocation]] 加入自己的 Flyway。当前 0.3 开发线只提供
+  * fresh-install V001，必须使用空 schema/新数据库，不接管 0.2 history。
   */
 object AgentPostgresMigrations:
   val DefaultLocation: String =
@@ -24,10 +19,9 @@ object AgentPostgresMigrations:
 
   val DefaultHistoryTable: String = "flyway_zyblw_agent_schema_history"
 
-  /** Validates and applies framework migrations using a dedicated Flyway history table.
+  /** 校验配置并用独立 Flyway history 表应用框架 migration。
     *
-    * This effect is blocking because Flyway and JDBC are blocking APIs. The returned projection does not
-    * expose Flyway classes, so a later Flyway upgrade does not become part of the public API.
+    * Flyway/JDBC 是阻塞 API，因此该 effect 运行在 blocking executor。返回值不暴露 Flyway 类型，避免将其版本变成公共 API。
     */
   def migrate(
       dataSource: DataSource,
@@ -54,11 +48,10 @@ object AgentPostgresMigrations:
       }
     yield result
 
-/** Migration policy owned by the host application.
+/** 由宿主应用拥有的 migration 策略。
   *
-  * `baselineOnMigrate` defaults to false: adopting an existing schema must be an explicit, audited operation.
-  * Additional locations are supported for opt-in framework capabilities, but every location must be a
-  * classpath resource.
+  * `baselineOnMigrate` 默认 false；0.3 fresh baseline 不允许用它伪装接管旧 schema。额外 location 服务 pgvector 等可选能力， 且必须是
+  * classpath 资源。
   */
 final case class AgentPostgresMigrationConfig(
     historyTable: String = AgentPostgresMigrations.DefaultHistoryTable,
@@ -74,7 +67,7 @@ final case class AgentPostgresMigrationConfig(
       Left("Flyway locations must be bounded classpath resources")
     else Right(copy(locations = locations.distinct))
 
-/** Low-coupling result returned by [[AgentPostgresMigrations.migrate]]. */
+/** [[AgentPostgresMigrations.migrate]] 返回的低耦合结果。 */
 final case class AgentPostgresMigrationResult(
     success: Boolean,
     migrationsExecuted: Int,

@@ -64,7 +64,7 @@ Telemetry 与 Eval，但如果没有统一的架构语义，新增能力仍可�
 |---|---|---|
 | Application SDK | `app`、Builder、Quickstart、HTTP host | PostgreSQL 最小应用与更少样板的生产 preset |
 | Intelligence | Provider、Instruction、Context、Tool、Memory、RAG | capability/native extension、真实长会话与 RAG lineage |
-| Execution | Agent Runtime、command worker、Workflow execution ledger、低敏 timeline | timer/signal、kill/recover 与多节点 soak |
+| Execution | Agent Runtime、command worker、Workflow execution ledger、低敏 timeline、durable wait/signal | timer worker→wake command、kill/recover 与多节点 soak |
 | Control | Permission、Guardrail、Approval、Limit、Cost | policy 管理 UX、任务级总预算与保留策略 |
 | State | Run/Event/Command、checkpoint、Memory、Artifact | Goal/Plan/Todo SPI、Artifact durable Adapter、schema upcaster |
 | Quality / Ops | Inspector、OTLP、Eval、趋势门禁 | outcome/trajectory 分离、`pass@k`/`pass^k` 趋势、图级 eval |
@@ -84,14 +84,14 @@ MCP 是 Agent 与工具/资源/Prompt 的上下文交换边界，不负责 Agent
 
 ### 当前收口
 
-- 以 `0.2.0` 发布已完成的 Artifact、耐久 Workflow checkpoint、Docling/Markdown RAG 和 `RagApplication`；
+- 0.3 开发线采用 fresh database baseline，并收口 durable Workflow wait/signal；不承诺兼容 0.2 的 API、state JSON 或 schema；
 - Eval 增加有界多试验运行及 `pass@k` / `pass^k` 可靠性信号；
 - 文档明确 Experimental/Beta，不把上述能力宣传为已经完成生产验证。
 
 ### 下一阶段
 
-1. Workflow G3-A2：durable timer/signal 的原子等待/接收/唤醒、数据库重启/进程 kill 与多 Worker soak；execution
-   timeline 的内存/PostgreSQL 复合游标投影已完成；
+1. Workflow G3-A2b：把已有 durable wait/signal 与 `expireDue` 接入受监督 timer worker 和耐久 wake command，补数据库重启、
+   进程 kill 与多 Worker soak；
 2. RAG R2-B：block/page/bbox lineage、parent-child retrieval、相邻块扩展和 ACL 前置；
 3. Harness H1：小型 Goal/Plan/Todo/Skill ADT 与 Store SPI，复用 Artifact/Workspace/Approval；
 4. Quality Q1：结果与轨迹评分分离，多试验趋势和 failure corpus；

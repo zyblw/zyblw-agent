@@ -1,3 +1,7 @@
+-- zyblw-agent 0.3 全新数据库基线。
+--
+-- 这是开发阶段允许破坏性重构后的唯一默认 migration；不支持从 0.2.x 的 Flyway 历史原地升级。
+-- 采用本版本的应用必须使用空 schema/新数据库并重新构建派生索引。已发布版本的 migration 只保留在对应 Maven artifact/tag 中。
 -- zyblw-agent PostgreSQL 首次正式发布基线；本文件直接描述当前完整结构。
 
 CREATE TABLE agent_runs (
@@ -428,3 +432,244 @@ COMMENT ON TABLE agent_embedding_quota_windows IS
   'Embedding 租户硬配额窗口；同一窗口的检查与累加由行锁串行化';
 COMMENT ON TABLE agent_embedding_quota_reservations IS
   'Embedding requestId/hash 幂等账本；与窗口计数在同一事务提交';
+
+-- 长期评测趋势只保存 EvalSuiteSnapshot 低敏投影，不保存问题、回答、引用正文或 grade details。
+CREATE TABLE agent_eval_snapshots (
+  evaluation_id TEXT PRIMARY KEY CHECK (evaluation_id ~ '^[A-Za-z0-9._-]{1,160}$'),
+  schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+  suite_kind TEXT NOT NULL CHECK (suite_kind IN ('Agent', 'Rag', 'ContextCompression')),
+  suite_id TEXT NOT NULL CHECK (suite_id ~ '^[A-Za-z0-9._-]{1,160}$'),
+  dataset_id TEXT NOT NULL CHECK (dataset_id ~ '^[A-Za-z0-9._-]{1,160}$'),
+  dataset_version TEXT NOT NULL CHECK (dataset_version ~ '^[A-Za-z0-9._-]{1,160}$'),
+  harness_version TEXT NOT NULL CHECK (harness_version ~ '^[A-Za-z0-9._-]{1,160}$'),
+  provider TEXT CHECK (provider IS NULL OR length(provider) BETWEEN 1 AND 120),
+  model TEXT CHECK (model IS NULL OR length(model) BETWEEN 1 AND 240),
+  pricing_version TEXT CHECK (pricing_version IS NULL OR pricing_version ~ '^[A-Za-z0-9._-]{1,160}$'),
+  commit_sha TEXT CHECK (commit_sha IS NULL OR commit_sha ~ '^[A-Za-z0-9._-]{1,160}$'),
+  started_at TIMESTAMPTZ NOT NULL,
+  finished_at TIMESTAMPTZ NOT NULL,
+  -- TIMESTAMPTZ 为微秒精度；额外保存秒/nano，保证 JVM Instant 的确定性排序。
+  finished_epoch_second BIGINT NOT NULL,
+  finished_nano INTEGER NOT NULL CHECK (finished_nano BETWEEN 0 AND 999999999),
+  passed BOOLEAN NOT NULL,
+  pass_rate DOUBLE PRECISION NOT NULL CHECK (
+    pass_rate <> 'NaN'::double precision AND pass_rate BETWEEN 0.0 AND 1.0
+  ),
+  snapshot_sha256 CHAR(64) NOT NULL CHECK (snapshot_sha256 ~ '^[0-9a-f]{64}$'),
+  snapshot_payload TEXT NOT NULL CHECK (octet_length(snapshot_payload) BETWEEN 2 AND 16777216),
+  snapshot_json JSONB NOT NULL CHECK (jsonb_typeof(snapshot_json) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CHECK (finished_at >= started_at),
+  CHECK (snapshot_json = snapshot_payload::jsonb)
+);
+
+CREATE INDEX agent_eval_snapshots_history_idx
+  ON agent_eval_snapshots(
+    suite_kind, suite_id, dataset_id, dataset_version,
+    finished_epoch_second DESC, finished_nano DESC, evaluation_id DESC
+  );
+
+CREATE INDEX agent_eval_snapshots_latest_passing_idx
+  ON agent_eval_snapshots(
+    suite_kind, suite_id, dataset_id, dataset_version,
+    finished_epoch_second DESC, finished_nano DESC, evaluation_id DESC
+  )
+  WHERE passed = TRUE;
+
+COMMENT ON TABLE agent_eval_snapshots IS
+  'Agent/RAG/Context Compression 的低敏不可变评测快照；evaluation_id 幂等且同 ID 不允许覆盖';
+
+-- 声明式 Workflow 的耐久恢复事实。
+-- 不引用 agent_runs：Workflow 可以独立于模型 Agent Run 使用，但 run_id 仍是全局 UUID。
+CREATE TABLE agent_workflow_checkpoints (
+  run_id UUID PRIMARY KEY,
+  schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+  workflow_id TEXT NOT NULL CHECK (workflow_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$'),
+  definition_version INTEGER NOT NULL CHECK (definition_version > 0),
+  session_id UUID NOT NULL,
+  cursor_kind TEXT NOT NULL CHECK (cursor_kind IN ('At', 'Completed')),
+  node_id TEXT CHECK (
+    node_id IS NULL OR node_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$'
+  ),
+  step INTEGER NOT NULL CHECK (step >= 0),
+  checkpoint_sha256 CHAR(64) NOT NULL CHECK (checkpoint_sha256 ~ '^[0-9a-f]{64}$'),
+  checkpoint_payload TEXT NOT NULL CHECK (octet_length(checkpoint_payload) BETWEEN 2 AND 16777216),
+  checkpoint_json JSONB NOT NULL CHECK (jsonb_typeof(checkpoint_json) = 'object'),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CHECK (
+    (cursor_kind = 'At' AND node_id IS NOT NULL) OR
+    (cursor_kind = 'Completed' AND node_id IS NULL)
+  ),
+  CHECK (checkpoint_json = checkpoint_payload::jsonb)
+);
+
+CREATE INDEX agent_workflow_checkpoints_identity_idx
+  ON agent_workflow_checkpoints(workflow_id, definition_version, session_id, updated_at DESC);
+
+COMMENT ON TABLE agent_workflow_checkpoints IS
+  '声明式 Workflow 的完整恢复快照；只允许相同 identity 内按 step 单调推进';
+
+-- Workflow 节点 execution ledger、pending outcome 与分布式 fencing。
+-- PostgresWorkflowCheckpointStore.commit 在同一事务推进 execution、checkpoint 与 durable wait。
+CREATE TABLE agent_workflow_node_executions (
+  run_id UUID NOT NULL,
+  workflow_id TEXT NOT NULL CHECK (workflow_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$'),
+  definition_version INTEGER NOT NULL CHECK (definition_version > 0),
+  session_id UUID NOT NULL,
+  node_id TEXT NOT NULL CHECK (node_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$'),
+  step INTEGER NOT NULL CHECK (step >= 0),
+  visit INTEGER NOT NULL CHECK (visit > 0),
+  status TEXT NOT NULL CHECK (status IN ('Running', 'Prepared', 'Committed')),
+  generation BIGINT NOT NULL CHECK (generation > 0),
+  lease_owner TEXT NOT NULL CHECK (length(btrim(lease_owner)) BETWEEN 1 AND 200),
+  lease_token UUID NOT NULL,
+  claimed_at TIMESTAMPTZ NOT NULL,
+  lease_expires_at TIMESTAMPTZ,
+  heartbeat_at TIMESTAMPTZ,
+  outcome_sha256 CHAR(64) CHECK (
+    outcome_sha256 IS NULL OR outcome_sha256 ~ '^[0-9a-f]{64}$'
+  ),
+  outcome_payload TEXT CHECK (
+    outcome_payload IS NULL OR octet_length(outcome_payload) BETWEEN 2 AND 16777216
+  ),
+  outcome_json JSONB CHECK (
+    outcome_json IS NULL OR jsonb_typeof(outcome_json) = 'object'
+  ),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  completed_at TIMESTAMPTZ,
+  PRIMARY KEY (run_id, step, node_id),
+  CHECK (
+    (status = 'Running'
+      AND lease_expires_at IS NOT NULL
+      AND heartbeat_at IS NOT NULL
+      AND outcome_sha256 IS NULL
+      AND outcome_payload IS NULL
+      AND outcome_json IS NULL
+      AND completed_at IS NULL)
+    OR
+    (status = 'Prepared'
+      AND lease_expires_at IS NOT NULL
+      AND heartbeat_at IS NOT NULL
+      AND outcome_sha256 IS NOT NULL
+      AND outcome_payload IS NOT NULL
+      AND outcome_json IS NOT NULL
+      AND completed_at IS NULL)
+    OR
+    (status = 'Committed'
+      AND lease_expires_at IS NULL
+      AND heartbeat_at IS NULL
+      AND outcome_sha256 IS NOT NULL
+      AND outcome_payload IS NOT NULL
+      AND outcome_json IS NOT NULL
+      AND completed_at IS NOT NULL)
+  ),
+  CHECK (
+    (outcome_payload IS NULL AND outcome_json IS NULL)
+    OR outcome_json = outcome_payload::jsonb
+  )
+);
+
+CREATE INDEX agent_workflow_node_executions_claim_idx
+  ON agent_workflow_node_executions(status, lease_expires_at, updated_at)
+  WHERE status IN ('Running', 'Prepared');
+
+CREATE INDEX agent_workflow_node_executions_identity_idx
+  ON agent_workflow_node_executions(workflow_id, definition_version, session_id, run_id, step);
+
+COMMENT ON TABLE agent_workflow_node_executions IS
+  'Workflow 节点执行台账；Prepared outcome 可跨进程恢复，commit 与 checkpoint 在同一事务完成';
+
+-- Durable Workflow timer/signal：等待注册与 checkpoint/execution commit 共享事务。
+CREATE TABLE agent_workflow_waits (
+  run_id UUID NOT NULL,
+  step INTEGER NOT NULL CHECK (step >= 0),
+  node_id TEXT NOT NULL CHECK (node_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$'),
+  workflow_id TEXT NOT NULL CHECK (workflow_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$'),
+  definition_version INTEGER NOT NULL CHECK (definition_version > 0),
+  session_id UUID NOT NULL,
+  condition_kind TEXT NOT NULL CHECK (condition_kind IN ('Signal', 'Timer')),
+  signal_name TEXT CHECK (
+    signal_name IS NULL OR signal_name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$'
+  ),
+  deadline TIMESTAMPTZ NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('Pending', 'Signaled', 'TimedOut', 'Consumed')),
+  accepted_signal_id TEXT CHECK (
+    accepted_signal_id IS NULL OR accepted_signal_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$'
+  ),
+  accepted_signal_payload TEXT CHECK (
+    accepted_signal_payload IS NULL OR octet_length(accepted_signal_payload) <= 65536
+  ),
+  accepted_signal_sha256 CHAR(64) CHECK (
+    accepted_signal_sha256 IS NULL OR accepted_signal_sha256 ~ '^[0-9a-f]{64}$'
+  ),
+  signal_received_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  resolved_at TIMESTAMPTZ,
+  consumed_at TIMESTAMPTZ,
+  PRIMARY KEY (run_id, step, node_id),
+  FOREIGN KEY (run_id, step, node_id)
+    REFERENCES agent_workflow_node_executions(run_id, step, node_id),
+  CHECK (
+    (condition_kind = 'Signal' AND signal_name IS NOT NULL) OR
+    (condition_kind = 'Timer' AND signal_name IS NULL)
+  ),
+  CHECK (
+    (status = 'Pending'
+      AND resolved_at IS NULL
+      AND consumed_at IS NULL
+      AND accepted_signal_id IS NULL
+      AND accepted_signal_payload IS NULL
+      AND accepted_signal_sha256 IS NULL
+      AND signal_received_at IS NULL)
+    OR
+    (status = 'Signaled'
+      AND resolved_at IS NOT NULL
+      AND consumed_at IS NULL
+      AND accepted_signal_id IS NOT NULL
+      AND accepted_signal_payload IS NOT NULL
+      AND accepted_signal_sha256 IS NOT NULL
+      AND signal_received_at IS NOT NULL)
+    OR
+    (status = 'TimedOut'
+      AND resolved_at IS NOT NULL
+      AND consumed_at IS NULL
+      AND accepted_signal_id IS NULL
+      AND accepted_signal_payload IS NULL
+      AND accepted_signal_sha256 IS NULL
+      AND signal_received_at IS NULL)
+    OR
+    (status = 'Consumed'
+      AND resolved_at IS NOT NULL
+      AND consumed_at IS NOT NULL)
+  )
+);
+
+CREATE UNIQUE INDEX agent_workflow_waits_one_active_per_run_idx
+  ON agent_workflow_waits(run_id)
+  WHERE status <> 'Consumed';
+
+CREATE INDEX agent_workflow_waits_due_idx
+  ON agent_workflow_waits(deadline, run_id, step, node_id)
+  WHERE status = 'Pending';
+
+-- 所有 signal 尝试都保存稳定 receipt；相同 wait/signal_id 不会被重复应用。
+CREATE TABLE agent_workflow_signals (
+  run_id UUID NOT NULL,
+  wait_step INTEGER NOT NULL CHECK (wait_step >= 0),
+  wait_node_id TEXT NOT NULL,
+  signal_id TEXT NOT NULL CHECK (signal_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$'),
+  signal_name TEXT NOT NULL CHECK (signal_name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$'),
+  payload TEXT NOT NULL CHECK (octet_length(payload) <= 65536),
+  payload_sha256 CHAR(64) NOT NULL CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'),
+  disposition TEXT NOT NULL CHECK (disposition IN ('Accepted', 'Late', 'AlreadyResolved')),
+  received_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (run_id, wait_step, wait_node_id, signal_id),
+  FOREIGN KEY (run_id, wait_step, wait_node_id)
+    REFERENCES agent_workflow_waits(run_id, step, node_id)
+);
+
+COMMENT ON TABLE agent_workflow_waits IS
+  'Workflow durable timer/signal；resolved/consumed 与 execution/checkpoint 形成唯一唤醒边界';
+COMMENT ON TABLE agent_workflow_signals IS
+  '外部 Workflow signal 去重 receipt；payload 不进入 timeline、日志或指标';
