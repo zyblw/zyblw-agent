@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-25
+> 最后核验：2026-08-02
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -100,6 +100,7 @@ ZYBLW_AGENT_TOOL_RETRY_MAX_ATTEMPTS=3
 ZYBLW_AGENT_WORKER_LEASE_DURATION=30s
 ZYBLW_AGENT_WORKER_HEARTBEAT_EVERY=10s
 ZYBLW_AGENT_WORKER_POLL_EVERY=500ms
+ZYBLW_AGENT_WORKER_PARALLELISM=4
 ```
 
 加载阶段会拒绝：
@@ -216,12 +217,15 @@ val applicationLayer: ZLayer[Any, Throwable, AgentApplication.Services] =
 - `RunObserver` 只输出脱敏、低基数字段，模型正文和工具参数不得进入 OTLP/Langfuse；
 - HTTP 只调用 `AgentCommandService`，Worker 才能调用 lease-aware Runtime；
 - `WorkerId` 每次进程启动唯一，不能把多个副本配置成同一个固定值。
+- `worker.parallelism` 是单实例同时推进的不同 Run 上限，默认 4、允许 1..256；同一 Run 仍由 dispatcher
+  严格串行。它必须与 JDBC 连接池、Provider 配额、工具下游容量和 Pod 内存一起压测，不能只为缩短队列而盲目调大。
 - `CompressionMode.Deterministic` 始终使用本地算法，即使图中存在 LLM compressor 也不产生费用；
 - `CompressionMode.ModelAssisted` 必须使用 `*WithContextCompressor` 入口，否则在 Provider 调用前明确失败。
 
 ## 8. Worker 生命周期
 
-常驻 Worker 可以直接作为应用主 effect：
+常驻 Worker 可以直接作为应用主 effect。`runWorker` 会启动 `worker.parallelism` 个结构化 claim lane；任一 lane
+永久失败都会中断其余 lane 并让外层 Supervisor 重启实例，不会留下部分 lane 静默死亡：
 
 ```scala
 val workerProgram: ZIO[AgentApplication, AgentError, Nothing] =

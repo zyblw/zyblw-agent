@@ -17,13 +17,16 @@ import zio.*
   *   可重试错误重新排队前的基础延迟
   * @param maxAttempts
   *   一个人工重试周期内的最大自动 claim 次数
+  * @param parallelism
+  *   当前进程同时推进的不同 Run 上限；同一 Run 仍由 `RunCommandStore` 的 dispatcher fence 保证严格串行
   */
 final case class WorkerHostConfig(
     leaseDuration: Duration = 30.seconds,
     heartbeatEvery: Duration = 10.seconds,
     pollEvery: Duration = 500.millis,
     retryDelay: Duration = 5.seconds,
-    maxAttempts: Int = 8
+    maxAttempts: Int = 8,
+    parallelism: Int = 4
 ):
   require(leaseDuration > Duration.Zero, "leaseDuration 必须大于零")
   require(
@@ -32,6 +35,7 @@ final case class WorkerHostConfig(
   )
   require(pollEvery > Duration.Zero && retryDelay >= Duration.Zero, "pollEvery 必须大于零且 retryDelay 不能为负")
   require(maxAttempts > 0, "maxAttempts 必须大于零")
+  require(parallelism >= 1 && parallelism <= 256, "parallelism 必须位于 1..256")
 
 /** 用 ZIO 结构化并发把命令执行 Fiber 与 heartbeat Fiber 绑定为同一个生命周期。
   *

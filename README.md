@@ -127,7 +127,7 @@ flowchart TB
 |---|---|---|
 | Agent Runtime | typed error、预算、审批、恢复、取消、流式事件 | Foundation；仍需长运行故障与负载证据 |
 | Tool / Side Effect | typed schema、scope、风险、冲突、幂等、outbox/inbox、补偿 | Foundation/Experimental；需要更多真实写业务 |
-| Durable Control | command queue、lease、heartbeat、generation fencing | Foundation；需要多节点 soak、SLO、备份恢复 |
+| Durable Control | command queue、有界 Run 并发、lease、heartbeat、generation fencing | Foundation；需要多节点 soak、SLO、备份恢复 |
 | Workflow | 静态图校验、循环预算、fan-out、checkpoint、execution ledger、低敏 timeline、durable wait/signal、受监督 wake worker | Experimental；kill/restart/multi-worker soak、人工任务、子图待完成 |
 | Context / Memory | 分区预算、压缩、可信来源、长期记忆治理 | Beta；需要真实长会话质量趋势 |
 | RAG | PDF/Markdown 摄取、结构切分、embedding 治理、hybrid、rerank、citation、eval | Beta；block/page lineage、parent-child、恶意 PDF/OCR 待完成 |
@@ -179,6 +179,9 @@ PDF/Markdown
 
 ## 生产接入顺序
 
+准备把框架用于真实业务时，先按[生产接入基线与发布候选判定](docs/production-readiness.md)区分框架门禁、业务验收和
+分阶段扩流；不要把 `testFull` 绿色直接解释为某个业务已经生产就绪。
+
 1. 先跑无密钥 Quickstart，确认 JDK、sbt 和主链路。
 2. 用 `ScriptedChatModel`、内存 Store 和 Fake Tool 写确定性业务测试。
 3. 接入真实 Provider，但保持工具只读、额度小、live smoke 显式启用。
@@ -196,7 +199,7 @@ ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`
 框架提供机制，业务仍拥有最终策略和运行责任：
 
 1. **身份与权限**：`RunContext` 的 user/tenant/scope 是否来自已经验签的可信身份，而不是请求正文或模型输出？
-2. **预算与过载**：步骤、模型、工具、token、费用、wall-clock、队列和并发是否都有上限？达到上限时如何降级？
+2. **预算与过载**：步骤、模型、工具、token、费用、wall-clock、队列和 Worker 并发是否都有上限？达到上限时如何降级？
 3. **外部副作用**：写工具是否有稳定业务幂等键、审批、outbox/inbox、补偿和审计？
 4. **数据与隐私**：Prompt、工具结果、RAG 文档、Memory、Trace 和 Eval 的保留、删除、脱敏策略是什么？
 5. **恢复**：数据库重启、worker 被杀、Provider 断流、lease 过期和重复命令是否经过演练？

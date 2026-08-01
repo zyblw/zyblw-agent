@@ -14,7 +14,7 @@ import zio.*
   *
   * {{ ZYBLW_AGENT_TOOL_ALLOWED_TOOLS=knowledge_search,article_draft
   * ZYBLW_AGENT_TOOL_APPROVAL_POLICY=risk-based ZYBLW_AGENT_WORKER_LEASE_DURATION=30s
-  * ZYBLW_AGENT_WORKER_HEARTBEAT_EVERY=10s }}
+  * ZYBLW_AGENT_WORKER_HEARTBEAT_EVERY=10s ZYBLW_AGENT_WORKER_PARALLELISM=4 }}
   *
   * ZIO Config 的描述和值加载保持分离：测试可使用 `ConfigProvider.fromMap`，生产可使用环境变量、系统属性， 或由宿主替换成 HOCON/YAML/Secret
   * backend，而本模块无需知道配置究竟来自哪里。
@@ -135,7 +135,8 @@ object AgentApplicationConfigLoader:
         Config.duration("heartbeat_every").withDefault(10.seconds) ++
         Config.duration("poll_every").withDefault(500.millis) ++
         Config.duration("retry_delay").withDefault(5.seconds) ++
-        Config.int("max_attempts").withDefault(8)
+        Config.int("max_attempts").withDefault(8) ++
+        Config.int("parallelism").withDefault(4)
     ).mapAttempt(WorkerHostConfig.apply).nested("worker")
 
   /** 把逗号分隔的部署值转换为去重后的类型化工具名，并拒绝控制字符或异常长度。 */

@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-01
+> 最后核验：2026-08-02
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -18,7 +18,8 @@ Artifact、Skill、Context 和 Sandbox 等长任务支架；Workflow 负责显�
 `zyblw-agent-core` 中的 `app` package 位于业务宿主与运行控制层之间，只组合
 `AgentRuntime/AgentCommandService/WorkerHost` 及其稳定 SPI。它不会定义
 第二套状态、隐藏数据库 fallback 或把 Provider 类型引入 core；生产 `durable` 入口要求业务显式提供持久化、Context、
-Guardrail 和 Observer。
+Guardrail 和 Observer。WorkerHost 在单个父 effect 下运行有界 claim lane：不同 Run 可以并行，同一 Run 仍由 dispatcher
+严格串行；任一 lane 失败会中断其余 lane 并交给外层 Supervisor，避免形成部分失效进程。
 
 `zyblw-agent-zio-http` artifact 位于最外层传输边界；其中 `http.host` package 只把 `AgentHttpApi` routes、command
 worker、健康探针与 ZIO HTTP Server 放入同一个子 Scope。它不反向进入 Runtime，也不创建 DataSource、认证或 Provider

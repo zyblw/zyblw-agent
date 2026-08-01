@@ -1,7 +1,7 @@
 # zyblw-agent 成熟度、取舍与路线
 
 > 状态：路线图
-> 最后核验：2026-08-01
+> 最后核验：2026-08-02
 > 事实来源：`build.sbt`、模块源码、测试、发布工作流、迁移与当前文档
 
 ## 成熟度语义
@@ -25,7 +25,7 @@
 | Provider-neutral 模型流 | core / `model` | Foundation | 统一事件和测试模型 | capability 矩阵持续演进 |
 | 类型化工具与策略 | core / `tools`,`guardrails` | Foundation | schema、allowlist、风险和结果测试 | policy 管理 UX |
 | 单 Agent loop | core / `runtime` | Foundation | budget、工具、审批、恢复、遥测测试 | 长运行与大负载故障注入 |
-| durable command worker | core / `app`,`scheduler`,`runtime` | Foundation | claim/lease/heartbeat/fencing | 多节点 soak、运维 dashboard |
+| durable command worker | core / `app`,`scheduler`,`runtime` | Foundation | 有界多 Run lane、同 Run 串行、claim/lease/heartbeat/fencing | 多节点 soak、容量曲线、运维 dashboard |
 | HTTP v1 公共协议 | zio-http / `http.contract`,`http` | Foundation/Beta | 独立 DTO、Endpoint、OpenAPI、route test | 客户端 SDK、兼容升级演练 |
 | Run Inspector / Timeline | core + zio-http / `inspection` | Foundation/Beta | 低敏投影、分页、授权、结构诊断与泄漏测试 | CLI/UI、筛选导出、真实事故验证 |
 | Context | core / `context` | Beta | 有界装配、确定性压缩测试 | 真实长会话数据集 |

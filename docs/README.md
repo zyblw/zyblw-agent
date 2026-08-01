@@ -1,7 +1,7 @@
 # zyblw-agent 文档地图
 
 > 状态：当前
-> 最后核验：2026-08-01
+> 最后核验：2026-08-02
 > 事实来源：`build.sbt`、发布工作流、模块源码、测试与数据库迁移
 
 ## 按目标选择阅读路径
@@ -12,6 +12,14 @@
 2. [模块选择](modules.md)
 3. [AgentApplication 与 Builder](application-builder.md)
 4. [Provider 与能力协商](providers.md)
+
+### 我要开始构建生产业务
+
+1. [生产接入基线与发布候选判定](production-readiness.md)
+2. [AgentApplication 与 Builder](application-builder.md)
+3. [持久化](persistence.md)与[宿主数据库迁移](database-migrations.md)
+4. [ZIO HTTP 生产宿主](http-host.md)
+5. [安全](security.md)、[可观测性](observability.md)与[测试](testing.md)
 
 ### 我要理解内核
 

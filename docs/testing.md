@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-01
+> 最后核验：2026-08-02
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -24,6 +24,20 @@ Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基
 `sbt-scalafmt` 锁定，不以某位开发者的编辑器配置为准。
 
 ### 最近一次完整本地证据
+
+2026-08-02 的业务生产基线候选复核：
+
+- `scalafmtCheckAll; scalafmtSbtCheck; testFull`：全部已执行确定性测试通过、0 失败；core 103 项通过，PostgreSQL
+  用例按默认开关忽略；
+- WorkerHost 新增单实例有界多 Run lane 契约：配置为 2 时只允许两个不同 Run 同时进入 Runtime，lane 释放后第三条继续
+  领取；同 Run 串行仍由已有 dispatcher 测试保护；配置加载覆盖默认值、显式值和 256 硬上限；
+- `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`：PostgreSQL 16.14、0.3 fresh V001 与 optional pgvector 共 30 项通过、
+  0 失败、0 忽略；
+- `0.3.0-local publishM2` 成功生成 11 个公开模块的 POM、binary、sources 与 Scaladoc JAR；独立 Maven consumer 不引用
+  仓库源码，重新编译 Agent Definition、Worker 配置、PostgreSQL 控制面、知识 Store 和 durable Application 生产装配；
+- `QuickstartAgentExample` 与 `RagAgentExample` 实际运行到 `Completed`，后者同时完成文档摄取、active snapshot、检索和引用；
+- 尚未执行长时间 process kill/数据库 restart/multi-Worker soak 和真实业务容量曲线，因此结论是“0.3.0 生产基线候选”，
+  不是通用规模 GA。
 
 2026-08-01 的 `0.3.0` breaking development line 复核：
 

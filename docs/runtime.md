@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-25
+> 最后核验：2026-08-02
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -67,6 +67,11 @@ val program: ZIO[RunCommandStore & LeaseAwareAgentRuntime, AgentError, Nothing] 
 每次 claim 的 command、owner、随机 token 和 generation 会原样进入 `executeLeased`。Runtime 使用 `FiberRef.locally` 把租约限制
 在当前工作 Fiber 的动态作用域内；子 Fiber 继承凭证，任务结束后自动恢复为空。`saveEvents` 检测到租约时只调用
 `RunStore.commitFenced`，不会退回普通 commit。
+
+`WorkerHostConfig.parallelism` 限制单实例同时运行的 claim lane，默认 4、硬上限 256。每个 lane 一次只持有一条命令，
+`RunCommandStore` 的 dispatcher 继续保证同一 Run 严格串行，因此该并发只扩大不同 Run 的吞吐。所有 lane 由同一父 effect
+结构化监督；任一 lane 失败会中断其余 lane，并由 `AgentHttpHost` 或部署 Supervisor 重启整个实例。生产取值必须结合
+Provider rate limit、JDBC pool、工具下游、内存和 P95 排队时间压测，不应把 256 当成推荐值。
 
 普通 `run/resume/recover/cancel` 仍保留给单进程、嵌入式和测试模式。生产集群 HTTP 控制面已经改为
 `AgentCommandService`：新建、审批、取消、恢复和显式重试先耐久入队并返回 `202 Accepted + commandId`，WorkerHost claim

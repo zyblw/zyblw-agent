@@ -28,7 +28,8 @@ object AgentApplicationConfigLoaderSpec extends ZIOSpecDefault:
         "zyblw.agent.worker.heartbeat_every"   -> "12s",
         "zyblw.agent.worker.poll_every"        -> "250ms",
         "zyblw.agent.worker.retry_delay"       -> "3s",
-        "zyblw.agent.worker.max_attempts"      -> "11"
+        "zyblw.agent.worker.max_attempts"      -> "11",
+        "zyblw.agent.worker.parallelism"       -> "6"
       )
 
       AgentApplicationConfigLoader.load().provide(configProvider(values)).map { config =>
@@ -50,7 +51,8 @@ object AgentApplicationConfigLoaderSpec extends ZIOSpecDefault:
           config.worker.heartbeatEvery == 12.seconds,
           config.worker.pollEvery == 250.millis,
           config.worker.retryDelay == 3.seconds,
-          config.worker.maxAttempts == 11
+          config.worker.maxAttempts == 11,
+          config.worker.parallelism == 6
         )
       }
     },
@@ -60,7 +62,8 @@ object AgentApplicationConfigLoaderSpec extends ZIOSpecDefault:
           config.toolPolicy.allowedTools.isEmpty,
           config.toolPolicy.approvalPolicy == ApprovalPolicy.RiskBased,
           config.toolPolicy.retryPolicy == ToolRetryPolicy.Never,
-          config.worker.maxAttempts == 8
+          config.worker.maxAttempts == 8,
+          config.worker.parallelism == 4
         )
       }
     },
@@ -93,6 +96,18 @@ object AgentApplicationConfigLoaderSpec extends ZIOSpecDefault:
           message.contains("heartbeatEvery")
         )
       }
+    },
+    test("拒绝超过硬上限的 Worker 并发") {
+      AgentApplicationConfigLoader
+        .load()
+        .provide(configProvider(Map("zyblw.agent.worker.parallelism" -> "257")))
+        .exit
+        .map { exit =>
+          val message = exit match
+            case Exit.Failure(cause) => cause.failureOption.map(_.message).getOrElse("")
+            case Exit.Success(_)     => ""
+          assertTrue(exit.isFailure, message.contains("parallelism"))
+        }
     },
     test("自定义 prefix 可以与同一业务进程中的其他 Agent 集群隔离") {
       val values = Map("research.worker.max_attempts" -> "13")

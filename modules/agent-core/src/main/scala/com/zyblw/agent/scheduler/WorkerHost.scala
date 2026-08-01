@@ -20,13 +20,17 @@ import zio.*
   *
   * @param worker
   *   已绑定 owner、调度参数、Runtime 和持久化存储的底层租约 worker
+  * @param parallelism
+  *   当前进程并行运行的 claim lane 数量
   */
-final class WorkerHost private (worker: CommandWorker):
-  /** 持续 claim 并执行任务，直到宿主 Scope/应用被中断。
+final class WorkerHost private (worker: CommandWorker, parallelism: Int):
+  /** 以配置的有界并发持续 claim 并执行任务，直到宿主 Scope/应用被中断。
     *
-    * 队列为空会按 `pollEvery` 休眠，不会忙等；中断会沿结构化并发传播到 heartbeat、模型流和工具 Fiber。
+    * 每个 lane 同时只持有一条 command；数据库 dispatcher 保证同一 Run 严格串行，不同 Run 最多并行到 `WorkerHostConfig.parallelism`。任一 lane
+    * 失败会中断其它 lane，并继续沿结构化并发传播到 heartbeat、模型流和工具 Fiber， 让外层 Host/Supervisor 看到关键 Worker 已失效，而不是留下部分存活的半健康进程。
     */
-  def run: IO[AgentError, Nothing] = worker.run
+  def run: IO[AgentError, Nothing] =
+    ZIO.foreachParDiscard(1 to parallelism)(_ => worker.run) *> ZIO.never
 
   /** 只处理一个 claim 周期，供受控批处理、健康验证和确定性测试使用。
     * @return
@@ -59,7 +63,7 @@ object WorkerHost:
         config,
         lease => runtime.executeLeased(lease)
       )
-    yield WorkerHost(worker)
+    yield WorkerHost(worker, config.parallelism)
 
   /** 固定 owner/config 后暴露为 Layer，便于宿主在启动依赖图中只请求 `WorkerHost`。
     * @param owner

@@ -7,6 +7,10 @@ All notable user-visible changes will be recorded here. The project follows
 
 ### Added
 
+- Durable command Worker now supports configurable bounded Run parallelism (default 4, hard limit 256). Different Runs can progress
+  concurrently while each Run remains serialized by the dispatcher fence; all lanes are supervised as one fail-fast ZIO lifecycle.
+- The independent Maven consumer now compiles the production-facing Agent definition, Worker config, PostgreSQL control plane,
+  knowledge store and durable `AgentApplication` wiring instead of checking only two core ADTs.
 - Durable Workflow timer/signal contract: `NodeOutcome.Awaiting`, absolute deadlines, typed wakeups, atomic wait registration and
   consumption in the execution/checkpoint commit, bounded signal payloads, stable signal IDs, duplicate/conflicting retry handling,
   and a database-clock timeout race with one winner.

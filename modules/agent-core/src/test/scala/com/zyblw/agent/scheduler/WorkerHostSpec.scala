@@ -76,5 +76,49 @@ object WorkerHostSpec extends ZIOSpecDefault:
         saved.status == RunCommandStatus.DeadLetter,
         saved.lastFailure.exists(_.contains("retryable=false"))
       )
+    },
+    test("run 只并行配置数量的不同 Run，并在 lane 释放后继续领取") {
+      for
+        environment <- RunCommandStore.inMemory.build
+        store = environment.get[RunCommandStore]
+        runIds  <- ZIO.foreach(1 to 3)(_ => RunId.random)
+        records <- ZIO.foreach(runIds)(runId =>
+          store.submit(runId, RunCommandPayload.Recover, s"recover:${runId.asString}")
+        )
+        active  <- Ref.make(0)
+        maximum <- Ref.make(0)
+        entered <- Queue.unbounded[CommandId]
+        release <- Promise.make[Nothing, Unit]
+        runtime = new LeaseAwareAgentRuntime:
+          def executeLeased(lease: RunCommandLease): IO[AgentError, Unit] =
+            (for
+              current <- active.updateAndGet(_ + 1)
+              _       <- maximum.update(value => value.max(current))
+              _       <- entered.offer(lease.commandId)
+              _       <- release.await
+            yield ()).ensuring(active.update(_ - 1))
+        host <- WorkerHost
+          .make(
+            WorkerId("host-parallel"),
+            WorkerHostConfig(parallelism = 2, pollEvery = 1.second)
+          )
+          .provide(ZLayer.succeed(store), ZLayer.succeed(runtime))
+        fiber       <- host.run.fork
+        first       <- entered.take
+        second      <- entered.take
+        activeAtCap <- active.get
+        maxAtCap    <- maximum.get
+        _           <- release.succeed(())
+        third       <- entered.take
+        maxAfter    <- maximum.get
+        _           <- fiber.interrupt
+      yield assertTrue(
+        records.map(_.commandId).toSet == Set(first, second, third),
+        first != second,
+        second != third,
+        activeAtCap == 2,
+        maxAtCap == 2,
+        maxAfter == 2
+      )
     }
   )

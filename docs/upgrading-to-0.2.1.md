@@ -66,7 +66,7 @@ sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
 sbt -batch 'set ThisBuild / version := "0.2.1-local"; publishM2'
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.2.1-local sbt -batch clean compile
+ZYBLW_AGENT_VERSION=0.2.1-local sbt -batch 'clean; compile'
 ```
 
 完整兼容面见 [兼容性契约](compatibility.md)，用户可见变化见 [CHANGELOG](../CHANGELOG.md)。
