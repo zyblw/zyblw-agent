@@ -13,6 +13,7 @@ Workflow durable wait 与后续 RAG lineage 契约收敛到正确形态，再建
    `V001__zyblw_agent_0_3_baseline.sql`。
 3. 重新导入允许保留的业务源文档；RAG 向量、FTS、chunk 和 eval 投影均视为可重建派生数据。
 4. 为每个 Workflow 使用新的 definition version；不要恢复 `0.2.x` 的活跃 checkpoint、Prepared outcome 或 lease。
-5. 运行框架、PostgreSQL、Maven-local consumer 和实际业务契约测试后再接入开发环境。
+5. 为每个 durable definition 启动 `WorkflowWakeWorker.startScoped`；webhook 只调用幂等 `signal`，不要直接调用 `resume`。
+6. 运行框架、PostgreSQL、Maven-local consumer 和实际业务契约测试后再接入开发环境。
 
 旧数据库不是自动删除目标。备份、保留和最终清理由宿主负责人决定；框架只明确拒绝把旧 schema 伪装成新 baseline。

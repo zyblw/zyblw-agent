@@ -68,6 +68,8 @@ flowchart LR
   WorkflowStore --> PostgreSQL
   WorkflowStore --> WorkflowTimeline[低敏 Execution Timeline]
   WorkflowStore --> WorkflowWait[Durable Wait + Signal]
+  WorkflowWake[Scoped Wake Worker] --> WorkflowStore
+  WorkflowWake --> Workflow
 ```
 
 Inspector 从授权后的权威 State 与耐久 Event 生成只读 Timeline 和一致性诊断。它不承担恢复和重放，因此不会成为与
@@ -76,7 +78,8 @@ Runtime 竞争的第二套状态；它也不复制 Prompt、消息、工具参�
 
 Workflow execution timeline 遵守同一原则：它从节点账本投影 node/step/status/generation/owner/时间戳，不复制应用状态、
 pending outcome 或 fencing token。durable wait 则保存条件、绝对 deadline 和唯一决议；signal payload 不进入 timeline。
-恢复仍只读取权威 checkpoint、ledger 与 wait；外部 Adapter 必须在查询前验证 Run 的 tenant/user 读取权限。
+已决议 wait 自身作为 wake command，由 Scoped Worker 以租约领取并恢复；恢复仍只读取权威 checkpoint、ledger 与 wait。
+外部 Adapter 必须在查询前验证 Run 的 tenant/user 读取权限。
 
 ## Agent Run 时序
 

@@ -28,15 +28,16 @@ Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基
 2026-08-01 的 `0.3.0` breaking development line 复核：
 
 - `scalafmtCheckAll; scalafmtSbtCheck; testFull`：全部已执行确定性测试通过、0 失败；PostgreSQL 用例按默认开关忽略；
-- Workflow core 共 17 项契约，新增 `Awaiting` 原子注册/消费、signal 幂等/冲突、Pending 恢复拒绝、wait identity
-  fail-closed、deadline 后 signal/timeout 唯一胜者与 typed wakeup；整个 core 模块 99 项通过；
+- Workflow core 共 20 项契约，新增 `Awaiting` 原子注册/消费、signal 幂等/冲突、Pending/未 claim 恢复拒绝、wait identity
+  fail-closed、deadline 后 signal/timeout 唯一胜者、wake worker timer 恢复、长恢复 heartbeat，以及 wake lease 排他/过期 fencing；
+  整个 core 模块 102 项通过；
 - `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`：PostgreSQL 16.14 只执行一个
-  `V001__zyblw_agent_0_3_baseline.sql`，连同 optional pgvector 共 29 项通过、0 失败、0 忽略；
-- PostgreSQL Workflow 共 8 项：除 checkpoint/ledger/timeline/fencing 外，真实验证 wait 与 checkpoint 原子注册、跨 Store
-  signal 去重、毫秒 deadline 身份，以及数据库时钟下 signal/`expireDue` 并发只有 TimedOut 一个权威胜者；
+  `V001__zyblw_agent_0_3_baseline.sql`，连同 optional pgvector 共 30 项通过、0 失败、0 忽略；
+- PostgreSQL Workflow 共 9 项：除 checkpoint/ledger/timeline/fencing 外，真实验证 wait 与 checkpoint 原子注册、跨 Store
+  signal 去重、毫秒 deadline 身份、signal/`expireDue` 唯一决议，以及两个 Store 并发唯一 wake claim、数据库租约过期重领和旧 fence 拒绝；
 - `0.3.0-local publishM2` 生成 11 个公开模块的 POM、binary、sources 与 Scaladoc JAR；独立
   `integration-tests/maven-consumer` 仅解析 Maven Local 坐标并完成 clean compile；
-- 尚未执行长期 process kill/数据库 restart/multi-worker soak；上述证据证明事务与契约正确性，不等同于生产容量结论。
+- 尚未执行长期 process kill/数据库 restart/multi-worker soak；上述证据证明事务与短时并发契约正确性，不等同于生产容量结论。
 
 2026-07-30 至 2026-08-01 的 `0.2.1` 发布复核：
 

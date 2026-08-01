@@ -455,6 +455,16 @@ final class WorkflowEngine[R, S] private (
   def run(initial: S, context: WorkflowContext): ZStream[R, WorkflowError, WorkflowEvent[S]] =
     execute(definition.entry, initial, 0, Map.empty, context.copy(wakeup = None), None)
 
+  /** 当前 Engine 绑定的稳定 Workflow ID，供 wake worker 限定自己的 claim 范围。 */
+  def workflowId: WorkflowId = definition.id
+
+  /** 当前 Engine 绑定的定义版本；wake worker 不得领取其他版本的等待。 */
+  def definitionVersion: WorkflowVersion = definition.version
+
+  /** Wake worker 用于避免在失败节点 execution 仍持有租约时过早重领；不作为业务定义 API 暴露。 */
+  private[workflow] def executionLeaseDuration: Option[Duration] =
+    durableExecution.map(_._2.leaseDuration)
+
   /** 从最近 checkpoint 恢复。
     *
     * 暂停节点会从节点入口重新执行；durable 模式会复用相同 execution 的 Prepared outcome，但新 step/visit 仍代表一次新 节点访问。节点内部外部写必须使用业务幂等键或
@@ -464,6 +474,23 @@ final class WorkflowEngine[R, S] private (
     *   必须与 checkpoint 的 Run/Session identity 匹配
     */
   def resume(context: WorkflowContext): ZStream[R, WorkflowError, WorkflowEvent[S]] =
+    resumeInternal(context, None)
+
+  /** 使用 Store 签发的完整 wakeup lease 恢复已决议等待。
+    *
+    * 普通 [[resume]] 只能恢复没有 durable wait 的显式 Suspended checkpoint。Signaled/TimedOut wait 必须先由
+    * `WorkflowExecutionStore.claimWakeups` 排他领取，再通过本入口恢复；消费 wait 与下一 checkpoint 在同一 fenced commit 中完成。
+    */
+  def resumeClaimed(
+      context: WorkflowContext,
+      lease: WorkflowWakeupLease
+  ): ZStream[R, WorkflowError, WorkflowEvent[S]] =
+    resumeInternal(context, Some(lease))
+
+  private def resumeInternal(
+      context: WorkflowContext,
+      claimedWakeup: Option[WorkflowWakeupLease]
+  ): ZStream[R, WorkflowError, WorkflowEvent[S]] =
     ZStream.unwrap(
       store
         .load(context.runId)
@@ -481,12 +508,24 @@ final class WorkflowEngine[R, S] private (
                         .flatMap {
                           case Some(record) =>
                             validateWaitIdentity(checkpoint, nodeId, record, context) *>
-                              (record.status match
-                                case WorkflowWaitStatus.Pending =>
+                              (claimedWakeup match
+                                case None if record.status == WorkflowWaitStatus.Pending =>
+                                  ZIO.fail(AgentError.WorkflowFailed(nodeId.value, "workflow-wait-pending"))
+                                case None =>
                                   ZIO.fail(
-                                    AgentError.WorkflowFailed(nodeId.value, "workflow-wait-pending")
+                                    AgentError.WorkflowFailed(
+                                      nodeId.value,
+                                      "workflow-wakeup-claim-required"
+                                    )
                                   )
-                                case _ =>
+                                case Some(lease) if lease.record != record =>
+                                  ZIO.fail(
+                                    AgentError.WorkflowFailed(
+                                      nodeId.value,
+                                      "workflow-wakeup-lease-mismatch"
+                                    )
+                                  )
+                                case Some(lease) =>
                                   ZIO
                                     .fromOption(WorkflowWakeup.fromRecord(record))
                                     .orElseFail(
@@ -502,34 +541,49 @@ final class WorkflowEngine[R, S] private (
                                         checkpoint.step,
                                         checkpoint.visits,
                                         context.copy(wakeup = Some(wakeup)),
-                                        Some(record.key)
+                                        Some(lease)
                                       )
                                     ))
                           case None =>
-                            ZIO.succeed(
-                              execute(
-                                nodeId,
-                                checkpoint.state,
-                                checkpoint.step,
-                                checkpoint.visits,
-                                context.copy(wakeup = None),
-                                None
-                              )
-                            )
+                            claimedWakeup match
+                              case Some(_) =>
+                                ZIO.fail(
+                                  AgentError.WorkflowFailed(nodeId.value, "workflow-wakeup-not-found")
+                                )
+                              case None =>
+                                ZIO.succeed(
+                                  execute(
+                                    nodeId,
+                                    checkpoint.state,
+                                    checkpoint.step,
+                                    checkpoint.visits,
+                                    context.copy(wakeup = None),
+                                    None
+                                  )
+                                )
                         }
                     case None =>
-                      ZIO.succeed(
-                        execute(
-                          nodeId,
-                          checkpoint.state,
-                          checkpoint.step,
-                          checkpoint.visits,
-                          context.copy(wakeup = None),
-                          None
-                        )
-                      )
+                      claimedWakeup match
+                        case Some(_) =>
+                          ZIO.fail(
+                            AgentError.WorkflowFailed(nodeId.value, "workflow-wakeup-requires-durable-engine")
+                          )
+                        case None =>
+                          ZIO.succeed(
+                            execute(
+                              nodeId,
+                              checkpoint.state,
+                              checkpoint.step,
+                              checkpoint.visits,
+                              context.copy(wakeup = None),
+                              None
+                            )
+                          )
                 case WorkflowCursor.Completed =>
-                  ZIO.succeed(ZStream.succeed(WorkflowEvent.Completed(checkpoint.state))))
+                  claimedWakeup match
+                    case Some(_) =>
+                      ZIO.fail(AgentError.WorkflowFailed("resume", "completed-workflow-has-wakeup"))
+                    case None => ZIO.succeed(ZStream.succeed(WorkflowEvent.Completed(checkpoint.state))))
           case None =>
             ZIO.fail(AgentError.WorkflowFailed("resume", s"Run ${context.runId.asString} 没有 checkpoint"))
         }
@@ -542,7 +596,7 @@ final class WorkflowEngine[R, S] private (
       step: Int,
       visits: Map[NodeId, Int],
       context: WorkflowContext,
-      activeWait: Option[WorkflowWaitKey]
+      activeWait: Option[WorkflowWakeupLease]
   ): ZStream[R, WorkflowError, WorkflowEvent[S]] =
     if step >= maxSteps then ZStream.fail(AgentError.WorkflowFailed(nodeId.value, s"超过最大节点数 $maxSteps"))
     else
@@ -600,7 +654,7 @@ final class WorkflowEngine[R, S] private (
       visits: Map[NodeId, Int],
       context: WorkflowContext,
       leases: Chunk[WorkflowExecutionLease],
-      activeWait: Option[WorkflowWaitKey]
+      activeWait: Option[WorkflowWakeupLease]
   ): ZStream[R, WorkflowError, WorkflowEvent[S]] =
     definition.transitions(current) match
       case WorkflowTransition.Next(next) =>
@@ -647,7 +701,7 @@ final class WorkflowEngine[R, S] private (
       visits: Map[NodeId, Int],
       context: WorkflowContext,
       leases: Chunk[WorkflowExecutionLease],
-      activeWait: Option[WorkflowWaitKey]
+      activeWait: Option[WorkflowWakeupLease]
   ): ZStream[R, WorkflowError, WorkflowEvent[S]] =
     persist(
       context.runId,
@@ -669,7 +723,7 @@ final class WorkflowEngine[R, S] private (
       visits: Map[NodeId, Int],
       context: WorkflowContext,
       currentLeases: Chunk[WorkflowExecutionLease],
-      activeWait: Option[WorkflowWaitKey]
+      activeWait: Option[WorkflowWakeupLease]
   ): ZStream[R, WorkflowError, WorkflowEvent[S]] =
     val branchIds = Chunk.fromIterable(branches)
     val joinStep  = step + branchIds.length + 1

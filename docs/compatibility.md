@@ -41,7 +41,9 @@ Workflow execution 与 durable wait/signal 表。采用当前源码必须：
 
 `WorkflowExecutionStore.commit` 是一个事务语义：Prepared execution、checkpoint、旧 wait 消费和新 wait 注册必须全部成功
 或全部回滚。外部 signal 使用 `(waitKey, signalId)` 去重；相同 ID 不同 payload 冲突。PostgreSQL 使用数据库时钟判断
-deadline，达到 deadline 后 timeout 胜出。恢复只消费 Signaled/TimedOut，Pending 不允许执行节点。
+deadline，达到 deadline 后 timeout 胜出。恢复只消费由 owner/token/generation/expiry 完整 fence 领取的 Signaled/TimedOut；
+Pending 不允许执行节点，已决议 wait 也不能通过普通 `resume` 绕过 claim。wait 行本身是 durable wake command，消费与下一
+checkpoint 原子提交。
 
 这些保证不自动让节点内部第三方副作用 exactly-once；支付、发信等写操作仍需业务幂等键或 outbox/inbox。
 

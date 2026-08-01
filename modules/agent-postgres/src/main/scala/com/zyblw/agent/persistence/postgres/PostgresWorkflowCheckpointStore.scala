@@ -300,6 +300,153 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
     validateWaitLimit(limit) *> withTransaction(connection => expireWaitRows(connection, limit))
       .flatMap(rows => ZIO.foreach(rows)(decodeWait))
 
+  override def claimWakeups(
+      workflowId: WorkflowId,
+      definitionVersion: WorkflowVersion,
+      owner: WorkerId,
+      leaseDuration: Duration,
+      limit: Int
+  ): IO[StoreError, Chunk[WorkflowWakeupLease]] =
+    validateDuration(leaseDuration) *> validateWaitLimit(limit) *>
+      withTransaction { connection =>
+        selectWakeCandidates(connection, workflowId, definitionVersion, limit).flatMap { rows =>
+          ZIO.foreach(rows) { row =>
+            for
+              record <- decodeWait(row)
+              token  <- LeaseToken.random
+              lease  <- claimWakeRow(connection, record, owner, token, leaseDuration)
+            yield lease
+          }
+        }
+      }
+
+  override def heartbeatWakeup(
+      lease: WorkflowWakeupLease,
+      leaseDuration: Duration
+  ): IO[StoreError, WorkflowWakeupLease] =
+    validateDuration(leaseDuration) *> withConnection { connection =>
+      jdbc("wait-wake-heartbeat") {
+        val statement = connection.prepareStatement(
+          """UPDATE agent_workflow_waits
+            |SET wake_lease_expires_at = clock_timestamp() + (? * INTERVAL '1 millisecond'),
+            |    wake_heartbeat_at = clock_timestamp()
+            |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
+            |  AND status IN ('Signaled', 'TimedOut')
+            |  AND wake_owner = ? AND wake_token = ?::uuid AND wake_generation = ?
+            |  AND wake_lease_expires_at > clock_timestamp()
+            |RETURNING wake_lease_expires_at""".stripMargin
+        )
+        try
+          statement.setLong(1, leaseDuration.toMillis)
+          bindWakeFence(statement, 2, lease)
+          val result = statement.executeQuery()
+          if result.next() then
+            lease.copy(leaseExpiresAt = result.getObject(1, classOf[OffsetDateTime]).toInstant)
+          else throw LostWorkflowWakeLease(lease)
+        finally statement.close()
+      }
+    }
+
+  override def abandonWakeup(
+      lease: WorkflowWakeupLease,
+      availableAt: Instant
+  ): IO[StoreError, Unit] =
+    withConnection { connection =>
+      jdbc("wait-wake-abandon") {
+        val statement = connection.prepareStatement(
+          """UPDATE agent_workflow_waits
+            |SET wake_available_at = GREATEST(?, clock_timestamp()),
+            |    wake_owner = NULL, wake_token = NULL, wake_claimed_at = NULL,
+            |    wake_lease_expires_at = NULL, wake_heartbeat_at = NULL
+            |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
+            |  AND status IN ('Signaled', 'TimedOut')
+            |  AND wake_owner = ? AND wake_token = ?::uuid AND wake_generation = ?
+            |  AND wake_lease_expires_at > clock_timestamp()""".stripMargin
+        )
+        try
+          statement.setObject(1, OffsetDateTime.ofInstant(availableAt, java.time.ZoneOffset.UTC))
+          bindWakeFence(statement, 2, lease)
+          if statement.executeUpdate() != 1 then throw LostWorkflowWakeLease(lease)
+        finally statement.close()
+      }
+    }
+
+  /** 在短事务中排他锁定当前 Engine 可处理的 wakeup。锁只保护领取状态转换，不覆盖后续 Workflow 执行。 */
+  private def selectWakeCandidates(
+      connection: Connection,
+      workflowId: WorkflowId,
+      definitionVersion: WorkflowVersion,
+      limit: Int
+  ): IO[StoreError, Chunk[StoredWaitRow]] =
+    jdbc("wait-wake-candidates") {
+      val statement = connection.prepareStatement(
+        """SELECT run_id::text, step, node_id, workflow_id, definition_version, session_id::text,
+          | condition_kind, signal_name, deadline, status, accepted_signal_id,
+          | accepted_signal_payload, accepted_signal_sha256, signal_received_at,
+          | created_at, resolved_at, consumed_at
+          |FROM agent_workflow_waits
+          |WHERE workflow_id = ? AND definition_version = ?
+          |  AND status IN ('Signaled', 'TimedOut')
+          |  AND wake_available_at <= clock_timestamp()
+          |  AND (wake_token IS NULL OR wake_lease_expires_at <= clock_timestamp())
+          |ORDER BY wake_available_at ASC, resolved_at ASC, run_id ASC, step ASC,
+          |         node_id COLLATE "C" ASC
+          |FOR UPDATE SKIP LOCKED
+          |LIMIT ?""".stripMargin
+      )
+      try
+        statement.setString(1, workflowId.value)
+        statement.setInt(2, definitionVersion.value)
+        statement.setInt(3, limit)
+        val result  = statement.executeQuery()
+        val builder = ChunkBuilder.make[StoredWaitRow]()
+        while result.next() do builder += readWaitRow(result)
+        builder.result()
+      finally statement.close()
+    }
+
+  /** 对已经 `FOR UPDATE` 锁定的 wait 换发随机 token 并递增 generation。WHERE 条件仍完整重验，避免未来调用路径绕过锁。 */
+  private def claimWakeRow(
+      connection: Connection,
+      record: WorkflowWaitRecord,
+      owner: WorkerId,
+      token: LeaseToken,
+      leaseDuration: Duration
+  ): IO[StoreError, WorkflowWakeupLease] =
+    jdbc("wait-wake-claim") {
+      val statement = connection.prepareStatement(
+        """UPDATE agent_workflow_waits
+          |SET wake_generation = wake_generation + 1,
+          |    wake_owner = ?, wake_token = ?::uuid,
+          |    wake_claimed_at = clock_timestamp(),
+          |    wake_lease_expires_at = clock_timestamp() + (? * INTERVAL '1 millisecond'),
+          |    wake_heartbeat_at = clock_timestamp()
+          |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
+          |  AND status IN ('Signaled', 'TimedOut')
+          |  AND wake_available_at <= clock_timestamp()
+          |  AND (wake_token IS NULL OR wake_lease_expires_at <= clock_timestamp())
+          |RETURNING wake_generation, wake_lease_expires_at""".stripMargin
+      )
+      try
+        statement.setString(1, owner.value)
+        statement.setString(2, token.value)
+        statement.setLong(3, leaseDuration.toMillis)
+        statement.setString(4, record.key.runId.asString)
+        statement.setInt(5, record.key.step)
+        statement.setString(6, record.key.nodeId.value)
+        val result = statement.executeQuery()
+        if result.next() then
+          WorkflowWakeupLease(
+            record,
+            owner,
+            token,
+            result.getLong(1),
+            result.getObject(2, classOf[OffsetDateTime]).toInstant
+          )
+        else throw IllegalStateException("locked workflow wake claim lost")
+      finally statement.close()
+    }
+
   private def selectCurrentWait(
       connection: Connection,
       runId: RunId,
@@ -517,7 +664,8 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
       val statement = connection.prepareStatement(
         """UPDATE agent_workflow_waits
           |SET status = 'Signaled', accepted_signal_id = ?, accepted_signal_payload = ?,
-          |    accepted_signal_sha256 = ?, signal_received_at = ?, resolved_at = ?
+          |    accepted_signal_sha256 = ?, signal_received_at = ?, resolved_at = ?,
+          |    wake_available_at = ?
           |WHERE run_id = ?::uuid AND step = ? AND node_id = ? AND status = 'Pending'""".stripMargin
       )
       try
@@ -526,9 +674,10 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         statement.setString(3, payloadHash)
         statement.setObject(4, OffsetDateTime.ofInstant(now, java.time.ZoneOffset.UTC))
         statement.setObject(5, OffsetDateTime.ofInstant(now, java.time.ZoneOffset.UTC))
-        statement.setString(6, key.runId.asString)
-        statement.setInt(7, key.step)
-        statement.setString(8, key.nodeId.value)
+        statement.setObject(6, OffsetDateTime.ofInstant(now, java.time.ZoneOffset.UTC))
+        statement.setString(7, key.runId.asString)
+        statement.setInt(8, key.step)
+        statement.setString(9, key.nodeId.value)
         if statement.executeUpdate() != 1 then throw IllegalStateException("wait signal transition lost")
       finally statement.close()
     }
@@ -540,14 +689,16 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
   ): IO[StoreError, Unit] =
     jdbc("wait-timeout") {
       val statement = connection.prepareStatement(
-        """UPDATE agent_workflow_waits SET status = 'TimedOut', resolved_at = ?
+        """UPDATE agent_workflow_waits
+          |SET status = 'TimedOut', resolved_at = ?, wake_available_at = ?
           |WHERE run_id = ?::uuid AND step = ? AND node_id = ? AND status = 'Pending'""".stripMargin
       )
       try
         statement.setObject(1, OffsetDateTime.ofInstant(now, java.time.ZoneOffset.UTC))
-        statement.setString(2, key.runId.asString)
-        statement.setInt(3, key.step)
-        statement.setString(4, key.nodeId.value)
+        statement.setObject(2, OffsetDateTime.ofInstant(now, java.time.ZoneOffset.UTC))
+        statement.setString(3, key.runId.asString)
+        statement.setInt(4, key.step)
+        statement.setString(5, key.nodeId.value)
         if statement.executeUpdate() != 1 then throw IllegalStateException("wait timeout transition lost")
       finally statement.close()
     }
@@ -592,7 +743,8 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
           |  LIMIT ?
           |), updated AS (
           |  UPDATE agent_workflow_waits AS waits
-          |  SET status = 'TimedOut', resolved_at = clock_timestamp()
+          |  SET status = 'TimedOut', resolved_at = clock_timestamp(),
+          |      wake_available_at = clock_timestamp()
           |  FROM due
           |  WHERE waits.run_id = due.run_id AND waits.step = due.step AND waits.node_id = due.node_id
           |    AND waits.status = 'Pending'
@@ -1009,8 +1161,8 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
     yield Some(outcome)
 
   private def validateDuration(duration: Duration): IO[StoreError, Unit] =
-    if duration > Duration.Zero then ZIO.unit
-    else ZIO.fail(AgentError.PersistenceFailure("workflow execution leaseDuration 必须大于零"))
+    if duration.toMillis > 0L then ZIO.unit
+    else ZIO.fail(AgentError.PersistenceFailure("workflow execution leaseDuration 必须至少为 1 毫秒"))
 
   private def validateTimelineLimit(limit: Int): IO[StoreError, Unit] =
     if limit >= 1 && limit <= 500 then ZIO.unit
@@ -1056,9 +1208,10 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
     val runId = leases.head.key.runId
     for
       _ <- commit.consume match
-        case None                            => ZIO.unit
-        case Some(key) if key.runId != runId => ZIO.fail(waitConflict(runId, "consume-run-mismatch"))
-        case Some(key)                       => consumeWait(connection, key)
+        case None                                    => ZIO.unit
+        case Some(lease) if lease.key.runId != runId =>
+          ZIO.fail(waitConflict(runId, "consume-run-mismatch"))
+        case Some(lease) => consumeWait(connection, lease)
       _ <- commit.register match
         case None                       => ZIO.unit
         case Some((execution, request)) =>
@@ -1071,30 +1224,53 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
           else registerWait(connection, execution, request)
     yield ()
 
-  private def consumeWait(connection: Connection, key: WorkflowWaitKey): IO[StoreError, Unit] =
+  /** 只有当前未过期 wake lease 可以消费 wait；状态转换与 checkpoint/execution commit 共用外层事务。 */
+  private def consumeWait(connection: Connection, lease: WorkflowWakeupLease): IO[StoreError, Unit] =
     jdbc("wait-consume") {
       val statement = connection.prepareStatement(
         """UPDATE agent_workflow_waits
-          |SET status = 'Consumed', consumed_at = clock_timestamp()
+          |SET status = 'Consumed', consumed_at = clock_timestamp(), wake_available_at = NULL,
+          |    wake_owner = NULL, wake_token = NULL, wake_claimed_at = NULL,
+          |    wake_lease_expires_at = NULL, wake_heartbeat_at = NULL
           |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
-          |  AND status IN ('Signaled', 'TimedOut')""".stripMargin
+          |  AND status IN ('Signaled', 'TimedOut')
+          |  AND wake_owner = ? AND wake_token = ?::uuid AND wake_generation = ?
+          |  AND wake_lease_expires_at > clock_timestamp()""".stripMargin
       )
       try
-        statement.setString(1, key.runId.asString)
-        statement.setInt(2, key.step)
-        statement.setString(3, key.nodeId.value)
+        bindWakeFence(statement, 1, lease)
         statement.executeUpdate()
       finally statement.close()
     }.flatMap {
       case 1 => ZIO.unit
       case _ =>
-        selectWait(connection, key, forUpdate = true).flatMap {
-          case Some(row) if row.status == "Consumed" => ZIO.unit
-          case Some(row) if row.status == "Pending"  =>
-            ZIO.fail(waitConflict(key.runId, "consume-pending-wait"))
-          case Some(_) => ZIO.fail(waitConflict(key.runId, "consume-transition-lost"))
-          case None    => ZIO.fail(waitConflict(key.runId, "consume-wait-not-found"))
+        selectWakeStatus(connection, lease.key).flatMap {
+          case Some(("Consumed", generation)) if generation == lease.generation => ZIO.unit
+          case Some(("Pending", _))                                             =>
+            ZIO.fail(waitConflict(lease.key.runId, "consume-pending-wait"))
+          case Some(_) => ZIO.fail(wakeupLost(lease))
+          case None    => ZIO.fail(waitConflict(lease.key.runId, "consume-wait-not-found"))
         }
+    }
+
+  private def selectWakeStatus(
+      connection: Connection,
+      key: WorkflowWaitKey
+  ): IO[StoreError, Option[(String, Long)]] =
+    jdbc("wait-wake-status") {
+      val statement = connection.prepareStatement(
+        """SELECT status, wake_generation
+          |FROM agent_workflow_waits
+          |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
+          |FOR UPDATE""".stripMargin
+      )
+      try
+        statement.setString(1, key.runId.asString)
+        statement.setInt(2, key.step)
+        statement.setString(3, key.nodeId.value)
+        val result = statement.executeQuery()
+        if result.next() then Some(result.getString(1) -> result.getLong(2)) else None
+      finally statement.close()
     }
 
   private def registerWait(
@@ -1190,6 +1366,19 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
     statement.setString(start + 4, lease.token.value)
     statement.setLong(start + 5, lease.generation)
 
+  /** 按 key + owner + token + generation 绑定完整 wakeup fencing 凭证。 */
+  private def bindWakeFence(
+      statement: java.sql.PreparedStatement,
+      start: Int,
+      lease: WorkflowWakeupLease
+  ): Unit =
+    statement.setString(start, lease.key.runId.asString)
+    statement.setInt(start + 1, lease.key.step)
+    statement.setString(start + 2, lease.key.nodeId.value)
+    statement.setString(start + 3, lease.owner.value)
+    statement.setString(start + 4, lease.token.value)
+    statement.setLong(start + 5, lease.generation)
+
   private def executionConflict(key: WorkflowExecutionKey, reason: String): StoreError =
     AgentError.WorkflowCheckpointConflict(
       key.runId,
@@ -1202,6 +1391,14 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
       lease.owner.value,
       lease.generation,
       s"workflow-node=${lease.key.nodeId.value},step=${lease.key.step}"
+    )
+
+  private def wakeupLost(lease: WorkflowWakeupLease): StoreError =
+    AgentError.LeaseLost(
+      lease.key.runId,
+      lease.owner.value,
+      lease.generation,
+      s"workflow-wakeup=${lease.key.nodeId.value},step=${lease.key.step}"
     )
 
   private def waitConflict(runId: RunId, reason: String): StoreError =
@@ -1444,6 +1641,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
 
   private def databaseError(operation: String, error: Throwable): StoreError = error match
     case LostWorkflowExecutionLease(lease) => lost(lease)
+    case LostWorkflowWakeLease(lease)      => wakeupLost(lease)
     case sql: SQLException                 =>
       val state     = Option(sql.getSQLState).getOrElse("unknown")
       val retryable =
@@ -1583,6 +1781,7 @@ object PostgresWorkflowCheckpointStore:
     )
 
   final private case class LostWorkflowExecutionLease(lease: WorkflowExecutionLease) extends RuntimeException
+  final private case class LostWorkflowWakeLease(lease: WorkflowWakeupLease)         extends RuntimeException
 
   def layer[S: JsonCodec: Tag]: URLayer[DataSource, WorkflowCheckpointStore[S]] =
     ZLayer.fromFunction((dataSource: DataSource) =>

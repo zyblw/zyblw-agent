@@ -474,6 +474,17 @@ object WorkflowSpec extends ZIOSpecDefault:
               payload: String
           ) = baseStore.signal(waitKey, signalId, name, payload)
           def expireDue(limit: Int) = baseStore.expireDue(limit)
+          def claimWakeups(
+              workflowId: WorkflowId,
+              definitionVersion: WorkflowVersion,
+              owner: WorkerId,
+              leaseDuration: Duration,
+              limit: Int
+          ) = baseStore.claimWakeups(workflowId, definitionVersion, owner, leaseDuration, limit)
+          def heartbeatWakeup(lease: WorkflowWakeupLease, leaseDuration: Duration) =
+            baseStore.heartbeatWakeup(lease, leaseDuration)
+          def abandonWakeup(lease: WorkflowWakeupLease, availableAt: java.time.Instant) =
+            baseStore.abandonWakeup(lease, availableAt)
           override def timeline(runId: RunId, after: Option[WorkflowTimelineCursor], limit: Int) =
             baseStore.timeline(runId, after, limit)
         policy = WorkflowExecutionPolicy(
@@ -585,7 +596,17 @@ object WorkflowSpec extends ZIOSpecDefault:
         conflicting <- store
           .signal(wait.key, WorkflowSignalId("signal-1"), signalName, "different")
           .either
-        resumed       <- engine.resume(context(runId, sessionId)).runCollect
+        wakeLease <- store
+          .claimWakeups(
+            testWorkflowId,
+            testWorkflowVersion,
+            WorkerId("wake-worker"),
+            30.seconds
+          )
+          .flatMap(value =>
+            ZIO.fromOption(value.headOption).orElseFail(AgentError.PersistenceFailure("wakeup missing"))
+          )
+        resumed       <- engine.resumeClaimed(context(runId, sessionId), wakeLease).runCollect
         remainingWait <- store.currentWait(runId)
       yield assertTrue(
         first.exists {
@@ -654,6 +675,17 @@ object WorkflowSpec extends ZIOSpecDefault:
               payload: String
           ) = baseStore.signal(waitKey, signalId, name, payload)
           def expireDue(limit: Int) = baseStore.expireDue(limit)
+          def claimWakeups(
+              workflowId: WorkflowId,
+              definitionVersion: WorkflowVersion,
+              owner: WorkerId,
+              leaseDuration: Duration,
+              limit: Int
+          ) = baseStore.claimWakeups(workflowId, definitionVersion, owner, leaseDuration, limit)
+          def heartbeatWakeup(lease: WorkflowWakeupLease, leaseDuration: Duration) =
+            baseStore.heartbeatWakeup(lease, leaseDuration)
+          def abandonWakeup(lease: WorkflowWakeupLease, availableAt: java.time.Instant) =
+            baseStore.abandonWakeup(lease, availableAt)
           override def timeline(runId: RunId, after: Option[WorkflowTimelineCursor], limit: Int) =
             baseStore.timeline(runId, after, limit)
         resumed <- WorkflowEngine
@@ -705,8 +737,18 @@ object WorkflowSpec extends ZIOSpecDefault:
         results <- store
           .signal(wait.key, WorkflowSignalId("late-signal"), signalName, "late")
           .zipPar(store.expireDue())
-        resolved <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
-        resumed  <- engine.resume(context(runId, sessionId)).runCollect
+        resolved  <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
+        wakeLease <- store
+          .claimWakeups(
+            testWorkflowId,
+            testWorkflowVersion,
+            WorkerId("timeout-wake-worker"),
+            30.seconds
+          )
+          .flatMap(value =>
+            ZIO.fromOption(value.headOption).orElseFail(AgentError.PersistenceFailure("wakeup missing"))
+          )
+        resumed <- engine.resumeClaimed(context(runId, sessionId), wakeLease).runCollect
       yield assertTrue(
         Set(
           WorkflowSignalDisposition.Late,
@@ -715,6 +757,178 @@ object WorkflowSpec extends ZIOSpecDefault:
         results._2.size <= 1,
         resolved.status == WorkflowWaitStatus.TimedOut,
         resumed.lastOption.contains(WorkflowEvent.Completed(101))
+      )
+    }.provide(WorkflowExecutionStore.inMemory[Int]),
+    test("wake worker 决议到期 timer，并在同一 fenced commit 中消费等待和推进 checkpoint") {
+      for
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        store     <- ZIO.service[WorkflowExecutionStore[Int]]
+        gate       = NodeId("worker-timer-gate")
+        definition = validDefinition(
+          gate,
+          Map(
+            gate -> nodeWithContext(gate) { (state, workflowContext) =>
+              workflowContext.wakeup match
+                case Some(WorkflowWakeup.DeadlineElapsed(_, _)) =>
+                  ZIO.succeed(NodeOutcome.Succeeded(state + 100))
+                case _ =>
+                  Clock.instant.map(now =>
+                    NodeOutcome.Awaiting(
+                      state,
+                      WorkflowWaitRequest(WorkflowWaitCondition.Timer, now.plusSeconds(60))
+                    )
+                  )
+            }
+          ),
+          Map(gate -> WorkflowTransition.Complete())
+        )
+        engine = WorkflowEngine.makeDurable(
+          definition,
+          store,
+          sumReducer,
+          WorkflowExecutionPolicy(WorkerId("timer-node-worker"))
+        )
+        worker = WorkflowWakeWorker(
+          WorkerId("timer-wake-worker"),
+          store,
+          engine,
+          noopWakeObserver,
+          WorkflowWakeWorkerConfig()
+        )
+        _          <- engine.run(1, context(runId, sessionId)).runDrain
+        _          <- TestClock.adjust(61.seconds)
+        cycle      <- worker.runOnce
+        checkpoint <- store.load(runId)
+        wait       <- store.currentWait(runId)
+      yield assertTrue(
+        cycle == WorkflowWakeCycle(expired = 1, claimed = true, completed = true, abandoned = false),
+        checkpoint.exists(value => value.cursor == WorkflowCursor.Completed && value.state == 101),
+        wait.isEmpty
+      )
+    }.provide(WorkflowExecutionStore.inMemory[Int]),
+    test("wake worker heartbeat 在长恢复期间续租，并让恢复 Fiber 在原 Scope 内完成") {
+      for
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        store     <- ZIO.service[WorkflowExecutionStore[Int]]
+        gate       = NodeId("long-wake-gate")
+        signalName = WorkflowSignalName("long-wake.ready")
+        definition = validDefinition(
+          gate,
+          Map(
+            gate -> nodeWithContext(gate) { (state, workflowContext) =>
+              workflowContext.wakeup match
+                case Some(WorkflowWakeup.SignalReceived(_, _)) =>
+                  ZIO.sleep(40.seconds).as(NodeOutcome.Succeeded(state + 1))
+                case _ =>
+                  Clock.instant.map(now =>
+                    NodeOutcome.Awaiting(
+                      state,
+                      WorkflowWaitRequest(
+                        WorkflowWaitCondition.Signal(signalName),
+                        now.plusSeconds(3600)
+                      )
+                    )
+                  )
+            }
+          ),
+          Map(gate -> WorkflowTransition.Complete())
+        )
+        engine = WorkflowEngine.makeDurable(
+          definition,
+          store,
+          sumReducer,
+          WorkflowExecutionPolicy(
+            WorkerId("long-node-worker"),
+            leaseDuration = 30.seconds,
+            heartbeatInterval = 10.seconds
+          )
+        )
+        worker = WorkflowWakeWorker(
+          WorkerId("long-wake-worker"),
+          store,
+          engine,
+          noopWakeObserver,
+          WorkflowWakeWorkerConfig(
+            leaseDuration = 30.seconds,
+            heartbeatEvery = 10.seconds
+          )
+        )
+        _          <- engine.run(1, context(runId, sessionId)).runDrain
+        wait       <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
+        _          <- store.signal(wait.key, WorkflowSignalId("long-wake-1"), signalName, "ready")
+        fiber      <- worker.runOnce.fork
+        _          <- TestClock.adjust(41.seconds)
+        cycle      <- fiber.join
+        checkpoint <- store.load(runId)
+      yield assertTrue(
+        cycle.completed,
+        checkpoint.exists(value => value.cursor == WorkflowCursor.Completed && value.state == 2)
+      )
+    }.provide(WorkflowExecutionStore.inMemory[Int]),
+    test("wakeup lease 排他领取，过期重领递增 generation 并拒绝旧 worker 写入") {
+      for
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        store     <- ZIO.service[WorkflowExecutionStore[Int]]
+        gate       = NodeId("wake-fence-gate")
+        signalName = WorkflowSignalName("wake.ready")
+        definition = validDefinition(
+          gate,
+          Map(
+            gate -> nodeWithContext(gate) { (state, _) =>
+              Clock.instant.map(now =>
+                NodeOutcome.Awaiting(
+                  state,
+                  WorkflowWaitRequest(
+                    WorkflowWaitCondition.Signal(signalName),
+                    now.plusSeconds(3600)
+                  )
+                )
+              )
+            }
+          ),
+          Map(gate -> WorkflowTransition.Complete())
+        )
+        engine = WorkflowEngine.makeDurable(
+          definition,
+          store,
+          sumReducer,
+          WorkflowExecutionPolicy(WorkerId("fence-node-worker"))
+        )
+        _     <- engine.run(1, context(runId, sessionId)).runDrain
+        wait  <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
+        _     <- store.signal(wait.key, WorkflowSignalId("wake-1"), signalName, "ready")
+        first <- store
+          .claimWakeups(testWorkflowId, testWorkflowVersion, WorkerId("wake-a"), 30.seconds)
+          .flatMap(value =>
+            ZIO.fromOption(value.headOption).orElseFail(AgentError.PersistenceFailure("first wake missing"))
+          )
+        busy <- store.claimWakeups(
+          testWorkflowId,
+          testWorkflowVersion,
+          WorkerId("wake-b"),
+          30.seconds
+        )
+        _      <- TestClock.adjust(31.seconds)
+        second <- store
+          .claimWakeups(testWorkflowId, testWorkflowVersion, WorkerId("wake-b"), 30.seconds)
+          .flatMap(value =>
+            ZIO.fromOption(value.headOption).orElseFail(AgentError.PersistenceFailure("second wake missing"))
+          )
+        staleHeartbeat <- store.heartbeatWakeup(first, 30.seconds).either
+        staleAbandon   <- store.abandonWakeup(first, java.time.Instant.EPOCH).either
+        _              <- TestClock.adjust(1.second)
+        renewed        <- store.heartbeatWakeup(second, 30.seconds)
+      yield assertTrue(
+        busy.isEmpty,
+        second.generation == first.generation + 1L,
+        second.owner == WorkerId("wake-b"),
+        staleHeartbeat.left.exists(_.category == ErrorCategory.Conflict),
+        staleAbandon.left.exists(_.category == ErrorCategory.Conflict),
+        renewed.generation == second.generation,
+        renewed.leaseExpiresAt.isAfter(second.leaseExpiresAt)
       )
     }.provide(WorkflowExecutionStore.inMemory[Int]),
     test("AllSucceeded 分支失败会中断仍在运行的兄弟 Fiber 且不提交 join checkpoint") {
@@ -808,6 +1022,12 @@ object WorkflowSpec extends ZIOSpecDefault:
   private val sumReducer = new StateReducer[Int]:
     def merge(base: Int, branches: Chunk[Int]): IO[WorkflowError, Int] =
       ZIO.succeed(base + branches.sum)
+
+  private val noopWakeObserver = new WorkflowWakeObserver:
+    def cycle(result: WorkflowWakeCycle): UIO[Unit]                    = ZIO.unit
+    def leaseLost(): UIO[Unit]                                         = ZIO.unit
+    def abandoned(category: ErrorCategory): UIO[Unit]                  = ZIO.unit
+    def failed(category: ErrorCategory, retryable: Boolean): UIO[Unit] = ZIO.unit
 
   private def acquired[S](
       claim: WorkflowExecutionClaim[S]

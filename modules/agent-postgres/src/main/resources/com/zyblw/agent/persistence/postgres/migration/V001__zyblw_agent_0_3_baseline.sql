@@ -607,6 +607,13 @@ CREATE TABLE agent_workflow_waits (
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   resolved_at TIMESTAMPTZ,
   consumed_at TIMESTAMPTZ,
+  wake_available_at TIMESTAMPTZ,
+  wake_generation BIGINT NOT NULL DEFAULT 0 CHECK (wake_generation >= 0),
+  wake_owner TEXT,
+  wake_token UUID,
+  wake_claimed_at TIMESTAMPTZ,
+  wake_lease_expires_at TIMESTAMPTZ,
+  wake_heartbeat_at TIMESTAMPTZ,
   PRIMARY KEY (run_id, step, node_id),
   FOREIGN KEY (run_id, step, node_id)
     REFERENCES agent_workflow_node_executions(run_id, step, node_id),
@@ -618,6 +625,8 @@ CREATE TABLE agent_workflow_waits (
     (status = 'Pending'
       AND resolved_at IS NULL
       AND consumed_at IS NULL
+      AND wake_available_at IS NULL
+      AND wake_generation = 0
       AND accepted_signal_id IS NULL
       AND accepted_signal_payload IS NULL
       AND accepted_signal_sha256 IS NULL
@@ -626,6 +635,7 @@ CREATE TABLE agent_workflow_waits (
     (status = 'Signaled'
       AND resolved_at IS NOT NULL
       AND consumed_at IS NULL
+      AND wake_available_at IS NOT NULL
       AND accepted_signal_id IS NOT NULL
       AND accepted_signal_payload IS NOT NULL
       AND accepted_signal_sha256 IS NOT NULL
@@ -634,6 +644,7 @@ CREATE TABLE agent_workflow_waits (
     (status = 'TimedOut'
       AND resolved_at IS NOT NULL
       AND consumed_at IS NULL
+      AND wake_available_at IS NOT NULL
       AND accepted_signal_id IS NULL
       AND accepted_signal_payload IS NULL
       AND accepted_signal_sha256 IS NULL
@@ -641,7 +652,27 @@ CREATE TABLE agent_workflow_waits (
     OR
     (status = 'Consumed'
       AND resolved_at IS NOT NULL
-      AND consumed_at IS NOT NULL)
+      AND consumed_at IS NOT NULL
+      AND wake_available_at IS NULL
+      AND wake_generation > 0)
+  ),
+  CHECK (
+    (wake_owner IS NULL
+      AND wake_token IS NULL
+      AND wake_claimed_at IS NULL
+      AND wake_lease_expires_at IS NULL
+      AND wake_heartbeat_at IS NULL)
+    OR
+    (status IN ('Signaled', 'TimedOut')
+      AND wake_owner IS NOT NULL
+      AND wake_token IS NOT NULL
+      AND wake_claimed_at IS NOT NULL
+      AND wake_lease_expires_at IS NOT NULL
+      AND wake_heartbeat_at IS NOT NULL
+      AND wake_generation > 0
+      AND wake_lease_expires_at > wake_claimed_at
+      AND wake_heartbeat_at >= wake_claimed_at
+      AND wake_heartbeat_at < wake_lease_expires_at)
   )
 );
 
@@ -652,6 +683,12 @@ CREATE UNIQUE INDEX agent_workflow_waits_one_active_per_run_idx
 CREATE INDEX agent_workflow_waits_due_idx
   ON agent_workflow_waits(deadline, run_id, step, node_id)
   WHERE status = 'Pending';
+
+CREATE INDEX agent_workflow_waits_wake_claim_idx
+  ON agent_workflow_waits(
+    workflow_id, definition_version, wake_available_at, resolved_at, run_id, step, node_id
+  )
+  WHERE status IN ('Signaled', 'TimedOut');
 
 -- 所有 signal 尝试都保存稳定 receipt；相同 wait/signal_id 不会被重复应用。
 CREATE TABLE agent_workflow_signals (

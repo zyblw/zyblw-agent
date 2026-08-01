@@ -64,7 +64,7 @@ Telemetry 与 Eval，但如果没有统一的架构语义，新增能力仍可�
 |---|---|---|
 | Application SDK | `app`、Builder、Quickstart、HTTP host | PostgreSQL 最小应用与更少样板的生产 preset |
 | Intelligence | Provider、Instruction、Context、Tool、Memory、RAG | capability/native extension、真实长会话与 RAG lineage |
-| Execution | Agent Runtime、command worker、Workflow execution ledger、低敏 timeline、durable wait/signal | timer worker→wake command、kill/recover 与多节点 soak |
+| Execution | Agent Runtime、command worker、Workflow execution ledger、低敏 timeline、durable wait/signal、Scoped wake worker | kill/recover、多节点 soak 与恢复 SLO |
 | Control | Permission、Guardrail、Approval、Limit、Cost | policy 管理 UX、任务级总预算与保留策略 |
 | State | Run/Event/Command、checkpoint、Memory、Artifact | Goal/Plan/Todo SPI、Artifact durable Adapter、schema upcaster |
 | Quality / Ops | Inspector、OTLP、Eval、趋势门禁 | outcome/trajectory 分离、`pass@k`/`pass^k` 趋势、图级 eval |
@@ -90,8 +90,8 @@ MCP 是 Agent 与工具/资源/Prompt 的上下文交换边界，不负责 Agent
 
 ### 下一阶段
 
-1. Workflow G3-A2b：把已有 durable wait/signal 与 `expireDue` 接入受监督 timer worker 和耐久 wake command，补数据库重启、
-   进程 kill 与多 Worker soak；
+1. Workflow G3-A2c：对已完成的 wait-as-command/Scoped wake worker 做数据库重启、进程 kill 与多 Worker soak，建立
+   backlog、claim latency、lease-lost 和恢复时延 SLO；
 2. RAG R2-B：block/page/bbox lineage、parent-child retrieval、相邻块扩展和 ACL 前置；
 3. Harness H1：小型 Goal/Plan/Todo/Skill ADT 与 Store SPI，复用 Artifact/Workspace/Approval；
 4. Quality Q1：结果与轨迹评分分离，多试验趋势和 failure corpus；

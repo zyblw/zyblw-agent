@@ -82,7 +82,9 @@ PostgreSQL 用 transaction-scoped advisory lock 关闭并发首次 claim 的检�
 
 `WorkflowExecutionStore.signal` 使用稳定 signal ID 和 payload hash 跨 Worker 去重；同 ID 不同 payload 冲突。
 `expireDue(limit)` 用有界 `FOR UPDATE SKIP LOCKED` 批次裁决到期 wait。两条路径锁定相同行并使用数据库时钟，确保 signal 与
-deadline 竞态只有一个胜者。宿主仍需提供受监督 timer worker 和耐久 wake-command 交接，不能把长时间等待实现成常驻 Fiber。
+deadline 竞态只有一个胜者。Signaled/TimedOut wait 行本身同时是 durable wake command；`claimWakeups` 使用
+`FOR UPDATE SKIP LOCKED` 换发 token 并递增 generation，`heartbeatWakeup`、`abandonWakeup` 和 checkpoint commit 都重验当前
+数据库租约。`WorkflowWakeWorker.startScoped` 将轮询、恢复和 heartbeat 绑定到 ZIO Scope，不把长时间等待实现成长寿命 sleep Fiber。
 
 删除使用 `DELETE FROM agent_runs`，所有子表依赖 migration 中的 `ON DELETE CASCADE` 由 PostgreSQL 原子清理。
 

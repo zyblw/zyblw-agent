@@ -41,7 +41,7 @@
 | Eval/趋势门禁 | evals；仓库内 eval-cli | Experimental | snapshot、trend、release gate、有界多试验与 `pass@k`/`pass^k` | outcome/trajectory 分离、固定真实数据集与人工校准 |
 | MCP client | mcp / `mcp` | Beta/Experimental | 协议与测试基础 | OAuth/server/Roots、供应链与隔离 |
 | 可靠写工具 | core / `sideeffects` | Experimental | outbox/inbox/补偿抽象 | 真实 transport 与业务案例 |
-| Workflow Graph | core + postgres / `workflow` | Experimental | 显式 nodes/edges、identity/version、启动校验、单调 checkpoint、`AllSucceeded` 取消、execution ledger/pending outcome、lease/fencing、复合游标低敏 timeline、durable wait/signal 状态机 | timer worker→wake command、多 Worker soak、人工任务、子图、完整 Inspector 与图级 eval |
+| Workflow Graph | core + postgres / `workflow` | Experimental | 显式 nodes/edges、identity/version、启动校验、单调 checkpoint、`AllSucceeded` 取消、execution ledger/pending outcome、lease/fencing、复合游标低敏 timeline、durable wait/signal 与受监督 wake worker | kill/restart/multi-worker soak、人工任务、子图、完整 Inspector 与图级 eval |
 | Workspace/Sandbox | mcp / `workspace` | Experimental | 能力边界 | 真实 OCI 隔离与攻击测试 |
 | Multimodal | core / `multimodal` | Experimental | 抽象 | 产品场景、Provider 与 eval |
 
@@ -142,9 +142,12 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
    低敏投影不暴露状态、pending outcome 或 lease token，并保留 generation/owner/时间戳用于抢占诊断；
 7. **已完成 G3-A2a**：`NodeOutcome.Awaiting`、绝对 deadline、typed wakeup、wait 注册/消费与 checkpoint 原子提交；
    内存/PostgreSQL Store 实现 signal ID/payload 去重、数据库时钟裁决超时竞态和有界 `expireDue`；
-8. **下一步 G3-A2b**：受监督 timer worker、耐久 wake-command 交接，以及数据库重启、进程 kill 与多 Worker soak；
-9. **随后 G3-B**：基于真实需求加入人工任务、子图或更多 fan-in policy；
-10. Graph Inspector、实际路径 trace、质量/延迟/token/费用 eval 达标后，才讨论通用 Agent 节点和多 Agent 调度。
+8. **已完成 G3-A2b**：`WorkflowWakeWorker` 以 ZIO Scope 监督恢复与 heartbeat；Signaled/TimedOut wait 行直接作为
+   durable wake command，claim 使用 owner/token/generation/expiry fencing。PostgreSQL 以 `FOR UPDATE SKIP LOCKED` 和数据库
+   时钟实现排他领取，消费 wait 与 checkpoint/execution 原子提交；真实双 Store 测试覆盖唯一领取、租约过期重领与旧 fence 拒绝；
+9. **下一步 G3-A2c**：数据库 restart、进程 kill、多 Worker 长时间 soak，并建立 backlog/claim latency/lease-lost/恢复时延 SLO；
+10. **随后 G3-B**：基于真实需求加入人工任务、子图或更多 fan-in policy；
+11. Graph Inspector、实际路径 trace、质量/延迟/token/费用 eval 达标后，才讨论通用 Agent 节点和多 Agent 调度。
 
 不把普通单 Agent loop 或几个顺序函数强制图化。完整当前契约见[声明式 Workflow Graph](workflow.md)。
 

@@ -14,6 +14,11 @@ All notable user-visible changes will be recorded here. The project follows
   real PostgreSQL 16 cross-Store integration tests.
 - `agent_workflow_waits` and `agent_workflow_signals`, including one-active-wait-per-Run, execution foreign keys, due-work indexes,
   payload checksums and low-sensitivity receipt state.
+- `WorkflowWakeWorker`, `WorkflowWakeSupervisor` and low-sensitivity observer/config APIs. Resolved wait rows now act as durable wake
+  commands with scoped heartbeat, delayed retry release, typed lease loss, and atomic `resumeClaimed` completion.
+- In-memory and PostgreSQL wake leases with owner/token/generation/expiry fencing. PostgreSQL uses database time and
+  `FOR UPDATE SKIP LOCKED`; real two-Store tests prove unique claim, expired reclaim and stale-worker rejection.
+- Executable `DurableWorkflowWakeExample` covering wait registration, idempotent signal delivery, Worker claim and completed state.
 
 ### Changed
 
@@ -25,7 +30,7 @@ All notable user-visible changes will be recorded here. The project follows
 
 ### Remaining before release
 
-- Add the bounded timer worker and durable wake-command handoff, then exercise database restart, process kill and multi-Worker soak.
+- Exercise database restart, process kill and long-running multi-Worker soak; establish backlog, claim-latency, lease-loss and recovery SLOs.
 - Complete RAG block/page/bbox lineage, parent-child retrieval and adjacent-block expansion against the new baseline.
 
 ## 0.2.1 - 2026-07-30

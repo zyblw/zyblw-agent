@@ -1,6 +1,7 @@
 package com.zyblw.agent.workflow
 
 import com.zyblw.agent.core.RunId
+import com.zyblw.agent.memory.{LeaseToken, WorkerId}
 import java.time.Instant
 
 /** Workflow 外部 signal 的稳定名称。
@@ -128,12 +129,33 @@ final case class WorkflowSignalReceipt(
     receivedAt: Instant
 )
 
+/** 已决议 wait 的排他恢复租约。
+  *
+  * Signaled/TimedOut wait 本身就是耐久 wake command；Store 在该事实行上签发 owner/token/generation，避免“先决议 wait、再写
+  * command”形成双写崩溃窗口。只有持有当前未过期租约的 Worker 才能在 checkpoint 提交时消费 wait。
+  */
+final case class WorkflowWakeupLease(
+    record: WorkflowWaitRecord,
+    owner: WorkerId,
+    token: LeaseToken,
+    generation: Long,
+    leaseExpiresAt: Instant
+):
+  require(
+    record.status == WorkflowWaitStatus.Signaled || record.status == WorkflowWaitStatus.TimedOut,
+    "Workflow wakeup lease 只能引用 Signaled/TimedOut wait"
+  )
+  require(generation > 0L, "Workflow wakeup generation 必须大于零")
+  require(leaseExpiresAt.isAfter(record.resolvedAt.get), "Workflow wakeup lease 必须晚于 wait 决议时间")
+
+  def key: WorkflowWaitKey = record.key
+
 /** checkpoint commit 同时需要完成的 wait 状态转换。
   *
   * 一个恢复节点可以在同一事务消费旧等待并注册新等待，从而支持“提醒后继续等”而不产生 crash gap。
   */
 final case class WorkflowWaitCommit(
-    consume: Option[WorkflowWaitKey],
+    consume: Option[WorkflowWakeupLease],
     register: Option[(WorkflowExecutionKey, WorkflowWaitRequest)]
 )
 

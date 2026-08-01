@@ -394,6 +394,18 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
         resolved <- harness.storeA
           .currentWait(runId)
           .someOrFail(AgentError.PersistenceFailure("resolved wait missing"))
+        wakeLease <- harness.storeA
+          .claimWakeups(
+            workflowId,
+            workflowVersion,
+            WorkerId("wait-wake-consumer"),
+            10.seconds
+          )
+          .flatMap(value =>
+            ZIO
+              .fromOption(value.headOption)
+              .orElseFail(AgentError.PersistenceFailure("claimed wake missing"))
+          )
         nextKey = firstKey.copy(step = 1, visit = 2)
         next <- harness.storeB
           .claim(nextKey, WorkerId("wait-consume"), 10.seconds)
@@ -412,7 +424,7 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
         _ <- harness.storeB.commit(
           NonEmptyChunk(next),
           completedCheckpoint,
-          WorkflowWaitCommit(Some(wait.key), None)
+          WorkflowWaitCommit(Some(wakeLease), None)
         )
         remaining <- harness.storeA.currentWait(runId)
       yield assertTrue(
@@ -425,6 +437,88 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
         resolved.status == WorkflowWaitStatus.Signaled,
         resolved.signal.exists(_.payload == "approved"),
         remaining.isEmpty
+      )).provideLayer(harnessLayer)
+    },
+    test("两 Store 只领取一个 wakeup，数据库租约过期后递增 generation 并拒绝旧 fence") {
+      (for
+        harness <- ZIO.service[Harness]
+        runId   <- RunId.random
+        session <- SessionId.random
+        now     <- Live.live(Clock.instant)
+        signalName = WorkflowSignalName("wake.concurrent")
+        key        = WorkflowExecutionKey(
+          runId,
+          workflowId,
+          workflowVersion,
+          session,
+          entry,
+          step = 0,
+          visit = 1
+        )
+        request = WorkflowWaitRequest(
+          WorkflowWaitCondition.Signal(signalName),
+          now.plusSeconds(30)
+        )
+        execution <- harness.storeA
+          .claim(key, WorkerId("wake-register"), 10.seconds)
+          .flatMap(acquired)
+        _ <- harness.storeA.prepare(
+          execution,
+          NodeOutcome.Awaiting(WorkflowState(1, Chunk.empty), request)
+        )
+        _ <- harness.storeA.commit(
+          NonEmptyChunk(execution),
+          checkpoint(
+            session,
+            WorkflowCursor.At(entry),
+            WorkflowState(1, Chunk.empty),
+            step = 1,
+            visits = Map(entry -> 1)
+          ),
+          WorkflowWaitCommit(None, Some(key -> request))
+        )
+        wait <- harness.storeA
+          .currentWait(runId)
+          .someOrFail(AgentError.PersistenceFailure("postgres wake wait missing"))
+        _ <- harness.storeB.signal(
+          wait.key,
+          WorkflowSignalId("wake-concurrent-1"),
+          signalName,
+          "ready"
+        )
+        raced <- harness.storeA
+          .claimWakeups(workflowId, workflowVersion, WorkerId("wake-owner-a"), 1.second)
+          .zipPar(
+            harness.storeB
+              .claimWakeups(workflowId, workflowVersion, WorkerId("wake-owner-b"), 1.second)
+          )
+        first <- ZIO
+          .fromOption((raced._1 ++ raced._2).headOption)
+          .orElseFail(AgentError.PersistenceFailure("postgres first wake claim missing"))
+        busy <- harness.storeA.claimWakeups(
+          workflowId,
+          workflowVersion,
+          WorkerId("wake-owner-c"),
+          1.second
+        )
+        _      <- Live.live(ZIO.sleep(1200.millis))
+        second <- harness.storeB
+          .claimWakeups(workflowId, workflowVersion, WorkerId("wake-owner-c"), 5.seconds)
+          .flatMap(value =>
+            ZIO
+              .fromOption(value.headOption)
+              .orElseFail(AgentError.PersistenceFailure("postgres second wake claim missing"))
+          )
+        staleHeartbeat <- harness.storeA.heartbeatWakeup(first, 5.seconds).either
+        staleAbandon   <- harness.storeA.abandonWakeup(first, now).either
+        renewed        <- harness.storeB.heartbeatWakeup(second, 5.seconds)
+      yield assertTrue(
+        raced._1.length + raced._2.length == 1,
+        busy.isEmpty,
+        second.generation == first.generation + 1L,
+        staleHeartbeat.left.exists(_.isInstanceOf[AgentError.LeaseLost]),
+        staleAbandon.left.exists(_.isInstanceOf[AgentError.LeaseLost]),
+        renewed.generation == second.generation
       )).provideLayer(harnessLayer)
     },
     test("数据库 deadline 后 signal 与 expireDue 并发时只产生 TimedOut 唯一胜者") {

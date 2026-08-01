@@ -29,6 +29,8 @@
   pending outcome；旧 owner 的 heartbeat、prepare 与 commit 均被 fencing 拒绝。
 - wait 注册/消费与 execution/checkpoint 同事务提交；signal 使用稳定 ID/payload hash 去重，signal 与 timeout 锁定同一行并由
   数据库时钟裁决唯一胜者。
+- Signaled/TimedOut wait 行本身作为 durable wake command；`WorkflowWakeWorker` 在 ZIO Scope 中排他 claim、heartbeat 并
+  调用 `resumeClaimed`，PostgreSQL 以 `SKIP LOCKED` 和完整 wake fence 支持多实例。
 
 节点状态由应用定义，持久化通过 SPI。Handoff 是受深度、上下文和工具策略限制的 Agent 转移，不自动继承全部权限。
 
@@ -38,9 +40,9 @@
 
 ## 风险与演化
 
-当前实现有意限定 fan-out 分支为单步 `Complete` 节点。durable timer/signal 的状态机与 Store 已实现，但受监督 timer worker、
-耐久 wake-command 交接、人工任务、子图和 quorum/race join 尚未实现。下一阶段先补 worker 交接、进程 kill/数据库重启与
-多 Worker soak，再由真实业务和 eval 决定是否增加更复杂图语义。
+当前实现有意限定 fan-out 分支为单步 `Complete` 节点。durable timer/signal、wait-as-command 与受监督 Worker 已实现；人工任务、
+子图和 quorum/race join 尚未实现。下一阶段先补进程 kill/数据库重启、多 Worker soak 与恢复 SLO，再由真实业务和 eval
+决定是否增加更复杂图语义。
 保留 Temporal/zio-temporal Adapter 边界，不让 core 依赖具体工作流引擎。
 
 简单 Agent loop 和顺序 ZIO 组合不强制图化；多 Agent 只有在固定 eval 中持续优于单 Agent时才进入图调度。

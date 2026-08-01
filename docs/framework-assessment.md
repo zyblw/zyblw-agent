@@ -91,10 +91,11 @@
 `WorkflowCheckpoint` 保存访问预算；fan-out 明确采用 `AllSucceeded`，由 ZIO 结构化并发传播失败与取消。随后完成的
 `WorkflowExecutionStore` 已补上 pending outcome、耐久账本、lease/fencing 与 prepare→checkpoint 故障注入；0.3 又补齐
 durable wait/signal 的原子注册/消费、稳定 signal ID 去重与 deadline 竞态裁决。当前仍故意只支持单步 fan-out 分支，避免在
-没有 timer worker→wake command、子图命名空间和多节点 soak 前假装拥有完整图平台。
+没有子图命名空间、kill/restart 和多节点 soak 前假装拥有完整图平台。0.3 进一步以 wait 行作为 durable wake command，
+补齐 Scoped `WorkflowWakeWorker`、heartbeat、延迟释放和 PostgreSQL `SKIP LOCKED` fencing。
 
-内存/PostgreSQL 共享低敏 execution timeline 与 wait 状态机；下一步不是堆 Agent，而是受监督 timer worker、耐久
-wake-command 交接、进程 kill/数据库重启 soak 和完整 Graph Inspector。完整契约与边界见
+内存/PostgreSQL 共享低敏 execution timeline、wait 状态机与 wake lease 契约；下一步不是堆 Agent，而是进程 kill、
+数据库重启、多 Worker soak、SLO 和完整 Graph Inspector。完整契约与边界见
 [声明式 Workflow Graph](workflow.md)。
 
 ### zyblw-agent 的差异化优势
@@ -184,7 +185,7 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 | Agent / Harness / Workflow 分工 | 采纳 | 作为 `agent-core` 内可组合概念，复用唯一 Runtime |
 | model proposer / runtime enforcer | 已是核心不变量 | 继续覆盖 capability、权限、审批、预算、fencing 与审计 |
 | execution ledger、pending writes、lease/fencing | 已落地并继续加深 | 0.3 基线 + `WorkflowExecutionStore`；下一步补 kill/restart/multi-worker soak |
-| timer、signal | 核心状态机与 Store 已实现 | 下一步把 `expireDue` 接入受监督 worker 与耐久 wake command，不能使用长寿命 Fiber |
+| timer、signal | 状态机、wait-as-command 与 Scoped Worker 已实现 | 下一步做 kill/restart/multi-worker soak 与 backlog/恢复时延 SLO |
 | human task | 采纳但尚未实现 | 在 timer/signal 之上补可信主体、权限、撤销、升级与审计，不用 Prompt 约定冒充人工任务 |
 | 低敏 execution timeline | 本轮落地 | 复合游标分页；不泄露状态、outcome 或 lease token |
 | Goal/Plan/Todo/Completion/Verification | 采纳为 Harness H1 | 先做小型 ADT/Store SPI 和 eval，不一次构造通用项目管理平台 |

@@ -39,7 +39,7 @@
 | `agent_eval_snapshots` | Agent/RAG/Context Compression 的低敏不可变评测快照与发布基线 | 不含业务正文；按数据集治理策略归档，不能静默覆盖 |
 | `agent_workflow_checkpoints` | Workflow identity、Session、游标、应用状态、step 与访问预算的完整恢复快照 | 独立于 `agent_runs`；按 Workflow Run 的保留策略删除 |
 | `agent_workflow_node_executions` | 节点 Running/Prepared/Committed 台账、pending outcome 与 owner/token/generation fencing | 与 Workflow checkpoint 同保留窗口；Prepared 需覆盖最长故障恢复期 |
-| `agent_workflow_waits` | 每个 Workflow Run 唯一活动的 signal/timer 条件、绝对 deadline、决议与消费状态 | 与 execution/checkpoint 同保留窗口；Pending 必须由有界 worker 扫描 |
+| `agent_workflow_waits` | 每个 Workflow Run 唯一活动的 signal/timer 条件、绝对 deadline、决议、wake lease 与消费状态 | 与 execution/checkpoint 同保留窗口；Pending/Resolved 由有界 Worker 扫描/领取 |
 | `agent_workflow_signals` | 外部 signal 的稳定 ID、payload hash、接收 disposition 与时间 | 覆盖外部发送方最长重试窗口；payload 按业务敏感数据治理 |
 
 可选 RAG baseline 还包含：
@@ -78,6 +78,11 @@ Prepared outcome 和推进 checkpoint 位于同一事务；恢复节点提交下
 `agent_workflow_signals` 以 `(run_id, wait_step, wait_node_id, signal_id)` 去重，同 ID 不同 payload hash 会 fail-closed。
 signal 与 `expireDue` 都锁定同一 wait 行并使用 PostgreSQL `clock_timestamp()` 判断 deadline，因此并发时只会有一个权威结果。
 恰好等于 deadline 视为超时，避免不同应用节点时钟产生双胜者。
+
+已决议 wait 同时保存 `wake_available_at`、generation、owner、随机 token、claimed/heartbeat/expiry。它本身就是 durable wake
+command，不需要在另一个队列表补写任务。`claimWakeups` 按 workflow/version 和可用时间扫描部分索引，并使用
+`FOR UPDATE SKIP LOCKED`；过期重领递增 generation。成功恢复在 execution/checkpoint 同一事务内把 wait 改为 Consumed 并清除
+活动租约字段，任何旧 owner/token/generation 或过期租约都得到 `LeaseLost`，不能覆盖新 Worker。
 
 `agent_memories` 不属于 Run checkpoint：Run 删除不会级联删除用户长期记忆。User scope 同时保存 tenant/user，并以
 无歧义 canonical scope key 建主键；相同 userId 在不同 tenant 中是不同命名空间。删除会清空 `value_json` 与

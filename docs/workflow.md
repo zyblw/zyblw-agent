@@ -154,8 +154,8 @@ Durable 模式对每次节点访问建立稳定 `(runId, step, nodeId)` 台账�
 
 ### 耐久 timer 与 signal
 
-`Awaiting` 只允许用于 durable engine。节点第一次访问时返回绝对 deadline；signal 或 deadline 胜出后，宿主再次调用
-`resume`，同一节点从 `WorkflowContext.wakeup` 读取结构化结果：
+`Awaiting` 只允许用于 durable engine。节点第一次访问时返回绝对 deadline；signal 或 deadline 胜出后，
+`WorkflowWakeWorker` 排他领取 wait 并调用 `resumeClaimed`，同一节点从 `WorkflowContext.wakeup` 读取结构化结果：
 
 ```scala
 val approval = WorkflowSignalName("approval.received")
@@ -194,10 +194,38 @@ val receipt = executionStore.signal(
 - `(waitKey, signalId)` 是去重身份；相同 ID/相同 payload 返回 `Duplicate`，不同 payload 返回冲突；
 - signal 仅能在 deadline 前胜出；PostgreSQL 用数据库时钟和行锁裁决 signal/timeout，恰好等于 deadline 时 timeout 胜出；
 - payload 上限默认 64 KiB，不进入 timeline、通用指标或日志；
-- `currentWait` 只返回尚未消费的当前等待；Pending 状态下 `resume` 返回 `workflow-wait-pending`，不会轮询执行节点。
+- `currentWait` 只返回尚未消费的当前等待；Pending 状态下普通 `resume` 返回 `workflow-wait-pending`；已决议等待则返回
+  `workflow-wakeup-claim-required`，不能绕过租约直接恢复。
 
-框架已经提供 `expireDue(limit)` 这个有界、可并发领取的 timer 原语。生产宿主仍需把它接入受监督 Worker，并在决议后提交
-耐久 wake command；不要让单个 JVM Fiber `sleep` 到 deadline，也不要在 HTTP webhook 线程直接运行 Workflow。
+框架把 Signaled/TimedOut wait 行本身作为 durable wake command，避免“先决议 wait、再写队列表”形成双写崩溃窗口。
+`WorkflowWakeWorker` 每轮先用有界 `expireDue(limit)` 决议 timer，再按 workflow/version 使用 owner/token/generation/expiry
+领取一个 wakeup；恢复成功时 wait 消费与下一 checkpoint/execution 在同一事务提交，可重试失败则延迟释放。生产宿主应把
+Worker Fiber 绑定到应用 Scope：
+
+```scala
+val wakeWorker = WorkflowWakeWorker(
+  owner = WorkerId("review-wake-worker-7"),
+  store = executionStore,
+  engine = engine,
+  observer = wakeObserver,
+  config = WorkflowWakeWorkerConfig(
+    leaseDuration = 30.seconds,
+    heartbeatEvery = 10.seconds,
+    pollEvery = 500.millis,
+    retryDelay = 5.seconds,
+    expireBatchSize = 100
+  )
+)
+
+ZIO.scoped {
+  wakeWorker.startScoped *> ZIO.never
+}
+```
+
+多个 Worker 可安全处理同一定义：PostgreSQL claim 使用 `FOR UPDATE SKIP LOCKED` 与数据库时钟，heartbeat 与 commit 都重验
+完整 fence；租约过期后新 owner 递增 generation，旧 Fiber 得到 typed `LeaseLost`。`WorkflowWakeObserver` 只输出计数、错误
+类别和 retryable，不携带 runId、Session、payload 或 token。不要让单个 JVM Fiber `sleep` 到 deadline，也不要在 HTTP
+webhook Fiber 中直接恢复 Workflow；webhook 只负责幂等 `signal`。
 
 ### 低敏 execution timeline
 
@@ -239,18 +267,27 @@ sbt -batch "examples/runMain com.zyblw.agent.examples.GraphWorkflowExample"
 完整源码见
 [`GraphWorkflowExample.scala`](../modules/agent-examples/src/main/scala/com/zyblw/agent/examples/GraphWorkflowExample.scala)。
 
+signal、排他 wake claim 与 Worker 恢复的完整最小示例：
+
+```bash
+sbt -batch "examples/runMain com.zyblw.agent.examples.DurableWorkflowWakeExample"
+```
+
+源码见
+[`DurableWorkflowWakeExample.scala`](../modules/agent-examples/src/main/scala/com/zyblw/agent/examples/DurableWorkflowWakeExample.scala)。
+
 ## 当前边界与下一步
 
 当前已经实现“可验证图内核 + PostgreSQL checkpoint + 节点 execution ledger/pending outcome/fencing + 低敏 timeline +
-耐久 timer/signal 状态机”，并用故障注入证明 prepare 后崩溃可恢复且节点不重复执行。当前仍未完成：
+耐久 timer/signal + 受监督 wake worker”，并用故障注入证明 prepare 后崩溃可恢复且节点不重复执行；真实 PostgreSQL 16
+测试证明两个 Store 并发只会领取一次、过期重领递增 generation 且旧 fence 无法写入。当前仍未完成：
 
-- timer worker 到耐久 wake command 的完整运行回路，以及数据库重启、进程 kill、多 Worker soak；
+- 数据库重启、进程 kill、多 Worker 长时间 soak 与容量/SLO 证据；
 - 人工任务的身份、权限、撤销与升级协议；
 - 多节点子图、checkpoint fork/time travel；
 - quorum/race 等更多 fan-in policy；
 - 完整 Graph Inspector UI/CLI 和图级质量/成本 eval。
 
-下一纵向切片是把已有等待状态机接入“有界 timer worker → 耐久 wake command → command worker 恢复”的原子交接，并补
-数据库重启、进程 kill 与多 Worker soak，关闭“状态已决议但恢复命令丢失”的窗口。随后才根据真实业务证据选择人工任务、
-子图或更多 fan-in policy。只有固定任务证明单 Agent 受角色或上下文隔离限制时，才在这个内核上增加 Agent handoff 或
-多 Agent 调度。
+下一纵向切片是对已完成的原子 wake 回路做数据库 restart、进程 kill 与多 Worker soak，并建立 backlog、claim latency、
+lease-lost rate 和恢复时延 SLO。随后才根据真实业务证据选择人工任务、子图或更多 fan-in policy。只有固定任务证明单
+Agent 受角色或上下文隔离限制时，才在这个内核上增加 Agent handoff 或多 Agent 调度。

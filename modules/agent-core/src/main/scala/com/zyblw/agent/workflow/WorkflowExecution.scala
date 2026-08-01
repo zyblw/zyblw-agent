@@ -185,8 +185,8 @@ final case class WorkflowExecutionPolicy(
     leaseDuration: Duration = 30.seconds,
     heartbeatInterval: Duration = 10.seconds
 ):
-  require(leaseDuration > Duration.Zero, "Workflow execution leaseDuration 必须大于零")
-  require(heartbeatInterval > Duration.Zero, "Workflow execution heartbeatInterval 必须大于零")
+  require(leaseDuration.toMillis > 0L, "Workflow execution leaseDuration 必须至少为 1 毫秒")
+  require(heartbeatInterval.toMillis > 0L, "Workflow execution heartbeatInterval 必须至少为 1 毫秒")
   require(
     heartbeatInterval < leaseDuration,
     "Workflow execution heartbeatInterval 必须小于 leaseDuration"
@@ -251,6 +251,24 @@ trait WorkflowExecutionStore[S] extends WorkflowCheckpointStore[S]:
   /** 原子决议已到期等待；返回本次从 Pending 转为 TimedOut 的记录，供宿主提交唤醒任务。 */
   def expireDue(limit: Int = 100): IO[StoreError, Chunk[WorkflowWaitRecord]]
 
+  /** 排他领取已 Signaled/TimedOut 的 wait；wait 行本身就是 durable wake command，不需要跨表补写任务。 */
+  def claimWakeups(
+      workflowId: WorkflowId,
+      definitionVersion: WorkflowVersion,
+      owner: WorkerId,
+      leaseDuration: Duration,
+      limit: Int = 1
+  ): IO[StoreError, Chunk[WorkflowWakeupLease]]
+
+  /** 仅在 owner/token/generation 匹配且租约未过期时续租 wakeup。 */
+  def heartbeatWakeup(
+      lease: WorkflowWakeupLease,
+      leaseDuration: Duration
+  ): IO[StoreError, WorkflowWakeupLease]
+
+  /** 可重试失败后释放 wakeup，并设置下一次可领取时间；旧 lease 随即失效。 */
+  def abandonWakeup(lease: WorkflowWakeupLease, availableAt: Instant): IO[StoreError, Unit]
+
   /** 按完整 execution identity 读取权威账本记录；该记录可能包含状态正文，不适合直接暴露给外部协议。 */
   def get(key: WorkflowExecutionKey): IO[StoreError, Option[WorkflowExecutionRecord[S]]]
 
@@ -278,17 +296,23 @@ object WorkflowExecutionStore:
       name: WorkflowSignalName,
       payload: String
   )
+  final private case class MemoryWakeDispatch(
+      availableAt: Instant,
+      generation: Long,
+      lease: Option[WorkflowWakeupLease]
+  )
 
   final private case class MemoryState[S](
       checkpoints: Map[RunId, WorkflowCheckpoint[S]],
       executions: Map[MemoryExecutionSlot, WorkflowExecutionRecord[S]],
       waits: Map[WorkflowWaitKey, WorkflowWaitRecord],
-      signals: Map[MemorySignalSlot, MemorySignal]
+      signals: Map[MemorySignalSlot, MemorySignal],
+      wakeups: Map[WorkflowWaitKey, MemoryWakeDispatch]
   )
 
   /** 单进程开发与测试实现；`Ref.Synchronized` 让 ledger 与 checkpoint 在同一原子临界区推进。 */
   def inMemory[S: Tag]: ULayer[WorkflowExecutionStore[S]] = ZLayer.fromZIO {
-    Ref.Synchronized.make(MemoryState[S](Map.empty, Map.empty, Map.empty, Map.empty)).map { state =>
+    Ref.Synchronized.make(MemoryState[S](Map.empty, Map.empty, Map.empty, Map.empty, Map.empty)).map { state =>
       new WorkflowExecutionStore[S]:
         override def save(runId: RunId, checkpoint: WorkflowCheckpoint[S]): IO[StoreError, Unit] =
           state.modifyZIO { current =>
@@ -452,12 +476,14 @@ object WorkflowExecutionStore:
                               )
                             )
                           }
-                        applyWaitCommit(current.waits, values, waitCommit, now).map { waits =>
-                          () -> current.copy(
-                            checkpoints = checkpoints,
-                            executions = executions,
-                            waits = waits
-                          )
+                        applyWaitCommit(current.waits, current.wakeups, values, waitCommit, now).map {
+                          case (waits, wakeups) =>
+                            () -> current.copy(
+                              checkpoints = checkpoints,
+                              executions = executions,
+                              waits = waits,
+                              wakeups = wakeups
+                            )
                         }
                       }
                   }
@@ -521,12 +547,20 @@ object WorkflowExecutionStore:
                                 WorkflowSignalDisposition.Late
                             case _ => wait -> WorkflowSignalDisposition.AlreadyResolved
                           val receipt = WorkflowSignalReceipt(waitKey, signalId, disposition, now)
-                          val next    = current.copy(
+                          val wakeups =
+                            if wait.status == WorkflowWaitStatus.Pending then
+                              current.wakeups.updated(
+                                waitKey,
+                                MemoryWakeDispatch(now, generation = 0L, lease = None)
+                              )
+                            else current.wakeups
+                          val next = current.copy(
                             waits = current.waits.updated(waitKey, updatedWait),
                             signals = current.signals.updated(
                               signalSlot,
                               MemorySignal(receipt, name, payload)
-                            )
+                            ),
+                            wakeups = wakeups
                           )
                           ZIO.succeed(receipt -> next)
             }
@@ -544,8 +578,114 @@ object WorkflowExecutionStore:
                 .take(limit)
               val resolved =
                 due.map(record => record.copy(status = WorkflowWaitStatus.TimedOut, resolvedAt = Some(now)))
-              val waits = resolved.foldLeft(current.waits)((acc, record) => acc.updated(record.key, record))
-              Chunk.fromIterable(resolved) -> current.copy(waits = waits)
+              val waits   = resolved.foldLeft(current.waits)((acc, record) => acc.updated(record.key, record))
+              val wakeups = resolved.foldLeft(current.wakeups)((acc, record) =>
+                acc.updated(record.key, MemoryWakeDispatch(now, generation = 0L, lease = None))
+              )
+              Chunk.fromIterable(resolved) -> current.copy(waits = waits, wakeups = wakeups)
+            }
+          }
+
+        override def claimWakeups(
+            workflowId: WorkflowId,
+            definitionVersion: WorkflowVersion,
+            owner: WorkerId,
+            leaseDuration: Duration,
+            limit: Int
+        ): IO[StoreError, Chunk[WorkflowWakeupLease]] =
+          validateDuration(leaseDuration) *> validateWaitLimit(limit) *> Clock.instant.flatMap { now =>
+            state.modifyZIO { current =>
+              val resolved = current.waits.valuesIterator
+                .filter(record =>
+                  record.workflowId == workflowId &&
+                    record.definitionVersion == definitionVersion &&
+                    (record.status == WorkflowWaitStatus.Signaled ||
+                      record.status == WorkflowWaitStatus.TimedOut)
+                )
+                .toList
+              val missingDispatch = resolved.exists(record => !current.wakeups.contains(record.key))
+              if missingDispatch then
+                ZIO.fail(AgentError.PersistenceFailure("resolved workflow wait 缺少 wake dispatch"))
+              else
+                val candidates = resolved
+                  .filter { record =>
+                    val dispatch = current.wakeups(record.key)
+                    !dispatch.availableAt
+                      .isAfter(now) && dispatch.lease.forall(!_.leaseExpiresAt.isAfter(now))
+                  }
+                  .sortBy(record => record.resolvedAt.get -> record.key.runId.asString)
+                  .take(limit)
+                ZIO
+                  .foreach(candidates) { record =>
+                    LeaseToken.random.map { token =>
+                      val dispatch   = current.wakeups(record.key)
+                      val generation = dispatch.generation + 1L
+                      WorkflowWakeupLease(
+                        record,
+                        owner,
+                        token,
+                        generation,
+                        now.plusMillis(leaseDuration.toMillis)
+                      )
+                    }
+                  }
+                  .map { claimed =>
+                    val wakeups = claimed.foldLeft(current.wakeups) { (acc, lease) =>
+                      acc.updated(
+                        lease.key,
+                        MemoryWakeDispatch(now, lease.generation, Some(lease))
+                      )
+                    }
+                    Chunk.fromIterable(claimed) -> current.copy(wakeups = wakeups)
+                  }
+            }
+          }
+
+        override def heartbeatWakeup(
+            lease: WorkflowWakeupLease,
+            leaseDuration: Duration
+        ): IO[StoreError, WorkflowWakeupLease] =
+          validateDuration(leaseDuration) *> Clock.instant.flatMap { now =>
+            state.modifyZIO { current =>
+              current.wakeups.get(lease.key) match
+                case Some(dispatch)
+                    if dispatch.lease.exists(existing =>
+                      sameWakeFence(existing, lease) && existing.leaseExpiresAt.isAfter(now)
+                    ) =>
+                  val renewed = lease.copy(leaseExpiresAt = now.plusMillis(leaseDuration.toMillis))
+                  ZIO.succeed(
+                    renewed -> current.copy(
+                      wakeups = current.wakeups.updated(
+                        lease.key,
+                        dispatch.copy(lease = Some(renewed))
+                      )
+                    )
+                  )
+                case _ => ZIO.fail(wakeupLost(lease))
+            }
+          }
+
+        override def abandonWakeup(
+            lease: WorkflowWakeupLease,
+            availableAt: Instant
+        ): IO[StoreError, Unit] =
+          Clock.instant.flatMap { now =>
+            state.modifyZIO { current =>
+              current.wakeups.get(lease.key) match
+                case Some(dispatch)
+                    if dispatch.lease.exists(existing =>
+                      sameWakeFence(existing, lease) && existing.leaseExpiresAt.isAfter(now)
+                    ) =>
+                  val nextAvailable = if availableAt.isBefore(now) then now else availableAt
+                  ZIO.succeed(
+                    () -> current.copy(
+                      wakeups = current.wakeups.updated(
+                        lease.key,
+                        dispatch.copy(availableAt = nextAvailable, lease = None)
+                      )
+                    )
+                  )
+                case _ => ZIO.fail(wakeupLost(lease))
             }
           }
 
@@ -570,8 +710,8 @@ object WorkflowExecutionStore:
   }
 
   private def validateDuration(duration: Duration): IO[StoreError, Unit] =
-    if duration > Duration.Zero then ZIO.unit
-    else ZIO.fail(AgentError.PersistenceFailure("workflow execution leaseDuration 必须大于零"))
+    if duration.toMillis > 0L then ZIO.unit
+    else ZIO.fail(AgentError.PersistenceFailure("workflow execution leaseDuration 必须至少为 1 毫秒"))
 
   private def validateTimelineLimit(limit: Int): IO[StoreError, Unit] =
     if limit >= 1 && limit <= 500 then ZIO.unit
@@ -628,32 +768,39 @@ object WorkflowExecutionStore:
 
   private def applyWaitCommit(
       waits: Map[WorkflowWaitKey, WorkflowWaitRecord],
+      wakeups: Map[WorkflowWaitKey, MemoryWakeDispatch],
       leases: Chunk[WorkflowExecutionLease],
       commit: WorkflowWaitCommit,
       now: Instant
-  ): IO[StoreError, Map[WorkflowWaitKey, WorkflowWaitRecord]] =
+  ): IO[StoreError, (Map[WorkflowWaitKey, WorkflowWaitRecord], Map[WorkflowWaitKey, MemoryWakeDispatch])] =
     val runId    = leases.head.key.runId
     val consumed = commit.consume match
-      case None                            => ZIO.succeed(waits)
-      case Some(key) if key.runId != runId => ZIO.fail(waitConflict(runId, "consume-run-mismatch"))
-      case Some(key)                       =>
-        waits.get(key) match
-          case Some(record) if record.status == WorkflowWaitStatus.Consumed => ZIO.succeed(waits)
+      case None                                            => ZIO.succeed(waits -> wakeups)
+      case Some(wakeLease) if wakeLease.key.runId != runId =>
+        ZIO.fail(waitConflict(runId, "consume-run-mismatch"))
+      case Some(wakeLease) =>
+        waits.get(wakeLease.key) match
           case Some(record)
               if record.status == WorkflowWaitStatus.Signaled ||
                 record.status == WorkflowWaitStatus.TimedOut =>
-            ZIO.succeed(
-              waits.updated(
-                key,
-                record.copy(status = WorkflowWaitStatus.Consumed, consumedAt = Some(now))
-              )
-            )
+            wakeups.get(wakeLease.key) match
+              case Some(dispatch)
+                  if dispatch.lease.exists(existing =>
+                    sameWakeFence(existing, wakeLease) && existing.leaseExpiresAt.isAfter(now)
+                  ) =>
+                ZIO.succeed(
+                  waits.updated(
+                    wakeLease.key,
+                    record.copy(status = WorkflowWaitStatus.Consumed, consumedAt = Some(now))
+                  ) -> wakeups.removed(wakeLease.key)
+                )
+              case _ => ZIO.fail(wakeupLost(wakeLease))
           case Some(_) => ZIO.fail(waitConflict(runId, "consume-pending-wait"))
           case None    => ZIO.fail(waitConflict(runId, "consume-wait-not-found"))
 
-    consumed.flatMap { afterConsume =>
+    consumed.flatMap { case (afterConsume, afterWakeups) =>
       commit.register match
-        case None                       => ZIO.succeed(afterConsume)
+        case None                       => ZIO.succeed(afterConsume -> afterWakeups)
         case Some((execution, request)) =>
           val key             = WorkflowWaitKey(execution.runId, execution.step, execution.nodeId)
           val executionOwned  = leases.exists(_.key == execution)
@@ -677,7 +824,7 @@ object WorkflowExecutionStore:
                     existing.sessionId == execution.sessionId &&
                     existing.condition == request.condition &&
                     existing.deadline == request.deadline =>
-                ZIO.succeed(afterConsume)
+                ZIO.succeed(afterConsume -> afterWakeups)
               case Some(_) => ZIO.fail(waitConflict(runId, "wait-identity-conflict"))
               case None    =>
                 val record = WorkflowWaitRecord(
@@ -693,10 +840,24 @@ object WorkflowExecutionStore:
                   None,
                   None
                 )
-                ZIO.succeed(afterConsume.updated(key, record))
+                ZIO.succeed(afterConsume.updated(key, record) -> afterWakeups)
     }
 
   private def checkpointRunId(leases: Chunk[WorkflowExecutionLease]): RunId = leases.head.key.runId
+
+  private def sameWakeFence(left: WorkflowWakeupLease, right: WorkflowWakeupLease): Boolean =
+    left.key == right.key &&
+      left.owner == right.owner &&
+      left.token == right.token &&
+      left.generation == right.generation
+
+  private def wakeupLost(lease: WorkflowWakeupLease): StoreError =
+    AgentError.LeaseLost(
+      lease.key.runId,
+      lease.owner.value,
+      lease.generation,
+      s"workflow-wakeup=${lease.key.nodeId.value},step=${lease.key.step}"
+    )
 
   private def slot(key: WorkflowExecutionKey): MemoryExecutionSlot =
     MemoryExecutionSlot(key.runId, key.step, key.nodeId)
