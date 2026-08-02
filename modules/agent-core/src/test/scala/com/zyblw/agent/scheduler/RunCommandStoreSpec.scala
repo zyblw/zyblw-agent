@@ -108,5 +108,40 @@ object RunCommandStoreSpec extends ZIOSpecDefault:
         claimed.commandId == record.commandId,
         claimed.command.attempt == 1
       )).provideLayer(RunCommandStore.inMemory)
+    },
+    test("队列快照只聚合可调度、租约与 DeadLetter 状态") {
+      (for
+        store     <- ZIO.service[RunCommandStore]
+        leasedRun <- RunId.random
+        futureRun <- RunId.random
+        deadRun   <- RunId.random
+        _         <- store.submit(leasedRun, RunCommandPayload.Recover, "snapshot:leased", priority = 100)
+        _         <- store.submit(
+          futureRun,
+          RunCommandPayload.Recover,
+          "snapshot:future",
+          availableAt = java.time.Instant.ofEpochSecond(3600L)
+        )
+        _      <- store.submit(deadRun, RunCommandPayload.Recover, "snapshot:dead", priority = 50)
+        active <- store
+          .claim(WorkerId("snapshot-active"), 5.seconds, 3)
+          .someOrFail(AgentError.Unexpected("active claim missing"))
+        dead <- store
+          .claim(WorkerId("snapshot-dead"), 5.seconds, 3)
+          .someOrFail(AgentError.Unexpected("dead claim missing"))
+        _      <- store.deadLetter(dead, "operator-review")
+        before <- store.queueSnapshot
+        _      <- TestClock.adjust(6.seconds)
+        after  <- store.queueSnapshot
+      yield assertTrue(
+        active.runId == leasedRun,
+        before.queuedCommands == 1L,
+        before.dispatchableRuns == 0L,
+        before.leasedRuns == 1L,
+        before.expiredLeases == 0L,
+        before.deadLetterCommands == 1L,
+        before.oldestDispatchableAgeMillis.isEmpty,
+        after.expiredLeases == 1L
+      )).provideLayer(RunCommandStore.inMemory)
     }
   )

@@ -68,15 +68,14 @@ Central artifact 不可覆盖；失败修复必须用新版本。
 
 ## 日常版本策略
 
-- 当前 `main` 是 0.3.0 的破坏性开发线：可以删除 0.2 API/state/schema，但必须让代码、fresh baseline、示例和权威文档
-  在同一提交中收敛，不能保留表面兼容层。
-- `0.3.0` 发布后：`0.3.x` patch 才开始保护该 minor 的公共 Scala API、state JSON、HTTP/OpenAPI 与 Flyway history；
+- `0.3.0` 已结束相对 0.2 的一次性破坏窗口；发布提交中的代码、fresh baseline、示例和权威文档共同构成新基线。
+- `0.3.x` patch 保护该 minor 的公共 Scala API、state JSON、HTTP/OpenAPI 与 Flyway history；
   破坏性演进进入下一个 minor。
 - `1.x`：公共核心、迁移、HTTP 契约和运维承诺达到稳定后再进入。
 - Provider、Beta/Experimental 模块也跟随统一版本，减少多模块组合矩阵。
 
-当前 build 使用 `early-semver`。0.2 发布物与 tag 保持不可变，但本轮明确不以它们约束 0.3 开发。0.3.0 发布后再把真实
-0.3.0 artifact 设为 patch 兼容基线；不能用空检查假装已经完成。
+当前 build 使用 `early-semver`。0.2 发布物与 tag 保持不可变；真实 `0.3.0` artifact 是后续 patch 的兼容基线，不能用
+空检查或开发分支替代。
 
 在 sbt 2 的 MiMa/version-policy 生态完成当前版本兼容性验证前，现有的独立 Maven consumer 与平台下游回归仍是必须
 执行的实际二进制门禁；它们不能证明所有二进制兼容性，但能证明公开 POM、资源和一条真实宿主消费路径。

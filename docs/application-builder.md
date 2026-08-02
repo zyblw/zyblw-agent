@@ -219,6 +219,8 @@ val applicationLayer: ZLayer[Any, Throwable, AgentApplication.Services] =
 - `WorkerId` 每次进程启动唯一，不能把多个副本配置成同一个固定值。
 - `worker.parallelism` 是单实例同时推进的不同 Run 上限，默认 4、允许 1..256；同一 Run 仍由 dispatcher
   严格串行。它必须与 JDBC 连接池、Provider 配额、工具下游容量和 Pod 内存一起压测，不能只为缩短队列而盲目调大。
+- `app.queueSnapshot` 只返回队列聚合，可直接供宿主的内部运维端点或定时指标采集使用；不要为查看 backlog 暴露命令正文或
+  绕过 `AgentApplication` 读取任意 SQL。
 - `CompressionMode.Deterministic` 始终使用本地算法，即使图中存在 LLM compressor 也不产生费用；
 - `CompressionMode.ModelAssisted` 必须使用 `*WithContextCompressor` 入口，否则在 Provider 调用前明确失败。
 
@@ -231,6 +233,16 @@ val applicationLayer: ZLayer[Any, Throwable, AgentApplication.Services] =
 val workerProgram: ZIO[AgentApplication, AgentError, Nothing] =
   ZIO.serviceWithZIO[AgentApplication](_.runWorker)
 ```
+
+同一门面可以采集低敏队列状态：
+
+```scala
+val queueHealth: ZIO[AgentApplication, AgentError, RunCommandQueueSnapshot] =
+  AgentApplication.queueSnapshot
+```
+
+建议对 `dispatchableRuns`、`oldestDispatchableAgeMillis`、`expiredLeases` 和 `deadLetterCommands` 分别建立阈值与 runbook。
+快照是采样值，不替代 `RunStore`、命令审计或 Prometheus 的历史时间序列。
 
 如果同一个进程还运行自定义 ZIO HTTP Server，可使用 Scope 管理后台 Fiber：
 

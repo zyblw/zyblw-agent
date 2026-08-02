@@ -3,12 +3,14 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
-## Unreleased - 0.3.0 development line
+## 0.3.0 - 2026-08-02
 
 ### Added
 
 - Durable command Worker now supports configurable bounded Run parallelism (default 4, hard limit 256). Different Runs can progress
   concurrently while each Run remains serialized by the dispatcher fence; all lanes are supervised as one fail-fast ZIO lifecycle.
+- `RunCommandQueueSnapshot` and `AgentApplication.queueSnapshot` expose a database-clock, low-sensitivity operational view of queued
+  commands, dispatchable Runs, active/expired leases, DeadLetters and oldest dispatchable age without exposing tenant data or payloads.
 - The independent Maven consumer now compiles the production-facing Agent definition, Worker config, PostgreSQL control plane,
   knowledge store and durable `AgentApplication` wiring instead of checking only two core ADTs.
 - Durable Workflow timer/signal contract: `NodeOutcome.Awaiting`, absolute deadlines, typed wakeups, atomic wait registration and
@@ -32,10 +34,20 @@ All notable user-visible changes will be recorded here. The project follows
 - PostgreSQL Workflow outcome schema is version 2 so an Awaiting result and its absolute deadline survive prepare/reclaim without
   recomputing time after a crash.
 
-### Remaining before release
+### Reliability evidence
 
-- Exercise database restart, process kill and long-running multi-Worker soak; establish backlog, claim-latency, lease-loss and recovery SLOs.
-- Complete RAG block/page/bbox lineage, parent-child retrieval and adjacent-block expansion against the new baseline.
+- PostgreSQL 16 integration tests now drive the formal `WorkerHost` through three instances and six bounded lanes over 48 independent
+  Runs, proving one Runtime invocation per command and a fully drained queue.
+- A Worker Fiber interruption leaves the ambiguous lease fenced; after expiry a new owner receives the next generation, completes the
+  command, and the stale owner is rejected. PostgreSQL pause/unpause and `pg_dump`/`pg_restore` scenarios verify typed unavailability,
+  connection recovery and durable data restoration.
+
+### Known limitations
+
+- The core Agent command path is a production baseline for staged and limited-production adoption, not a universal throughput promise.
+  Every deployment still needs its own sustained soak, HikariCP/PgBouncer saturation curve, SLO, backup/RTO and Provider failure drills.
+- Workflow remains Experimental; RAG remains Beta and does not yet preserve Docling block/page/bbox lineage or provide parent-child and
+  adjacent-block retrieval. MCP/Sandbox, Artifact, Multimodal and Harness also remain Experimental.
 
 ## 0.2.1 - 2026-07-30
 

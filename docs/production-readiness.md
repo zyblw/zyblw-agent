@@ -12,17 +12,17 @@
 ## 当前结论与版本建议
 
 当前源码已经具备开发真实业务的主干：耐久提交、异步 Worker、有界多 Run 并发、lease/fencing、类型化工具与权限、
-审批/取消/恢复、PostgreSQL、HTTP/SSE、低敏观测、RAG 和 Eval。新业务可以现在开始基于 0.3 开发线构建垂直切片，
+审批/取消/恢复、PostgreSQL、HTTP/SSE、低敏观测、RAG 和 Eval。新业务可以现在开始基于 0.3.0 构建垂直切片，
 不需要等待 Harness、多 Agent、Graph Studio 或完整 GraphRAG。
 
-推荐把 **`0.3.0` 定义为第一个“业务生产基线候选”**，而不是宣传为已经通过任意规模验证的 GA：
+**`0.3.0` 是第一个“业务生产基线”**，适合从 staging 进入受限生产验收，而不是已经通过任意规模验证的通用 GA：
 
-- 0.3.0 发布前允许完成当前 fresh schema、Worker 并发和公共装配的最后收敛；
-- 发布后 0.3.x patch 冻结公共 Scala API、HTTP v1、state/outcome JSON 和 V001 migration；
+- 0.3.0 冻结 fresh schema、公共 Scala API、HTTP v1、state/outcome JSON 和 V001 migration；
 - 业务先在 staging 和受限流量使用 0.3.0，完成自己的数据、权限、Provider、容量和恢复验收后再扩大流量；
 - Workflow、Artifact、MCP/Sandbox 等标记为 Experimental 的能力不自动继承核心主线的成熟度。
 
-在 0.3.0 正式发布前，业务仓库应固定到明确 Git commit 或内部 `0.3.0-local` 候选，不应依赖移动分支或伪造已发布版本。
+发布流水线完成前，业务仓库应使用内部 `0.3.0-local` 候选；Maven Central 显示 Published 后固定精确 `0.3.0`，不要使用
+移动分支、版本范围或 `latest.release`。
 
 ## 推荐生产拓扑
 
@@ -85,6 +85,10 @@ consumer 会从制品重新编译这条生产装配，而不是引用仓库源�
 - 每个 Agent 的步骤、模型调用、工具调用、token、费用和 wall-clock 均有硬预算。
 
 并发值应从 1 或 4 开始按测量调整。256 是防止错误配置的硬边界，不是推荐生产值。
+
+`AgentApplication.queueSnapshot` 可直接采样 `dispatchableRuns`、`oldestDispatchableAgeMillis`、`leasedRuns`、
+`expiredLeases` 和 `deadLetterCommands`。框架提供数据，不替业务选择阈值；至少把“最长等待持续增长”“过期 lease 非零”和
+“DeadLetter 新增”配置成不同告警，因为三者的处置分别是扩容/下游诊断、Worker/数据库诊断和人工重试审查。
 
 ## 上线前六类强制证据
 
@@ -157,11 +161,12 @@ Workflow、MCP/Sandbox、长期 Memory 与多 Agent 必须分别完成自己的�
 
 ## 当前仍阻止“通用生产 GA”宣称的证据缺口
 
-- 数据库重启、进程 kill 和多 Worker 的长时间 soak 及容量曲线；
+- 已完成短时三 Worker/六 lane/48 Run 排他 drain、Worker Fiber 中断后过期重领、数据库 pause/unpause 与
+  `pg_dump/pg_restore`；仍缺部署环境中的数小时/数天 soak、真实 `SIGKILL`/节点丢失、数据库主备切换和容量曲线；
 - 真实 HikariCP/PgBouncer 饱和、滚动发布与备份恢复演练；
 - RAG block/page/bbox lineage、恶意 PDF/真实 OCR 与线上领域质量趋势；
 - MCP OAuth/Roots/供应链、OCI 隔离攻击和真实第三方互操作；
 - 独立外部业务用户的持续运行反馈。
 
-因此，当前合理表述是“核心主线具备业务开发与受限生产候选条件”，不是“所有模块已经通用生产就绪”。最新证据与缺口
+因此，当前合理表述是“核心主线具备业务开发与受限生产采用条件”，不是“所有模块已经通用生产就绪”。最新证据与缺口
 始终以[成熟度与路线](maturity-and-roadmap.md)为准。

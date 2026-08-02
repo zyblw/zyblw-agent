@@ -3,6 +3,8 @@ package com.zyblw.agent.persistence.postgres
 import com.dimafeng.testcontainers.PostgreSQLContainer
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
+import com.zyblw.agent.runtime.*
+import com.zyblw.agent.scheduler.*
 import javax.sql.DataSource
 import org.flywaydb.core.Flyway
 import org.postgresql.ds.PGSimpleDataSource
@@ -166,8 +168,10 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
         first <- stores.commandStore
           .claim(WorkerId("old-worker"), 200.millis, 3)
           .someOrFail(AgentError.Unexpected("claim missing"))
-        _      <- ZIO.sleep(300.millis)
-        second <- stores.commandStore
+        beforeExpiry <- stores.commandStore.queueSnapshot
+        _            <- ZIO.sleep(300.millis)
+        afterExpiry  <- stores.commandStore.queueSnapshot
+        second       <- stores.commandStore
           .claim(WorkerId("new-worker"), 5.seconds, 3)
           .someOrFail(AgentError.Unexpected("reclaim missing"))
         stale <- stores.commandStore.complete(first).exit
@@ -176,6 +180,9 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
         records.length == 24,
         leases.length == 24,
         leases.map(_.runId).distinct.length == 24,
+        beforeExpiry.leasedRuns == 25L,
+        beforeExpiry.expiredLeases == 0L,
+        afterExpiry.expiredLeases == 1L,
         second.commandId == expiring.commandId,
         second.generation == first.generation + 1L,
         stale.isFailure
@@ -279,6 +286,149 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
         current.commandId == cancel.commandId,
         records.find(_.commandId == cancel.commandId).exists(_.status == RunCommandStatus.Completed),
         records.find(_.commandId == recover.commandId).exists(_.status == RunCommandStatus.Superseded)
+      )).provideLayer(storesLayer)
+    },
+    test("正式 WorkerHost 多实例有界并发消费时每条命令只执行一次") {
+      (for
+        stores  <- ZIO.service[Stores]
+        runIds  <- ZIO.foreach(1 to 48)(_ => createRun(stores.runStore))
+        records <- ZIO.foreach(runIds)(runId =>
+          stores.commandStore.submit(runId, RunCommandPayload.Recover, s"soak:${runId.asString}")
+        )
+        invocations <- Ref.make(Map.empty[CommandId, Int])
+        active      <- Ref.make(0)
+        maximum     <- Ref.make(0)
+        runtime = new LeaseAwareAgentRuntime:
+          def executeLeased(lease: RunCommandLease): IO[AgentError, Unit] =
+            (for
+              _ <- invocations.update(current =>
+                current.updated(lease.commandId, current.getOrElse(lease.commandId, 0) + 1)
+              )
+              current <- active.updateAndGet(_ + 1)
+              _       <- maximum.update(_.max(current))
+              _       <- ZIO.sleep(20.millis)
+            yield ()).ensuring(active.update(_ - 1))
+        config = WorkerHostConfig(
+          leaseDuration = 3.seconds,
+          heartbeatEvery = 1.second,
+          pollEvery = 10.millis,
+          parallelism = 2
+        )
+        hosts <- ZIO.foreach(1 to 3)(index =>
+          WorkerHost
+            .make(WorkerId(s"multi-host-$index"), config)
+            .provide(ZLayer.succeed(stores.commandStore), ZLayer.succeed(runtime))
+        )
+        fibers <- ZIO.foreach(hosts)(_.run.fork)
+        _      <- ZIO
+          .foreach(records)(record => stores.commandStore.get(record.commandId))
+          .map(_.forall(_.status == RunCommandStatus.Completed))
+          .repeatUntil(identity)
+          .timeoutFail(AgentError.Unexpected("multi-worker drain timeout"))(20.seconds)
+          .ensuring(ZIO.foreachDiscard(fibers)(_.interrupt))
+        counts   <- invocations.get
+        max      <- maximum.get
+        snapshot <- stores.commandStore.queueSnapshot
+      yield assertTrue(
+        counts.keySet == records.map(_.commandId).toSet,
+        counts.values.forall(_ == 1),
+        max >= 2,
+        max <= 6,
+        snapshot.queuedCommands == 0L,
+        snapshot.dispatchableRuns == 0L,
+        snapshot.leasedRuns == 0L,
+        snapshot.expiredLeases == 0L,
+        snapshot.deadLetterCommands == 0L
+      )).provideLayer(storesLayer)
+    },
+    test("Worker Fiber 被中断后保留租约，过期时由新 Worker generation 安全重领") {
+      (for
+        stores  <- ZIO.service[Stores]
+        runId   <- createRun(stores.runStore)
+        command <- stores.commandStore.submit(runId, RunCommandPayload.Recover, "kill-recover")
+        oldSeen <- Promise.make[Nothing, RunCommandLease]
+        oldRuntime = new LeaseAwareAgentRuntime:
+          def executeLeased(lease: RunCommandLease): IO[AgentError, Unit] =
+            oldSeen.succeed(lease).unit *> ZIO.never
+        oldHost <- WorkerHost
+          .make(
+            WorkerId("killed-host"),
+            WorkerHostConfig(
+              leaseDuration = 400.millis,
+              heartbeatEvery = 100.millis,
+              pollEvery = 10.millis,
+              parallelism = 1
+            )
+          )
+          .provide(ZLayer.succeed(stores.commandStore), ZLayer.succeed(oldRuntime))
+        oldFiber <- oldHost.claimOnce.fork
+        oldLease <- oldSeen.await
+        _        <- oldFiber.interrupt
+        leased   <- stores.commandStore.queueSnapshot
+        _        <- ZIO.sleep(500.millis)
+        expired  <- stores.commandStore.queueSnapshot
+        newSeen  <- Promise.make[Nothing, RunCommandLease]
+        newRuntime = new LeaseAwareAgentRuntime:
+          def executeLeased(lease: RunCommandLease): IO[AgentError, Unit] = newSeen.succeed(lease).unit
+        newHost <- WorkerHost
+          .make(WorkerId("recovery-host"), WorkerHostConfig(parallelism = 1))
+          .provide(ZLayer.succeed(stores.commandStore), ZLayer.succeed(newRuntime))
+        processed <- newHost.claimOnce
+        newLease  <- newSeen.await
+        stale     <- stores.commandStore.complete(oldLease).exit
+        saved     <- stores.commandStore.get(command.commandId)
+        recovered <- stores.commandStore.queueSnapshot
+      yield assertTrue(
+        leased.leasedRuns == 1L,
+        leased.expiredLeases == 0L,
+        expired.expiredLeases == 1L,
+        processed,
+        newLease.commandId == oldLease.commandId,
+        newLease.generation == oldLease.generation + 1L,
+        stale.isFailure,
+        saved.status == RunCommandStatus.Completed,
+        saved.attempt == 2,
+        recovered.leasedRuns == 0L,
+        recovered.expiredLeases == 0L
+      )).provideLayer(storesLayer)
+    },
+    test("PostgreSQL 暂停造成短时不可用后 Run、命令和队列快照恢复") {
+      (for
+        stores  <- ZIO.service[Stores]
+        runId   <- createRun(stores.runStore)
+        command <- stores.commandStore.submit(runId, RunCommandPayload.Retry("restart-test"), "restart")
+        before  <- stores.commandStore.queueSnapshot
+        boundedDataSource <- ZIO.attempt {
+          val value = PGSimpleDataSource()
+          value.setURL(stores.container.jdbcUrl)
+          value.setUser(stores.container.username)
+          value.setPassword(stores.container.password)
+          value.setConnectTimeout(1)
+          value.setSocketTimeout(1)
+          value: DataSource
+        }
+        unavailable <- (ZIO.attemptBlocking(
+          stores.container.dockerClient.pauseContainerCmd(stores.container.containerId).exec()
+        ) *> PostgresRunStore(boundedDataSource).load(runId).exit)
+          .ensuring(
+            ZIO
+              .attemptBlocking(
+                stores.container.dockerClient.unpauseContainerCmd(stores.container.containerId).exec()
+              )
+              .orDie
+          )
+        restoredRun <- (ZIO.sleep(100.millis) *> stores.runStore.load(runId))
+          .retry(Schedule.spaced(100.millis) && Schedule.recurs(30))
+        restoredCommand <- stores.commandStore.get(command.commandId)
+        after           <- stores.commandStore.queueSnapshot
+      yield assertTrue(
+        before.queuedCommands == 1L,
+        unavailable.isFailure,
+        restoredRun.runId == runId,
+        restoredCommand.payload == RunCommandPayload.Retry("restart-test"),
+        restoredCommand.status == RunCommandStatus.Queued,
+        after.queuedCommands == 1L,
+        after.dispatchableRuns == 1L
       )).provideLayer(storesLayer)
     },
     test("pg_dump/pg_restore 后 Run、命令正文和 dispatcher generation 均可恢复") {

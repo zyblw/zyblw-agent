@@ -84,7 +84,7 @@ MCP 是 Agent 与工具/资源/Prompt 的上下文交换边界，不负责 Agent
 
 ### 当前收口
 
-- 0.3 开发线采用 fresh database baseline，并收口 durable Workflow wait/signal；不承诺兼容 0.2 的 API、state JSON 或 schema；
+- 0.3.0 采用 fresh database baseline，并收口 durable Workflow wait/signal；不兼容 0.2 的 API、state JSON 或 schema；
 - Eval 增加有界多试验运行及 `pass@k` / `pass^k` 可靠性信号；
 - 文档明确 Experimental/Beta，不把上述能力宣传为已经完成生产验证。
 

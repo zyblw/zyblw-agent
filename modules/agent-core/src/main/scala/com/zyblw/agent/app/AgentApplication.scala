@@ -86,6 +86,9 @@ trait AgentApplication:
     */
   def claimOnce: IO[AgentError, Boolean]
 
+  /** 读取低敏命令队列聚合，供 backlog、DeadLetter、过期租约和最长等待 SLO 采集。 */
+  def queueSnapshot: IO[AgentError, RunCommandQueueSnapshot]
+
   /** 持续 claim/heartbeat/execute，直到宿主应用被中断。 */
   def runWorker: IO[AgentError, Nothing]
 
@@ -100,7 +103,8 @@ trait AgentApplication:
 final private class AgentApplicationLive(
     runtime: AgentRuntime,
     commands: AgentCommandService,
-    worker: WorkerHost
+    worker: WorkerHost,
+    commandStore: RunCommandStore
 ) extends AgentApplication:
   def submit(
       agent: AgentDefinition,
@@ -132,6 +136,8 @@ final private class AgentApplicationLive(
     commands.inspect(commandId, actor)
 
   def claimOnce: IO[AgentError, Boolean] = worker.claimOnce
+
+  def queueSnapshot: IO[AgentError, RunCommandQueueSnapshot] = commandStore.queueSnapshot
 
   def runWorker: IO[AgentError, Nothing] = worker.run
 
@@ -179,12 +185,17 @@ object AgentApplication:
   def claimOnce: ZIO[AgentApplication, AgentError, Boolean] =
     ZIO.serviceWithZIO[AgentApplication](_.claimOnce)
 
+  /** 从环境读取不含租户、命令正文和 lease token 的命令队列快照。 */
+  def queueSnapshot: ZIO[AgentApplication, AgentError, RunCommandQueueSnapshot] =
+    ZIO.serviceWithZIO[AgentApplication](_.queueSnapshot)
+
   /** 从环境在当前 Scope 中启动结构化 Worker。 */
   def startWorkerScoped: ZIO[AgentApplication & Scope, Nothing, Fiber.Runtime[AgentError, Nothing]] =
     ZIO.serviceWithZIO[AgentApplication](_.startWorkerScoped)
 
   /** 从 Runtime、控制面和 WorkerHost 构造无额外状态的业务门面。 */
-  private val live: URLayer[AgentRuntime & AgentCommandService & WorkerHost, AgentApplication] =
+  private val live
+      : URLayer[AgentRuntime & AgentCommandService & WorkerHost & RunCommandStore, AgentApplication] =
     ZLayer.fromFunction(AgentApplicationLive.apply)
 
   /** 生产耐久装配。

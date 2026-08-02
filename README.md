@@ -10,10 +10,11 @@ Service、Agent、Harness 或 Durable Workflow。
         → 暂停/恢复/取消 → 低敏 Inspector、Trace 与 Eval
 ```
 
-当前最新发布版是 [`0.2.1`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.2.1)，已发布到
-[Maven Central](https://central.sonatype.com/artifact/io.github.zyblw/zyblw-agent-core_3/0.2.1)。项目仍处于
-`0.x` 演进期：核心单 Agent 控制面已经形成闭环，外围 Adapter 和 Durable Workflow 等能力按证据标记为 Beta 或
-Experimental；“有实现”不等于已经经过大规模生产验证。
+当前发布基线是 [`0.3.0`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.3.0)，制品位于
+[Maven Central](https://central.sonatype.com/artifact/io.github.zyblw/zyblw-agent-core_3/0.3.0)。项目仍处于 `0.x` 演进期：
+核心单 Agent 控制面适合 staging 与受限生产验收，外围 Adapter 和 Durable Workflow 等能力按证据标记为 Beta 或
+Experimental；“有实现”不等于已经经过大规模生产验证。若 Central 尚未显示 Published，请等待 tag 驱动的发布流水线完成，
+不要回退到分支或 SNAPSHOT。
 
 ## 什么时候使用哪一层
 
@@ -39,8 +40,8 @@ Harness 不是第二套模型循环；Workflow 也不替代普通函数。多 Ag
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.2.1",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.2.1"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.3.0",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.3.0"
 )
 ```
 
@@ -127,7 +128,7 @@ flowchart TB
 |---|---|---|
 | Agent Runtime | typed error、预算、审批、恢复、取消、流式事件 | Foundation；仍需长运行故障与负载证据 |
 | Tool / Side Effect | typed schema、scope、风险、冲突、幂等、outbox/inbox、补偿 | Foundation/Experimental；需要更多真实写业务 |
-| Durable Control | command queue、有界 Run 并发、lease、heartbeat、generation fencing | Foundation；需要多节点 soak、SLO、备份恢复 |
+| Durable Control | command queue、有界 Run 并发、lease、heartbeat、generation fencing、低敏 queue snapshot | Foundation；短时三实例 drain/中断重领已验证，仍需业务长时 soak 与 SLO |
 | Workflow | 静态图校验、循环预算、fan-out、checkpoint、execution ledger、低敏 timeline、durable wait/signal、受监督 wake worker | Experimental；kill/restart/multi-worker soak、人工任务、子图待完成 |
 | Context / Memory | 分区预算、压缩、可信来源、长期记忆治理 | Beta；需要真实长会话质量趋势 |
 | RAG | PDF/Markdown 摄取、结构切分、embedding 治理、hybrid、rerank、citation、eval | Beta；block/page lineage、parent-child、恶意 PDF/OCR 待完成 |
@@ -211,9 +212,9 @@ ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`
 
 ## 兼容、升级与故障定位
 
-当前 `main` 是允许破坏性重构的 `0.3.0` 开发线，不承诺从 `0.2.x` 原地升级。公开的 `0.2.1` artifact/tag 保持不可变；
-试用当前源码必须使用空 schema/新数据库执行单一 0.3 baseline，并重新构建派生 RAG 索引。进入 `0.3.0` 正式发布后，
-后续 `0.3.x` patch 才恢复 minor 内兼容承诺。完整边界见 [兼容性契约](docs/compatibility.md)。
+`0.3.0` 是相对 `0.2.x` 的一次性破坏基线，不支持原地升级；公开的旧 artifact/tag 保持不可变。采用 0.3 必须使用空
+schema/新数据库执行单一 V001，并重新构建派生 RAG 索引。从 `0.3.0` 起，后续 `0.3.x` patch 恢复 minor 内兼容承诺。
+完整边界见 [兼容性契约](docs/compatibility.md)。
 
 常见问题先按边界定位：
 

@@ -1,7 +1,7 @@
 # 业务项目接入发布版 zyblw-agent
 
 > 状态：运行手册  
-> 最后核验：2026-08-01
+> 最后核验：2026-08-02
 > 事实来源：`build.sbt`、`integration-tests/maven-consumer`、公开 CI consumer job
 
 ## 推荐模式
@@ -9,7 +9,7 @@
 业务项目的 CI 和生产构建固定 Maven Central 精确版本：
 
 ```scala
-val zyblwAgentVersion = "0.2.1"
+val zyblwAgentVersion = "0.3.0"
 
 libraryDependencies ++= Seq(
   "io.github.zyblw" %% "zyblw-agent-core"      % zyblwAgentVersion,

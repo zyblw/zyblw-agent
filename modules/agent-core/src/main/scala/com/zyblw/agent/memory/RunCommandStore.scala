@@ -148,6 +148,42 @@ final case class RunCommandLease(
   /** 便捷返回命令 ID，用于 SQL fencing。 */
   def commandId: CommandId = command.commandId
 
+/** 耐久命令队列的低敏运维快照。
+  *
+  * 快照只包含聚合数量与最长等待时间，不暴露 Run、租户、命令正文、幂等键或 lease token。业务可定时读取它建立 backlog、DeadLetter
+  * 和过期租约告警；它是瞬时观测值，不是新的业务事实来源。
+  *
+  * @param capturedAt
+  *   Store 权威时钟中的采样时间；PostgreSQL Adapter 使用数据库时间
+  * @param queuedCommands
+  *   当前所有等待命令数量，包括尚未到达 `availableAt` 或同 Run 正被串行执行的命令
+  * @param dispatchableRuns
+  *   采样时至少有一条已到期命令且 dispatcher 可领取的 Run 数量
+  * @param leasedRuns
+  *   当前持有 dispatcher lease 的 Run 数量
+  * @param expiredLeases
+  *   已到期但尚未被下一轮 claim 回收的 lease 数量
+  * @param deadLetterCommands
+  *   需要人工检查或显式 retry 的命令数量
+  * @param oldestDispatchableAgeMillis
+  *   最早可领取命令已经等待的毫秒数；没有可领取 Run 时为 None
+  */
+final case class RunCommandQueueSnapshot(
+    capturedAt: Instant,
+    queuedCommands: Long,
+    dispatchableRuns: Long,
+    leasedRuns: Long,
+    expiredLeases: Long,
+    deadLetterCommands: Long,
+    oldestDispatchableAgeMillis: Option[Long]
+) derives JsonCodec:
+  require(
+    queuedCommands >= 0L && dispatchableRuns >= 0L && leasedRuns >= 0L && expiredLeases >= 0L &&
+      deadLetterCommands >= 0L,
+    "命令队列聚合数量不能为负数"
+  )
+  require(oldestDispatchableAgeMillis.forall(_ >= 0L), "最长可领取等待时间不能为负数")
+
 /** 多 worker 耐久控制命令队列 SPI。
   *
   * 实现必须使用“每 Run 一个 dispatcher”串行化命令：不同 Run 可并行，同一个 Run 的审批、恢复、取消绝不能并发推进 AgentState。所有
@@ -204,6 +240,9 @@ trait RunCommandStore:
 
   /** 按创建时间和命令 ID 稳定排序查询一个 Run 的全部命令。 */
   def list(runId: RunId): IO[StoreError, Chunk[RunCommandRecord]]
+
+  /** 读取不含身份和正文的队列运维快照，用于容量、SLO 与告警采集。 */
+  def queueSnapshot: IO[StoreError, RunCommandQueueSnapshot]
 
 object RunCommandStore:
   /** 内存 dispatcher 状态；只在该 Adapter 的单个 Ref 临界区中使用。 */
@@ -446,6 +485,33 @@ object RunCommandStore:
                 .sortBy(r => (r.createdAt, r.commandId.asString))
             )
           )
+
+        def queueSnapshot: IO[StoreError, RunCommandQueueSnapshot] = Clock.instant.flatMap { now =>
+          state.get.map { current =>
+            val queued = current.commands.valuesIterator.filter(_.status == RunCommandStatus.Queued).toVector
+            val dispatchable = current.dispatches.iterator
+              .collect {
+                case (runId, dispatch) if dispatch.status != DispatchStatus.Leased =>
+                  queued.filter(record => record.runId == runId && !record.availableAt.isAfter(now))
+              }
+              .flatten
+              .toVector
+            val leased = current.dispatches.valuesIterator.flatMap(_.lease).toVector
+            RunCommandQueueSnapshot(
+              capturedAt = now,
+              queuedCommands = queued.length.toLong,
+              dispatchableRuns = dispatchable.map(_.runId).distinct.length.toLong,
+              leasedRuns = leased.length.toLong,
+              expiredLeases = leased.count(lease => !lease.expiresAt.isAfter(now)).toLong,
+              deadLetterCommands = current.commands.valuesIterator
+                .count(_.status == RunCommandStatus.DeadLetter)
+                .toLong,
+              oldestDispatchableAgeMillis = dispatchable
+                .map(record => (now.toEpochMilli - record.availableAt.toEpochMilli).max(0L))
+                .maxOption
+            )
+          }
+        }
 
         /** fenced 释放的共同实现；命令与 dispatcher 在同一个 Ref 临界区内一起变化。 */
         private def release(

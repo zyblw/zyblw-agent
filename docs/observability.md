@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-25
+> 最后核验：2026-08-02
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -68,6 +68,10 @@ OTel instrument 名称如下；Prometheus exporter 通常把点转换成下划�
 
 绝对禁止作为 Metrics label 的字段：runId、sessionId、tenantId、userId、callId、commandId、prompt、query、工具参数、
 工具结果、引用正文、错误消息。它们要么高基数，要么敏感，通常两者兼有。
+
+队列深度与最长等待是“当前值”而不是事件 Counter。框架通过 `AgentApplication.queueSnapshot` 返回低敏聚合，由宿主按固定周期
+映射为自己的 Gauge：`queuedCommands`、`dispatchableRuns`、`leasedRuns`、`expiredLeases`、`deadLetterCommands` 与
+`oldestDispatchableAgeMillis`。不要把每次采样伪装成累加 Counter，也不要增加 tenant/runId label。
 
 ## 4. ZLayer 接入
 

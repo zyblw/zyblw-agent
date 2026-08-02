@@ -56,7 +56,7 @@
 - [模块与依赖选择](modules.md)
 - [版本、Maven Central 发布与回滚](releasing.md)
 - [兼容性契约与版本边界](compatibility.md)
-- [进入 0.3.0 开发线：清库重建](upgrading-to-0.3.0.md)
+- [升级到 0.3.0：清库重建](upgrading-to-0.3.0.md)
 - [从 0.1.0 升级到 0.2.0](upgrading-to-0.2.0.md)
 - [从 0.2.0 升级到 0.2.1](upgrading-to-0.2.1.md)
 - [宿主数据库迁移](database-migrations.md)

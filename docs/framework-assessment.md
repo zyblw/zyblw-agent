@@ -218,11 +218,11 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 
 ### P0：开发体验和真实发布
 
-- Maven Central `0.1.0`、`0.2.0` 与兼容 patch `0.2.1` 均已发布；`0.2.0` 按 Early SemVer 承载明确记录的破坏性
-  改进，`0.2.1` 保持同 minor 公共 Scala API 兼容并增加 durable Workflow ledger/timeline；
+- Maven Central `0.1.0`、`0.2.0`、`0.2.1` 与新的生产基线 `0.3.0` 均有不可变发布记录；`0.3.0` 用一次明确的
+  fresh schema 重建收敛 durable command 与 Workflow wait/wakeup，后续 `0.3.x` 恢复 minor 内兼容；
 - 维持已经可运行的五分钟纯内存 sample，并补一个独立 PostgreSQL sample；
-- 当前 0.3.0 开发线先完成允许破坏性调整的 fresh baseline；正式发布后再以真实 `0.3.0` 制品持续检查 Scala API、
-  JSON 快照、HTTP schema 和追加式数据库 migration，并以[兼容性契约](compatibility.md)分开记录各兼容表面；
+- 以真实 `0.3.0` 制品持续检查 Scala API、JSON 快照、HTTP schema 和追加式数据库 migration，并以
+  [兼容性契约](compatibility.md)分开记录各兼容表面；
 - 用发布制品而不是源码完整验证 `zyblw-server`；
 - 在已有安全 Timeline/inspect HTTP 读模型上增加 CLI 与轻量界面，不急着做大型 Web Studio。
 

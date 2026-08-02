@@ -220,6 +220,9 @@ CREATE TABLE agent_run_commands (
 CREATE INDEX agent_run_commands_claimable_idx
   ON agent_run_commands(priority DESC, available_at ASC, created_at ASC, command_id ASC)
   WHERE status = 'Queued';
+CREATE INDEX agent_run_commands_dead_letter_idx
+  ON agent_run_commands(updated_at ASC, command_id ASC)
+  WHERE status = 'DeadLetter';
 CREATE INDEX agent_run_commands_run_created_idx
   ON agent_run_commands(run_id, created_at ASC, command_id ASC);
 

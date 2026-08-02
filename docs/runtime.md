@@ -73,6 +73,10 @@ val program: ZIO[RunCommandStore & LeaseAwareAgentRuntime, AgentError, Nothing] 
 结构化监督；任一 lane 失败会中断其余 lane，并由 `AgentHttpHost` 或部署 Supervisor 重启整个实例。生产取值必须结合
 Provider rate limit、JDBC pool、工具下游、内存和 P95 排队时间压测，不应把 256 当成推荐值。
 
+`RunCommandStore.queueSnapshot` / `AgentApplication.queueSnapshot` 提供数据库时钟下的低敏运维快照：Queued、可领取 Run、
+Leased、过期 lease、DeadLetter 与最长可领取等待。快照不触发 claim/reclaim，也不包含 runId、tenant、payload 或 token，
+适合由宿主定时转成指标；它不是业务状态事实源。
+
 普通 `run/resume/recover/cancel` 仍保留给单进程、嵌入式和测试模式。生产集群 HTTP 控制面已经改为
 `AgentCommandService`：新建、审批、取消、恢复和显式重试先耐久入队并返回 `202 Accepted + commandId`，WorkerHost claim
 后才推进 AgentState。不要在集群模式旁路调用普通 `run/resume` 并把它误认为 fenced 异步执行。

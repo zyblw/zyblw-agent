@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-01
+> 最后核验：2026-08-02
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -43,10 +43,10 @@ modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/m
 `agent_embedding_quota_windows`、`agent_embedding_quota_reservations`、`agent_eval_snapshots`、
 `agent_workflow_checkpoints`、`agent_workflow_node_executions`、`agent_workflow_waits` 与 `agent_workflow_signals`。
 
-当前 `main` 是明确不兼容 0.2 的 0.3 开发线，默认 location 只有一个
+`0.3.0` 明确不兼容 0.2，默认 location 只有一个
 `V001__zyblw_agent_0_3_baseline.sql`，只支持空 schema/新数据库。旧环境不能通过 `repair`、手改 history 或假装 baseline
-接管；应建立新 schema、重新导入业务允许保留的数据并重建派生索引。0.3.0 发布后才冻结该基线并恢复只追加 migration 的
-发布纪律。完整操作见[PostgreSQL 迁移发布契约](database-migrations.md)与[升级到 0.3.0](upgrading-to-0.3.0.md)。
+接管；应建立新 schema、重新导入业务允许保留的数据并重建派生索引。该 V001 从 `0.3.0` 起冻结，后续 patch 只允许追加
+migration。完整操作见[PostgreSQL 迁移发布契约](database-migrations.md)与[升级到 0.3.0](upgrading-to-0.3.0.md)。
 
 框架不会因 JAR 被加载而自动修改数据库。宿主显式调用 `AgentPostgresMigrations.migrate`，默认使用独立历史表
 `flyway_zyblw_agent_schema_history`。
@@ -56,8 +56,12 @@ modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/m
 乐观锁。Run 创建/首事件以及状态 CAS/后续事件分别在短事务中提交；SQLSTATE 会区分可重试的连接、序列化、
 死锁和取消错误。
 
-Testcontainers 已使用 PostgreSQL 16 真库验证 migration、事务、JSONB/UUID/TIMESTAMPTZ、乐观锁、审批状态、
-工具账本和并发取消。运行命令：
+`PostgresRunCommandStore.queueSnapshot` 使用数据库时钟返回低敏聚合：Queued 命令、当前可领取 Run、Leased Run、已过期
+lease、DeadLetter 以及最早可领取命令的等待毫秒数。它不执行回收、不领取命令，也不返回 runId、tenant、payload、
+idempotency key 或 token；业务可经 `AgentApplication.queueSnapshot` 定时采集并建立 backlog/SLO 告警。
+
+Testcontainers 已使用 PostgreSQL 16 真库验证 migration、事务、JSONB/UUID/TIMESTAMPTZ、乐观锁、审批状态、工具账本、
+并发取消、三实例六 lane drain、Worker 中断后过期重领、PostgreSQL pause/unpause 连接恢复及 `pg_dump/pg_restore`。运行命令：
 
 ```bash
 RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.postgres.PostgresRunStoreIntegrationSpec"

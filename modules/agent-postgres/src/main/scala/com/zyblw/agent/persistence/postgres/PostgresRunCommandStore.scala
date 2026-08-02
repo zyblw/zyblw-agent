@@ -272,6 +272,65 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
       .mapError(error => databaseError("查询 Run 控制命令失败", error))
   }
 
+  /** 使用数据库权威时钟读取低敏队列聚合；查询不领取、不回收也不改变任何租约。 */
+  def queueSnapshot: IO[StoreError, RunCommandQueueSnapshot] = withConnection { connection =>
+    ZIO
+      .attemptBlocking {
+        val statement = connection.prepareStatement(
+          """WITH command_counts AS (
+            |  SELECT
+            |    COUNT(*) FILTER (WHERE status = 'Queued') AS queued_commands,
+            |    COUNT(*) FILTER (WHERE status = 'DeadLetter') AS dead_letter_commands
+            |  FROM agent_run_commands
+            |), dispatch_counts AS (
+            |  SELECT
+            |    COUNT(*) FILTER (WHERE status = 'Leased') AS leased_runs,
+            |    COUNT(*) FILTER (
+            |      WHERE status = 'Leased' AND lease_expires_at <= CURRENT_TIMESTAMP
+            |    ) AS expired_leases
+            |  FROM agent_run_dispatch
+            |), dispatchable AS (
+            |  SELECT
+            |    COUNT(DISTINCT d.run_id) AS dispatchable_runs,
+            |    MIN(c.available_at) AS oldest_available_at
+            |  FROM agent_run_dispatch d
+            |  JOIN agent_run_commands c ON c.run_id = d.run_id
+            |  WHERE d.status IN ('Idle', 'Queued')
+            |    AND c.status = 'Queued'
+            |    AND c.available_at <= CURRENT_TIMESTAMP
+            |)
+            |SELECT CURRENT_TIMESTAMP AS captured_at,
+            |  command_counts.queued_commands,
+            |  dispatchable.dispatchable_runs,
+            |  dispatch_counts.leased_runs,
+            |  dispatch_counts.expired_leases,
+            |  command_counts.dead_letter_commands,
+            |  CASE WHEN dispatchable.oldest_available_at IS NULL THEN NULL
+            |       ELSE GREATEST(
+            |         0,
+            |         FLOOR(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - dispatchable.oldest_available_at)) * 1000)
+            |       )::BIGINT
+            |  END AS oldest_dispatchable_age_millis
+            |FROM command_counts, dispatch_counts, dispatchable""".stripMargin
+        )
+        try
+          val result = statement.executeQuery()
+          if !result.next() then throw IllegalStateException("命令队列快照查询未返回聚合行")
+          RunCommandQueueSnapshot(
+            capturedAt = instant(result, "captured_at"),
+            queuedCommands = result.getLong("queued_commands"),
+            dispatchableRuns = result.getLong("dispatchable_runs"),
+            leasedRuns = result.getLong("leased_runs"),
+            expiredLeases = result.getLong("expired_leases"),
+            deadLetterCommands = result.getLong("dead_letter_commands"),
+            oldestDispatchableAgeMillis = Option(result.getObject("oldest_dispatchable_age_millis"))
+              .map(_ => result.getLong("oldest_dispatchable_age_millis"))
+          )
+        finally statement.close()
+      }
+      .mapError(error => databaseError("读取 Agent 命令队列快照失败", error))
+  }
+
   /** 插入命令；冲突时返回 None，由调用者读取并比较原 payload。 */
   private def insertCommand(
       connection: Connection,

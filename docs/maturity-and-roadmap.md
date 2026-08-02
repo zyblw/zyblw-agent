@@ -25,7 +25,7 @@
 | Provider-neutral 模型流 | core / `model` | Foundation | 统一事件和测试模型 | capability 矩阵持续演进 |
 | 类型化工具与策略 | core / `tools`,`guardrails` | Foundation | schema、allowlist、风险和结果测试 | policy 管理 UX |
 | 单 Agent loop | core / `runtime` | Foundation | budget、工具、审批、恢复、遥测测试 | 长运行与大负载故障注入 |
-| durable command worker | core / `app`,`scheduler`,`runtime` | Foundation | 有界多 Run lane、同 Run 串行、claim/lease/heartbeat/fencing | 多节点 soak、容量曲线、运维 dashboard |
+| durable command worker | core / `app`,`scheduler`,`runtime` | Foundation | 有界多 Run lane、同 Run 串行、claim/lease/heartbeat/fencing、三实例 drain、中断重领、低敏队列快照 | 长时多节点 soak、容量曲线、运维 dashboard |
 | HTTP v1 公共协议 | zio-http / `http.contract`,`http` | Foundation/Beta | 独立 DTO、Endpoint、OpenAPI、route test | 客户端 SDK、兼容升级演练 |
 | Run Inspector / Timeline | core + zio-http / `inspection` | Foundation/Beta | 低敏投影、分页、授权、结构诊断与泄漏测试 | CLI/UI、筛选导出、真实事故验证 |
 | Context | core / `context` | Beta | 有界装配、确定性压缩测试 | 真实长会话数据集 |
@@ -33,7 +33,7 @@
 | 模型辅助压缩 | core / `context.llm` | Beta | evidence 校验和 eval | 多 Provider 质量/成本基线 |
 | Memory | core / `memory`,`memory.llm` | Beta | Store/SPI 与治理设计 | 用户查看/删除 UX、长期质量 |
 | RAG | rag、document-loaders、rerank | Beta/Experimental | `RagApplication`、同源存储层、Docling/Tika、结构切分、版本化 ingestion、hybrid retrieval、rerank、citation 与 eval | block/page lineage、parent-child、恶意 PDF/真实 OCR、线上质量 |
-| PostgreSQL | postgres | Beta | Testcontainers、迁移、并发、连接耗尽测试 | 大库升级、备份恢复、性能 |
+| PostgreSQL | postgres | Beta | Testcontainers、迁移、并发、连接耗尽、pause/recover、pg_dump/restore | 大库升级、主备切换、性能/RTO |
 | OpenAI-compatible | providers / `integrations.openai` | Beta | stream/tool/error stub 与 smoke | 长期真实 Provider 观测 |
 | Anthropic/Gemini | providers / 对应 package | Beta | Provider contract tests | zyblw QA 业务尚未启用 |
 | OTLP/Langfuse | opentelemetry | Beta | 基数、脱敏、stub tests | 生产告警与 SLO |
@@ -109,8 +109,9 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
 
 1. 建固定中文中医学习数据集，覆盖正常、无来源、冲突来源、注入和医疗高风险。
 2. 对启用 Provider 持续测工具、citation、safety、latency、token、cost。
-3. 多节点 Worker soak：lease 抢占、网络抖动、数据库重启、Provider 断流、进程 kill/recover。
-4. 建 SLO/dashboard：提交、排队、运行、工具、投影、恢复和反馈。
+3. **短时协议证据已完成**：三 Worker/六 lane/48 Run 排他 drain、Fiber 中断后 generation 重领、数据库 pause/recover；
+   下一步在真实部署做数小时 soak、数据库切换、Provider 断流和节点 `SIGKILL`。
+4. 基于 `queueSnapshot` 建 SLO/dashboard：提交、排队、运行、工具、投影、恢复和反馈。
 5. 演练 PostgreSQL 备份恢复、migration upgrade 与数据保留。
 6. 以 instruction fingerprint 关联 eval，并建立 cache hit、reasoning、Context 分区、质量与费用 dashboard。
 
