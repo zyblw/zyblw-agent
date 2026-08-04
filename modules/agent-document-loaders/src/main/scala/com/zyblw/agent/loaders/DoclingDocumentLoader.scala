@@ -53,6 +53,8 @@ final case class DoclingDocumentLoaderConfig(
     maxInputBytes: Int = 32 * 1024 * 1024,
     maxResponseBytes: Int = 16 * 1024 * 1024,
     maxMarkdownCodePoints: Int = 2_000_000,
+    maxStructuredBlocks: Int = 200_000,
+    maxStructuredOrigins: Int = 1_000_000,
     requestTimeout: Duration = 5.minutes,
     doOcr: Boolean = true,
     forceOcr: Boolean = false,
@@ -71,6 +73,7 @@ final case class DoclingDocumentLoaderConfig(
   )
   require(maxInputBytes > 0 && maxResponseBytes > 0, "Docling input/response 上限必须为正数")
   require(maxMarkdownCodePoints > 0, "Docling Markdown 上限必须为正数")
+  require(maxStructuredBlocks > 0 && maxStructuredOrigins > 0, "Docling structure 上限必须为正数")
   require(requestTimeout > Duration.Zero, "Docling requestTimeout 必须为正数")
   require(
     ocrLanguages.length <= 16 && ocrLanguages.forall(_.matches("[A-Za-z0-9_-]{1,32}")),
@@ -109,7 +112,7 @@ final case class DoclingDocumentLoaderConfig(
   * 同步转换可能已经在服务端消耗大量计算，因此 Adapter 不做透明自动重试。瞬时错误仍带 `retryable=true`，由带幂等任务 ID 的摄取 worker 决定是否重新提交。
   */
 final class DoclingDocumentLoader(client: Client, config: DoclingDocumentLoaderConfig) extends DocumentLoader:
-  override val id: String = "docling-serve-v1-markdown"
+  override val id: String = "docling-serve-v1-markdown-json"
 
   override val supportedMediaTypes: Set[String] = Set("application/pdf")
 
@@ -121,17 +124,19 @@ final class DoclingDocumentLoader(client: Client, config: DoclingDocumentLoaderC
       _     <- ZIO
         .fail(AgentError.RetrievalFailed(s"PDF 输入超过 Docling 字节上限 ${config.maxInputBytes}"))
         .when(bytes.length > config.maxInputBytes)
-      markdown <- convert(input, bytes)
+      converted <- convert(input, bytes)
     yield SourceDocument(
       input.id,
-      markdown,
+      converted.markdown,
       input.sourceUri,
       Map(
         "detectedMediaType"  -> "application/pdf",
         "contentConverterId" -> id,
-        "pageBreakMarker"    -> config.pageBreakPlaceholder
+        "pageBreakMarker"    -> config.pageBreakPlaceholder,
+        "structureSchema"    -> converted.structure.schemaName
       ),
-      DocumentRepresentation.Markdown
+      DocumentRepresentation.Markdown,
+      Some(converted.structure)
     )
 
   private def rejectDeclaredOversize(input: DocumentInput): IO[RetrievalError, Unit] =
@@ -144,7 +149,7 @@ final class DoclingDocumentLoader(client: Client, config: DoclingDocumentLoaderC
         )
       case _ => ZIO.unit
 
-  private def convert(input: DocumentInput, bytes: Chunk[Byte]): IO[RetrievalError, String] =
+  private def convert(input: DocumentInput, bytes: Chunk[Byte]): IO[RetrievalError, ConvertedDocument] =
     for
       boundaryId <- Random.nextUUID.map(value => s"zyblw-docling-${value.toString}")
       boundary = Boundary(boundaryId)
@@ -157,6 +162,7 @@ final class DoclingDocumentLoader(client: Client, config: DoclingDocumentLoaderC
         ),
         FormField.simpleField("from_formats", "pdf"),
         FormField.simpleField("to_formats", "md"),
+        FormField.simpleField("to_formats", "json"),
         FormField.simpleField("image_export_mode", "placeholder"),
         FormField.simpleField("do_ocr", config.doOcr.toString),
         FormField.simpleField("force_ocr", config.forceOcr.toString),
@@ -179,10 +185,10 @@ final class DoclingDocumentLoader(client: Client, config: DoclingDocumentLoaderC
         .someOrFail(AgentError.RetrievalFailed("Docling 响应流为空", retryable = true))
         .mapError(mapTransportError)
         .timeoutFail(AgentError.RetrievalFailed("Docling 转换超时", retryable = true))(config.requestTimeout)
-      markdown <-
-        if response._1.isSuccess then decodeMarkdown(response._2)
+      converted <-
+        if response._1.isSuccess then decodeDocument(response._2)
         else ZIO.fail(httpError(response._1.code))
-    yield markdown
+    yield converted
 
   private def readBounded(response: Response): IO[RetrievalError, String] =
     response.body.asStream
@@ -195,7 +201,9 @@ final class DoclingDocumentLoader(client: Client, config: DoclingDocumentLoaderC
         else ZIO.succeed(String(bytes.toArray, StandardCharsets.UTF_8))
       }
 
-  private def decodeMarkdown(body: String): IO[RetrievalError, String] =
+  /** 同时解码人类可读 Markdown 与无损 DoclingDocument JSON。只有 Markdown 的响应会 fail-closed， 因为它无法满足页码/bbox/父子引用的生产契约。
+    */
+  private def decodeDocument(body: String): IO[RetrievalError, ConvertedDocument] =
     for
       json <- ZIO
         .fromEither(body.fromJson[Json])
@@ -220,7 +228,178 @@ final class DoclingDocumentLoader(client: Client, config: DoclingDocumentLoaderC
           )
         )
         .when(codePoints > config.maxMarkdownCodePoints)
-    yield markdown
+      structureJson <- ZIO
+        .fromOption(field(document, "json_content"))
+        .orElseFail(AgentError.RetrievalFailed("Docling 响应缺少 json_content"))
+      structure <- decodeStructure(structureJson)
+    yield ConvertedDocument(markdown, structure)
+
+  /** 把 DoclingDocument 投影为 Provider-neutral block ADT。原始 JSON 不进 metadata/日志，避免数据放大和隐私泄漏。 */
+  private def decodeStructure(value: Json): IO[RetrievalError, DocumentStructure] =
+    val parsed = value match
+      case objectValue: Json.Obj => Right(objectValue: Json)
+      case Json.Str(raw)         => raw.fromJson[Json]
+      case _                     => Left("json_content 不是 object/string")
+    ZIO
+      .fromEither(parsed)
+      .mapError(_ => AgentError.RetrievalFailed("Docling json_content 不是合法 DoclingDocument JSON"))
+      .flatMap { json =>
+        val schemaName    = stringField(json, "schema_name").getOrElse("")
+        val schemaVersion = stringField(json, "version").orElse(stringField(json, "schema_version"))
+        val sizes         = pageSizes(json)
+        val nodes         = Chunk("texts", "tables", "pictures", "key_value_items")
+          .flatMap(name => arrayField(json, name))
+          .flatMap(value => decodeNode(value, sizes))
+          .sortBy(node => (node.origins.headOption.fold(Int.MaxValue)(_.pageNumber), node.orderHint, node.id))
+        val nodeById = nodes.map(node => node.id -> node).toMap
+        val blocks   = nodes.zipWithIndex.map { case (node, ordinal) =>
+          DocumentBlock(
+            id = node.id,
+            parentId = node.parentId,
+            ordinal = ordinal,
+            kind = blockKind(node.label),
+            text = node.text,
+            headingPath = headingPath(node, nodeById),
+            origins = node.origins
+          )
+        }
+        val originCount = blocks.foldLeft(0L)((total, block) => total + block.origins.length)
+        if schemaName != "DoclingDocument" then
+          ZIO.fail(AgentError.RetrievalFailed("Docling json_content schema_name 不受支持"))
+        else if blocks.isEmpty then ZIO.fail(AgentError.RetrievalFailed("Docling json_content 没有可索引 block"))
+        else if blocks.length > config.maxStructuredBlocks || originCount > config.maxStructuredOrigins then
+          ZIO.fail(AgentError.RetrievalFailed("Docling structure 超过 block/origin 上限"))
+        else
+          ZIO
+            .attempt(DocumentStructure(schemaName, schemaVersion, blocks))
+            .mapError(_ => AgentError.RetrievalFailed("Docling structure 身份或字段契约无效"))
+      }
+
+  private def decodeNode(json: Json, pageSizes: Map[Int, (Double, Double)]): Option[RawNode] =
+    val id       = stringField(json, "self_ref")
+    val label    = stringField(json, "label").getOrElse("other")
+    val text     = stringField(json, "text").orElse(stringField(json, "orig")).orElse(tableText(json))
+    val parentId = field(json, "parent").flatMap(value => stringField(value, "$ref"))
+    for
+      nodeId   <- id.filter(_.trim.nonEmpty)
+      nodeText <- text.map(normalize).filter(_.nonEmpty)
+    yield RawNode(
+      nodeId,
+      parentId,
+      label,
+      nodeText,
+      arrayField(json, "prov").flatMap(origin(nodeId, _, pageSizes)),
+      orderHint(json)
+    )
+
+  /** 表格节点通常没有顶层 text，使用 table_cells 的行列位置恢复一份确定性文本。 */
+  private def tableText(json: Json): Option[String] =
+    val cells = Chunk
+      .fromIterable(field(json, "data"))
+      .flatMap(data => arrayField(data, "table_cells"))
+      .flatMap { cell =>
+        stringField(cell, "text").map(text =>
+          (
+            intField(cell, "start_row_offset_idx").getOrElse(0),
+            intField(cell, "start_col_offset_idx").getOrElse(0),
+            text
+          )
+        )
+      }
+      .sortBy(value => (value._1, value._2))
+    Option.when(cells.nonEmpty)(
+      cells.groupBy(_._1).toVector.sortBy(_._1).map(_._2.map(_._3).mkString(" | ")).mkString("\n")
+    )
+
+  private def origin(
+      blockId: String,
+      json: Json,
+      pageSizes: Map[Int, (Double, Double)]
+  ): Option[DocumentOrigin] =
+    intField(json, "page_no").filter(_ > 0).map { page =>
+      val bbox = field(json, "bbox").flatMap { value =>
+        for
+          left   <- doubleField(value, "l")
+          top    <- doubleField(value, "t")
+          right  <- doubleField(value, "r")
+          bottom <- doubleField(value, "b")
+          coordinateOrigin = stringField(value, "coord_origin").map(
+            _.toLowerCase(java.util.Locale.ROOT)
+          ) match
+            case Some(name) if name.contains("bottom") => DocumentCoordinateOrigin.BottomLeft
+            case _                                     => DocumentCoordinateOrigin.TopLeft
+          size = pageSizes.get(page)
+          box <- Try(
+            DocumentBoundingBox(
+              left,
+              top,
+              right,
+              bottom,
+              size.map(_._1),
+              size.map(_._2),
+              coordinateOrigin
+            )
+          ).toOption
+        yield box
+      }
+      DocumentOrigin(page, bbox, Some(blockId))
+    }
+
+  private def orderHint(json: Json): Int =
+    arrayField(json, "prov").headOption
+      .flatMap(value => field(value, "charspan"))
+      .flatMap {
+        case Json.Arr(values) => values.headOption.collect { case Json.Num(number) => number.intValue }
+        case value            => intField(value, "start")
+      }
+      .getOrElse(Int.MaxValue)
+
+  /** Docling `pages` 是以页号为 key 的 object；页宽高让 bbox 可在不同渲染尺寸下稳定归一化。 */
+  private def pageSizes(json: Json): Map[Int, (Double, Double)] =
+    field(json, "pages") match
+      case Some(Json.Obj(pages)) =>
+        pages.flatMap { case (key, value) =>
+          val page = key.toIntOption.orElse(intField(value, "page_no"))
+          val size = field(value, "size")
+          for
+            pageNumber <- page
+            sizeValue  <- size
+            width      <- doubleField(sizeValue, "width")
+            height     <- doubleField(sizeValue, "height")
+            if pageNumber > 0 && width > 0.0 && height > 0.0
+          yield pageNumber -> (width -> height)
+        }.toMap
+      case _ => Map.empty
+
+  private def headingPath(node: RawNode, nodes: Map[String, RawNode]): Chunk[String] =
+    def loop(current: Option[String], visited: Set[String], remaining: Int): List[String] =
+      if remaining == 0 then Nil
+      else
+        current.flatMap(nodes.get) match
+          case Some(parent) if !visited.contains(parent.id) =>
+            val prefix = loop(parent.parentId, visited + parent.id, remaining - 1)
+            if isHeading(parent.label) then prefix :+ parent.text else prefix
+          case _ => Nil
+    val ancestors = loop(node.parentId, Set(node.id), 64)
+    val all       = if isHeading(node.label) then ancestors :+ node.text else ancestors
+    Chunk.fromIterable(all.map(value => value.take(300)).filter(_.nonEmpty))
+
+  private def blockKind(label: String): DocumentBlockKind =
+    label.toLowerCase(java.util.Locale.ROOT) match
+      case "title"                        => DocumentBlockKind.Title
+      case "section_header" | "heading"   => DocumentBlockKind.SectionHeading
+      case "paragraph" | "text"           => DocumentBlockKind.Paragraph
+      case "list_item"                    => DocumentBlockKind.ListItem
+      case "table"                        => DocumentBlockKind.Table
+      case "picture" | "chart"            => DocumentBlockKind.Picture
+      case "code"                         => DocumentBlockKind.Code
+      case "formula"                      => DocumentBlockKind.Formula
+      case "key_value_area" | "key_value" => DocumentBlockKind.KeyValue
+      case _                              => DocumentBlockKind.Other
+
+  private def isHeading(label: String): Boolean =
+    val normalized = label.toLowerCase(java.util.Locale.ROOT)
+    normalized == "title" || normalized == "section_header" || normalized == "heading"
 
   private def normalize(value: String): String =
     value.replace("\r\n", "\n").replace('\r', '\n').replace("\u0000", "").trim
@@ -247,6 +426,25 @@ final class DoclingDocumentLoader(client: Client, config: DoclingDocumentLoaderC
 
   private def stringField(json: Json, name: String): Option[String] =
     field(json, name).collect { case Json.Str(value) => value }
+
+  private def arrayField(json: Json, name: String): Chunk[Json] =
+    field(json, name).collect { case Json.Arr(values) => values }.getOrElse(Chunk.empty)
+
+  private def intField(json: Json, name: String): Option[Int] =
+    field(json, name).collect { case Json.Num(value) => Try(value.intValueExact()).toOption }.flatten
+
+  private def doubleField(json: Json, name: String): Option[Double] =
+    field(json, name).collect { case Json.Num(value) => value.doubleValue }
+
+  final private case class ConvertedDocument(markdown: String, structure: DocumentStructure)
+  final private case class RawNode(
+      id: String,
+      parentId: Option[String],
+      label: String,
+      text: String,
+      origins: Chunk[DocumentOrigin],
+      orderHint: Int
+  )
 
 object DoclingDocumentLoader:
   def configured(config: DoclingDocumentLoaderConfig): URLayer[Client, DocumentLoader] =

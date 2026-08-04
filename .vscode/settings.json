@@ -3,12 +3,20 @@
     "editor.defaultFormatter": "scalameta.metals",
     "editor.formatOnSave": true
   },
+  "metals.serverProperties": [
+    "-Xmx2G",
+    "-XX:+UseZGC",
+    "-XX:ZUncommitDelay=30",
+    "-XX:ZCollectionInterval=5",
+    "-XX:+IgnoreUnrecognizedVMOptions",
+    "-Dmetals.macos-max-watch-roots=512"
+  ],
   "files.watcherExclude": {
     "**/.bloop/**": true,
     "**/.bsp/**": true,
-    "**/.metals/**": true,
     "**/.scala-build/**": true,
-    "**/target/**": true
+    "**/target/**": true,
+    "**/target": true
   },
   "files.exclude": {
     "**/.bloop": true,

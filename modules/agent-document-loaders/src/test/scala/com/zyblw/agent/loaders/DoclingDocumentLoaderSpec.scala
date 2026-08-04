@@ -47,9 +47,25 @@ object DoclingDocumentLoaderSpec extends ZIOSpecDefault:
     allowInsecureHttp = true
   )
 
+  private val structureJson =
+    """{
+      |"schema_name":"DoclingDocument",
+      |"version":"1.8.0",
+      |"pages":{"1":{"page_no":1,"size":{"width":612,"height":792}},"2":{"page_no":2,"size":{"width":612,"height":792}}},
+      |"texts":[
+      |  {"self_ref":"#/texts/0","label":"title","text":"ZIO","parent":{"$ref":"#/body"},
+      |   "prov":[{"page_no":1,"charspan":[0,3],"bbox":{"l":10,"t":20,"r":100,"b":40,"coord_origin":"TOPLEFT"}}]},
+      |  {"self_ref":"#/texts/1","label":"section_header","text":"Runtime","parent":{"$ref":"#/texts/0"},
+      |   "prov":[{"page_no":1,"charspan":[4,11],"bbox":{"l":10,"t":50,"r":150,"b":75,"coord_origin":"TOPLEFT"}}]},
+      |  {"self_ref":"#/texts/2","label":"text","text":"Fiber","parent":{"$ref":"#/texts/1"},
+      |   "prov":[{"page_no":2,"charspan":[12,17],"bbox":{"l":12,"t":30,"r":120,"b":55,"coord_origin":"TOPLEFT"}}]}
+      |],
+      |"tables":[],"pictures":[],"key_value_items":[]
+      |}""".stripMargin
+
   private def success(markdown: String): Response =
     Response.json(
-      s"""{"document":{"md_content":${markdown.toJson}},"status":"success","processing_time":0.1,"errors":[]}"""
+      s"""{"document":{"md_content":${markdown.toJson},"json_content":$structureJson},"status":"success","processing_time":0.1,"errors":[]}"""
     )
 
   private def route(observed: Ref[Option[ObservedRequest]], response: UIO[Response]): Routes[Any, Response] =
@@ -102,11 +118,19 @@ object DoclingDocumentLoaderSpec extends ZIOSpecDefault:
         loaded.sourceUri == "knowledge://pdf-guide",
         loaded.representation == DocumentRepresentation.Markdown,
         loaded.text.contains("## Runtime"),
-        loaded.metadata("contentConverterId") == "docling-serve-v1-markdown",
+        loaded.metadata("contentConverterId") == "docling-serve-v1-markdown-json",
+        loaded.structure.exists(_.schemaName == "DoclingDocument"),
+        loaded.structure.exists(_.blocks.length == 3),
+        loaded.structure.exists(_.blocks.last.headingPath == Chunk("ZIO", "Runtime")),
+        loaded.structure.exists(_.blocks.last.origins.head.boundingBox.nonEmpty),
+        loaded.structure.exists(
+          _.blocks.last.origins.head.boundingBox.flatMap(_.pageWidth).contains(612.0)
+        ),
+        loaded.structure.exists(_.blocks.last.origins.head.pageNumber == 2),
         sent.flatMap(_.apiKey).contains("docling-test-secret"),
         sent.flatMap(_.fileName).contains("guide.pdf"),
         sent.exists(_.fileBytes == bytes("%PDF-stub")),
-        sent.exists(_.fields.get("to_formats").contains(Chunk("md"))),
+        sent.exists(_.fields.get("to_formats").contains(Chunk("md", "json"))),
         sent.exists(_.fields.get("ocr_lang").contains(Chunk("zh", "en"))),
         !loader.toString.contains("docling-test-secret")
       )

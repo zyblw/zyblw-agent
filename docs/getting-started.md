@@ -6,22 +6,25 @@
 >
 > 事实来源：对应模块源码、测试与构建定义
 
+如果希望先获得从模块选择、ZLayer、PostgreSQL、HTTP 到 PDF RAG 的整体视图，请先读
+[总体使用手册](usage-guide.md)；本页继续给出逐步接入细节。
+
 ## 1. 引入依赖与环境
 
 宿主项目使用 JDK 21、Scala 3，并按能力选择制品：
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.3.0",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.3.0"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.4.0",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.4.0"
 )
 ```
 
 需要 ZIO HTTP 控制面再加入 `zyblw-agent-zio-http`；需要 PostgreSQL 耐久化再加入
 `zyblw-agent-postgres`。完整矩阵见 [模块选择](modules.md)。
 
-`0.3.0` 由 `v0.3.0` tag 发布到 Maven Central。验证后续尚未发布的候选时，可以在框架目录执行
-`sbt -batch 'set ThisBuild / version := "0.3.1-local.1"; publishM2'`，宿主临时使用同一唯一版本并显式启用 Maven
+`0.4.0` 由 `v0.4.0` annotated tag 发布到 Maven Central。验证尚未发布的候选时，可以在框架目录执行
+`sbt -batch 'set ThisBuild / version := "0.4.0-local.1"; publishM2'`，宿主临时使用同一唯一版本并显式启用 Maven
 Local；不要覆盖旧本地版本，也不要把本地版本或 `SNAPSHOT` 当作可重复生产发布物。完整命令见
 [server 消费指南](consuming-from-server.md)。
 
@@ -111,9 +114,9 @@ val persistenceLayer: ULayer[RunStore & RunCommandStore & RunSubmissionStore] =
 需要跨 Run 长期记忆时改用 `PostgresAgentPersistence.layerWithMemory`，它在同一个 DataSource 上额外提供
 `MemoryStore`。pgvector 知识表需要显式选择固定维度并执行 optional migration，因此不会被该组合层偷偷启用。
 
-框架不会在加载 JAR 或创建 ZLayer 时偷偷修改数据库。宿主在启动阶段显式调用
-`AgentPostgresMigrations.migrate(dataSource)`，默认只扫描框架专属 classpath，并使用独立
-`flyway_zyblw_agent_schema_history`。已有共享 Flyway 历史的系统必须按
+框架不会仅因加载 JAR 或创建普通 `layer` 就修改数据库。宿主可以在部署阶段显式调用
+`AgentPostgresMigrations.migrate(dataSource)`，也可以选择名称明确的 `PostgresAgentPersistence.migratedLayer`，让 ZLayer 在构造
+Store 前完成 migrate/validate/关键表校验。两者使用独立 `flyway_zyblw_agent_schema_history`。已有共享 Flyway 历史的系统必须按
 [数据库迁移指南](database-migrations.md) 制定一次性接管方案，不能直接在存量库上启用新历史表。
 
 ## 7. 暴露 ZIO HTTP API
@@ -185,10 +188,13 @@ val localRagLayer = ZLayer.make[RagApplication](
 
 生产环境把 `InMemoryKnowledgeIndexStore.knowledge` 替换为
 `PostgresAgentPersistence.knowledge(dimension = 1536)`；后者同时提供版本化摄取和 hybrid 查询所需 SPI，并共享宿主
-`DataSource`、向量维度和正式快照。仍需显式执行匹配维度的 optional pgvector migration，不会因构建 ZLayer 自动改库。
+`DataSource`、向量维度和正式快照。应用账号负责 DDL 时可直接使用
+`PostgresAgentPersistence.migratedKnowledge1536()`；平台负责 DDL 时先执行
+`AgentPostgresMigrations.migrateKnowledge1536(dataSource)`，再使用普通 `knowledge(1536)`。两条路径都会校验 pgvector 版本、
+`vector(1536)` 和完整谱系列。
 
 单文档调用 `rag.ingestOne(request)`；队列调用 `rag.ingest(requestStream)`；查询使用
 `rag.retrieve(RagQuery(text, trustedScope, limit))`。门面会在 Embedding/数据库之前拒绝空 query、超长 query 和越界
 topK。完整可运行路径见
 [RagAgentExample.scala](../modules/agent-examples/src/main/scala/com/zyblw/agent/examples/RagAgentExample.scala)，PDF/Tika/Docling
-配置见 [文档 Loader](document-loaders.md)。
+配置见 [文档 Loader](document-loaders.md)和[PDF RAG 生产流水线](pdf-rag-pipeline.md)。

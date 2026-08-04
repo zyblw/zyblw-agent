@@ -10,8 +10,9 @@ Service、Agent、Harness 或 Durable Workflow。
         → 暂停/恢复/取消 → 低敏 Inspector、Trace 与 Eval
 ```
 
-当前发布基线是 [`0.3.0`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.3.0)，制品位于
-[Maven Central](https://central.sonatype.com/artifact/io.github.zyblw/zyblw-agent-core_3/0.3.0)。项目仍处于 `0.x` 演进期：
+当前版本线是 `0.4.0`，正式制品以
+[Maven Central](https://central.sonatype.com/artifact/io.github.zyblw/zyblw-agent-core_3/0.4.0) 的 Published 状态和
+[`v0.4.0`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.4.0) Release 为准。项目仍处于 `0.x` 演进期：
 核心单 Agent 控制面适合 staging 与受限生产验收，外围 Adapter 和 Durable Workflow 等能力按证据标记为 Beta 或
 Experimental；“有实现”不等于已经经过大规模生产验证。若 Central 尚未显示 Published，请等待 tag 驱动的发布流水线完成，
 不要回退到分支或 SNAPSHOT。
@@ -40,8 +41,8 @@ Harness 不是第二套模型循环；Workflow 也不替代普通函数。多 Ag
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.3.0",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.3.0"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.4.0",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.4.0"
 )
 ```
 
@@ -59,7 +60,7 @@ status=Completed, answer=你好，zyblw-agent 的最小运行链路已经完成�
 ```
 
 这个示例使用确定性模型和内存控制面，适合学习接线与测试；进程退出后数据会丢失，不能作为生产持久化方案。接下来按
-[快速开始](docs/getting-started.md) 完成工具、真实 Provider、PostgreSQL、HTTP 和 RAG 接入。
+[总体使用手册](docs/usage-guide.md)和[快速开始](docs/getting-started.md)完成工具、真实 Provider、PostgreSQL、HTTP 和 RAG 接入。
 
 ## 最小业务代码
 
@@ -131,7 +132,7 @@ flowchart TB
 | Durable Control | command queue、有界 Run 并发、lease、heartbeat、generation fencing、低敏 queue snapshot | Foundation；短时三实例 drain/中断重领已验证，仍需业务长时 soak 与 SLO |
 | Workflow | 静态图校验、循环预算、fan-out、checkpoint、execution ledger、低敏 timeline、durable wait/signal、受监督 wake worker | Experimental；kill/restart/multi-worker soak、人工任务、子图待完成 |
 | Context / Memory | 分区预算、压缩、可信来源、长期记忆治理 | Beta；需要真实长会话质量趋势 |
-| RAG | PDF/Markdown 摄取、结构切分、embedding 治理、hybrid、rerank、citation、eval | Beta；block/page lineage、parent-child、恶意 PDF/OCR 待完成 |
+| RAG | 目录/PDF 摄取、Markdown+JSON、page/bbox lineage、结构切分、hybrid、rerank、相邻/同父级扩展、citation、eval | Beta；真实 OCR/恶意 PDF/大规模容量待验收 |
 | Provider | OpenAI-compatible、Responses、Anthropic、Gemini 与 capability contract | Beta；需要持续真实流量证据 |
 | HTTP / Ops | 异步 v1 API、耐久 SSE、OpenAPI、健康检查、Inspector、OTLP/Langfuse | Foundation/Beta；CLI/UI、告警与事故演练待完成 |
 | MCP / Sandbox / Eval | MCP client、Workspace/OCI 边界、趋势门禁 | Beta/Experimental；OAuth、真实隔离和人工校准待完成 |
@@ -165,17 +166,20 @@ flowchart TB
 
 ```text
 PDF/Markdown
-→ DocumentLoader（Tika 或受限 Docling）
-→ MarkdownStructureChunker
+→ LocalDirectory/ObjectStorage DocumentInput
+→ DocumentLoader（Tika 或受限 Docling Markdown+JSON）
+→ DocumentStructureChunker（block/page/bbox/parent/neighbor）
 → Embedding 治理
 → KnowledgeIndex Building/Activate
 → ACL 前置的 Hybrid Retrieval
-→ Rerank / Citation / Context Budget
+→ Rerank / 有界谱系扩展 / Citation / Context Budget
 ```
 
 本地可用 `InMemoryKnowledgeIndexStore.knowledge`；生产替换为
-`PostgresAgentPersistence.knowledge(dimension = 1536)` 并显式执行对应 pgvector migration。详细代码见
-[文档摄取](docs/document-loaders.md)、[Context/Memory/RAG](docs/context-memory-rag.md) 与
+`PostgresAgentPersistence.migratedKnowledge1536()`（应用启动时自动迁移），或由部署任务先调用
+`AgentPostgresMigrations.migrateKnowledge1536` 后使用 `PostgresAgentPersistence.knowledge(1536)`。知识对象与 Flyway history
+位于 `zyblw_agent_knowledge` 专属 schema。详细代码见
+[文档摄取](docs/document-loaders.md)、[PDF RAG 生产流水线](docs/pdf-rag-pipeline.md)、[Context/Memory/RAG](docs/context-memory-rag.md) 与
 [RAG 评测](docs/rag-evaluation.md)。
 
 ## 生产接入顺序
@@ -186,7 +190,7 @@ PDF/Markdown
 1. 先跑无密钥 Quickstart，确认 JDK、sbt 和主链路。
 2. 用 `ScriptedChatModel`、内存 Store 和 Fake Tool 写确定性业务测试。
 3. 接入真实 Provider，但保持工具只读、额度小、live smoke 显式启用。
-4. 引入 PostgreSQL，共享宿主 `DataSource`，显式执行框架 Flyway migration。
+4. 引入 PostgreSQL，共享宿主 `DataSource`；选择部署任务显式迁移，或使用名称明确的 `migrated*` ZLayer 在服务启动前迁移并校验。
 5. 将身份从已验签 claim/session 映射为 `RunContext`，再暴露 ZIO HTTP routes。
 6. 接入受控写工具、业务幂等键、outbox/inbox 和审批。
 7. 建固定 Eval、SLO、告警、备份恢复和 kill/recover 演练后再扩大流量。
@@ -212,9 +216,10 @@ ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`
 
 ## 兼容、升级与故障定位
 
-`0.3.0` 是相对 `0.2.x` 的一次性破坏基线，不支持原地升级；公开的旧 artifact/tag 保持不可变。采用 0.3 必须使用空
-schema/新数据库执行单一 V001，并重新构建派生 RAG 索引。从 `0.3.0` 起，后续 `0.3.x` patch 恢复 minor 内兼容承诺。
-完整边界见 [兼容性契约](docs/compatibility.md)。
+`0.3.0` 是核心控制面相对 `0.2.x` 的一次性破坏基线；0.4.0 保持该核心 V001 不变，但重构了仍处于 Beta 的结构化 RAG
+公共契约，并在 `zyblw_agent_knowledge` 专属 schema 使用独立的 0.4 knowledge history/V001。升级 0.4.0 必须重建 RAG
+派生索引，不能修改或 repair 已发布 migration。
+完整边界见 [兼容性契约](docs/compatibility.md)与[升级到 0.4.0](docs/upgrading-to-0.4.0.md)。
 
 常见问题先按边界定位：
 
@@ -236,7 +241,7 @@ schema/新数据库执行单一 V001，并重新构建派生 RAG 索引。从 `0
 
 推荐按“能运行 → 会接入 → 懂内核 → 能扩展 → 会运营”学习：
 
-1. [文档地图](docs/README.md) 与 [快速开始](docs/getting-started.md)
+1. [文档地图](docs/README.md)、[总体使用手册](docs/usage-guide.md)与[快速开始](docs/getting-started.md)
 2. [核心概念](docs/core-concepts.md) 与 [AgentApplication](docs/application-builder.md)
 3. [运行时](docs/runtime.md)、[工具](docs/tools.md)、[持久化](docs/persistence.md)
 4. [Workflow](docs/workflow.md) 与 [Context/Memory/RAG](docs/context-memory-rag.md)
@@ -248,7 +253,7 @@ schema/新数据库执行单一 V001，并重新构建派生 RAG 索引。从 `0
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.3.0-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.4.0-local.1"; publishM2'
 ```
 
 sbt 2 的普通 `test` 是增量测试；CI、发布和 PostgreSQL 契约必须使用 `testFull`。真实 Provider 测试默认关闭，避免普通

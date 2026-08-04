@@ -54,12 +54,15 @@ final class MarkdownStructureChunker(
       permissions: Set[String]
   ): UIO[Chunk[DocumentChunk]] =
     ZIO.succeed {
-      val normalized = normalize(document.text)
+      val normalized      = normalize(document.text)
+      val pageBreakMarker = document.metadata.get("pageBreakMarker").map(_.trim).filter(_.nonEmpty)
+      val pageByLine      = pageNumbersByLine(normalized, pageBreakMarker)
+      val chunkingText    = removePageBreakMarkers(normalized, pageBreakMarker)
       if normalized.trim.isEmpty then Chunk.empty
       else
-        val drafts      = parseSections(normalized).flatMap(chunkSection)
+        val drafts      = parseSections(chunkingText).flatMap(chunkSection)
         val occurrences = mutable.HashMap.empty[String, Int]
-        Chunk.fromIterable(drafts.zipWithIndex.map { case (draft, ordinal) =>
+        val prepared    = drafts.zipWithIndex.map { case (draft, ordinal) =>
           val identityHash = KnowledgeIndexer.sha256(
             s"${document.id}\u0000${draft.headingPath.mkString("\u001f")}\u0000${draft.body}"
           )
@@ -67,8 +70,23 @@ final class MarkdownStructureChunker(
           occurrences.update(identityHash, duplicateIndex + 1)
           val duplicateSuffix = if duplicateIndex == 0 then "" else s"-${duplicateIndex + 1}"
           val chunkId         = s"${document.id.take(160)}-${identityHash.take(24)}$duplicateSuffix"
-          val headingPath     = takeCodePoints(draft.headingPath.mkString(" > "), 1000)
-          val chunkMetadata   = document.metadata ++ Map(
+          PreparedChunk(chunkId, draft, ordinal)
+        }
+        Chunk.fromIterable(prepared.zipWithIndex.map { case (preparedChunk, index) =>
+          val draft       = preparedChunk.draft
+          val ordinal     = preparedChunk.ordinal
+          val chunkId     = preparedChunk.id
+          val headingPath = takeCodePoints(draft.headingPath.mkString(" > "), 1000)
+          val parentHash  = KnowledgeIndexer.sha256(
+            s"${document.id}\u0000section\u0000${draft.headingPath.mkString("\u001f")}"
+          )
+          val pages = pageBreakMarker.fold(Vector.empty[Int])(_ =>
+            pageByLine
+              .slice((draft.startLine - 1).max(0), draft.endLine.min(pageByLine.length))
+              .distinct
+          )
+          val origins       = Chunk.fromIterable(pages.map(page => DocumentOrigin(page)))
+          val chunkMetadata = document.metadata ++ Map(
             "chunkerId"       -> strategyId,
             "chunkOrdinal"    -> ordinal.toString,
             "chunkStartLine"  -> draft.startLine.toString,
@@ -83,10 +101,41 @@ final class MarkdownStructureChunker(
             sourceUri = document.sourceUri,
             tenantId = tenantId,
             permissions = permissions,
-            metadata = chunkMetadata
+            metadata = chunkMetadata,
+            lineage = Some(
+              ChunkLineage(
+                parentId = Some(s"${document.id.take(160)}-section-${parentHash.take(24)}"),
+                ordinal = ordinal,
+                previousChunkId = prepared.lift(index - 1).map(_.id),
+                nextChunkId = prepared.lift(index + 1).map(_.id),
+                headingPath = Chunk.fromIterable(draft.headingPath),
+                origins = origins,
+                blockIds = Chunk(s"markdown-lines:${draft.startLine}-${draft.endLine}")
+              )
+            )
           )
         })
     }
+
+  /** 页分隔符所在行属于前一页；分隔符之后的第一行进入下一页。 */
+  private def pageNumbersByLine(markdown: String, marker: Option[String]): Vector[Int] =
+    var page = 1
+    markdown
+      .split("\n", -1)
+      .iterator
+      .map { line =>
+        val current = page
+        if marker.exists(value => line.trim == value) then page += 1
+        current
+      }
+      .toVector
+
+  /** 分隔符只是定位信号，不应进入 Embedding 或最终回答。以空行替换可保持原始行号稳定。 */
+  private def removePageBreakMarkers(markdown: String, marker: Option[String]): String =
+    marker match
+      case None        => markdown
+      case Some(value) =>
+        markdown.split("\n", -1).map(line => if line.trim == value then "" else line).mkString("\n")
 
   /** 把 ATX headings 分解为章节。代码围栏内的 heading-like 行保持普通正文。 */
   private def parseSections(markdown: String): Vector[Section] =
@@ -274,6 +323,7 @@ final class MarkdownStructureChunker(
       startLine: Int,
       endLine: Int
   )
+  final private case class PreparedChunk(id: String, draft: DraftChunk, ordinal: Int)
 
 object MarkdownStructureChunker:
   val layer: ULayer[Chunker] = ZLayer.succeed(MarkdownStructureChunker(): Chunker)

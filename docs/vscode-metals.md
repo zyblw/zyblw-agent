@@ -16,8 +16,13 @@ Metals 的 workspace、Bloop build target、sbt 2.0.1 和框架的公开依赖�
    `sbt-bloop` 永久写入 `project/plugins.sbt`。
 4. 导入完成后等待当前文件的 build target 编译成功，再使用跳转、引用、测试和格式化功能。
 
-`.vscode/settings.json` 只包含可共享的格式化和缓存排除规则；`.vscode/tasks.json` 通过 `mise` 提供 compile、`testFull` 与
-Scalafmt 检查入口，保证终端也使用 JDK 21。个人 `launch.json`、Java 路径、环境变量和本机调试参数应保留在未跟踪的本地文件中。
+`.vscode/settings.json` 只包含可共享的格式化、缓存排除和 Metals 进程稳定性参数；`.vscode/tasks.json` 通过 `mise` 提供
+compile、`testFull` 与 Scalafmt 检查入口，保证终端也使用 JDK 21。个人 `launch.json`、Java 路径、环境变量和本机调试参数应保留在
+未跟踪的本地文件中。
+
+仓库共享配置还会为 macOS 上的 Metals 设置 `-Dmetals.macos-max-watch-roots=512`。大型 sbt 工作区的依赖图会把许多
+Coursier/sbt CAS 目录带入语义索引，Metals 的 macOS 原生监视器默认根目录上限可能因此不够。这个参数只调整 IDE
+文件监视容量，不改变编译或运行时语义。
 
 ## 生成物与重新导入
 
@@ -29,6 +34,22 @@ Metals 会生成 `.metals/`、`.bloop/`、`.bsp/`、`project/metals.sbt`，在�
   同一 Metals workspace 在两个依赖模式之间复用旧 Bloop 配置。
 - 导入异常时先运行 **Metals: Doctor**，然后 **Metals: Restart build server**。只有缓存确定损坏时才关闭 VS Code 并删除
   本机生成物，再重新 Import build。
+
+## Scala 文件爆红的定位顺序
+
+不要根据红色波浪线直接改源码。先把“真实编译失败”与“Metals 索引失效”分开：
+
+1. 在仓库根目录运行对应模块的真实 sbt 编译，例如：
+
+   ```bash
+   sbt -batch 'documentLoaders/clean; documentLoaders/compile; documentLoaders/testFull'
+   ```
+
+2. 若 sbt 成功，查看 **Metals: Open log file**。若出现 `increase 'metals.macos-max-watch-roots'` 或
+   `com.swoval.files.apple.CreateStreamException`，说明是文件监视器容量问题，不是 Scala 类型错误。
+3. 拉取包含仓库 `metals.serverProperties` 的最新配置后，依次执行 **Metals: Restart server**、
+   **Metals: Import build** 和 **Metals: Doctor**。
+4. 只有 sbt 也失败时，才根据编译器给出的文件、行号和类型信息修改代码。
 
 ## 日常验证
 

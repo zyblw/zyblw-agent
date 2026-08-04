@@ -4,7 +4,7 @@
 >
 > 最后核验：2026-08-02
 >
-> 事实来源：源码、测试、0.3 fresh migration、CI/发布工作流与本项目成熟度矩阵
+> 事实来源：源码、测试、0.3 core baseline、0.4 knowledge baseline、CI/发布工作流与本项目成熟度矩阵
 
 本文面向准备基于 `zyblw-agent` 开发真实业务的团队。它把“框架可以被使用”“某个业务可以小流量上线”和“已经经过
 通用大规模生产验证”分开，避免用单元测试数量或功能清单替代上线证据。
@@ -12,16 +12,19 @@
 ## 当前结论与版本建议
 
 当前源码已经具备开发真实业务的主干：耐久提交、异步 Worker、有界多 Run 并发、lease/fencing、类型化工具与权限、
-审批/取消/恢复、PostgreSQL、HTTP/SSE、低敏观测、RAG 和 Eval。新业务可以现在开始基于 0.3.0 构建垂直切片，
+审批/取消/恢复、PostgreSQL、HTTP/SSE、低敏观测、RAG 和 Eval。新业务可以基于 0.4.0 构建垂直切片，
 不需要等待 Harness、多 Agent、Graph Studio 或完整 GraphRAG。
 
-**`0.3.0` 是第一个“业务生产基线”**，适合从 staging 进入受限生产验收，而不是已经通过任意规模验证的通用 GA：
+**`0.4.0` 延续 0.3.0 建立的核心“业务生产基线”，并把结构化 PDF RAG 推进到 Beta**，适合从 staging 进入受限生产
+验收，而不是已经通过任意规模验证的通用 GA：
 
-- 0.3.0 冻结 fresh schema、公共 Scala API、HTTP v1、state/outcome JSON 和 V001 migration；
-- 业务先在 staging 和受限流量使用 0.3.0，完成自己的数据、权限、Provider、容量和恢复验收后再扩大流量；
+- 0.3.0 的 core V001、HTTP v1、state/outcome 与核心控制面保持冻结；0.4.0 不改写已发布 migration；
+- 0.4.0 为结构化 RAG 使用新的 Scala 契约、`zyblw_agent_knowledge` 专属 schema/history 和单一 fresh V001，升级必须
+  重建派生知识索引；
+- 业务先在 staging 和受限流量使用 0.4.0，完成自己的数据、权限、Provider、容量和恢复验收后再扩大流量；
 - Workflow、Artifact、MCP/Sandbox 等标记为 Experimental 的能力不自动继承核心主线的成熟度。
 
-发布流水线完成前，业务仓库应使用内部 `0.3.0-local` 候选；Maven Central 显示 Published 后固定精确 `0.3.0`，不要使用
+发布流水线完成前，业务仓库应使用唯一的内部 `0.4.0-local.*` 候选；Maven Central 显示 Published 后固定精确 `0.4.0`，不要使用
 移动分支、版本范围或 `latest.release`。
 
 ## 推荐生产拓扑
@@ -130,7 +133,8 @@ consumer 会从制品重新编译这条生产装配，而不是引用仓库源�
 
 ### 6. 发布与升级
 
-- fresh schema 执行唯一 0.3 V001，拒绝旧 history；所有派生 RAG 索引可重建；
+- fresh 核心 schema 执行冻结的 core V001；需要 RAG 时在 `zyblw_agent_knowledge` 专属 schema/history 执行唯一 0.4
+  knowledge V001；所有派生 RAG 索引可重建；
 - 格式、`testFull`、PostgreSQL 16、`publishM2` 和独立 Maven consumer 全部通过；
 - CHANGELOG、升级指南、tag、远端 main 和 Maven 制品来自同一提交；
 - 先 canary，再受限租户/只读工具，最后开放写工具；每一步都有回滚或停止扩流条件。
@@ -140,9 +144,9 @@ consumer 会从制品重新编译这条生产装配，而不是引用仓库源�
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.3.0-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.4.0-local.1"; publishM2'
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.3.0-local sbt -batch 'clean; compile'
+ZYBLW_AGENT_VERSION=0.4.0-local.1 sbt -batch 'clean; compile'
 ```
 
 这些命令证明可构建、可迁移、可发布和可被独立 Scala 项目消费；它们不能替代业务数据集、容量、攻击、备份恢复和
@@ -164,7 +168,7 @@ Workflow、MCP/Sandbox、长期 Memory 与多 Agent 必须分别完成自己的�
 - 已完成短时三 Worker/六 lane/48 Run 排他 drain、Worker Fiber 中断后过期重领、数据库 pause/unpause 与
   `pg_dump/pg_restore`；仍缺部署环境中的数小时/数天 soak、真实 `SIGKILL`/节点丢失、数据库主备切换和容量曲线；
 - 真实 HikariCP/PgBouncer 饱和、滚动发布与备份恢复演练；
-- RAG block/page/bbox lineage、恶意 PDF/真实 OCR 与线上领域质量趋势；
+- RAG block/page/bbox lineage 已实现并通过 PostgreSQL round-trip；仍缺恶意 PDF/真实 OCR、大规模 corpus 容量和线上领域质量趋势；
 - MCP OAuth/Roots/供应链、OCI 隔离攻击和真实第三方互操作；
 - 独立外部业务用户的持续运行反馈。
 

@@ -92,7 +92,7 @@ MCP 是 Agent 与工具/资源/Prompt 的上下文交换边界，不负责 Agent
 
 1. Workflow G3-A2c：对已完成的 wait-as-command/Scoped wake worker 做数据库重启、进程 kill 与多 Worker soak，建立
    backlog、claim latency、lease-lost 和恢复时延 SLO；
-2. RAG R2-B：block/page/bbox lineage、parent-child retrieval、相邻块扩展和 ACL 前置；
+2. RAG R2-C：在已有 block/page/bbox lineage、parent/neighbor 扩展和 ACL 前置上，补真实 OCR/敌对 PDF、token-aware 与容量证据；
 3. Harness H1：小型 Goal/Plan/Todo/Skill ADT 与 Store SPI，复用 Artifact/Workspace/Approval；
 4. Quality Q1：结果与轨迹评分分离，多试验趋势和 failure corpus；
 5. DX D1：PostgreSQL 最小接入、Inspector CLI 和生产装配 preset。

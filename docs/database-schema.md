@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-01
+> 最后核验：2026-08-02
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -47,12 +47,17 @@
 | 表 | 事实与用途 | 可见性规则 |
 |---|---|---|
 | `agent_knowledge_documents` | ingestion 幂等键、内容 hash、Embedding/切分策略、版本状态和 active manifest | 每个 tenant/document 至多一个 `ready + active` |
-| `agent_knowledge_chunk_staging` | Building 版本的可重放暂存向量 | Retriever 永远不查询该表 |
-| `agent_knowledge_chunks` | 当前正式发布的完整文档块快照、FTS 与 pgvector 向量 | 只在 activate 短事务中按文档整体替换 |
+| `agent_knowledge_chunk_staging` | Building 版本的可重放暂存向量与 parent/neighbor/heading/page/bbox/block 谱系 | Retriever 永远不查询该表 |
+| `agent_knowledge_chunks` | 当前正式发布的文档块快照、FTS、pgvector 和结构谱系 | 复合主键为 tenant/document/chunk；activate 短事务整体替换，谱系扩展再次校验 ACL |
 
 知识 manifest 状态为 Building/Ready/Superseded/Failed/Retired。`retire` 在文档 advisory lock 和 active-version 乐观条件下
 原子删除正式块并写 Retired；`purgeInactive` 通过部分索引和 `SKIP LOCKED` 只清理截止时间前的非活动终态，绝不删除
 Building 或 Ready/active。
+
+0.4 optional pgvector location 固定管理 `zyblw_agent_knowledge` schema 及其中的独立 Flyway history，且只有一份
+fresh-install V001：一次建立 1536 维 manifest、staging、active read model、FTS/HNSW 与
+parent/ordinal/previous/next/heading/page/origin/block 谱系。vector extension/type 固定从 `public` 解析。0.3 的旧
+location/V001 只为公开制品 checksum 审计保留，不与 0.4 location 混用。
 
 通用 `agent_checkpoints` 不存在于全新基线。Agent Runtime 直接保存 `AgentState`。生产异步创建通过
 `PostgresRunSubmissionStore` 在同一事务写 `agent_runs + agent_events + agent_run_commands + agent_run_dispatch`；任一插入
@@ -180,9 +185,13 @@ Agent Run 时级联删除仍需投递或审计的业务事实。宿主必须为�
 
 ## pgvector
 
-可选 migration 位于：
+0.4 可选 migration 位于：
 
-`modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/optional/pgvector/V001__agent_knowledge_pgvector_1536.sql`
+`modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/optional/pgvector_1536_v0_4/V001__agent_knowledge_pgvector_1536_baseline.sql`
+
+三张表的完整名称是 `zyblw_agent_knowledge.agent_knowledge_documents`、
+`zyblw_agent_knowledge.agent_knowledge_chunk_staging` 和 `zyblw_agent_knowledge.agent_knowledge_chunks`。业务 SQL 不应在
+`public` 创建同名替代物，也不应依赖 `search_path` 省略 schema。
 
 它默认使用 `vector(1536)`。维度是表和索引契约，必须与 Embedding Provider 一致，不能在同一列混用不同维度。
 `PostgresPgVectorStore` 的查询先执行 tenant 与权限包含关系，再进行 cosine/全文排序。`searchHybrid` 使用
@@ -195,7 +204,14 @@ val vectorStoreLayer: ZLayer[DataSource, Nothing, VectorStore] =
 
 val indexStoreLayer: ZLayer[DataSource, Nothing, KnowledgeIndexStore] =
   PostgresKnowledgeIndexStore.layer(dimension = 1536)
+
+// 应用负责 DDL 时：构建 ZLayer 会先 migrate/validate/verify，再创建 Store。
+val autoMigrated: RLayer[DataSource, KnowledgeIndexStore & VectorStore] =
+  PostgresAgentPersistence.migratedKnowledge1536()
 ```
+
+生产平台若由独立任务/DBA 执行 DDL，则先调用 `AgentPostgresMigrations.migrateKnowledge1536(dataSource)`，应用进程继续使用普通
+`PostgresAgentPersistence.knowledge(1536)`。两种模式不可重复实现自己的建表 SQL。
 
 索引写入不是逐行覆盖正式表。`begin` 分配 Building 版本，`stage` 分批幂等 upsert，`activate` 在文档 advisory
 transaction lock 下校验块数并原子切换 active 快照。Embedding HTTP 不进入数据库事务。失败版本保留稳定
@@ -212,8 +228,8 @@ HNSW 的参数不是通用最优值；应使用自己的中医文档、引用正
 - 正式环境优先让 Flyway 执行 classpath 下的默认 migration。
 - 必需表只有一个可执行事实源：
   [`V001__zyblw_agent_0_3_baseline.sql`](../modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/migration/V001__zyblw_agent_0_3_baseline.sql)。
-  不再维护一份容易漂移的手工 SQL 副本；生产优先由 Flyway 执行该资源。
-- 需要 RAG 时，再确认 extension 权限和 embedding 维度后执行 [zyblw-agent-pgvector-1536.sql](sql/zyblw-agent-pgvector-1536.sql)。
+  已发布 V001 不改 checksum，后续中文目录说明由 repeatable COMMENT migration 维护。
+- 需要 RAG 时，确认 extension 权限后调用 `migrateKnowledge1536`；不要复制一份手工 SQL 到业务仓库。
 - 不要把数据库密码写入 SQL、README 或 Git；通过部署平台 Secret 注入 DataSource 配置。
 
 PostgreSQL 的事务、行锁和 `SKIP LOCKED` 等语义应以

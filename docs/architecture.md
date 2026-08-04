@@ -30,6 +30,51 @@ Endpoint 与 OpenAPI；`http` package 通过显式公共投影把授权后的 `A
 Schema 不再等于外部 wire Schema。首次公开版本不再为这个很小的 package 单发 artifact；如果出现两个以上只消费协议
 而不运行 JVM Runtime 的真实客户端，再以 ADR 评估拆分。
 
+## 代码与模块分层
+
+依赖方向从外围指向内核，不能反向：
+
+```text
+业务 Host / examples
+  -> zio-http、postgres、document-loaders、providers、telemetry、mcp
+  -> rag、context、memory
+  -> agent-core
+  -> ZIO
+```
+
+- `agent-core`：provider-neutral ADT、Agent Runtime、Tool/权限/Guardrail、耐久命令 SPI、Workflow/Harness 与应用装配；
+- `agent-rag`：文档、结构谱系、切分、Embedding、Retriever、Reranker 和知识发布 SPI，不依赖 Docling/JDBC；
+- `agent-document-loaders`：本地目录边界与 Docling HTTP Adapter，把外部 JSON/Markdown 投影为 `agent-rag` 类型；
+- `agent-postgres`：Run/Command/Workflow/Memory/RAG JDBC Adapter、Flyway 和数据库结构探针；
+- `agent-zio-http`：Endpoint/OpenAPI/Routes/SSE 和可选 Host 生命周期；
+- Provider、OpenTelemetry、MCP 分别留在独立协议/安全/依赖边界，不进入 core。
+
+业务应在自己的 composition root 用 `ZLayer` 选择实现并明确提供依赖；库代码不调用 `Runtime.default.unsafe.run`，不隐藏全局单例，
+不在 Adapter 中创建第二套业务状态。资源由 `ZLayer.scoped`/`Scope` 管理，阻塞 JDBC/文件 API 留在对应 Adapter 的阻塞边界。
+
+## 结构化 RAG 数据路径
+
+```mermaid
+flowchart LR
+  Source["PDF / Markdown / 受控目录"] --> Loader["DocumentLoader / Docling Adapter"]
+  Loader --> Document["SourceDocument + blocks/page/bbox"]
+  Document --> Chunker["DocumentStructureChunker / Markdown fallback"]
+  Chunker --> Chunks["DocumentChunk + parent/neighbor lineage"]
+  Chunks --> Embed["GovernedEmbeddingService"]
+  Embed --> Staging["KnowledgeIndexStore staging"]
+  Staging --> Active["原子 activate"]
+  Active --> Knowledge[("zyblw_agent_knowledge schema")]
+  Query["RetrievalScope + query"] --> Hybrid["ACL-first vector + FTS + RRF"]
+  Knowledge --> Hybrid
+  Hybrid --> Rerank["可选 Reranker"]
+  Rerank --> Expand["ACL-first parent/neighbor expansion"]
+  Expand --> Citation["bounded context + page/bbox citation"]
+```
+
+原始 PDF/完整 Markdown 属于宿主对象存储；知识表只保存稳定 URI、hash、可回答 chunk、向量、ACL 与可追溯谱系。核心表和知识表使用同一
+`DataSource` 时仍有独立 Flyway 生命周期：核心管理宿主默认 schema，0.4 知识索引固定管理 `zyblw_agent_knowledge`，运行时 SQL 不依赖
+`search_path`。OCR、LLM、Embedding 和对象存储调用全部在数据库事务之外完成。
+
 下图是当前已经落地的主路径。HTTP、CLI 与恢复 worker 都调用同一个 `AgentRuntime`；`ContextManager`、
 `GuardrailEngine`、`RegisteredToolRegistry`、`ToolExecutor` 和 `RunStore` 已进入同一状态机。
 

@@ -37,11 +37,12 @@ final class PostgresPgVectorStore(
     ZIO.foreachDiscard(chunks)(validateDimension) *> withConnection { connection =>
       ZIO.attemptBlocking {
         val statement = connection.prepareStatement(
-          """INSERT INTO agent_knowledge_chunks
-            |(tenant_id, chunk_id, document_id, index_version, chunk_text, search_text, source_uri, permissions, metadata, embedding)
-            |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::vector)
-            |ON CONFLICT (tenant_id, chunk_id) DO UPDATE SET
-            |document_id = EXCLUDED.document_id,
+          """INSERT INTO zyblw_agent_knowledge.agent_knowledge_chunks
+            |(tenant_id, chunk_id, document_id, index_version, chunk_text, search_text, source_uri, permissions, metadata,
+            | embedding, parent_id, lineage_ordinal, previous_chunk_id, next_chunk_id, heading_path,
+            | page_numbers, origins, block_ids)
+            |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::public.vector, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+            |ON CONFLICT (tenant_id, document_id, chunk_id) DO UPDATE SET
             |index_version = EXCLUDED.index_version,
             |chunk_text = EXCLUDED.chunk_text,
             |search_text = EXCLUDED.search_text,
@@ -49,6 +50,14 @@ final class PostgresPgVectorStore(
             |permissions = EXCLUDED.permissions,
             |metadata = EXCLUDED.metadata,
             |embedding = EXCLUDED.embedding,
+            |parent_id = EXCLUDED.parent_id,
+            |lineage_ordinal = EXCLUDED.lineage_ordinal,
+            |previous_chunk_id = EXCLUDED.previous_chunk_id,
+            |next_chunk_id = EXCLUDED.next_chunk_id,
+            |heading_path = EXCLUDED.heading_path,
+            |page_numbers = EXCLUDED.page_numbers,
+            |origins = EXCLUDED.origins,
+            |block_ids = EXCLUDED.block_ids,
             |updated_at = now()""".stripMargin
         )
         try
@@ -64,6 +73,7 @@ final class PostgresPgVectorStore(
             statement.setArray(8, connection.createArrayOf("text", chunk.permissions.toArray))
             statement.setString(9, chunk.metadata.toJson)
             statement.setString(10, vectorLiteral(indexed.embedding))
+            bindLineage(statement, connection, 11, chunk.lineage)
             statement.addBatch()
           }
           statement.executeBatch()
@@ -88,10 +98,12 @@ final class PostgresPgVectorStore(
         ZIO.attemptBlocking {
           val sql =
             """SELECT chunk_id, document_id, chunk_text, search_text, source_uri, permissions, metadata::text, index_version,
-            |       1 - (embedding <=> ?::vector) AS score
-            |FROM agent_knowledge_chunks
+            |       parent_id, lineage_ordinal, previous_chunk_id, next_chunk_id, heading_path,
+            |       page_numbers, origins::text, block_ids,
+            |       1 - (embedding <=> ?::public.vector) AS score
+            |FROM zyblw_agent_knowledge.agent_knowledge_chunks
             |WHERE tenant_id = ? AND permissions <@ ?::text[]
-            |ORDER BY embedding <=> ?::vector
+            |ORDER BY embedding <=> ?::public.vector
             |LIMIT ?""".stripMargin
           val statement = connection.prepareStatement(sql)
           try
@@ -103,28 +115,7 @@ final class PostgresPgVectorStore(
             statement.setInt(5, limit)
             val result  = statement.executeQuery()
             val builder = ChunkBuilder.make[RetrievalHit]()
-            while result.next() do
-              val permissions =
-                result.getArray(6).getArray.asInstanceOf[Array[AnyRef]].iterator.map(_.toString).toSet
-              val metadata = result
-                .getString(7)
-                .fromJson[Map[String, String]]
-                .fold(
-                  error => throw IllegalStateException(s"知识块 metadata 解码失败: $error"),
-                  identity
-                )
-              val chunk = DocumentChunk(
-                id = result.getString(1),
-                documentId = result.getString(2),
-                text = result.getString(3),
-                sourceUri = result.getString(5),
-                tenantId = scope.tenantId,
-                permissions = permissions,
-                metadata = metadata,
-                searchText = Option(result.getString(4)),
-                indexVersion = result.getLong(8)
-              )
-              builder += RetrievalHit(chunk, result.getDouble(9))
+            while result.next() do builder += RetrievalHit(readChunk(result, scope), result.getDouble(17))
             builder.result()
           finally statement.close()
         }
@@ -170,31 +161,32 @@ final class PostgresPgVectorStore(
               |  SELECT websearch_to_tsquery(?::regconfig, ?) AS value
               |),
               |vector_hits AS MATERIALIZED (
-              |  SELECT chunk_id,
-              |         row_number() OVER (ORDER BY embedding <=> ?::vector, chunk_id) AS vector_rank,
-              |         1 - (embedding <=> ?::vector) AS vector_score
-              |  FROM agent_knowledge_chunks
+              |  SELECT document_id, chunk_id,
+              |         row_number() OVER (ORDER BY embedding <=> ?::public.vector, document_id, chunk_id) AS vector_rank,
+              |         1 - (embedding <=> ?::public.vector) AS vector_score
+              |  FROM zyblw_agent_knowledge.agent_knowledge_chunks
               |  WHERE tenant_id = ? AND permissions <@ ?::text[]
-              |  ORDER BY embedding <=> ?::vector, chunk_id
+              |  ORDER BY embedding <=> ?::public.vector, document_id, chunk_id
               |  LIMIT ?
               |),
               |text_hits AS MATERIALIZED (
-              |  SELECT chunk_id,
+              |  SELECT document_id, chunk_id,
               |         row_number() OVER (
-              |           ORDER BY ts_rank_cd(search_vector, search_query.value, 32) DESC, chunk_id
+              |           ORDER BY ts_rank_cd(search_vector, search_query.value, 32) DESC, document_id, chunk_id
               |         ) AS text_rank,
               |         ts_rank_cd(search_vector, search_query.value, 32) AS text_score
-              |  FROM agent_knowledge_chunks CROSS JOIN search_query
+              |  FROM zyblw_agent_knowledge.agent_knowledge_chunks CROSS JOIN search_query
               |  WHERE tenant_id = ?
               |    AND permissions <@ ?::text[]
               |    AND search_vector @@ search_query.value
-              |  ORDER BY text_score DESC, chunk_id
+              |  ORDER BY text_score DESC, document_id, chunk_id
               |  LIMIT ?
               |),
               |ranks AS (
-              |  SELECT COALESCE(vector_hits.chunk_id, text_hits.chunk_id) AS chunk_id,
+              |  SELECT COALESCE(vector_hits.document_id, text_hits.document_id) AS document_id,
+              |         COALESCE(vector_hits.chunk_id, text_hits.chunk_id) AS chunk_id,
               |         vector_rank, text_rank, vector_score, text_score
-              |  FROM vector_hits FULL OUTER JOIN text_hits USING (chunk_id)
+              |  FROM vector_hits FULL OUTER JOIN text_hits USING (document_id, chunk_id)
               |),
               |fused AS (
               |  SELECT *,
@@ -206,10 +198,13 @@ final class PostgresPgVectorStore(
               |)
               |SELECT c.chunk_id, c.document_id, c.chunk_text, c.search_text, c.source_uri,
               |       c.permissions, c.metadata::text, f.fused_score,
-              |       f.vector_score, f.text_score, f.vector_rank, f.text_rank, c.index_version
+              |       f.vector_score, f.text_score, f.vector_rank, f.text_rank, c.index_version,
+              |       c.parent_id, c.lineage_ordinal, c.previous_chunk_id, c.next_chunk_id,
+              |       c.heading_path, c.page_numbers, c.origins::text, c.block_ids
               |FROM fused f
-              |JOIN agent_knowledge_chunks c ON c.tenant_id = ? AND c.chunk_id = f.chunk_id
-              |ORDER BY f.fused_score DESC, c.chunk_id
+              |JOIN zyblw_agent_knowledge.agent_knowledge_chunks c
+              |  ON c.tenant_id = ? AND c.document_id = f.document_id AND c.chunk_id = f.chunk_id
+              |ORDER BY f.fused_score DESC, c.document_id, c.chunk_id
               |LIMIT ?""".stripMargin
             val statement = connection.prepareStatement(sql)
             try
@@ -235,26 +230,7 @@ final class PostgresPgVectorStore(
               val result  = statement.executeQuery()
               val builder = ChunkBuilder.make[RetrievalHit]()
               while result.next() do
-                val resultPermissions =
-                  result.getArray(6).getArray.asInstanceOf[Array[AnyRef]].iterator.map(_.toString).toSet
-                val metadata = result
-                  .getString(7)
-                  .fromJson[Map[String, String]]
-                  .fold(
-                    error => throw IllegalStateException(s"知识块 metadata 解码失败: $error"),
-                    identity
-                  )
-                val chunk = DocumentChunk(
-                  id = result.getString(1),
-                  documentId = result.getString(2),
-                  text = result.getString(3),
-                  sourceUri = result.getString(5),
-                  tenantId = scope.tenantId,
-                  permissions = resultPermissions,
-                  metadata = metadata,
-                  searchText = Option(result.getString(4)),
-                  indexVersion = result.getLong(13)
-                )
+                val chunk   = readChunk(result, scope)
                 val signals = Map.newBuilder[String, Double]
                 Option(result.getObject(9)).foreach(_ => signals += "vectorScore" -> result.getDouble(9))
                 Option(result.getObject(10)).foreach(_ => signals += "textScore" -> result.getDouble(10))
@@ -272,6 +248,125 @@ final class PostgresPgVectorStore(
         }
       }
 
+  /** 在 rerank 之后读取相邻块与同父级块。SQL 重新应用 tenant/permission，扩展行不会因为种子命中已授权就被隐式信任。 */
+  override def expandContext(
+      seeds: Chunk[RetrievalHit],
+      scope: RetrievalScope,
+      config: RetrievalExpansionConfig
+  ): IO[RetrievalError, Chunk[RetrievalHit]] =
+    if seeds.isEmpty || config.maxAdditionalChunks == 0 then ZIO.succeed(Chunk.empty)
+    else
+      val seedKeys = seeds.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
+      val neighborScores: Map[(String, String), Double] =
+        if config.neighborRadius == 0 then Map.empty
+        else
+          seeds
+            .flatMap(seed =>
+              seed.chunk.lineage
+                .fold(Chunk.empty[String])(lineage =>
+                  Chunk.fromIterable(lineage.previousChunkId) ++ Chunk.fromIterable(lineage.nextChunkId)
+                )
+                .map(id => (seed.chunk.documentId -> id) -> seed.score)
+            )
+            .toList
+            .groupMapReduce(_._1)(_._2)(math.max)
+      val parentScores: Map[(String, String), Double] = seeds
+        .flatMap(hit =>
+          hit.chunk.lineage
+            .flatMap(_.parentId)
+            .map(parentId => (hit.chunk.documentId -> parentId) -> hit.score)
+        )
+        .groupBy(_._1)
+        .collect {
+          case (parentKey, values) if values.length >= config.parentHitThreshold =>
+            parentKey -> values.map(_._2).max
+        }
+      if neighborScores.isEmpty && parentScores.isEmpty then ZIO.succeed(Chunk.empty)
+      else
+        withConnection { connection =>
+          ZIO.attemptBlocking {
+            val sql =
+              """WITH seed_key AS (
+                |  SELECT * FROM unnest(?::text[], ?::text[]) AS key(document_id, chunk_id)
+                |), neighbor_key AS (
+                |  SELECT * FROM unnest(?::text[], ?::text[]) AS key(document_id, chunk_id)
+                |), parent_key AS (
+                |  SELECT * FROM unnest(?::text[], ?::text[]) AS key(document_id, parent_id)
+                |)
+                |SELECT chunk_id, document_id, chunk_text, search_text, source_uri, permissions,
+                |       metadata::text, index_version, parent_id, lineage_ordinal,
+                |       previous_chunk_id, next_chunk_id, heading_path, page_numbers, origins::text, block_ids
+                |FROM zyblw_agent_knowledge.agent_knowledge_chunks chunk
+                |WHERE tenant_id = ?
+                |  AND permissions <@ ?::text[]
+                |  AND NOT EXISTS (
+                |    SELECT 1 FROM seed_key
+                |    WHERE seed_key.document_id = chunk.document_id AND seed_key.chunk_id = chunk.chunk_id
+                |  )
+                |  AND (
+                |    EXISTS (
+                |      SELECT 1 FROM neighbor_key
+                |      WHERE neighbor_key.document_id = chunk.document_id AND neighbor_key.chunk_id = chunk.chunk_id
+                |    )
+                |    OR EXISTS (
+                |      SELECT 1 FROM parent_key
+                |      WHERE parent_key.document_id = chunk.document_id
+                |        AND parent_key.parent_id = chunk.parent_id
+                |    )
+                |  )
+                |ORDER BY CASE WHEN EXISTS (
+                |           SELECT 1 FROM neighbor_key
+                |           WHERE neighbor_key.document_id = chunk.document_id
+                |             AND neighbor_key.chunk_id = chunk.chunk_id
+                |         ) THEN 0 ELSE 1 END,
+                |         parent_id NULLS LAST, lineage_ordinal NULLS LAST, chunk_id
+                |LIMIT ?""".stripMargin
+            val statement = connection.prepareStatement(sql)
+            try
+              val seeds     = seedKeys.toVector.sorted
+              val neighbors = neighborScores.keys.toVector.sorted
+              val parents   = parentScores.keys.toVector.sorted
+              statement.setArray(1, connection.createArrayOf("text", seeds.map(_._1).toArray))
+              statement.setArray(2, connection.createArrayOf("text", seeds.map(_._2).toArray))
+              statement.setArray(3, connection.createArrayOf("text", neighbors.map(_._1).toArray))
+              statement.setArray(4, connection.createArrayOf("text", neighbors.map(_._2).toArray))
+              statement.setArray(5, connection.createArrayOf("text", parents.map(_._1).toArray))
+              statement.setArray(6, connection.createArrayOf("text", parents.map(_._2).toArray))
+              statement.setString(7, scope.tenantId.value)
+              statement.setArray(8, connection.createArrayOf("text", scope.permissions.toArray))
+              statement.setInt(9, (config.maxAdditionalChunks * 4).max(config.maxAdditionalChunks))
+              val result = statement.executeQuery()
+              val found  = Vector.newBuilder[DocumentChunk]
+              while result.next() do found += readChunk(result, scope)
+              val authorized   = found.result()
+              val neighborHits = authorized
+                .flatMap(chunk =>
+                  neighborScores
+                    .get(chunk.documentId -> chunk.id)
+                    .map(score => expandedHit(chunk, score, "neighbor", config))
+                )
+              val neighborKeys = neighborHits.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
+              val siblingHits  = parentScores.toVector.sortBy(_._1).flatMap { case (parentKey, score) =>
+                authorized
+                  .filter(chunk =>
+                    chunk.documentId == parentKey._1 && chunk.lineage
+                      .flatMap(_.parentId)
+                      .contains(parentKey._2)
+                  )
+                  .filterNot(chunk => neighborKeys.contains(chunk.documentId -> chunk.id))
+                  .sortBy(chunk => (chunk.lineage.fold(Int.MaxValue)(_.ordinal), chunk.id))
+                  .take(config.maxSiblingsPerParent)
+                  .map(chunk => expandedHit(chunk, score, "parentSibling", config))
+              }
+              Chunk.fromIterable(
+                (neighborHits ++ siblingHits)
+                  .distinctBy(hit => hit.chunk.documentId -> hit.chunk.id)
+                  .take(config.maxAdditionalChunks)
+              )
+            finally statement.close()
+          }
+        }
+
   /** 删除一个租户下指定原始文档的所有块。
     * @param documentId
     *   原始文档稳定 ID
@@ -282,7 +377,7 @@ final class PostgresPgVectorStore(
     withConnection { connection =>
       ZIO.attemptBlocking {
         val statement = connection.prepareStatement(
-          "DELETE FROM agent_knowledge_chunks WHERE tenant_id = ? AND document_id = ?"
+          "DELETE FROM zyblw_agent_knowledge.agent_knowledge_chunks WHERE tenant_id = ? AND document_id = ?"
         )
         try
           statement.setString(1, tenantId.value)
@@ -307,6 +402,102 @@ final class PostgresPgVectorStore(
   private def validateQueryDimension(embedding: Embedding): IO[RetrievalError, Unit] =
     if embedding.values.length == dimension then ZIO.unit
     else ZIO.fail(AgentError.RetrievalFailed(s"query embedding 维度 ${embedding.values.length} != $dimension"))
+
+  /** 从带统一列名的检索 ResultSet 重建知识块，确保向量、hybrid 和谱系查询使用同一解码逻辑。 */
+  private def readChunk(result: java.sql.ResultSet, scope: RetrievalScope): DocumentChunk =
+    val permissions =
+      result.getArray("permissions").getArray.asInstanceOf[Array[AnyRef]].iterator.map(_.toString).toSet
+    val metadata = result
+      .getString("metadata")
+      .fromJson[Map[String, String]]
+      .fold(error => throw IllegalStateException(s"知识块 metadata 解码失败: $error"), identity)
+    DocumentChunk(
+      id = result.getString("chunk_id"),
+      documentId = result.getString("document_id"),
+      text = result.getString("chunk_text"),
+      sourceUri = result.getString("source_uri"),
+      tenantId = scope.tenantId,
+      permissions = permissions,
+      metadata = metadata,
+      searchText = Option(result.getString("search_text")),
+      indexVersion = result.getLong("index_version"),
+      lineage = decodeLineage(result)
+    )
+
+  /** 谱系整体不存在时返回 None；损坏的 origins JSON 会终止查询，不静默丢失引用几何。 */
+  private def decodeLineage(result: java.sql.ResultSet): Option[ChunkLineage] =
+    val ordinalValue = Option(result.getObject("lineage_ordinal")).map(_.asInstanceOf[Number].intValue())
+    val origins      = result
+      .getString("origins")
+      .fromJson[Chunk[DocumentOrigin]]
+      .fold(error => throw IllegalStateException(s"知识块 origins 解码失败: $error"), identity)
+    val pageNumbers     = sqlIntChunk(result.getArray("page_numbers"))
+    val resolvedOrigins =
+      if origins.nonEmpty then origins else pageNumbers.map(page => DocumentOrigin(page))
+    val headingPath = sqlStringChunk(result.getArray("heading_path"))
+    val blockIds    = sqlStringChunk(result.getArray("block_ids"))
+    val parent      = Option(result.getString("parent_id"))
+    val previous    = Option(result.getString("previous_chunk_id"))
+    val next        = Option(result.getString("next_chunk_id"))
+    val present     = ordinalValue.nonEmpty || parent.nonEmpty || previous.nonEmpty || next.nonEmpty ||
+      headingPath.nonEmpty || resolvedOrigins.nonEmpty || blockIds.nonEmpty
+    Option.when(present)(
+      ChunkLineage(
+        parent,
+        ordinalValue.getOrElse(0),
+        previous,
+        next,
+        headingPath,
+        resolvedOrigins,
+        blockIds
+      )
+    )
+
+  private def sqlStringChunk(value: java.sql.Array): Chunk[String] =
+    Option(value).fold(Chunk.empty[String])(array =>
+      Chunk.fromArray(array.getArray.asInstanceOf[Array[AnyRef]]).map(_.toString)
+    )
+
+  private def sqlIntChunk(value: java.sql.Array): Chunk[Int] =
+    Option(value).fold(Chunk.empty[Int])(array =>
+      Chunk.fromArray(array.getArray.asInstanceOf[Array[AnyRef]]).map(_.asInstanceOf[Number].intValue())
+    )
+
+  private def bindLineage(
+      statement: java.sql.PreparedStatement,
+      connection: Connection,
+      start: Int,
+      lineage: Option[ChunkLineage]
+  ): Unit =
+    statement.setString(start, lineage.flatMap(_.parentId).orNull)
+    statement.setObject(start + 1, lineage.map(value => Int.box(value.ordinal)).orNull)
+    statement.setString(start + 2, lineage.flatMap(_.previousChunkId).orNull)
+    statement.setString(start + 3, lineage.flatMap(_.nextChunkId).orNull)
+    statement.setArray(
+      start + 4,
+      connection.createArrayOf("text", lineage.fold(Chunk.empty[String])(_.headingPath).toArray)
+    )
+    statement.setArray(
+      start + 5,
+      connection.createArrayOf("integer", lineage.fold(Chunk.empty[Int])(_.pageNumbers).map(Int.box).toArray)
+    )
+    statement.setString(start + 6, lineage.fold(Chunk.empty[DocumentOrigin])(_.origins).toJson)
+    statement.setArray(
+      start + 7,
+      connection.createArrayOf("text", lineage.fold(Chunk.empty[String])(_.blockIds).toArray)
+    )
+
+  private def expandedHit(
+      chunk: DocumentChunk,
+      seedScore: Double,
+      reason: String,
+      config: RetrievalExpansionConfig
+  ): RetrievalHit =
+    RetrievalHit(
+      chunk,
+      seedScore * config.expandedScoreFactor,
+      Map("contextExpanded" -> 1.0, s"context.$reason" -> 1.0)
+    )
 
   /** 把 Float 向量编码为 pgvector 文本输入格式；数值来自类型化 Float，不拼接外部原始字符串。 */
   private def vectorLiteral(embedding: Embedding): String = embedding.values.mkString("[", ",", "]")

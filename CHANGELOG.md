@@ -3,6 +3,34 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
+## 0.4.0 - 2026-08-02
+
+### Added
+
+- Docling Serve v1 loader now requests both Markdown and lossless JSON and projects document blocks, parent references, heading paths,
+  pages, bounding boxes and block IDs into provider-neutral RAG types with explicit capacity limits.
+- `DocumentStructureChunker` performs structure-first peer merging, oversized-block splitting and stable parent/previous/next lineage;
+  plain Markdown remains an explicit fallback without fabricated geometry.
+- `LocalDocumentDirectorySource` turns a confined directory into a bounded, symlink-safe stream of lazy `DocumentInput` values.
+- The 0.4 pgvector location has one fresh-install V001 containing manifest, staging, active vectors, FTS/HNSW, and complete
+  parent/neighbor/heading/page/bbox/block lineage. Knowledge objects and their Flyway history live in the dedicated
+  `zyblw_agent_knowledge` schema, while vector types are explicitly resolved from `public`; post-migration probes and opt-in
+  auto-migrating ZLayers fail startup on drift.
+- A production-oriented usage guide, PDF RAG pipeline, 0.4 upgrade guide, current compatibility contract and source-reading path now
+  connect dependency selection, ZLayer wiring, database ownership, ingestion, retrieval, deployment and release verification.
+
+### Changed
+
+- **Breaking (next minor):** `SourceDocument`, `DocumentChunk` and `Citation` carry optional structured provenance. The development
+  branch targets the next `0.4.x` minor rather than a `0.3.x` patch so the published `0.3.0` Scala API remains frozen.
+
+### Verification
+
+- RAG and document-loader suites cover structure decoding, bbox lineage, structural chunking, directory confinement and expansion
+  authorization. The PostgreSQL integration harness applies the core baseline first, then creates and idempotently replays the
+  dedicated 0.4 knowledge baseline before verifying atomic publication, composite document/chunk identity and complete lineage
+  round-trip.
+
 ## 0.3.0 - 2026-08-02
 
 ### Added

@@ -39,9 +39,10 @@ object PostgresRunStoreIntegrationSpec extends ZIOSpecDefault:
           value.setPassword(container.password)
           value: DataSource
         }
-        migration <- AgentPostgresMigrations.migrate(dataSource)
-        _ <- ZIO.fail(new IllegalStateException("Agent migration did not succeed")).unless(migration.success)
-      yield PostgresRunStore(dataSource): RunStore
+        persistence <- PostgresAgentPersistence.migratedLayer.build.provideSome[Scope](
+          ZLayer.succeed[DataSource](dataSource)
+        )
+      yield persistence.get[RunStore]
     }
 
   /** 创建最小但完整的 AgentState。

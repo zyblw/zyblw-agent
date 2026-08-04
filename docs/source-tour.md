@@ -14,7 +14,7 @@ getter、局部变量和 Scala 语法不会机械逐行翻译。
 - 先跑确定性示例，再读门面、领域语言和主循环；不要从 Provider 或数据库 Adapter 倒着猜框架。
 - 每读一个生产文件，同时读对应测试。测试里的失败路径通常比接口注释更能说明真实契约。
 - 第一次只追一条 `submit -> claim -> runtime -> inspect` 主线；Memory、RAG、MCP、Workflow 和写工具留到第二轮。
-- 遇到 ZIO/ZIO HTTP 版本问题，从官方 `llms.txt` 找精确页面，并以 `project/Dependencies.scala` 的版本编译验证。
+- 遇到 ZIO/ZIO HTTP 版本问题，从官方 `llms.txt` 找精确页面，并以根 `build.sbt` 锁定的版本编译验证。
 
 ## 第 0 阶段：建立可运行基线
 
@@ -120,6 +120,22 @@ sbt 'testkit/testOnly com.zyblw.agent.runtime.AgentRuntimeSpec -- -t "关键词"
 
 完成标准：能指出 Adapter 只负责什么、绝不能负责什么，并能新增一个测试替身而不改 Runtime。
 
+### RAG 纵向阅读顺序
+
+需要理解 PDF 到引用回答时，不要从 pgvector SQL 单点倒推。按数据变换顺序阅读：
+
+1. `rag/DocumentLoading.scala`：`DocumentInput`、Loader 注册与批量失败语义；
+2. `rag/RetrievalLineage.scala`：block、page、bbox 与坐标系；
+3. `loaders/DoclingDocumentLoader.scala`：Docling Markdown+JSON 到 Provider-neutral 结构投影；
+4. `rag/DocumentStructureChunker.scala`：同父 block 合并、超限切分和 parent/neighbor lineage；
+5. `rag/Rag.scala`：`RagApplication`、`KnowledgeIndexer`、Retriever 与 Citation；
+6. `postgres/PostgresKnowledgeIndexStore.scala`：Building/stage/activate 原子发布；
+7. `postgres/PostgresPgVectorStore.scala`：ACL-first vector/FTS/RRF 与谱系扩展；
+8. 0.4 pgvector V001 和 `PostgresKnowledgeIndexIntegrationSpec`：物理约束与真实数据库证据。
+
+完成标准：能解释原始 PDF、Markdown、chunk、向量和 citation 分别由谁拥有，以及为什么不同文档复用相同 chunk ID 不会
+覆盖或跨文档扩展。
+
 ## 第二轮专题
 
 掌握主线后，再按目标选择：
@@ -139,7 +155,7 @@ sbt 'testkit/testOnly com.zyblw.agent.runtime.AgentRuntimeSpec -- -t "关键词"
 2. 一个现有测试的变体；
 3. 一段对失败恢复语义的解释；
 4. 一个只读工具和对应 policy/eval；
-5. 一个使用 Maven Central 最新正式版或唯一 `0.3.1-local.*` 候选的独立最小消费者。
+5. 一个使用 Maven Central 最新正式版或唯一 `0.4.0-local.*` 候选的独立最小消费者。
 
 最后在 `zyblw-platform` 中用两条路径验证同一业务：
 

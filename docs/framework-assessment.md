@@ -49,7 +49,8 @@
 
 - OpenAI-compatible、OpenAI Responses、Anthropic、Gemini 都有真实协议 Adapter 和 stub contract test，但真实流量历史仍短。
 - RAG 已有 Tika/Docling PDF 摄取、结构感知 Markdown chunk、版本化原子发布、hybrid retrieval、rerank、citation 和 eval；
-  仍缺 block/page lineage、parent-child retrieval、恶意 PDF/真实 OCR 证据与线上领域质量。
+  已有 block/page/bbox lineage、结构切分和 ACL 后相邻/同父级扩展；仍缺恶意 PDF/真实 OCR、tokenizer-aligned
+  chunking、大规模容量与线上领域质量证据。
 - 长期 Memory 有治理和删除语义，但业务 UI、人工纠错和健康敏感信息的真实运营流程不足。
 - MCP 客户端已经覆盖主要协议能力；server、OAuth、Roots 和第三方供应链治理还没有形成完整发布承诺。
 - Workflow 已是显式 nodes/edges、运行前验证、循环访问预算和可恢复 checkpoint 的小型 StateGraph；仍不是成熟的
@@ -192,7 +193,7 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 | 低敏 execution timeline | 本轮落地 | 复合游标分页；不泄露状态、outcome 或 lease token |
 | Goal/Plan/Todo/Completion/Verification | 采纳为 Harness H1 | 先做小型 ADT/Store SPI 和 eval，不一次构造通用项目管理平台 |
 | 定义版本/指纹冻结 | 部分采纳 | Workflow version、Instruction fingerprint 已有；Skill/Policy/Tool schema snapshot 后续补齐 |
-| Context pipeline、RAG/Memory 分治 | 已有基础并继续演进 | 接入 lineage、parent-child、ACL 前置、长期质量与保留治理 |
+| Context pipeline、RAG/Memory 分治 | 已有 lineage、parent/neighbor、ACL 前置与原子发布 | 真实 OCR/敌对 PDF、token-aware、长期质量与保留治理 |
 | Artifact 与 Message 分离 | 采纳 | 现有实验 SPI；下一步 durable metadata/object-store、ACL 与 retention |
 | Provider-neutral + native capability | 采纳 | 公共最小契约加 capability/受控扩展，不伪装 Provider 完全等价 |
 | MCP 与 A2A 分工 | 采纳边界，A2A 延后 | MCP 先完成身份/OAuth/Roots/信任；A2A 不替代内部 Workflow |

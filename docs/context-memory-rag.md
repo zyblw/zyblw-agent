@@ -2,11 +2,9 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-29
+> 最后核验：2026-08-02
 >
 > 事实来源：对应模块源码、测试与构建定义
-
-更新时间：2026-07-29。
 
 ## 1. 四类边界不能混为一谈
 
@@ -413,9 +411,9 @@ Building 和 Ready/active 永不进入 retention 候选。暂存块由 manifest 
 ```text
 业务对象存储/上传授权
   → DocumentInput(ZStream[Byte])
-  → DoclingDocumentLoader(PDF→Markdown) 或 TikaDocumentLoader(轻量文本)
+  → DoclingDocumentLoader(PDF→Markdown+JSON structure) 或 TikaDocumentLoader(轻量文本)
   → DocumentLoaderRegistry(身份/MIME/metadata/容量)
-  → MarkdownStructureChunker(标题路径/表格/代码块/稳定 ID)
+  → DocumentStructureChunker(block/page/bbox/parent/neighbor，无 structure 时降级 Markdown)
   → GovernedEmbeddingService(tenant cache/quota)
   → KnowledgeIndexer(Building→stage→activate)
   → Postgres pgvector + FTS weighted RRF
@@ -437,16 +435,17 @@ Docling Adapter 默认 HTTPS、请求/响应/Markdown 硬上限、API Key 脱敏
 
 本轮已经完成真实 OpenAI-compatible Embedding、HTTP stub 契约、租户隔离精确缓存与 PostgreSQL 事务化硬配额、
 PostgreSQL FTS+pgvector weighted RRF、索引 manifest/暂存/原子发布、真实 pgvector Testcontainers，以及有界
-`DocumentInput`/Loader 注册/并发摄取、可选 Tika 3.3.1 text/Markdown/HTML/PDF/EPUB Adapter、Docling Serve v1
-PDF→Markdown Adapter，以及标题/表格/fenced-code 感知的稳定 Markdown Chunker。RAG eval 已能对
+`DocumentInput`/Loader 注册/并发摄取、本地目录 Source、可选 Tika 3.3.1 text/Markdown/HTML/PDF/EPUB Adapter、Docling Serve v1
+PDF→Markdown+JSON Adapter、page/bbox/block lineage、`DocumentStructureChunker`、0.4 单文件 pgvector 基线原子发布和 ACL 后相邻/同父级扩展。RAG eval 已能对
 Recall/Precision/MRR/NDCG、引用证据、租户授权、禁止片段、数值完整性和延迟做独立硬门禁。仍需继续完成：
 
 - 部署侧运行 LLM Extractor 真实 Provider smoke、前端治理页面、审计归档策略和业务级敏感信息分类；
 - Redis Embedding 缓存/配额 Adapter、命中与节省成本指标、更多厂商原生 Embedding Adapter；
-- 真实 Docling/OCR smoke、恶意 PDF corpus、Docling JSON block/page lineage、网页 Loader、parent-child/late-interaction
+- 真实 Docling/OCR smoke、恶意 PDF corpus、tokenizer-aligned chunking、网页/对象存储 Source、late-interaction
   retrieval 与业务保留期调度；
 - 基于真实中医资料的数据集、趋势存储和 CI 门禁，验证召回、引用支持率、延迟、token 与成本；
 - 大规模索引重建的连接池、WAL、HNSW 构建和 vacuum 容量结论。
 
 Loader 的信任边界、参数说明、Tika 使用示例和生产隔离要求见 [文档 Loader 与知识摄取](document-loaders.md)；
+PDF/OCR/切分/pgvector/检索/重排/Agent 接入的完整路径见 [PDF RAG 生产流水线](pdf-rag-pipeline.md)；
 RAG 指标定义、数据集字段和 CI 接法见 [RAG 评测与发布门禁](rag-evaluation.md)。

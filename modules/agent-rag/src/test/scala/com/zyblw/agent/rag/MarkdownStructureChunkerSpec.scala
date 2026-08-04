@@ -127,5 +127,40 @@ object MarkdownStructureChunkerSpec extends ZIOSpecDefault:
         first.map(_.id).distinct.length == 2,
         first.map(_.id) == second.map(_.id)
       )
+    },
+    test("PDF 页分隔符不进入 embedding 文本，同时生成页码、父级和相邻谱系") {
+      val markdown =
+        """# 第一章
+          |
+          |第一页内容。
+          |
+          |<!-- page -->
+          |
+          |第二页内容。
+          |
+          |## 子节
+          |
+          |第三段内容。
+          |""".stripMargin
+      val pdf = SourceDocument(
+        "pdf-guide",
+        markdown,
+        "knowledge://pdf-guide",
+        Map("pageBreakMarker" -> "<!-- page -->"),
+        DocumentRepresentation.Markdown
+      )
+      for chunks <- MarkdownStructureChunker(
+          MarkdownStructureChunkerConfig(maxCharacters = 128, overlapCharacters = 16)
+        ).split(pdf, tenant, scope)
+      yield assertTrue(
+        chunks.length >= 2,
+        chunks.forall(!_.text.contains("<!-- page -->")),
+        chunks.forall(_.lineage.nonEmpty),
+        chunks.head.lineage.exists(_.origins.map(_.pageNumber).contains(1)),
+        chunks.exists(_.lineage.exists(_.origins.map(_.pageNumber).contains(2))),
+        chunks.head.lineage.flatMap(_.nextChunkId).contains(chunks(1).id),
+        chunks(1).lineage.flatMap(_.previousChunkId).contains(chunks.head.id),
+        chunks.forall(_.lineage.flatMap(_.parentId).nonEmpty)
+      )
     }
   )

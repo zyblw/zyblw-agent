@@ -96,7 +96,7 @@ val loader = TikaDocumentLoader(
 声明类型与实测类型。OCR 默认关闭，同时关闭通用 Tesseract 与 PDF OCR，避免部署机器是否安装 Tesseract 悄悄改变延迟、
 成本和数据流向。
 
-## 5. Docling Serve：高保真 PDF→Markdown
+## 5. Docling Serve：PDF→Markdown + 无损结构
 
 Tika 适合受控数字 PDF 的轻量文本提取，但不会承诺恢复复杂标题层级、阅读顺序、表格、公式和页面布局。需要结构化
 Markdown 时可以使用 `DoclingDocumentLoader`：
@@ -118,9 +118,14 @@ val docling = DoclingDocumentLoader(
 )
 ```
 
-Adapter 固定调用 Docling Serve 稳定 v1 `/v1/convert/file` multipart 协议，只请求 `md`，图片采用 placeholder，不允许
-Provider 返回的错误正文进入日志。默认只接受 HTTPS；本机测试必须显式启用 `allowInsecureHttp`。请求和响应都有硬上限，
-`status != success`、空 Markdown、非法 JSON 和超限输出全部 fail-closed。
+Adapter 固定调用 Docling Serve 稳定 v1 `/v1/convert/file` multipart 协议，同时请求 `md` 与 `json`：
+
+- `SourceDocument.text` 保留可阅读 Markdown，用于检查、简单切分和原文展示；
+- `SourceDocument.structure` 保留 Provider-neutral `DocumentBlock`、父节点、标题路径、页码、bbox 和 Docling block ID；
+- 图片使用 placeholder，不把 base64 图片放大到 JVM/metadata；Provider 错误正文不进入日志。
+
+默认只接受 HTTPS；本机测试必须显式启用 `allowInsecureHttp`。请求、响应、Markdown、block 数和 origin 数都有硬上限。
+`status != success`、空 Markdown、缺少/JSON 错误的 `DoclingDocument`、非法 bbox 或超限输出全部 fail-closed。
 
 同步 PDF 转换可能已经在服务端产生昂贵计算，所以 Adapter 不做透明自动重试；408/409/425/429/5xx 与 transport failure
 仍保留 `retryable` 分类，由持有稳定 ingestion/task ID 的业务 Worker 决定是否重试。部署应固定 Docling Serve 镜像版本或
@@ -129,7 +134,25 @@ digest，配置 `X-Api-Key`、非 root、CPU/内存/PID 限额、默认出站断
 `DocumentLoaderRegistry` 不允许 Tika 与 Docling 同时声明 `application/pdf`。宿主必须明确选择一种 PDF 策略；需要降级时也
 应在业务任务中记录“主解析失败→显式选择另一个 Loader”，不能靠注册顺序静默切换表示。
 
-## 6. Markdown 结构感知切分
+## 6. 结构优先切分与 Markdown 降级
+
+Docling/OCR 输出优先使用 `DocumentStructureChunker`：
+
+```scala
+val chunker = DocumentStructureChunker(
+  DocumentStructureChunkerConfig(
+    maxCharacters = 1200,
+    overlapCharacters = 120,
+    mergePeers = true
+  )
+)
+```
+
+它直接基于 `DocumentBlock` 工作：合并相邻、同父节点、同标题路径的小 block，只在单个 block 超限时使用
+Unicode-safe overlap 切分。产出的 `ChunkLineage` 保留 `parentId/previousChunkId/nextChunkId/ordinal`、页码、bbox 和
+block IDs。这些字段由受控 Loader/Chunker 生成，不允许模型填写。
+
+若没有 `SourceDocument.structure`，它会显式降级到 `MarkdownStructureChunker`：
 
 `MarkdownStructureChunker` 保留 ATX 标题路径、段落、列表、正常大小的表格和 fenced code：
 
@@ -151,7 +174,38 @@ val chunker = MarkdownStructureChunker(
 清洗、中文分词等框架外步骤时，业务才显式覆盖 `indexingStrategy`。这样参数改变会与旧 ingestion ID 冲突，而不是错误
 复用旧暂存向量。
 
-## 7. 端到端使用示例
+## 7. 目录批量摄取
+
+`LocalDocumentDirectorySource` 把一个受限根目录转成 `ZStream[DocumentInput]`：
+
+```scala
+val source = LocalDocumentDirectorySource(
+  LocalDocumentDirectoryConfig(
+    root = java.nio.file.Path.of("/srv/knowledge/books"),
+    maxDepth = 8,
+    maxFiles = 20_000,
+    maxFileBytes = 64L * 1024 * 1024,
+    sourceUriPrefix = "knowledge://books/"
+  )
+)
+
+val requests = source.inputs.map { input =>
+  DocumentIngestionRequest(
+    input,
+    TenantId("tenant-a"),
+    Set("knowledge:read"),
+    ingestionId = s"books-2026-08-02-${input.id}"
+  )
+}
+
+val outcomes = ingestion.ingest(requests)
+```
+
+扫描不跟随符号链接，限制深度/文件数/单文件大小，不把真实绝对路径放进 citation；每个文件的内容仍是惰性
+`ZStream[Byte]`。该 Adapter 面向单机/离线 worker；多实例生产部署应使用对象存储/Queue Source，但继续产出同一
+`DocumentInput` 契约。
+
+## 8. 端到端使用示例
 
 普通业务应把底层组件一次性组装为 `RagApplication`，Controller、后台 Job 和 Agent Tool 只依赖这个门面。下面的
 内存层与生产 PostgreSQL 层具有相同的服务形状：
@@ -166,7 +220,7 @@ val ragLayer = ZLayer.make[RagApplication](
   DocumentLoaderRegistry.layer(Chunk(docling)),
   ZLayer.succeed[EmbeddingService](embeddingService),
   InMemoryKnowledgeIndexStore.knowledge,
-  MarkdownStructureChunker.layer,
+  DocumentStructureChunker.layer,
   KnowledgeIndexer.layer(stageBatchSize = 200),
   DocumentIngestionService.layer(
     maxParallelism = 2,
@@ -224,7 +278,7 @@ PostgresAgentPersistence.knowledge(
 该组合层让 `KnowledgeIndexStore` 与 `VectorStore` 使用同一 DataSource、固定维度和正式表；业务无需把已经发布的向量再
 手工 upsert 到另一套查询 Store。
 
-## 8. 生产部署边界
+## 9. 生产部署边界
 
 当前 Tika 是进程内 Adapter，适合受控运营导入和可信知识库。它已经有输入/输出上限、超时、MIME 复核、低敏 metadata、
 关闭 OCR 和取消传播，但 JVM 内超时不等于 OS 级隔离：恶意解析器缺陷、native OCR、压缩炸弹和长期占用仍可能影响宿主。
@@ -235,10 +289,11 @@ PostgresAgentPersistence.knowledge(
 
 已由自动测试覆盖：纯文本、HTML 脚本排除、真实 Tika PDF/EPUB、声明长度预拒绝、实际字节越界、MIME 伪装、并发顺序、
 单项失败隔离、Fiber 取消、Docling v1 multipart/API Key/容量/低敏错误，以及 Markdown 标题/表格/fenced code/Unicode/
-稳定 ID。Docling 测试是本地 HTTP stub 契约，不等于真实模型质量证据。尚未完成恶意文档 corpus、真实 Docling/OCR
-smoke、Docling JSON block/page lineage、网页抓取器和 parent-child retrieval。
+稳定 ID、Docling Markdown+JSON 解码、block/page/bbox lineage、结构切分、本地目录 Source、0.4 单文件 pgvector 基线谱系回读，以及
+ACL 复核后的相邻/同父级有界扩展。Docling 测试是本地 HTTP stub 契约，真实 Docling/OCR 质量、恶意 PDF corpus、
+多页复杂表格/图片 VLM 和大规模容量仍需业务环境验收。
 
-## 9. 设计参考与取舍
+## 10. 设计参考与取舍
 
 - [Docling](https://github.com/docling-project/docling) 与
   [Docling Serve](https://github.com/docling-project/docling-serve)证明 PDF 解析应是独立、可部署的文档理解边界，并提供

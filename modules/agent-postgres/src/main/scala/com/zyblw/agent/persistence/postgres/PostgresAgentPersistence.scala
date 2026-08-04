@@ -24,12 +24,42 @@ object PostgresAgentPersistence:
   val layer: URLayer[DataSource, RunStore & RunCommandStore & RunSubmissionStore] =
     PostgresRunStore.layer ++ PostgresRunCommandStore.layer ++ PostgresRunSubmissionStore.layer
 
+  /** 自动迁移后再构造核心持久化 Adapter 的便捷生产层。
+    *
+    * 该层只在 ZLayer 构建阶段执行一次 Flyway migrate/validate 和关键表探针；失败会阻止应用及 Worker 启动，绝不回退到内存。 已由平台统一执行 migration
+    * 的大型宿主可继续使用 [[layer]]，避免应用账号持有 DDL 权限。
+    */
+  val migratedLayer: RLayer[DataSource, RunStore & RunCommandStore & RunSubmissionStore] =
+    ZLayer.fromZIOEnvironment {
+      for
+        dataSource <- ZIO.service[DataSource]
+        _          <- AgentPostgresMigrations.migrate(dataSource)
+      yield ZEnvironment[RunStore](PostgresRunStore(dataSource)) ++
+        ZEnvironment[RunCommandStore](PostgresRunCommandStore(dataSource)) ++
+        ZEnvironment[RunSubmissionStore](PostgresRunSubmissionStore(dataSource))
+    }
+
   /** 在控制面基础上加入长期 MemoryStore。
     *
     * 不默认加入 pgvector 知识表，因为它是需要显式选择固定维度和 optional migration 的独立部署能力。
     */
   val layerWithMemory: URLayer[DataSource, RunStore & RunCommandStore & RunSubmissionStore & MemoryStore] =
     layer ++ PostgresMemoryStore.layer
+
+  /** 与 [[migratedLayer]] 相同，但同时装配长期记忆。 */
+  val migratedLayerWithMemory: RLayer[
+    DataSource,
+    RunStore & RunCommandStore & RunSubmissionStore & MemoryStore
+  ] =
+    ZLayer.fromZIOEnvironment {
+      for
+        dataSource <- ZIO.service[DataSource]
+        _          <- AgentPostgresMigrations.migrate(dataSource)
+      yield ZEnvironment[RunStore](PostgresRunStore(dataSource)) ++
+        ZEnvironment[RunCommandStore](PostgresRunCommandStore(dataSource)) ++
+        ZEnvironment[RunSubmissionStore](PostgresRunSubmissionStore(dataSource)) ++
+        ZEnvironment[MemoryStore](PostgresMemoryStore(dataSource))
+    }
 
   /** Embedding 治理持久化组合层。
     *
@@ -47,14 +77,31 @@ object PostgresAgentPersistence:
 
   /** 版本化知识摄取与 hybrid retrieval 的推荐同源组合层。
     *
-    * 两个 Adapter 共享同一个 DataSource、固定向量维度和 `agent_knowledge_chunks` 正式快照： `KnowledgeIndexStore` 负责
-    * Building→stage→activate，`VectorStore` 只查询 active 发布结果。 业务仍需显式执行对应维度的 optional pgvector migration。
+    * 两个 Adapter 共享同一个 DataSource、固定向量维度和 `zyblw_agent_knowledge.agent_knowledge_chunks` 正式快照：
+    * `KnowledgeIndexStore` 负责 Building→stage→activate，`VectorStore` 只查询 active 发布结果。 业务仍需显式执行对应维度的 optional
+    * pgvector migration。
     */
   def knowledge(
       dimension: Int,
       hybridConfig: PostgresHybridSearchConfig = PostgresHybridSearchConfig()
   ): URLayer[DataSource, KnowledgeIndexStore & VectorStore] =
     PostgresKnowledgeIndexStore.layer(dimension) ++ PostgresPgVectorStore.layer(dimension, hybridConfig)
+
+  /** 0.4 的一站式 1536 维知识库层：在空库自动创建/校验 vector 扩展和知识表，再暴露版本摄取与检索 Store。
+    *
+    * 维度被 migration 固定为 1536，因此此入口不接受运行时 dimension，消除“ZLayer 配置与物理列不一致”的无效状态。 如果生产数据库由 DBA/部署任务负责 DDL，请先显式调用
+    * `migrateKnowledge1536`，运行进程再使用 [[knowledge]]。
+    */
+  def migratedKnowledge1536(
+      hybridConfig: PostgresHybridSearchConfig = PostgresHybridSearchConfig()
+  ): RLayer[DataSource, KnowledgeIndexStore & VectorStore] =
+    ZLayer.fromZIOEnvironment {
+      for
+        dataSource <- ZIO.service[DataSource]
+        _          <- AgentPostgresMigrations.migrateKnowledge1536(dataSource)
+      yield ZEnvironment[KnowledgeIndexStore](PostgresKnowledgeIndexStore(dataSource, 1536)) ++
+        ZEnvironment[VectorStore](PostgresPgVectorStore(dataSource, 1536, hybridConfig))
+    }
 
   /** 生产评测趋势仓库。
     *

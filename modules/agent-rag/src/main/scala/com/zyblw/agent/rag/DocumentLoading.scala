@@ -77,7 +77,9 @@ object DocumentInput:
 final case class DocumentLoadPolicy(
     maxExtractedCodePoints: Int = 2_000_000,
     maxMetadataEntries: Int = 64,
-    maxMetadataValueLength: Int = 1000
+    maxMetadataValueLength: Int = 1000,
+    maxStructuredBlocks: Int = 200_000,
+    maxStructuredOrigins: Int = 1_000_000
 ):
   require(maxExtractedCodePoints > 0, "maxExtractedCodePoints 必须为正数")
   require(maxMetadataEntries > 0 && maxMetadataEntries <= 256, "maxMetadataEntries 必须位于 1..256")
@@ -85,6 +87,8 @@ final case class DocumentLoadPolicy(
     maxMetadataValueLength > 0 && maxMetadataValueLength <= 10_000,
     "maxMetadataValueLength 必须位于 1..10000"
   )
+  require(maxStructuredBlocks > 0, "maxStructuredBlocks 必须为正数")
+  require(maxStructuredOrigins > 0, "maxStructuredOrigins 必须为正数")
 
 /** 单一格式族的文档解析 SPI。
   *
@@ -168,6 +172,13 @@ object DocumentLoaderRegistry:
       key.matches("[A-Za-z0-9_.-]{1,100}") && value.length <= policy.maxMetadataValueLength && !value
         .contains('\u0000')
     }
+    val structureValid = document.structure.forall { structure =>
+      structure.blocks.length <= policy.maxStructuredBlocks &&
+      structure.blocks.foldLeft(0L)((total, block) =>
+        total + block.origins.length
+      ) <= policy.maxStructuredOrigins &&
+      structure.blocks.forall(block => block.id.length <= 1000 && block.text.indexOf('\u0000') < 0)
+    }
     if document.id != input.id || document.sourceUri != input.sourceUri then
       ZIO.fail(AgentError.RetrievalFailed("DocumentLoader 输出身份与输入不一致"))
     else if document.text.trim.isEmpty then ZIO.fail(AgentError.RetrievalFailed("DocumentLoader 未提取到可索引正文"))
@@ -178,6 +189,8 @@ object DocumentLoaderRegistry:
         )
       )
     else if !metadataValid then ZIO.fail(AgentError.RetrievalFailed("DocumentLoader metadata 超过数量、键或值边界"))
+    else if !structureValid then
+      ZIO.fail(AgentError.RetrievalFailed("DocumentLoader structure 超过 block/origin/字段边界"))
     else ZIO.succeed(document.copy(metadata = merged))
 
 /** 一份流式摄取请求；tenant、permissions 与 ingestionId 必须来自可信业务控制面。 */

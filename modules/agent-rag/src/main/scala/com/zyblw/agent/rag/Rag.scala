@@ -15,7 +15,9 @@ final case class SourceDocument(
     text: String,
     sourceUri: String,
     metadata: Map[String, String] = Map.empty,
-    representation: DocumentRepresentation = DocumentRepresentation.PlainText
+    representation: DocumentRepresentation = DocumentRepresentation.PlainText,
+    /** 可选的页面/块/几何结构；Markdown 是人类可读正文，structure 是机器可追溯表示，二者不互相代替。 */
+    structure: Option[DocumentStructure] = None
 )
 final case class DocumentChunk(
     id: String,
@@ -29,7 +31,9 @@ final case class DocumentChunk(
       */
     searchText: Option[String] = None,
     /** 所属知识索引版本；普通内存用例默认 1，耐久索引发布时由 `KnowledgeIndexer` 覆盖。 */
-    indexVersion: Long = 1L
+    indexVersion: Long = 1L,
+    /** 受控切分器生成的父子、相邻、页码与 bbox 谱系；纯文本或旧切分器可为 None。 */
+    lineage: Option[ChunkLineage] = None
 )
 final case class Embedding(values: Chunk[Float]):
   require(values.nonEmpty, "Embedding 不能为空")
@@ -96,7 +100,16 @@ final case class RetrievalScope(
   *   可观测的子信号，例如 `vectorScore`、`textScore`、`vectorRank`、`textRank`
   */
 final case class RetrievalHit(chunk: DocumentChunk, score: Double, signals: Map[String, Double] = Map.empty)
-final case class Citation(id: String, sourceUri: String, excerpt: String, score: Double)
+final case class Citation(
+    id: String,
+    sourceUri: String,
+    excerpt: String,
+    score: Double,
+    /** 从 1 开始的原文页码；纯文本来源可为空。 */
+    pageNumbers: Chunk[Int] = Chunk.empty,
+    /** 用于 PDF 高亮的可选页内几何信息。 */
+    origins: Chunk[DocumentOrigin] = Chunk.empty
+)
 final case class RetrievalResult(hits: Chunk[RetrievalHit], citations: Chunk[Citation])
 
 trait Chunker:
@@ -189,16 +202,31 @@ trait VectorStore:
     val _ = queryText
     search(query, scope, limit)
 
+  /** 在 rerank 之后根据受控谱系补充相邻块和同父级块。
+    *
+    * 默认实现不扩展，使纯向量的自定义 Store 仍可以最小实现。生产 Store 必须在读取扩展候选时再次应用 tenant/permission 条件，不得信任 seed metadata。
+    */
+  def expandContext(
+      seeds: Chunk[RetrievalHit],
+      scope: RetrievalScope,
+      config: RetrievalExpansionConfig
+  ): IO[RetrievalError, Chunk[RetrievalHit]] =
+    val _ = (seeds, scope, config)
+    ZIO.succeed(Chunk.empty)
+
   /** 删除租户内某原始文档的全部块。 */
   def deleteByDocument(documentId: String, tenantId: TenantId): IO[RetrievalError, Unit]
 
 /** 测试和本地开发向量库。权限和 tenant 过滤在相似度计算之前执行，防止越权数据进入候选集。
   */
-final class InMemoryVectorStore private (state: Ref.Synchronized[Map[String, IndexedChunk]])
-    extends VectorStore:
-  /** 以 chunk id 为键原子 upsert。 */
+final class InMemoryVectorStore private (
+    state: Ref.Synchronized[Map[(TenantId, String, String), IndexedChunk]]
+) extends VectorStore:
+  /** 以 tenant/document/chunk 复合身份原子 upsert；局部 chunk ID 在另一文档中复用不会互相覆盖。 */
   def upsert(chunks: Chunk[IndexedChunk]): UIO[Unit] =
-    state.update(current => current ++ chunks.map(item => item.chunk.id -> item))
+    state.update(current =>
+      current ++ chunks.map(item => (item.chunk.tenantId, item.chunk.documentId, item.chunk.id) -> item)
+    )
 
   /** 先过滤 tenant/permission，再计算 cosine，防止未授权内容进入候选集。 */
   def search(query: Embedding, scope: RetrievalScope, limit: Int): IO[RetrievalError, Chunk[RetrievalHit]] =
@@ -214,6 +242,88 @@ final class InMemoryVectorStore private (state: Ref.Synchronized[Map[String, Ind
           .take(limit.max(0))
       )
     }
+
+  /** 内存实现与 PostgreSQL Adapter 共享相同语义：先授权，再选相邻/同父级，最后做全局有界截断。 */
+  override def expandContext(
+      seeds: Chunk[RetrievalHit],
+      scope: RetrievalScope,
+      config: RetrievalExpansionConfig
+  ): UIO[Chunk[RetrievalHit]] =
+    if seeds.isEmpty || config.maxAdditionalChunks == 0 then ZIO.succeed(Chunk.empty)
+    else
+      state.get.map { all =>
+        val seedKeys   = seeds.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
+        val authorized = all.valuesIterator
+          .map(_.chunk)
+          .filter(chunk =>
+            !seedKeys.contains(chunk.documentId -> chunk.id) && chunk.tenantId == scope.tenantId &&
+              chunk.permissions.subsetOf(scope.permissions)
+          )
+          .toVector
+        val neighborScores: Map[(String, String), Double] =
+          if config.neighborRadius == 0 then Map.empty[(String, String), Double]
+          else
+            seeds
+              .flatMap { seed =>
+                val ids = seed.chunk.lineage.fold(Chunk.empty[String])(lineage =>
+                  Chunk.fromIterable(lineage.previousChunkId) ++ Chunk.fromIterable(lineage.nextChunkId)
+                )
+                ids.map(id => (seed.chunk.documentId -> id) -> seed.score)
+              }
+              .toList
+              .groupMapReduce(_._1)(_._2)(math.max)
+        val parentScores = seeds
+          .flatMap(hit =>
+            hit.chunk.lineage
+              .flatMap(_.parentId)
+              .map(parentId => (hit.chunk.documentId -> parentId) -> hit.score)
+          )
+          .groupBy(_._1)
+          .collect {
+            case (parentKey, values) if values.length >= config.parentHitThreshold =>
+              parentKey -> values.map(_._2).max
+          }
+        val siblingsByParent = authorized
+          .flatMap(chunk =>
+            chunk.lineage.flatMap(_.parentId).map(parentId => (chunk.documentId -> parentId) -> chunk)
+          )
+          .groupBy(_._1)
+          .view
+          .mapValues(values => values.map(_._2).sortBy(_.lineage.fold(Int.MaxValue)(_.ordinal)))
+          .toMap
+        val neighborHits = authorized
+          .flatMap(chunk =>
+            neighborScores
+              .get(chunk.documentId -> chunk.id)
+              .map(score => expandedHit(chunk, score, "neighbor", config))
+          )
+          .sortBy(hit => (-hit.score, hit.chunk.lineage.fold(Int.MaxValue)(_.ordinal), hit.chunk.id))
+        val neighborKeys = neighborHits.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
+        val siblingHits  = parentScores.toVector.sortBy(_._1).flatMap { case (parentKey, score) =>
+          siblingsByParent
+            .getOrElse(parentKey, Vector.empty)
+            .filterNot(chunk => neighborKeys.contains(chunk.documentId -> chunk.id))
+            .take(config.maxSiblingsPerParent)
+            .map(chunk => expandedHit(chunk, score, "parentSibling", config))
+        }
+        Chunk.fromIterable(
+          (neighborHits ++ siblingHits)
+            .distinctBy(hit => hit.chunk.documentId -> hit.chunk.id)
+            .take(config.maxAdditionalChunks)
+        )
+      }
+
+  private def expandedHit(
+      chunk: DocumentChunk,
+      seedScore: Double,
+      reason: String,
+      config: RetrievalExpansionConfig
+  ): RetrievalHit =
+    RetrievalHit(
+      chunk,
+      seedScore * config.expandedScoreFactor,
+      Map("contextExpanded" -> 1.0, s"context.$reason" -> 1.0)
+    )
 
   /** 按 tenantId+documentId 删除条目。 */
   def deleteByDocument(documentId: String, tenantId: TenantId): UIO[Unit] =
@@ -231,7 +341,11 @@ final class InMemoryVectorStore private (state: Ref.Synchronized[Map[String, Ind
 
 object InMemoryVectorStore:
   val layer: ULayer[VectorStore] =
-    ZLayer.fromZIO(Ref.Synchronized.make(Map.empty[String, IndexedChunk]).map(InMemoryVectorStore(_)))
+    ZLayer.fromZIO(
+      Ref.Synchronized
+        .make(Map.empty[(TenantId, String, String), IndexedChunk])
+        .map(InMemoryVectorStore(_))
+    )
 
 trait Reranker:
   /** 根据 query 重排候选并截取 limit；实现可接 cross-encoder。 */
@@ -248,8 +362,12 @@ trait Retriever:
   /** 完成 query embedding、权限检索、rerank 和引用组装。 */
   def retrieve(query: String, scope: RetrievalScope, limit: Int): IO[RetrievalError, RetrievalResult]
 
-final class DefaultRetriever(embeddings: EmbeddingService, vectors: VectorStore, reranker: Reranker)
-    extends Retriever:
+final class DefaultRetriever(
+    embeddings: EmbeddingService,
+    vectors: VectorStore,
+    reranker: Reranker,
+    expansion: RetrievalExpansionConfig = RetrievalExpansionConfig()
+) extends Retriever:
   /** 把单 query 编码后搜索并重排，最终引用保留 source 与 metadata。 */
   def retrieve(query: String, scope: RetrievalScope, limit: Int): IO[RetrievalError, RetrievalResult] =
     if limit <= 0 then ZIO.succeed(RetrievalResult(Chunk.empty, Chunk.empty))
@@ -269,11 +387,21 @@ final class DefaultRetriever(embeddings: EmbeddingService, vectors: VectorStore,
         candidates <- vectors.searchHybrid(query, queryEmbedding, scope, candidateLimit)
         reranked   <- reranker.rerank(query, candidates, limit)
         // Reranker 可能是远端或业务自定义实现；即使它失陷，也不能注入候选集外或未授权文档。
-        hits <- validateReranked(candidates, reranked, scope, limit)
-        citations = hits.zipWithIndex.map { case (hit, index) =>
-          Citation(s"cite-${index + 1}", hit.chunk.sourceUri, hit.chunk.text.take(500), hit.score)
+        hits     <- validateReranked(candidates, reranked, scope, limit)
+        expanded <- vectors.expandContext(hits, scope, expansion)
+        context  <- validateExpanded(hits, expanded, scope, expansion.maxAdditionalChunks)
+        citations = context.zipWithIndex.map { case (hit, index) =>
+          val origins = hit.chunk.lineage.fold(Chunk.empty[DocumentOrigin])(_.origins)
+          Citation(
+            s"cite-${index + 1}",
+            hit.chunk.sourceUri,
+            hit.chunk.text.take(500),
+            hit.score,
+            origins.map(_.pageNumber).distinct,
+            origins
+          )
         }
-      yield RetrievalResult(hits, citations)
+      yield RetrievalResult(context, citations)
 
   /** 在 Reranker 信任边界之后重新验证身份、授权、数量和数值。
     *
@@ -298,9 +426,29 @@ final class DefaultRetriever(embeddings: EmbeddingService, vectors: VectorStore,
     if valid then ZIO.succeed(hits)
     else ZIO.fail(AgentError.RetrievalFailed("Reranker 输出违反候选身份、权限、数量或有限值契约"))
 
+  /** 扩展候选来自存储 Adapter 而不是 reranker 候选集，因此单独复核授权、重复、数量和数值边界。 */
+  private def validateExpanded(
+      seeds: Chunk[RetrievalHit],
+      expanded: Chunk[RetrievalHit],
+      scope: RetrievalScope,
+      maxAdditionalChunks: Int
+  ): IO[RetrievalError, Chunk[RetrievalHit]] =
+    val seedKeys     = seeds.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
+    val expandedKeys = expanded.map(hit => hit.chunk.documentId -> hit.chunk.id)
+    val valid        =
+      expanded.length <= maxAdditionalChunks && expandedKeys.distinct.length == expandedKeys.length &&
+        expandedKeys.forall(key => !seedKeys.contains(key)) && expanded.forall { hit =>
+          hit.chunk.tenantId == scope.tenantId && hit.chunk.permissions.subsetOf(scope.permissions) &&
+          java.lang.Double.isFinite(hit.score) && hit.signals.values.forall(java.lang.Double.isFinite)
+        }
+    if valid then ZIO.succeed(seeds ++ expanded)
+    else ZIO.fail(AgentError.RetrievalFailed("上下文扩展输出违反权限、数量或有限值契约"))
+
 object DefaultRetriever:
   val layer: URLayer[EmbeddingService & VectorStore & Reranker, Retriever] =
-    ZLayer.fromFunction(DefaultRetriever.apply)
+    ZLayer.fromFunction((embeddings: EmbeddingService, vectors: VectorStore, reranker: Reranker) =>
+      DefaultRetriever(embeddings, vectors, reranker)
+    )
 
 /** 确定性测试 embedding，不应用于真实语义检索。 */
 final class HashEmbedding(val dimension: Int = 64) extends EmbeddingService:

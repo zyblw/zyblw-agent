@@ -8,10 +8,11 @@
 
 ### 我要先跑起来
 
-1. [快速开始](getting-started.md)
-2. [模块选择](modules.md)
-3. [AgentApplication 与 Builder](application-builder.md)
-4. [Provider 与能力协商](providers.md)
+1. [总体使用手册](usage-guide.md)
+2. [快速开始](getting-started.md)
+3. [模块选择](modules.md)
+4. [AgentApplication 与 Builder](application-builder.md)
+5. [Provider 与能力协商](providers.md)
 
 ### 我要开始构建生产业务
 
@@ -43,10 +44,11 @@
 ### 我要接入知识库
 
 1. [Context、Memory 与 RAG](context-memory-rag.md)
-2. [文档 Loader、PDF→Markdown 与结构切分](document-loaders.md)
-3. [Embedding 治理](embedding-governance.md)
-4. [Reranker](reranker.md)
-5. [RAG 评测](rag-evaluation.md)
+2. [PDF RAG 生产流水线](pdf-rag-pipeline.md)
+3. [文档 Loader、PDF→Markdown 与结构切分](document-loaders.md)
+4. [Embedding 治理](embedding-governance.md)
+5. [Reranker](reranker.md)
+6. [RAG 评测](rag-evaluation.md)
 
 ## 开源维护与发布
 
@@ -56,7 +58,8 @@
 - [模块与依赖选择](modules.md)
 - [版本、Maven Central 发布与回滚](releasing.md)
 - [兼容性契约与版本边界](compatibility.md)
-- [升级到 0.3.0：清库重建](upgrading-to-0.3.0.md)
+- [升级到 0.4.0：结构化 RAG 与独立知识 schema](upgrading-to-0.4.0.md)
+- [升级到 0.3.0：核心控制面清库重建](upgrading-to-0.3.0.md)
 - [从 0.1.0 升级到 0.2.0](upgrading-to-0.2.0.md)
 - [从 0.2.0 升级到 0.2.1](upgrading-to-0.2.1.md)
 - [宿主数据库迁移](database-migrations.md)
@@ -69,6 +72,7 @@
 
 ## 接入与运行
 
+- [总体使用手册](usage-guide.md)
 - [快速开始](getting-started.md)
 - [AgentApplication 与 Builder](application-builder.md)
 - [声明式 Workflow Graph](workflow.md)
@@ -90,6 +94,7 @@
 - [Embedding 治理](embedding-governance.md)
 - [Reranker](reranker.md)
 - [文档 Loader、PDF→Markdown 与结构切分](document-loaders.md)
+- [PDF RAG 生产流水线](pdf-rag-pipeline.md)
 - [RAG 评测](rag-evaluation.md)
 
 ## 安全与扩展

@@ -4,7 +4,6 @@ import com.dimafeng.testcontainers.PostgreSQLContainer
 import com.zyblw.agent.core.*
 import com.zyblw.agent.rag.*
 import javax.sql.DataSource
-import org.flywaydb.core.Flyway
 import org.postgresql.ds.PGSimpleDataSource
 import org.testcontainers.utility.DockerImageName
 import zio.*
@@ -17,9 +16,15 @@ import zio.test.*
 object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
 
   /** 同时暴露版本 Store 与检索 Store，确保二者操作同一份真实 schema。 */
-  final private case class Harness(index: KnowledgeIndexStore, vectors: VectorStore)
+  final private case class Harness(
+      index: KnowledgeIndexStore,
+      vectors: VectorStore,
+      firstMigrations: Int,
+      replayMigrations: Int,
+      vectorExtensionVersion: Option[String]
+  )
 
-  /** 启动 `pgvector/pgvector:pg16` 并只执行 optional pgvector baseline。 */
+  /** 启动 `pgvector/pgvector:pg16`，依次执行 public 核心基线和专属 schema 中的知识库基线。 */
   private val harnessLayer: ZLayer[Any, Throwable, Harness] = ZLayer.scoped {
     for
       container <- ZIO.acquireRelease(
@@ -37,22 +42,24 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         value.setPassword(container.password)
         value: DataSource
       }
-      _ <- ZIO.attemptBlocking {
-        Flyway
-          .configure()
-          .dataSource(dataSource)
-          .locations(AgentPostgresMigrations.OptionalPgVectorLocation)
-          .load()
-          .migrate()
-      }
-      knowledge <- PostgresAgentPersistence
+      _               <- AgentPostgresMigrations.migrate(dataSource)
+      firstMigration  <- AgentPostgresMigrations.migrateKnowledge1536(dataSource)
+      replayMigration <- AgentPostgresMigrations.migrateKnowledge1536(dataSource)
+      verification    <- AgentPostgresMigrations.verifyKnowledge1536(dataSource)
+      knowledge       <- PostgresAgentPersistence
         .knowledge(
           1536,
           PostgresHybridSearchConfig(enableHnswIterativeScan = false)
         )
         .build
         .provideSome[Scope](ZLayer.succeed[DataSource](dataSource))
-    yield Harness(knowledge.get[KnowledgeIndexStore], knowledge.get[VectorStore])
+    yield Harness(
+      knowledge.get[KnowledgeIndexStore],
+      knowledge.get[VectorStore],
+      firstMigration.migrationsExecuted,
+      replayMigration.migrationsExecuted,
+      verification.extensionVersion
+    )
   }
 
   /** 创建 1536 维单位向量；slot 用于制造可预测 cosine 排名。 */
@@ -95,7 +102,10 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
       text: String,
       searchText: String,
       vector: Embedding,
-      permissions: Set[String] = Set("read")
+      permissions: Set[String] = Set("read"),
+      ordinal: Int = 0,
+      previous: Option[String] = None,
+      next: Option[String] = None
   ): IndexedChunk = IndexedChunk(
     DocumentChunk(
       id,
@@ -106,7 +116,24 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
       permissions,
       Map("section" -> id),
       Some(searchText),
-      build.version
+      build.version,
+      Some(
+        ChunkLineage(
+          Some("section-a"),
+          ordinal,
+          previous,
+          next,
+          headingPath = Chunk("测试篇", "section-a"),
+          origins = Chunk(
+            DocumentOrigin(
+              ordinal + 1,
+              Some(DocumentBoundingBox(10, 20, 100, 40, Some(612), Some(792))),
+              Some(s"block-$ordinal")
+            )
+          ),
+          blockIds = Chunk(s"block-$ordinal")
+        )
+      )
     ),
     vector
   )
@@ -121,13 +148,27 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
           request(tenant, "ingestion-1", "first", ActiveVersionExpectation.NoActiveVersion)
         )
         firstChunks = Chunk(
-          indexed(first, "doc-1-0", "桂枝汤用于测试", "桂枝 汤 测试", unitVector(0)),
-          indexed(first, "doc-1-1", "租户内受限资料", "受限 资料", unitVector(1), Set("private"))
+          indexed(first, "doc-1-0", "桂枝汤用于测试", "桂枝 汤 测试", unitVector(0), next = Some("doc-1-1")),
+          indexed(
+            first,
+            "doc-1-1",
+            "租户内受限资料",
+            "受限 资料",
+            unitVector(1),
+            Set("private"),
+            ordinal = 1,
+            previous = Some("doc-1-0")
+          )
         )
-        _           <- harness.index.stage(first, firstChunks)
-        before      <- harness.vectors.searchHybrid("桂枝", unitVector(0), scope, 10)
-        firstReady  <- harness.index.activate(first, 2)
-        after       <- harness.vectors.searchHybrid("桂枝", unitVector(0), scope, 10)
+        _          <- harness.index.stage(first, firstChunks)
+        before     <- harness.vectors.searchHybrid("桂枝", unitVector(0), scope, 10)
+        firstReady <- harness.index.activate(first, 2)
+        after      <- harness.vectors.searchHybrid("桂枝", unitVector(0), scope, 10)
+        expansion  <- harness.vectors.expandContext(
+          after,
+          scope,
+          RetrievalExpansionConfig(parentHitThreshold = 1)
+        )
         firstReplay <- harness.index.begin(
           request(tenant, "ingestion-1", "first", ActiveVersionExpectation.NoActiveVersion)
         )
@@ -147,12 +188,42 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         purged        <- harness.index.purgeInactive(retired.updatedAt.plusSeconds(1), 10)
         goneFirst     <- harness.index.find(KnowledgeDocumentKey(tenant, "doc-1"), "ingestion-1")
         goneSecond    <- harness.index.find(KnowledgeDocumentKey(tenant, "doc-1"), "ingestion-2")
+        sharedChunkA = DocumentChunk(
+          "shared-chunk",
+          "doc-a",
+          "共享标识的第一份文档",
+          "doc://a",
+          tenant,
+          Set("read"),
+          searchText = Some("共享 标识 第一份")
+        )
+        sharedChunkB = DocumentChunk(
+          "shared-chunk",
+          "doc-b",
+          "共享标识的第二份文档",
+          "doc://b",
+          tenant,
+          Set("read"),
+          searchText = Some("共享 标识 第二份")
+        )
+        _ <- harness.vectors.upsert(
+          Chunk(IndexedChunk(sharedChunkA, unitVector(3)), IndexedChunk(sharedChunkB, unitVector(3)))
+        )
+        sharedHits <- harness.vectors.searchHybrid("共享标识", unitVector(3), scope, 10)
       yield assertTrue(
         before.isEmpty,
+        harness.firstMigrations == 1,
+        harness.replayMigrations == 0,
+        harness.vectorExtensionVersion.exists(_.startsWith("0.8.")),
         firstReady.active,
         firstReady.chunkCount == 2,
         after.map(_.chunk.id) == Chunk("doc-1-0"),
         after.head.signals.contains("textRank"),
+        after.head.chunk.lineage.exists(_.pageNumbers == Chunk(1)),
+        after.head.chunk.lineage.exists(_.headingPath == Chunk("测试篇", "section-a")),
+        after.head.chunk.lineage.exists(_.origins.head.boundingBox.nonEmpty),
+        after.head.chunk.lineage.exists(_.blockIds == Chunk("block-0")),
+        expansion.isEmpty,
         firstReplay == first,
         wrongCount.isFailure,
         afterRollback.map(_.chunk.id) == Chunk("doc-1-0"),
@@ -165,7 +236,8 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         afterRetire.isEmpty,
         purged == 2L,
         goneFirst.isEmpty,
-        goneSecond.isEmpty
+        goneSecond.isEmpty,
+        sharedHits.filter(_.chunk.id == "shared-chunk").map(_.chunk.documentId).toSet == Set("doc-a", "doc-b")
       )).provideLayer(harnessLayer)
     } @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@ TestAspect.timeout(
       3.minutes

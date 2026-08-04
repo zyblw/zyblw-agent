@@ -124,7 +124,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
     withConnection { connection =>
       jdbc("mark failed") {
         val statement = connection.prepareStatement(
-          """UPDATE agent_knowledge_documents
+          """UPDATE zyblw_agent_knowledge.agent_knowledge_documents
             |SET status = 'failed', active = FALSE, failure_code = ?, updated_at = now()
             |WHERE tenant_id = ? AND document_id = ? AND index_version = ? AND status = 'building'""".stripMargin
         )
@@ -179,7 +179,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
                 _ <- deletePublished(connection, key)
                 _ <- jdbc("retire manifest") {
                   val statement = connection.prepareStatement(
-                    """UPDATE agent_knowledge_documents
+                    """UPDATE zyblw_agent_knowledge.agent_knowledge_documents
                                     |SET status = 'retired', active = FALSE, updated_at = CURRENT_TIMESTAMP
                                     |WHERE tenant_id = ? AND document_id = ? AND index_version = ?
                                     |  AND status = 'ready' AND active = TRUE""".stripMargin
@@ -215,7 +215,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
           val statement = connection.prepareStatement(
             """WITH candidates AS (
             |  SELECT tenant_id, document_id, index_version
-            |  FROM agent_knowledge_documents
+            |  FROM zyblw_agent_knowledge.agent_knowledge_documents
             |  WHERE active = FALSE
             |    AND status IN ('superseded', 'failed', 'retired')
             |    AND updated_at < ?
@@ -223,7 +223,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
             |  FOR UPDATE SKIP LOCKED
             |  LIMIT ?
             |)
-            |DELETE FROM agent_knowledge_documents document
+            |DELETE FROM zyblw_agent_knowledge.agent_knowledge_documents document
             |USING candidates candidate
             |WHERE document.tenant_id = candidate.tenant_id
             |  AND document.document_id = candidate.document_id
@@ -262,7 +262,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
       )
       _ <- jdbc("insert manifest") {
         val statement = connection.prepareStatement(
-          """INSERT INTO agent_knowledge_documents
+          """INSERT INTO zyblw_agent_knowledge.agent_knowledge_documents
                  |(tenant_id, document_id, index_version, ingestion_id, source_uri, content_hash,
                  | permissions, metadata, embedding_provider, embedding_model, embedding_dimension,
                  | embedding_max_batch_size, embedding_supports_dimensions, indexing_strategy,
@@ -307,7 +307,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
         .unless(count == expectedChunkCount)
       _ <- jdbc("supersede active manifest") {
         val statement = connection.prepareStatement(
-          """UPDATE agent_knowledge_documents
+          """UPDATE zyblw_agent_knowledge.agent_knowledge_documents
                  |SET status = 'superseded', active = FALSE, updated_at = now()
                  |WHERE tenant_id = ? AND document_id = ? AND active = TRUE AND index_version <> ?""".stripMargin
         )
@@ -321,7 +321,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
       }
       _ <- jdbc("delete old published chunks") {
         val statement = connection.prepareStatement(
-          "DELETE FROM agent_knowledge_chunks WHERE tenant_id = ? AND document_id = ?"
+          "DELETE FROM zyblw_agent_knowledge.agent_knowledge_chunks WHERE tenant_id = ? AND document_id = ?"
         )
         try
           statement.setString(1, build.key.tenantId.value)
@@ -332,12 +332,14 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
       }
       _ <- jdbc("publish staged chunks") {
         val statement = connection.prepareStatement(
-          """INSERT INTO agent_knowledge_chunks
+          """INSERT INTO zyblw_agent_knowledge.agent_knowledge_chunks
                  |(tenant_id, chunk_id, document_id, index_version, chunk_text, search_text,
-                 | source_uri, permissions, metadata, embedding)
+                 | source_uri, permissions, metadata, embedding, parent_id, lineage_ordinal,
+                 | previous_chunk_id, next_chunk_id, heading_path, page_numbers, origins, block_ids)
                  |SELECT tenant_id, chunk_id, document_id, index_version, chunk_text, search_text,
-                 |       source_uri, permissions, metadata, embedding
-                 |FROM agent_knowledge_chunk_staging
+                 |       source_uri, permissions, metadata, embedding, parent_id, lineage_ordinal,
+                 |       previous_chunk_id, next_chunk_id, heading_path, page_numbers, origins, block_ids
+                 |FROM zyblw_agent_knowledge.agent_knowledge_chunk_staging
                  |WHERE tenant_id = ? AND document_id = ? AND index_version = ?""".stripMargin
         )
         try
@@ -367,10 +369,11 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
     else
       jdbc("stage chunks") {
         val statement = connection.prepareStatement(
-          """INSERT INTO agent_knowledge_chunk_staging
+          """INSERT INTO zyblw_agent_knowledge.agent_knowledge_chunk_staging
           |(tenant_id, document_id, index_version, chunk_id, chunk_text, search_text,
-          | source_uri, permissions, metadata, embedding)
-          |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::vector)
+          | source_uri, permissions, metadata, embedding, parent_id, lineage_ordinal,
+          | previous_chunk_id, next_chunk_id, heading_path, page_numbers, origins, block_ids)
+          |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::public.vector, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
           |ON CONFLICT (tenant_id, document_id, index_version, chunk_id) DO UPDATE SET
           |chunk_text = EXCLUDED.chunk_text,
           |search_text = EXCLUDED.search_text,
@@ -378,6 +381,14 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
           |permissions = EXCLUDED.permissions,
           |metadata = EXCLUDED.metadata,
           |embedding = EXCLUDED.embedding,
+          |parent_id = EXCLUDED.parent_id,
+          |lineage_ordinal = EXCLUDED.lineage_ordinal,
+          |previous_chunk_id = EXCLUDED.previous_chunk_id,
+          |next_chunk_id = EXCLUDED.next_chunk_id,
+          |heading_path = EXCLUDED.heading_path,
+          |page_numbers = EXCLUDED.page_numbers,
+          |origins = EXCLUDED.origins,
+          |block_ids = EXCLUDED.block_ids,
           |updated_at = now()""".stripMargin
         )
         try
@@ -393,6 +404,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
             statement.setArray(8, connection.createArrayOf("text", chunk.permissions.toArray))
             statement.setString(9, chunk.metadata.toJson)
             statement.setString(10, vectorLiteral(indexed.embedding))
+            bindLineage(statement, connection, 11, chunk.lineage)
             statement.addBatch()
           }
           statement.executeBatch()
@@ -420,11 +432,36 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
         )
       case None => ZIO.unit
 
+  /** 以固定列顺序绑定可选谱系。空谱系写 SQL NULL/空数组，不伪造页码或父子关系。 */
+  private def bindLineage(
+      statement: java.sql.PreparedStatement,
+      connection: Connection,
+      start: Int,
+      lineage: Option[ChunkLineage]
+  ): Unit =
+    statement.setString(start, lineage.flatMap(_.parentId).orNull)
+    statement.setObject(start + 1, lineage.map(value => Int.box(value.ordinal)).orNull)
+    statement.setString(start + 2, lineage.flatMap(_.previousChunkId).orNull)
+    statement.setString(start + 3, lineage.flatMap(_.nextChunkId).orNull)
+    statement.setArray(
+      start + 4,
+      connection.createArrayOf("text", lineage.fold(Chunk.empty[String])(_.headingPath).toArray)
+    )
+    statement.setArray(
+      start + 5,
+      connection.createArrayOf("integer", lineage.fold(Chunk.empty[Int])(_.pageNumbers).map(Int.box).toArray)
+    )
+    statement.setString(start + 6, lineage.fold(Chunk.empty[DocumentOrigin])(_.origins).toJson)
+    statement.setArray(
+      start + 7,
+      connection.createArrayOf("text", lineage.fold(Chunk.empty[String])(_.blockIds).toArray)
+    )
+
   /** 清理一个版本的全部暂存行；用于失败重试和成功发布。 */
   private def clearStaging(connection: Connection, build: KnowledgeIndexBuild): IO[RetrievalError, Unit] =
     jdbc("clear staging") {
       val statement = connection.prepareStatement(
-        "DELETE FROM agent_knowledge_chunk_staging WHERE tenant_id = ? AND document_id = ? AND index_version = ?"
+        "DELETE FROM zyblw_agent_knowledge.agent_knowledge_chunk_staging WHERE tenant_id = ? AND document_id = ? AND index_version = ?"
       )
       try
         statement.setString(1, build.key.tenantId.value)
@@ -445,7 +482,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
       chunkCount: Int = 0
   ): IO[RetrievalError, Unit] = jdbc("update manifest status") {
     val statement = connection.prepareStatement(
-      """UPDATE agent_knowledge_documents
+      """UPDATE zyblw_agent_knowledge.agent_knowledge_documents
         |SET status = ?, active = ?, failure_code = ?, chunk_count = ?, updated_at = now()
         |WHERE tenant_id = ? AND document_id = ? AND index_version = ?""".stripMargin
     )
@@ -466,7 +503,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
   private def touchBuild(connection: Connection, build: KnowledgeIndexBuild): IO[RetrievalError, Unit] =
     jdbc("touch build") {
       val statement = connection.prepareStatement(
-        """UPDATE agent_knowledge_documents SET updated_at = now()
+        """UPDATE zyblw_agent_knowledge.agent_knowledge_documents SET updated_at = now()
         |WHERE tenant_id = ? AND document_id = ? AND index_version = ? AND status = 'building'""".stripMargin
       )
       try
@@ -483,7 +520,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
   private def stagedCount(connection: Connection, build: KnowledgeIndexBuild): IO[RetrievalError, Int] =
     jdbc("count staging") {
       val statement = connection.prepareStatement(
-        """SELECT count(*) FROM agent_knowledge_chunk_staging
+        """SELECT count(*) FROM zyblw_agent_knowledge.agent_knowledge_chunk_staging
         |WHERE tenant_id = ? AND document_id = ? AND index_version = ?""".stripMargin
       )
       try
@@ -515,7 +552,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
   ): IO[RetrievalError, Option[Long]] =
     jdbc("select active version") {
       val statement = connection.prepareStatement(
-        "SELECT index_version FROM agent_knowledge_documents WHERE tenant_id = ? AND document_id = ? AND active = TRUE"
+        "SELECT index_version FROM zyblw_agent_knowledge.agent_knowledge_documents WHERE tenant_id = ? AND document_id = ? AND active = TRUE"
       )
       try
         statement.setString(1, key.tenantId.value)
@@ -529,7 +566,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
   private def nextVersion(connection: Connection, key: KnowledgeDocumentKey): IO[RetrievalError, Long] =
     jdbc("next version") {
       val statement = connection.prepareStatement(
-        "SELECT COALESCE(max(index_version), 0) + 1 FROM agent_knowledge_documents WHERE tenant_id = ? AND document_id = ?"
+        "SELECT COALESCE(max(index_version), 0) + 1 FROM zyblw_agent_knowledge.agent_knowledge_documents WHERE tenant_id = ? AND document_id = ?"
       )
       try
         statement.setString(1, key.tenantId.value)
@@ -609,7 +646,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
   private def deletePublished(connection: Connection, key: KnowledgeDocumentKey): IO[RetrievalError, Unit] =
     jdbc("delete published chunks") {
       val statement = connection.prepareStatement(
-        "DELETE FROM agent_knowledge_chunks WHERE tenant_id = ? AND document_id = ?"
+        "DELETE FROM zyblw_agent_knowledge.agent_knowledge_chunks WHERE tenant_id = ? AND document_id = ?"
       )
       try
         statement.setString(1, key.tenantId.value)
@@ -757,7 +794,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
       |       permissions, metadata::text, embedding_provider, embedding_model, embedding_dimension,
       |       embedding_max_batch_size, embedding_supports_dimensions, indexing_strategy,
       |       status, active, chunk_count, failure_code, created_at, updated_at
-      |FROM agent_knowledge_documents""".stripMargin
+      |FROM zyblw_agent_knowledge.agent_knowledge_documents""".stripMargin
 
 object PostgresKnowledgeIndexStore:
   /** 构造与 optional migration 固定维度一致的 Store Layer。 */
