@@ -15,8 +15,7 @@
     "**/.bloop/**": true,
     "**/.bsp/**": true,
     "**/.scala-build/**": true,
-    "**/target/**": true,
-    "**/target": true
+    "**/target/**": true
   },
   "files.exclude": {
     "**/.bloop": true,
