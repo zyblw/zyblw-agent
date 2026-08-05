@@ -10,6 +10,7 @@ import { SecurityArtifacts } from '@/components/SecurityArtifacts';
 import { EvalAnalytics } from '@/components/EvalAnalytics';
 import {
   MOCK_RUNS,
+  MOCK_KNOWLEDGE_DOCS,
   MOCK_PDF_BLOCKS,
   MOCK_RETRIEVAL_HITS,
   MOCK_WORKERS,
@@ -53,6 +54,7 @@ export default function Home() {
 
         {activeTab === 'rag' && (
           <RagInspector
+            initialDocs={MOCK_KNOWLEDGE_DOCS}
             blocks={MOCK_PDF_BLOCKS}
             hits={MOCK_RETRIEVAL_HITS}
           />

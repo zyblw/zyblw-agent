@@ -57,29 +57,29 @@ export const RunInspector: React.FC<RunInspectorProps> = ({
   const handleStartSseStream = () => {
     if (!ssePrompt.trim()) return;
     setIsStreaming(true);
-    setSseLogs([`[INFO] POST /api/v1/agents/${currentRun.agentId}/runs 提交接收`]);
+    setSseLogs([`[系统日志] POST /api/v1/agents/${currentRun.agentId}/runs 命令提交成功`]);
 
     setTimeout(() => {
       setSseLogs((prev) => [
         ...prev,
-        `[SSE] event: run.started { runId: "run-live-${Date.now()}" }`,
-        `[SSE] event: delta { text: "收到您的 Prompt，正在解析语义与查询依赖..." }`
+        `[SSE 事件流] event: run.started { runId: "run-live-${Date.now()}" }`,
+        `[SSE 事件流] event: delta { text: "已收到您的 Prompt，正在解析上下文并检索已授权 RAG 知识..." }`
       ]);
     }, 600);
 
     setTimeout(() => {
       setSseLogs((prev) => [
         ...prev,
-        `[SSE] event: tool.started { name: "knowledge_search", callId: "call-live-1" }`,
-        `[SSE] event: tool.completed { name: "knowledge_search", status: "success" }`
+        `[SSE 事件流] event: tool.started { name: "knowledge_search", callId: "call-live-1" }`,
+        `[SSE 事件流] event: tool.completed { name: "knowledge_search", status: "success" }`
       ]);
     }, 1500);
 
     setTimeout(() => {
       setSseLogs((prev) => [
         ...prev,
-        `[SSE] event: delta { text: "已根据已授权 RAG 谱系提取证据，结论为：架构模式符合 0.4.0 规范。" }`,
-        `[SSE] event: run.completed { status: "Completed" }`
+        `[SSE 事件流] event: delta { text: "根据已授权知识库谱系得出结论：架构模式完全符合 0.4.0 规范。" }`,
+        `[SSE 事件流] event: run.completed { status: "Completed" }`
       ]);
       setIsStreaming(false);
     }, 2800);
@@ -107,7 +107,7 @@ export const RunInspector: React.FC<RunInspectorProps> = ({
         <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-3">
           <h2 className="font-bold text-sm text-slate-200 tracking-wide flex items-center gap-2">
             <Terminal className="w-4 h-4 text-indigo-400" />
-            Agent Runs ({runs.length})
+            智能体运行实例 ({runs.length})
           </h2>
           <span className="text-[10px] text-slate-500 font-mono">Durable Runs</span>
         </div>
@@ -137,7 +137,7 @@ export const RunInspector: React.FC<RunInspectorProps> = ({
                       run.status
                     )}`}
                   >
-                    {run.status}
+                    {run.status === 'Paused' ? '等待审批' : run.status === 'Completed' ? '已完成' : run.status}
                   </span>
                 </div>
                 <p className="text-xs text-slate-300 line-clamp-2 mb-2 font-medium">
@@ -145,7 +145,7 @@ export const RunInspector: React.FC<RunInspectorProps> = ({
                 </p>
                 <div className="flex items-center justify-between text-[11px] text-slate-500 font-mono">
                   <span>{new Date(run.createdAt).toLocaleTimeString()}</span>
-                  <span>{run.cumulativeUsage.totalTokens} tokens</span>
+                  <span>{run.cumulativeUsage.totalTokens} Tokens</span>
                 </div>
               </div>
             );
@@ -176,16 +176,16 @@ export const RunInspector: React.FC<RunInspectorProps> = ({
               className="flex items-center space-x-1.5 text-xs bg-amber-500/10 text-amber-300 border border-amber-500/30 px-3 py-1.5 rounded-lg font-medium hover:bg-amber-500/20 transition-all"
             >
               <Flame className="w-3.5 h-3.5 text-amber-400" />
-              <span>Trace ID</span>
+              <span>在 Langfuse 中打开 Trace</span>
               <ExternalLink className="w-3 h-3 text-amber-400 opacity-70" />
             </a>
           )}
         </div>
 
         {/* Step Waterfall Timeline */}
-        <div className="flex-1 overflow-y-auto space-y-4 pr-1">
+        <div className="flex-1 overflow-y-auto space-y-4 pr-1 custom-scrollbar">
           <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-            Execution Step Timeline
+            执行步骤时间线 (Step Execution Timeline)
           </h3>
 
           {currentRun.steps.map((step) => (
@@ -211,12 +211,12 @@ export const RunInspector: React.FC<RunInspectorProps> = ({
                 <div className="mt-2 pt-2 border-t border-slate-800/60 flex items-center space-x-4 text-[11px] text-slate-400 font-mono">
                   <span className="flex items-center gap-1">
                     <Coins className="w-3 h-3 text-amber-400" />
-                    Input: {step.usage.inputTokens}
+                    输入: {step.usage.inputTokens}
                   </span>
-                  <span>Output: {step.usage.outputTokens}</span>
+                  <span>输出: {step.usage.outputTokens}</span>
                   {step.usage.promptCacheHits ? (
                     <span className="text-emerald-400">
-                      Cache Hits: {step.usage.promptCacheHits}
+                      Cache 命中: {step.usage.promptCacheHits}
                     </span>
                   ) : null}
                 </div>
@@ -244,7 +244,7 @@ export const RunInspector: React.FC<RunInspectorProps> = ({
                               : 'bg-slate-800 text-slate-300'
                           }`}
                         >
-                          Risk: {tool.riskLevel}
+                          风险等级: {tool.riskLevel}
                         </span>
                       </div>
                       <div className="bg-slate-950 p-2 rounded font-mono text-[11px] text-slate-300 overflow-x-auto">
@@ -263,9 +263,9 @@ export const RunInspector: React.FC<RunInspectorProps> = ({
           <div className="mt-4 pt-3 border-t border-slate-800 bg-emerald-950/20 border-emerald-500/30 p-3.5 rounded-xl border">
             <h4 className="text-xs font-bold text-emerald-400 flex items-center gap-1.5 mb-1">
               <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-              Final Output Verified
+              最终输出答案已验证
             </h4>
-            <p className="text-xs text-slate-200 leading-relaxed font-mono">
+            <p className="text-xs text-slate-200 leading-relaxed font-sans">
               {currentRun.finalAnswer}
             </p>
           </div>
@@ -279,10 +279,10 @@ export const RunInspector: React.FC<RunInspectorProps> = ({
           <div className="pb-3 border-b border-slate-800 mb-3 flex items-center justify-between">
             <h3 className="font-bold text-xs uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
               <ShieldAlert className="w-4 h-4 text-amber-400" />
-              Human-in-the-Loop Approvals
+              Human-in-the-Loop 人工写工具审批
             </h3>
             <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full font-mono font-bold">
-              {approvals.length} Pending
+              {approvals.length} 个待审批
             </span>
           </div>
 
@@ -293,9 +293,9 @@ export const RunInspector: React.FC<RunInspectorProps> = ({
           )}
 
           {approvals.length === 0 ? (
-            <div className="py-6 text-center text-xs text-slate-500 font-mono flex flex-col items-center">
+            <div className="py-6 text-center text-xs text-slate-500 font-sans flex flex-col items-center">
               <ShieldCheck className="w-8 h-8 text-slate-600 mb-2 opacity-50" />
-              没有处于暂停状态的写工具审批请求
+              当前没有处于暂停等待状态的写工具审批请求
             </div>
           ) : (
             <div className="space-y-3">
@@ -307,7 +307,7 @@ export const RunInspector: React.FC<RunInspectorProps> = ({
                   <div className="flex items-center justify-between">
                     <span className="font-mono font-bold text-amber-300">{item.toolName}</span>
                     <span className="bg-rose-500/20 text-rose-300 px-2 py-0.5 rounded text-[10px] font-bold">
-                      {item.riskLevel} Risk
+                      {item.riskLevel} 级风险
                     </span>
                   </div>
 
@@ -343,7 +343,7 @@ export const RunInspector: React.FC<RunInspectorProps> = ({
           <div className="pb-3 border-b border-slate-800 mb-3 flex items-center justify-between">
             <h3 className="font-bold text-xs uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
               <Zap className="w-4 h-4 text-cyan-400" />
-              SSE Live Event Debugger
+              SSE 事件流实时调试器
             </h3>
             <span className="text-[10px] text-slate-500 font-mono">/api/v1/events/stream</span>
           </div>
@@ -354,7 +354,7 @@ export const RunInspector: React.FC<RunInspectorProps> = ({
               type="text"
               value={ssePrompt}
               onChange={(e) => setSsePrompt(e.target.value)}
-              placeholder="测试提交新 Run并模拟 SSE 流..."
+              placeholder="输入测试 Prompt 并观察流式 SSE 事件..."
               className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-sans"
             />
             <button
@@ -363,14 +363,14 @@ export const RunInspector: React.FC<RunInspectorProps> = ({
               className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1 transition-all"
             >
               <Play className="w-3.5 h-3.5" />
-              <span>测试</span>
+              <span>提交</span>
             </button>
           </div>
 
           {/* Terminal Console Log */}
-          <div className="flex-1 bg-slate-950 rounded-xl p-3 border border-slate-800/80 font-mono text-[11px] text-slate-300 overflow-y-auto space-y-1.5">
+          <div className="flex-1 bg-slate-950 rounded-xl p-3 border border-slate-800/80 font-mono text-[11px] text-slate-300 overflow-y-auto space-y-1.5 custom-scrollbar">
             {sseLogs.length === 0 ? (
-              <span className="text-slate-600 italic">等待测试命令提交以开始 SSE 捕获...</span>
+              <span className="text-slate-600 italic">等待提交测试 Prompt 以捕获 SSE 事件流...</span>
             ) : (
               sseLogs.map((log, index) => (
                 <div key={index} className="leading-relaxed">

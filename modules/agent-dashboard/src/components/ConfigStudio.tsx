@@ -12,8 +12,7 @@ import {
   Save,
   Settings,
   Sliders,
-  Sparkles,
-  Zap
+  Sparkles
 } from 'lucide-react';
 
 interface ConfigStudioProps {
@@ -74,10 +73,10 @@ ZYBLW_AGENT_RERANK_ENABLED=${config.rerankEnabled}
           </div>
           <div>
             <h2 className="font-bold text-base text-slate-100">
-              Live Runtime Config & Parameter Tuning Studio
+              运行时配置与参数调优面板 (Live Config Studio)
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              Interactive Parameter Adjustments • Dynamic Scala ZLayer & .env Generator
+              实时参数调优 • 动态生成 Scala ZLayer 与 .env 环境变量代码
             </p>
           </div>
         </div>
@@ -117,7 +116,7 @@ ZYBLW_AGENT_RERANK_ENABLED=${config.rerankEnabled}
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="text-[11px] font-mono text-slate-400 block mb-1">
-                  DEFAULT PROVIDER
+                  默认 PROVIDER
                 </label>
                 <input
                   type="text"
@@ -129,7 +128,7 @@ ZYBLW_AGENT_RERANK_ENABLED=${config.rerankEnabled}
 
               <div>
                 <label className="text-[11px] font-mono text-slate-400 block mb-1">
-                  DEFAULT MODEL ID
+                  默认模型 ID (MODEL ID)
                 </label>
                 <input
                   type="text"
@@ -143,7 +142,7 @@ ZYBLW_AGENT_RERANK_ENABLED=${config.rerankEnabled}
             {/* Temperature Slider */}
             <div>
               <div className="flex justify-between items-center text-xs mb-1">
-                <span className="text-slate-400 font-mono">TEMPERATURE</span>
+                <span className="text-slate-400 font-mono">模型随机采样温度 (TEMPERATURE)</span>
                 <span className="font-mono text-indigo-400 font-bold">{config.temperature}</span>
               </div>
               <input
@@ -168,7 +167,7 @@ ZYBLW_AGENT_RERANK_ENABLED=${config.rerankEnabled}
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="text-[11px] font-mono text-slate-400 block mb-1">
-                  RETRIEVAL TOP-K LIMIT
+                  检索 TOP-K 上限
                 </label>
                 <input
                   type="number"
@@ -180,7 +179,7 @@ ZYBLW_AGENT_RERANK_ENABLED=${config.rerankEnabled}
 
               <div>
                 <label className="text-[11px] font-mono text-slate-400 block mb-1">
-                  NEIGHBOR EXPANSION RADIUS (0..1)
+                  邻近块扩展半径 (0..1)
                 </label>
                 <input
                   type="number"
@@ -217,7 +216,7 @@ ZYBLW_AGENT_RERANK_ENABLED=${config.rerankEnabled}
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="text-[11px] font-mono text-slate-400 block mb-1">
-                  WORKER CONCURRENCY LANES
+                  WORKER 并发车道数 (CONCURRENCY)
                 </label>
                 <input
                   type="number"
@@ -229,7 +228,7 @@ ZYBLW_AGENT_RERANK_ENABLED=${config.rerankEnabled}
 
               <div>
                 <label className="text-[11px] font-mono text-slate-400 block mb-1">
-                  LEASE TIMEOUT (SECONDS)
+                  租约超时时间 (LEASE TIMEOUT - 秒)
                 </label>
                 <input
                   type="number"
@@ -260,7 +259,7 @@ ZYBLW_AGENT_RERANK_ENABLED=${config.rerankEnabled}
               </button>
             </div>
 
-            <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 font-mono text-[11px] text-slate-300 overflow-x-auto">
+            <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 font-mono text-[11px] text-slate-300 overflow-x-auto custom-scrollbar">
               <pre>{generateScalaSnippet()}</pre>
             </div>
           </div>
@@ -274,7 +273,7 @@ ZYBLW_AGENT_RERANK_ENABLED=${config.rerankEnabled}
               </h3>
             </div>
 
-            <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 font-mono text-[11px] text-emerald-400 overflow-x-auto">
+            <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 font-mono text-[11px] text-emerald-400 overflow-x-auto custom-scrollbar">
               <pre>{generateEnvSnippet()}</pre>
             </div>
           </div>

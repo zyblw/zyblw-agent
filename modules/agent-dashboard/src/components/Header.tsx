@@ -15,7 +15,7 @@ import {
   Zap
 } from 'lucide-react';
 
-export type DashboardTab = 'runs' | 'rag' | 'queue' | 'evals' | 'config' | 'security';
+export type DashboardTab = 'runs' | 'rag' | 'queue' | 'config' | 'security' | 'evals';
 
 interface HeaderProps {
   activeTab: DashboardTab;
@@ -52,16 +52,16 @@ export const Header: React.FC<HeaderProps> = ({
               </span>
               <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                ZIO 2 Active
+                ZIO 2 运行正常
               </span>
             </div>
-            <p className="text-xs text-slate-400 font-mono">
-              Enterprise Agent Runtime & Lineage Console
+            <p className="text-xs text-slate-400 font-sans">
+              企业级智能体运行时与 RAG 谱系管理控制台
             </p>
           </div>
         </div>
 
-        {/* Tab Navigation */}
+        {/* Tab Navigation in Chinese */}
         <nav className="flex items-center space-x-1 bg-slate-900/90 p-1.5 rounded-xl border border-slate-800 shadow-inner overflow-x-auto">
           <button
             onClick={() => onTabChange('runs')}
@@ -72,7 +72,7 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           >
             <Terminal className="w-3.5 h-3.5" />
-            <span>Run Inspector</span>
+            <span>智能体运行追溯</span>
           </button>
 
           <button
@@ -84,7 +84,7 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
-            <span>RAG & PDF Lineage</span>
+            <span>RAG 知识库与解析</span>
           </button>
 
           <button
@@ -96,7 +96,7 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           >
             <Cpu className="w-3.5 h-3.5" />
-            <span>Queue & Workers</span>
+            <span>Worker 队列与节点</span>
           </button>
 
           <button
@@ -108,7 +108,7 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           >
             <Sliders className="w-3.5 h-3.5" />
-            <span>Config Studio</span>
+            <span>运行时配置与调优</span>
           </button>
 
           <button
@@ -120,7 +120,7 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           >
             <Shield className="w-3.5 h-3.5" />
-            <span>Guardrails & Artifacts</span>
+            <span>安全规则与文件</span>
           </button>
 
           <button
@@ -132,7 +132,7 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           >
             <TrendingUp className="w-3.5 h-3.5" />
-            <span>Eval Trends</span>
+            <span>评测与质量大盘</span>
           </button>
         </nav>
 
@@ -156,10 +156,10 @@ export const Header: React.FC<HeaderProps> = ({
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center space-x-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150"
-            title="Open Deep Traces in Langfuse Platform"
+            title="跳转至 Langfuse 深度 Flamegraph 追踪页面"
           >
             <Flame className="w-3.5 h-3.5 text-amber-400" />
-            <span>Langfuse</span>
+            <span>Langfuse 追踪</span>
             <ExternalLink className="w-3 h-3 text-amber-400 opacity-70" />
           </a>
 
@@ -169,10 +169,10 @@ export const Header: React.FC<HeaderProps> = ({
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center space-x-1.5 bg-orange-500/10 hover:bg-orange-500/20 text-orange-300 border border-orange-500/30 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150"
-            title="Open SRE Prometheus Metrics in Grafana"
+            title="跳转至 Grafana Prometheus SRE 指标监控大盘"
           >
             <Activity className="w-3.5 h-3.5 text-orange-400" />
-            <span>Grafana</span>
+            <span>Grafana 监控</span>
             <ExternalLink className="w-3 h-3 text-orange-400 opacity-70" />
           </a>
         </div>

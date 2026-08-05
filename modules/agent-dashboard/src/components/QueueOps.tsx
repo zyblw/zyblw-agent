@@ -3,16 +3,11 @@
 import React, { useState } from 'react';
 import { QueueSnapshotView, WorkerNodeView } from '@/types/agent';
 import {
-  Activity,
-  AlertTriangle,
   Clock,
   Cpu,
-  Layers,
-  RefreshCw,
   RotateCcw,
   Server,
-  ShieldCheck,
-  Zap
+  ShieldCheck
 } from 'lucide-react';
 
 interface QueueOpsProps {
@@ -40,10 +35,10 @@ export const QueueOps: React.FC<QueueOpsProps> = ({ workers, queueSnapshot }) =>
           </div>
           <div>
             <h2 className="font-bold text-base text-slate-100">
-              Distributed Command Worker & Lease Operations
+              分布式 Command Worker 与写租约运维控制台
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              PostgreSQL Queue • Claim/Lease/Heartbeat Fencing • Monolithic Dispatch Order Guaranteed
+              PostgreSQL 控制队列 • Claim/Lease/Heartbeat Fencing • 串行分发保证
             </p>
           </div>
         </div>
@@ -68,62 +63,62 @@ export const QueueOps: React.FC<QueueOpsProps> = ({ workers, queueSnapshot }) =>
       <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4">
         <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl shadow-lg backdrop-blur-sm">
           <div className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">
-            QUEUED COMMANDS
+            排队命令 (QUEUED)
           </div>
           <div className="text-2xl font-bold text-slate-100 font-mono">
             {snapshot.queuedCommands}
           </div>
-          <span className="text-[10px] text-slate-400 mt-1 block">Pending start/cancel</span>
+          <span className="text-[10px] text-slate-400 mt-1 block">等待 Start/Cancel 命令</span>
         </div>
 
         <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl shadow-lg backdrop-blur-sm">
           <div className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">
-            DISPATCHABLE RUNS
+            可调度 (DISPATCHABLE)
           </div>
           <div className="text-2xl font-bold text-indigo-400 font-mono">
             {snapshot.dispatchableRuns}
           </div>
-          <span className="text-[10px] text-slate-400 mt-1 block">Ready for claim</span>
+          <span className="text-[10px] text-slate-400 mt-1 block">准备被 Worker Claim</span>
         </div>
 
         <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl shadow-lg backdrop-blur-sm">
           <div className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">
-            LEASED RUNS
+            活动租约 (LEASED)
           </div>
           <div className="text-2xl font-bold text-cyan-400 font-mono">
             {snapshot.leasedRuns}
           </div>
-          <span className="text-[10px] text-slate-400 mt-1 block">Active worker lanes</span>
+          <span className="text-[10px] text-slate-400 mt-1 block">正在执行的 Worker 车道</span>
         </div>
 
         <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl shadow-lg backdrop-blur-sm">
           <div className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">
-            EXPIRED LEASES
+            过期租约 (EXPIRED)
           </div>
           <div className="text-2xl font-bold text-amber-400 font-mono">
             {snapshot.expiredLeases}
           </div>
-          <span className="text-[10px] text-slate-400 mt-1 block">Fencing timeouts</span>
+          <span className="text-[10px] text-slate-400 mt-1 block">Fencing 超时租约</span>
         </div>
 
         <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl shadow-lg backdrop-blur-sm">
           <div className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">
-            DEAD LETTER
+            死信命令 (DEAD LETTER)
           </div>
           <div className="text-2xl font-bold text-rose-400 font-mono">
             {snapshot.deadLetterCommands}
           </div>
-          <span className="text-[10px] text-slate-400 mt-1 block">Fatal command errors</span>
+          <span className="text-[10px] text-slate-400 mt-1 block">不可恢复错误命令</span>
         </div>
 
         <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl shadow-lg backdrop-blur-sm">
           <div className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">
-            OLDEST AGE
+            最大等待延迟
           </div>
           <div className="text-2xl font-bold text-slate-200 font-mono">
             {snapshot.oldestDispatchableAgeMs}ms
           </div>
-          <span className="text-[10px] text-slate-400 mt-1 block">Queue latency</span>
+          <span className="text-[10px] text-slate-400 mt-1 block">队列平均延迟</span>
         </div>
       </div>
 
@@ -132,9 +127,9 @@ export const QueueOps: React.FC<QueueOpsProps> = ({ workers, queueSnapshot }) =>
         <div className="pb-4 border-b border-slate-800 mb-4 flex items-center justify-between">
           <h3 className="font-bold text-sm text-slate-200 flex items-center gap-2">
             <Server className="w-4 h-4 text-indigo-400" />
-            Active Worker Fleet Nodes ({workers.length})
+            活动 Worker 节点集群 ({workers.length} 节点)
           </h3>
-          <span className="text-xs text-slate-500 font-mono">WorkerHost Supervised Lanes</span>
+          <span className="text-xs text-slate-500 font-mono">WorkerHost 监督并发车道</span>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -151,18 +146,18 @@ export const QueueOps: React.FC<QueueOpsProps> = ({ workers, queueSnapshot }) =>
                   </span>
                 </div>
                 <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[10px] px-2 py-0.5 rounded-full font-bold">
-                  {w.status}
+                  {w.status === 'Healthy' ? '健康运行' : w.status}
                 </span>
               </div>
 
               <div className="grid grid-cols-3 gap-2 text-xs font-mono pt-2 border-t border-slate-900">
                 <div>
-                  <span className="text-slate-500 text-[10px] block">HOST IP</span>
+                  <span className="text-slate-500 text-[10px] block">节点 IP</span>
                   <span className="text-slate-300">{w.hostIp}</span>
                 </div>
                 <div>
-                  <span className="text-slate-500 text-[10px] block">ACTIVE LEASES</span>
-                  <span className="text-indigo-400 font-bold">{w.activeLeases} Lanes</span>
+                  <span className="text-slate-500 text-[10px] block">活动租约数</span>
+                  <span className="text-indigo-400 font-bold">{w.activeLeases} 车道</span>
                 </div>
                 <div>
                   <span className="text-slate-500 text-[10px] block">FENCING GEN</span>
@@ -172,7 +167,7 @@ export const QueueOps: React.FC<QueueOpsProps> = ({ workers, queueSnapshot }) =>
 
               <div className="text-[11px] font-mono text-slate-500 flex items-center space-x-1 pt-1">
                 <Clock className="w-3 h-3 text-slate-600" />
-                <span>Last Heartbeat: {new Date(w.lastHeartbeatAt).toLocaleTimeString()}</span>
+                <span>最后心跳时间: {new Date(w.lastHeartbeatAt).toLocaleTimeString()}</span>
               </div>
             </div>
           ))}

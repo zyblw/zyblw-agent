@@ -4,6 +4,7 @@ import {
   DocumentBlock,
   DocumentChunk,
   EvalTrendPoint,
+  KnowledgeDocumentView,
   QueueSnapshotView,
   RetrievalHit,
   RuntimeConfigModel,
@@ -33,7 +34,7 @@ export const MOCK_RUNS: AgentRunView[] = [
     steps: [
       {
         stepIndex: 1,
-        nodeName: 'Context & Intent Resolution',
+        nodeName: '上下文与意图解析 (Context & Intent)',
         kind: 'ContextCompression',
         status: 'Completed',
         durationMs: 340,
@@ -42,7 +43,7 @@ export const MOCK_RUNS: AgentRunView[] = [
       },
       {
         stepIndex: 2,
-        nodeName: 'Knowledge Hybrid Search',
+        nodeName: 'RAG 混合检索 (Knowledge Hybrid Search)',
         kind: 'ToolExecution',
         status: 'Completed',
         durationMs: 820,
@@ -62,7 +63,7 @@ export const MOCK_RUNS: AgentRunView[] = [
       },
       {
         stepIndex: 3,
-        nodeName: 'High Risk Database Side Effect',
+        nodeName: '高风险数据库副作用 (High Risk Database Action)',
         kind: 'ApprovalWait',
         status: 'Paused',
         durationMs: 0,
@@ -80,7 +81,7 @@ export const MOCK_RUNS: AgentRunView[] = [
             guardrailAllowed: true
           }
         ],
-        details: '等待管理员审批执行 `execute_schema_validation` 工具。'
+        details: '等待管理员审批执行 `execute_schema_validation` 写工具。'
       }
     ],
     pendingApprovals: [
@@ -119,7 +120,7 @@ export const MOCK_RUNS: AgentRunView[] = [
     steps: [
       {
         stepIndex: 1,
-        nodeName: 'RAG Lineage Query',
+        nodeName: 'RAG 谱系检索 (RAG Lineage Query)',
         kind: 'ToolExecution',
         status: 'Completed',
         durationMs: 450,
@@ -139,7 +140,7 @@ export const MOCK_RUNS: AgentRunView[] = [
       },
       {
         stepIndex: 2,
-        nodeName: 'Model Generation',
+        nodeName: '模型推理生成 (Model Generation)',
         kind: 'ModelInference',
         status: 'Completed',
         durationMs: 1200,
@@ -148,6 +149,39 @@ export const MOCK_RUNS: AgentRunView[] = [
       }
     ],
     pendingApprovals: []
+  }
+];
+
+export const MOCK_KNOWLEDGE_DOCS: KnowledgeDocumentView[] = [
+  {
+    id: 'doc-zyblw-spec-v04',
+    fileName: 'zyblw-agent-0.4.0-pdf-rag-pipeline.pdf',
+    sourceUri: 'knowledge://local/docs/pdf-rag-pipeline.pdf',
+    mediaType: 'application/pdf',
+    fileSizeBytes: 1042000,
+    status: 'Active',
+    totalChunks: 18,
+    tenantId: 'tenant-enterprise-a',
+    permissions: ['knowledge:read'],
+    loaderEngine: 'Docling',
+    chunkerStrategy: 'DocumentStructureChunker',
+    createdAt: '2026-08-06T00:30:00Z',
+    sha256: '9f3e478a89bc2137409218274...'
+  },
+  {
+    id: 'doc-medical-report-03',
+    fileName: '临床医学病例报告分析说明书.pdf',
+    sourceUri: 'knowledge://local/docs/medical-report-03.pdf',
+    mediaType: 'application/pdf',
+    fileSizeBytes: 845000,
+    status: 'Active',
+    totalChunks: 12,
+    tenantId: 'tenant-medical-dev',
+    permissions: ['medical:read'],
+    loaderEngine: 'Docling',
+    chunkerStrategy: 'DocumentStructureChunker',
+    createdAt: '2026-08-05T22:15:00Z',
+    sha256: '468bac5357d3958674ba9786a...'
   }
 ];
 

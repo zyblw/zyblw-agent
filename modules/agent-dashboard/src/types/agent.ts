@@ -99,6 +99,22 @@ export interface RetrievalHit {
   signals: Record<string, number>;
 }
 
+export interface KnowledgeDocumentView {
+  id: string;
+  fileName: string;
+  sourceUri: string;
+  mediaType: string;
+  fileSizeBytes: number;
+  status: 'Building' | 'Staged' | 'Active' | 'Failed';
+  totalChunks: number;
+  tenantId: string;
+  permissions: string[];
+  loaderEngine: 'Docling' | 'Apache Tika' | 'PlainText';
+  chunkerStrategy: 'DocumentStructureChunker' | 'SlidingWindowChunker';
+  createdAt: string;
+  sha256: string;
+}
+
 export interface WorkerNodeView {
   workerId: string;
   hostIp: string;

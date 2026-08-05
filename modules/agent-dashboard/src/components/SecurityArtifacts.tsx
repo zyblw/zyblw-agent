@@ -8,10 +8,7 @@ import {
   FolderLock,
   Lock,
   Shield,
-  ShieldCheck,
-  Terminal,
-  Trash2,
-  Unlock
+  ShieldCheck
 } from 'lucide-react';
 
 interface SecurityArtifactsProps {
@@ -33,10 +30,10 @@ export const SecurityArtifacts: React.FC<SecurityArtifactsProps> = ({
           </div>
           <div>
             <h2 className="font-bold text-base text-slate-100">
-              Guardrail Security Policies & Artifact Explorer
+              Guardrail 安全策略与 Artifact 文件浏览器
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              Tool Whitelist • Risk Classification • Metadata Redaction • Session File Isolation
+              工具白名单 • 风险分级 • Metadata脱敏 • 会话文件隔离
             </p>
           </div>
         </div>
@@ -48,10 +45,10 @@ export const SecurityArtifacts: React.FC<SecurityArtifactsProps> = ({
           <div className="pb-3 border-b border-slate-800 flex items-center justify-between">
             <h3 className="font-bold text-sm text-slate-200 flex items-center gap-2">
               <Shield className="w-4 h-4 text-emerald-400" />
-              Active Tool Policies & Risk Classifications
+              活动工具白名单与风险拦截规则
             </h3>
             <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono font-bold">
-              {allowedTools.length} Tools Whitelisted
+              {allowedTools.length} 个工具已允许
             </span>
           </div>
 
@@ -66,7 +63,7 @@ export const SecurityArtifacts: React.FC<SecurityArtifactsProps> = ({
                   <div>
                     <span className="font-mono font-bold text-slate-200">{tool}</span>
                     <span className="text-[10px] text-slate-500 block mt-0.5">
-                      Stateful & Boundary Enforced
+                      状态感知与边界受控
                     </span>
                   </div>
                 </div>
@@ -78,7 +75,7 @@ export const SecurityArtifacts: React.FC<SecurityArtifactsProps> = ({
                       : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
                   }`}
                 >
-                  {tool.includes('schema') || tool.includes('sql') ? 'High Risk (Approval Required)' : 'Low Risk (Auto Direct)'}
+                  {tool.includes('schema') || tool.includes('sql') ? '高风险 (需人工审批)' : '低风险 (自动直接执行)'}
                 </span>
               </div>
             ))}
@@ -88,7 +85,7 @@ export const SecurityArtifacts: React.FC<SecurityArtifactsProps> = ({
           <div className="mt-4 p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
             <h4 className="text-xs font-bold text-indigo-400 flex items-center gap-1.5">
               <FolderLock className="w-4 h-4" />
-              MetadataOnly Redaction Policies Active
+              MetadataOnly 隐私脱敏策略已激活
             </h4>
             <p className="text-xs text-slate-400 leading-relaxed font-sans">
               根据 `MetadataOnly` 隐私脱敏策略：所有的密码、Authorization Token、API Key、完整的 System Prompt、敏感患者/用户正文已被过滤，不进 Log、Metrics 或视图回显。
@@ -101,10 +98,10 @@ export const SecurityArtifacts: React.FC<SecurityArtifactsProps> = ({
           <div className="pb-3 border-b border-slate-800 flex items-center justify-between">
             <h3 className="font-bold text-sm text-slate-200 flex items-center gap-2">
               <FileCheck className="w-4 h-4 text-cyan-400" />
-              Agent Session Artifact Explorer
+              Agent 会话 Artifact 文件浏览器
             </h3>
             <span className="text-[10px] text-slate-500 font-mono">
-              Immutable Artifact Store
+              不可变 Artifact 存储
             </span>
           </div>
 
