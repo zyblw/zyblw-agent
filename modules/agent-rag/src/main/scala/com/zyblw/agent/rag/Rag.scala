@@ -366,13 +366,16 @@ final class DefaultRetriever(
     embeddings: EmbeddingService,
     vectors: VectorStore,
     reranker: Reranker,
-    expansion: RetrievalExpansionConfig = RetrievalExpansionConfig()
+    expansion: RetrievalExpansionConfig = RetrievalExpansionConfig(),
+    policies: RetrievalPolicySource = RetrievalPolicySource.default
 ) extends Retriever:
   /** 把单 query 编码后搜索并重排，最终引用保留 source 与 metadata。 */
   def retrieve(query: String, scope: RetrievalScope, limit: Int): IO[RetrievalError, RetrievalResult] =
     if limit <= 0 then ZIO.succeed(RetrievalResult(Chunk.empty, Chunk.empty))
     else if query.trim.isEmpty then ZIO.fail(AgentError.RetrievalFailed("Retrieval query 不能为空"))
     else
+      // 单次检索内只读取一次工作点，避免同一次调用的重排开关和阈值来自不同版本的覆盖。
+      val policy = policies.current()
       for
         requestId <- scope.requestId.fold(Random.nextUUID.map(_.toString))(ZIO.succeed(_))
         detailed  <- embeddings.embedScoped(
@@ -385,9 +388,16 @@ final class DefaultRetriever(
         // 候选池放大三倍供 reranker 选择；Long 中间值防止外部错误 limit 造成 Int 溢出。
         candidateLimit = Math.min(limit.toLong * 3L, Int.MaxValue.toLong).toInt
         candidates <- vectors.searchHybrid(query, queryEmbedding, scope, candidateLimit)
-        reranked   <- reranker.rerank(query, candidates, limit)
+        // 关闭重排时直接截断候选池。这里不能跳过后续校验：截断结果同样要满足数量、去重和权限契约，
+        // 而 searchHybrid 来自存储 Adapter，与 reranker 一样位于信任边界之外。
+        reranked <-
+          if policy.rerankEnabled then reranker.rerank(query, candidates, limit)
+          else ZIO.succeed(candidates.take(limit))
         // Reranker 可能是远端或业务自定义实现；即使它失陷，也不能注入候选集外或未授权文档。
-        hits     <- validateReranked(candidates, reranked, scope, limit)
+        validated <- validateReranked(candidates, reranked, scope, limit)
+        // 阈值只作用于 seed 命中。上下文扩展块按 expandedScoreFactor 主动降分，
+        // 用同一个阈值筛掉它们会让"提高阈值"意外地同时关闭上下文扩展。
+        hits = validated.filter(_.score >= policy.minimumScore)
         expanded <- vectors.expandContext(hits, scope, expansion)
         context  <- validateExpanded(hits, expanded, scope, expansion.maxAdditionalChunks)
         citations = context.zipWithIndex.map { case (hit, index) =>
@@ -448,6 +458,18 @@ object DefaultRetriever:
   val layer: URLayer[EmbeddingService & VectorStore & Reranker, Retriever] =
     ZLayer.fromFunction((embeddings: EmbeddingService, vectors: VectorStore, reranker: Reranker) =>
       DefaultRetriever(embeddings, vectors, reranker)
+    )
+
+  /** 接入运行时覆盖的装配；宿主提供由 `RuntimeSettingsService` 支撑的解析器后，管理台调整 topK、 最低得分与重排开关即可在下一次检索生效。
+    */
+  val governedLayer: URLayer[EmbeddingService & VectorStore & Reranker & RetrievalPolicySource, Retriever] =
+    ZLayer.fromFunction(
+      (
+          embeddings: EmbeddingService,
+          vectors: VectorStore,
+          reranker: Reranker,
+          policies: RetrievalPolicySource
+      ) => DefaultRetriever(embeddings, vectors, reranker, RetrievalExpansionConfig(), policies)
     )
 
 /** 确定性测试 embedding，不应用于真实语义检索。 */

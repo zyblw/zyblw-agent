@@ -94,16 +94,9 @@ final class GeminiInteractionsChatModel(client: Client, config: GeminiInteractio
     case value: AgentError => value
     case other => AgentError.ModelFailure(provider, "Gemini transport failure", retryable = true, Some(other))
 
-  /** HTTP 错误映射遵守 ProviderContract 2.0：408/409/429/5xx 可重试，其他状态需要调用方修正。 错误消息只保留 HTTP 状态和 Google error
-    * status，永不保存完整 response body。
-    */
-  private def httpError(status: Int, body: String): AgentError.ModelFailure =
-    val retryable = status == 408 || status == 409 || status == 429 || status >= 500
-    AgentError.ModelFailure(
-      provider,
-      s"Gemini HTTP $status (${GeminiInteractionsWire.errorStatus(body).getOrElse("unknown_error")})",
-      retryable
-    )
+  /** HTTP 错误只保留状态与 Google error status，永不保存完整 response body。 */
+  private def httpError(status: Int, body: String): AgentError.ModelHttpFailure =
+    AgentError.ModelHttpFailure(provider, status, GeminiInteractionsWire.errorStatus(body))
 
   /** 完整请求或流超过部署预算时使用的稳定、可重试错误。 */
   private def timeoutError: AgentError =

@@ -37,23 +37,16 @@ final class OpenAICompatibleChatModel(client: Client, config: OpenAICompatibleCo
         )
         .mapError {
           case error: AgentError => error
-          case error => AgentError.ModelFailure(provider, error.getMessage, retryable = true, Some(error))
+          case error => AgentError.ModelFailure(provider, "transport failure", retryable = true, Some(error))
         }
       responseBody <- response.body.asString.mapError { error =>
-        AgentError.ModelFailure(provider, error.getMessage, retryable = true, Some(error))
+        AgentError.ModelFailure(provider, "response body failure", retryable = true, Some(error))
       }
       result <-
         (
           if response.status.code >= 200 && response.status.code < 300 then
             OpenAIWire.decodeResponse(responseBody, config.compatibility)
-          else
-            ZIO.fail(
-              AgentError.ModelFailure(
-                provider,
-                s"HTTP ${response.status.code}: ${responseBody.take(2000)}",
-                retryable = response.status.code == 429 || response.status.code >= 500
-              )
-            )
+          else ZIO.fail(httpError(response.status.code, responseBody))
         )
     yield result.copy(
       metadata = result.metadata ++ Map(
@@ -95,26 +88,23 @@ final class OpenAICompatibleChatModel(client: Client, config: OpenAICompatibleCo
                 OpenAISse.events(response.body.asStream, config.compatibility)
               else
                 ZStream.fromZIO(
-                  response.body.asString.flatMap(body =>
-                    ZIO.fail(
-                      AgentError.ModelFailure(
-                        provider,
-                        s"HTTP ${response.status.code}: ${body.take(2000)}",
-                        retryable = response.status.code == 429 || response.status.code >= 500
-                      )
-                    )
-                  )
+                  response.body.asString.flatMap(body => ZIO.fail(httpError(response.status.code, body)))
                 )
             }
             .mapError {
               case error: AgentError => error
-              case error => AgentError.ModelFailure(provider, error.getMessage, retryable = true, Some(error))
+              case error             =>
+                AgentError.ModelFailure(provider, "transport failure", retryable = true, Some(error))
             }
             .timeoutFail(AgentError.ModelFailure(provider, "stream timed out", retryable = true))(
               config.requestTimeout
             )
         yield stream
       }
+
+  /** 只保留 HTTP 状态与 OpenAI 风格 envelope 的低基数 code/type；原始响应正文不进入错误。 */
+  private def httpError(status: Int, body: String): AgentError.ModelHttpFailure =
+    AgentError.ModelHttpFailure(provider, status, OpenAIHttpError.code(body))
 
 object OpenAICompatibleChatModel:
   val layer: URLayer[Client & OpenAICompatibleConfig, ChatModel] =

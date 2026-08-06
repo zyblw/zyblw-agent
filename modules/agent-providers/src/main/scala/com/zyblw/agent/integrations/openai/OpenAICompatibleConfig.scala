@@ -3,6 +3,7 @@ package com.zyblw.agent.integrations.openai
 // Provider 配置与预设：API Key 必须来自环境变量或 Secret Manager，禁止写入仓库和日志。
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.integrations.CredentialReference
 import zio.*
 
 final case class OpenAICompatibleConfig(
@@ -27,6 +28,16 @@ final case class OpenAICompatibleConfig(
       s"provider=${compatibility.descriptor.id}, requestTimeout=$requestTimeout)"
 
 object OpenAICompatibleConfig:
+  /** 本 loader 读取 API Key 的环境变量名。
+    *
+    * 单独声明而不是让管理面按 Provider ID 猜测：同一个 `OpenAICompatibleConfig` 类型被 OpenAI、DeepSeek 和 GLM 复用， 猜测会在"运维明明配了
+    * Key、界面却说来源是另一个变量"时把排障引向错误的方向。
+    */
+  val ApiKeyVariable: String = "OPENAI_API_KEY"
+
+  /** 可展示的凭据引用；只含变量名，不含值。 */
+  val credentialReference: String = CredentialReference.environment(ApiKeyVariable)
+
   /** 通用 OpenAI-compatible 配置描述。
     *
     * API Key 使用 `Config.Secret` 读取，在配置错误、测试报告和调试输出中保持脱敏；只有构造 HTTP Adapter 时才展开为 String。当前键名保持既有 `OPENAI_*`
@@ -35,7 +46,7 @@ object OpenAICompatibleConfig:
   val environmentConfig: Config[OpenAICompatibleConfig] =
     (
       Config.string("OPENAI_BASE_URL").withDefault("https://api.openai.com/v1") ++
-        Config.secret("OPENAI_API_KEY") ++
+        Config.secret(ApiKeyVariable) ++
         Config.string("OPENAI_MODEL") ++
         Config.string("OPENAI_ORGANIZATION").optional
     ).mapAttempt { case (baseUrl, apiKey, model, organization) =>
@@ -51,6 +62,14 @@ object OpenAICompatibleConfig:
 object ProviderPresets:
   val DeepSeekDefaultModel = "deepseek-v4-flash"
   val GlmDefaultModel      = "glm-4.7-flash"
+
+  /** DeepSeek 与 GLM 各自的 API Key 变量名；两者与 OpenAI 共用配置类型但不共用凭据。 */
+  val DeepSeekApiKeyVariable: String = "DEEPSEEK_API_KEY"
+  val GlmApiKeyVariable: String      = "GLM_API_KEY"
+
+  /** 可展示的凭据引用；只含变量名，不含值。 */
+  val deepSeekCredentialReference: String = CredentialReference.environment(DeepSeekApiKeyVariable)
+  val glmCredentialReference: String      = CredentialReference.environment(GlmApiKeyVariable)
 
   /** 构造 OpenAI 官方端点配置。 */
   def openAI(apiKey: String, model: String): OpenAICompatibleConfig =
@@ -91,14 +110,14 @@ object ProviderPresets:
   /** DeepSeek 的 ZIO Config 描述；密钥保持为 `Config.Secret` 直到构造 Adapter。 */
   val deepSeekEnvironmentConfig: Config[OpenAICompatibleConfig] =
     (
-      Config.secret("DEEPSEEK_API_KEY") ++
+      Config.secret(DeepSeekApiKeyVariable) ++
         Config.string("DEEPSEEK_MODEL").withDefault(DeepSeekDefaultModel)
     ).mapAttempt { case (key, model) => deepSeek(key.stringValue, model) }
 
   /** GLM 的 ZIO Config 描述。 */
   val glmEnvironmentConfig: Config[OpenAICompatibleConfig] =
     (
-      Config.secret("GLM_API_KEY") ++
+      Config.secret(GlmApiKeyVariable) ++
         Config.string("GLM_MODEL").withDefault(GlmDefaultModel)
     ).mapAttempt { case (key, model) => glm(key.stringValue, model) }
 

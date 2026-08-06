@@ -3,6 +3,152 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
+## 0.5.0 - 2026-08-07
+
+Adds an optional administration sub-surface and the runtime resolver paths that make its overrides observable without a restart.
+The Agent runtime, durable commands, business HTTP v1, workflow outcome v2 and the 0.4 knowledge schema are unchanged. Upgrading
+without wiring any admin capability mounts no new routes, but the `V002` migration and two layer signature changes still apply —
+see [docs/upgrading-to-0.5.0.md](docs/upgrading-to-0.5.0.md).
+
+### Added
+
+- An optional administration API sub-surface under `/api/v1/admin/**` backs a browser-only operations console. Every capability is
+  an `Option` supplied by the host: unwired capabilities mount no routes, and `GET /api/v1/admin/capabilities` reports what is
+  actually available so the console degrades by hiding tabs instead of rendering panels that only ever return 404. The sub-surface is
+  deliberately **Beta** and stays outside the stable `AgentHttpContract` OpenAPI promise, because admin view shapes follow what the
+  console needs to display.
+- Administration endpoints require explicit scopes rather than reusing the business-side "ownership implies read" rule, since an
+  operator sees cross-tenant aggregates rather than a single run owner's view. `agent:admin:read` covers aggregates,
+  `agent:admin:write` covers changes to deployment behaviour and implies read, and `agent:admin:debug` covers the retrieval sandbox
+  and document ingestion. Debug is **not** implied by write because those two operations bill real provider calls.
+- `RuntimeSettingsService` persists a bounded whitelist of runtime configuration overrides with compare-and-set writes, an
+  append-only audit history and periodic cross-replica refresh. Overrides are sparse patches, so removing one is equivalent to never
+  having set it. Every setting declares its effect boundary, and values fixed as immutable resources at assembly time
+  (`maxParallelism`) reject overrides outright rather than offering a switch that saves successfully and does nothing.
+- `ToolPolicySource` and `RetrievalPolicySource` let the runtime read tool governance and the retrieval working point through a
+  resolver instead of a value frozen at startup, which is what makes those overrides observable without a restart. Both have
+  baseline-returning defaults, so deployments that do not wire them keep their current behaviour.
+- Narrow admin SPIs (`RunDirectory`, `RuntimeOverrideStore`, `IngestionJobStore`, `OpsAdminService`, `KnowledgeAdminService`,
+  `KnowledgeIndexDirectory`, `EvalTrendReader`) with PostgreSQL, RAG and evals adapters. They are separate traits rather than new
+  abstract methods on published store traits, which would break every external implementation.
+- Document ingestion is an asynchronous endpoint returning `202` and a job id, accepting raw bytes rather than base64 JSON. Its
+  background fiber is bound to the application scope, not the request scope, so progress survives the response being written.
+- The run directory pages by keyset cursor rather than `OFFSET`, because runs keep updating while an operator pages through them.
+- `modules/agent-dashboard` implements seven panels (runs, knowledge, queue, configuration, security, evaluation, models) against the
+  real wire contract. Run listings carry metadata only: prompts, model output and tool arguments are business data, and a cross-tenant
+  operations view should not become an export channel for them. Langfuse and Grafana deep links come from the backend so one
+  deployment setting corrects every link target.
+- `RunEventAdminService` and `GET /api/v1/admin/runs/{runId}/events/stream` give the console a resumable server-sent event stream for
+  a single run, and the console renders it as an explicitly started debugger. It is a separate endpoint from the business-side run
+  stream rather than an alias, because the two differ in both authorization and projection: the admin view requires
+  `agent:admin:read` instead of ownership, and `AdminRunEventView` is an allow-list that drops `output` and `message` so a
+  cross-tenant operations surface cannot become an export channel for business text. Missing runs and cursors beyond the run's last
+  sequence are rejected as ordinary 4xx **before** the response head is written, since a `200 OK` followed by a `stream_error` would
+  make "this run does not exist" indistinguishable from a transient disconnect. Resumption uses the standard `Last-Event-ID` header
+  carrying the event `sequence`, so a reconnect can land on any HTTP replica; terminal and awaiting-approval states end the stream
+  normally rather than holding an idle connection that polls the database.
+- `ModelPolicySource` lets the runtime resolve the provider, model name, temperature and output ceiling per call instead of reading
+  values frozen into `AgentDefinition.modelSettings` at assembly time. Overrides are sparse: switching provider alone does not blank
+  the model name, and `toolChoice`, `providerOptions` and `metadata` deliberately cannot be overridden because they are agent
+  behaviour contracts rather than deployment working points.
+- `RuntimeOverrides` gains `modelProvider`, `modelName`, `modelTemperature` and `modelMaxOutputTokens`, so a provider outage can be
+  routed around without a redeploy. Model switching reuses the existing config write path and therefore inherits its compare-and-set,
+  audit history and cross-replica refresh; a second versioned write surface would produce two configuration facts that can disagree.
+- `ModelCatalog` is the write-time validation authority, not just a display API. Overrides naming an unregistered provider are
+  rejected before they reach storage, because a persisted bad override reloads on every restart and turns one dropdown mistake into a
+  permanent `ProviderNotFound` for every call while the console reports success. Model names validate against the *effective*
+  provider, so a model belonging to a different provider is rejected too. Deployments that wire no catalog cannot write model
+  overrides at all: `ModelCatalog.empty` is fail-closed because without a catalog there is no basis to judge whether a provider name
+  is routable.
+- `GET /api/v1/admin/models` exposes the registered provider and model catalog with capabilities, credential status and pricing.
+  Credentials are reported as `present` plus a display reference such as `env:DEEPSEEK_API_KEY`; **no endpoint accepts, returns or
+  stores a key value.** Writing keys into the application database would add encryption-at-rest, rotation, backup redaction and a
+  `pg_dump` exposure surface, none of which are problems an agent framework should own. The consequence is a deliberate boundary:
+  switching between already-registered providers is immediate, but adding a wholly new provider still requires a restart.
+- `POST /api/v1/admin/models/probe` performs a minimal connectivity check against a registered combination and requires
+  `agent:admin:debug` because it bills a real provider call. It returns latency, token usage and a stable framework failure code, but
+  never the model's output text: echoing output would turn a debug-scoped endpoint into a channel for asking arbitrary questions of
+  any configured provider. Combinations absent from the catalog fail without issuing a network request and distinguish an unknown
+  provider from an unknown model.
+- `ModelHttpFailure` gives chat adapters a provider-neutral, redacted HTTP failure contract. Authentication, authorization, timeout,
+  conflict, rate limit and unavailable remain distinct categories while retryability is preserved independently. Raw provider
+  response bodies never enter the error; only a short low-cardinality code/type may be retained.
+- `ModelPriceBook` turns token usage into `UsageSummary.estimatedCost`, which was structurally present but always zero. The framework
+  ships **no** vendor prices: they change with time, contract and region, and a guessed table would render a cost dashboard that looks
+  precise while being wrong with no signal to the operator. Missing entries estimate to zero, consistent with the existing contract
+  that unknown cost stays zero rather than fabricating a billing fact. Two easy-to-get-wrong billing semantics are handled:
+  `cachedInputTokens` is a subset of `inputTokens` so multiplying both by their rates double-charges cache hits, and
+  `reasoningOutputTokens` is a subset of `outputTokens` billed at the output rate. Mixed currencies are rejected at construction
+  because `estimatedCost` is a single scalar that would otherwise sum incomparable amounts.
+- The embedding model is surfaced read-only with the reason it cannot change at runtime. Vector dimension is pinned by migration and
+  existing vectors are only comparable to the model that produced them, so a switch that saves successfully would silently collapse
+  knowledge-base recall. A console warning fires when the model dimension and the index dimension disagree, since ingestion fails
+  before writing in that state.
+- `ModelCatalogLive` and `ModelAdminLive` in `agent-providers` implement the catalog and probe SPIs from the already-assembled
+  providers, so the catalog cannot drift from what is actually routable. The host declares each provider once through
+  `ProviderRegistration`, which supplies the three facts the `ChatModel` SPI deliberately does not expose: the deployment default
+  model, where the credential comes from and whether it is present. Declarations are checked against the real routing topology at
+  assembly time in both directions, because a missing declaration hides a usable provider while a surplus one advertises an option
+  that fails on every call. Reflection over provider config types was rejected: it would work for the four built-in adapters and
+  silently degrade every custom `ChatModel` to "no default model, credential unknown".
+- Provider configuration objects now declare which environment variable supplies their API key (`ApiKeyVariable` and
+  `credentialReference`), and their loaders read that declaration instead of a duplicated literal. The console therefore shows a
+  credential reference that is derived from the loader rather than guessed from a provider id — which matters because OpenAI,
+  DeepSeek and GLM share one config type but three different variables.
+- Embedding and Cohere rerank configuration gain ZIO Config loaders, so the `EMBEDDING_*` and `COHERE_*` variables that
+  `.env.example` already declared can actually be read symmetrically with the chat providers. `EMBEDDING_MODEL` and
+  `EMBEDDING_DIMENSION` are required with no default, because a plausible-looking default turns a missed setting into degraded
+  recall across the whole knowledge base instead of a startup failure. `allowInsecureHttp` is deliberately not readable from
+  configuration: a switch that sends a bearer token over cleartext HTTP will eventually be turned on in production "temporarily".
+
+### Changed
+
+- `AgentRuntimeLive` now requires `ModelPolicySource` in its environment, alongside the existing `ToolPolicySource`. Deployments using
+  the `AgentApplication` assembly layers need no change; those wiring the runtime directly must add `ModelPolicySource.defaultLayer`,
+  which preserves current behaviour exactly (each agent keeps its own `modelSettings` and no cost is estimated).
+- `RuntimeSettingsService.layer` additionally requires `ModelCatalog`. Supply `ModelCatalog.emptyLayer` to keep the previous
+  behaviour, which also means model overrides are rejected — see the fail-closed rationale above.
+- `V002__zyblw_agent_admin_surface.sql` promotes tenant, user and approval-pending to generated columns on `agent_runs` with
+  supporting indices, and adds the runtime override and ingestion job tables. Generated columns leave every write path untouched, so
+  the read model cannot drift from authoritative state; the cost is a table rewrite that large deployments must schedule.
+
+### Fixed
+
+- Keyset cursors carry microsecond timestamps, matching the precision of the `TIMESTAMPTZ` columns they sort by. A
+  millisecond cursor is truncated below every actual timestamp in the same millisecond, so the row-value comparison excluded the
+  whole millisecond along with the cursor row itself and the next page silently vanished. This affected the run directory and the
+  knowledge manifest directory; the manifest case was reachable on every republish, because superseding the old version and
+  readying the new one write both rows at one transaction timestamp. Fixtures built from millisecond-aligned instants cannot
+  reproduce it, so the regression tests now use sub-millisecond timestamps.
+- Concurrent runtime override writes now surface as an optimistic-lock conflict rather than a database failure. The
+  `MAX(version)` guard inside the insert cannot see an uncommitted concurrent insert under `READ COMMITTED`, so the race is settled
+  by the version primary key; classifying that unique violation as a generic database error turned an ordinary simultaneous edit
+  into a 500, and the console only prompts for a reload on 409.
+
+### Verification
+
+- Runtime settings and run directory suites cover sparse-patch merging, override removal, compare-and-set conflicts, baseline
+  clamping (including NaN), policy-source propagation and cursor pagination. The admin HTTP suite covers the authorization boundary
+  directly: missing scopes are rejected before adapters are reached, write implies read, debug is not implied by write, and unwired
+  capabilities return 404 while capability discovery reports them as unavailable.
+- The PostgreSQL admin suite runs against a real database and covers generated-column extraction, keyset pagination agreeing with
+  the in-memory implementation, UUID tie-breaking, sub-millisecond cursor advance, append-only override history, and eight
+  concurrent writers resolving to exactly one success with optimistic-lock failures. A knowledge manifest directory suite covers
+  cross-tenant listing, tenant scoping, paging across a republished document's two versions, limit clamping and past-the-end
+  cursors. The dashboard passes type checking, lint and a production build.
+- Model governance is verified end to end rather than per unit: a scripted model asserts that an override reaches the actual
+  `ChatRequest`, that unoverridden fields still come from the agent definition, and that the price book lands in `estimatedCost`.
+  Catalog validation is tested for unregistered providers, models belonging to another provider, and the empty fail-closed catalog.
+  Probe tests assert the security-relevant behaviours specifically: an unregistered target issues no network call, a write-only
+  scope cannot probe, cancellation is not reported as a provider failure, and the serialized catalog contains no credential value.
+- The dashboard now has a Playwright browser contract using intercepted admin responses rather than live credentials. It proves the
+  credential gate issues no admin request, model rows are keyboard-selectable, probe failures provide an actionable explanation,
+  embedding dimension drift is visible, bearer authentication is forwarded, and no token or key value is rendered.
+- The run event debugger is covered for both the happy path and recovery. One scenario asserts the bearer-authenticated `fetch`
+  carries `Accept: text/event-stream` and an initial `Last-Event-ID`; a second interrupts the stream with `stream_error` after one
+  event and asserts the reconnect resumes from the last confirmed sequence rather than replaying, since replayed events would be
+  rejected by the client's own contiguity check.
+
 ## 0.4.0 - 2026-08-02
 
 ### Added

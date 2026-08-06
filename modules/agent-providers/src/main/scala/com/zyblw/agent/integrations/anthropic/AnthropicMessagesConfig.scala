@@ -1,6 +1,7 @@
 package com.zyblw.agent.integrations.anthropic
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.integrations.CredentialReference
 import com.zyblw.agent.model.*
 import zio.*
 import zio.json.ast.Json
@@ -46,6 +47,12 @@ final case class AnthropicMessagesConfig(
       s"anthropicVersion=$anthropicVersion, defaultMaxTokens=$defaultMaxTokens, requestTimeout=$requestTimeout)"
 
 object AnthropicMessagesConfig:
+  /** 本 loader 读取 API Key 的环境变量名；管理面据此展示凭据来源，而不是猜一个名字。 */
+  val ApiKeyVariable: String = "ANTHROPIC_API_KEY"
+
+  /** 可展示的凭据引用；只含变量名，不含值。 */
+  val credentialReference: String = CredentialReference.environment(ApiKeyVariable)
+
   /** Anthropic Messages 的 ZIO Config 描述。
     *
     * 使用大写键保持现有环境变量契约；API Key 先进入 `Config.Secret`，只有构造 HTTP Adapter 配置时才展开。
@@ -53,7 +60,7 @@ object AnthropicMessagesConfig:
   val environmentConfig: Config[AnthropicMessagesConfig] =
     (
       Config.string("ANTHROPIC_BASE_URL").withDefault("https://api.anthropic.com/v1") ++
-        Config.secret("ANTHROPIC_API_KEY") ++
+        Config.secret(ApiKeyVariable) ++
         Config.string("ANTHROPIC_MODEL") ++
         Config.string("ANTHROPIC_VERSION").withDefault("2023-06-01") ++
         Config.int("ANTHROPIC_MAX_TOKENS").withDefault(4096) ++

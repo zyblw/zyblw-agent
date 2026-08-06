@@ -2,7 +2,7 @@ package com.zyblw.agent.runtime
 
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
-import com.zyblw.agent.tools.ToolPolicyConfig
+import com.zyblw.agent.tools.ToolPolicySource
 import java.time.Instant
 import zio.*
 
@@ -69,14 +69,14 @@ trait AgentCommandService:
   *   已存在 Run 的耐久命令队列
   * @param submissions
   *   新 Run 原子创建 Adapter
-  * @param toolPolicy
-  *   工具治理硬上限；初始 BudgetState 与 Runtime 使用同一份配置
+  * @param toolPolicies
+  *   工具治理硬上限解析器；初始 BudgetState 与 Runtime 读取同一个来源，管理面覆盖因此对新建 Run 立即生效
   */
 final class AgentCommandServiceLive(
     runs: RunStore,
     commands: RunCommandStore,
     submissions: RunSubmissionStore,
-    toolPolicy: ToolPolicyConfig
+    toolPolicies: ToolPolicySource
 ) extends AgentCommandService:
   /** 先在内存中准备不可变初始事实，再由 Adapter 用一个事务落库。 这里不调用 `runs.createWithEvents`，否则会重新引入“状态成功、Start 命令失败”的双写窗口。
     */
@@ -86,7 +86,7 @@ final class AgentCommandServiceLive(
       idempotencyKey: String
   ): IO[AgentError, RunCommandRecord] =
     RunInitialization
-      .prepare(agent, request, idempotencyKey, toolPolicy.maxCallsPerRun)
+      .prepare(agent, request, idempotencyKey, toolPolicies.current().maxCallsPerRun)
       .flatMap(submissions.submitStart)
 
   /** 审批幂等键只绑定 approvalId，保证相反决定不能各自创建成功。 */
@@ -193,5 +193,5 @@ final class AgentCommandServiceLive(
 object AgentCommandServiceLive:
   /** 通过 ZLayer 将状态、命令、原子提交和工具预算组装为控制面。 */
   val layer
-      : URLayer[RunStore & RunCommandStore & RunSubmissionStore & ToolPolicyConfig, AgentCommandService] =
+      : URLayer[RunStore & RunCommandStore & RunSubmissionStore & ToolPolicySource, AgentCommandService] =
     ZLayer.fromFunction(AgentCommandServiceLive.apply)

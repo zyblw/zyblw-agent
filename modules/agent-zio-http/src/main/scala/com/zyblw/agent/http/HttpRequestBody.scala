@@ -38,6 +38,28 @@ private[http] object HttpRequestBody:
           else decodeUtf8(bytes)
         }
 
+  /** 以 ZStream 最多读取 `maxBytes + 1` 个原始字节。
+    *
+    * 管理面文档上传不能走 [[readJson]]：Base64 会把二进制放大三分之一，而 JSON 上限是为控制面 DTO 设计的。 这里保持同样的“多读一个字节判定溢出”策略，只是不做 UTF-8 解码。
+    *
+    * @param request
+    *   当前 ZIO HTTP 请求
+    * @param maxBytes
+    *   最大字节数
+    */
+  def readBytes(request: Request, maxBytes: Long): IO[AgentError, Chunk[Byte]] =
+    if maxBytes <= 0L then ZIO.fail(AgentError.InvalidConfiguration("请求体上限必须为正数"))
+    else
+      request.body.asStream
+        .take(maxBytes + 1L)
+        .runCollect
+        .mapError(error => AgentError.InvalidConfiguration(Option(error.getMessage).getOrElse("读取请求体失败")))
+        .flatMap { bytes =>
+          if bytes.length.toLong > maxBytes then
+            ZIO.fail(AgentError.InvalidConfiguration(s"请求体不能超过 $maxBytes 字节"))
+          else ZIO.succeed(bytes)
+        }
+
   /** 严格拒绝畸形 UTF-8，而不是让 `new String` 用替换字符悄悄改变签名、幂等指纹或用户输入。 */
   private def decodeUtf8(bytes: Chunk[Byte]): IO[AgentError, String] =
     ZIO

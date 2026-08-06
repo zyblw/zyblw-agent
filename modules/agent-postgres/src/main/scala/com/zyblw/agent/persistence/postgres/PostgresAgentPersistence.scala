@@ -1,7 +1,13 @@
 package com.zyblw.agent.persistence.postgres
 
 import com.zyblw.agent.memory.{MemoryStore, RunCommandStore, RunStore, RunSubmissionStore}
-import com.zyblw.agent.rag.{EmbeddingCacheStore, EmbeddingQuotaStore, KnowledgeIndexStore, VectorStore}
+import com.zyblw.agent.rag.{
+  EmbeddingCacheStore,
+  EmbeddingQuotaStore,
+  KnowledgeIndexDirectory,
+  KnowledgeIndexStore,
+  VectorStore
+}
 import com.zyblw.agent.evals.EvalTrendStore
 import com.zyblw.agent.workflow.{WorkflowCheckpointStore, WorkflowExecutionStore}
 import javax.sql.DataSource
@@ -77,15 +83,18 @@ object PostgresAgentPersistence:
 
   /** 版本化知识摄取与 hybrid retrieval 的推荐同源组合层。
     *
-    * 两个 Adapter 共享同一个 DataSource、固定向量维度和 `zyblw_agent_knowledge.agent_knowledge_chunks` 正式快照：
-    * `KnowledgeIndexStore` 负责 Building→stage→activate，`VectorStore` 只查询 active 发布结果。 业务仍需显式执行对应维度的 optional
-    * pgvector migration。
+    * 三个 Adapter 共享同一个 DataSource、固定向量维度和 `zyblw_agent_knowledge.agent_knowledge_chunks` 正式快照：
+    * `KnowledgeIndexStore` 负责 Building→stage→activate，`VectorStore` 只查询 active 发布结果，
+    * `KnowledgeIndexDirectory` 是管理台的只读清单投影。业务仍需显式执行对应维度的 optional pgvector migration。
+    *
+    * 目录随这一层一起提供，而不是留给调用方单独装配：漏装的后果是管理台文档列表静默为空，而空列表看起来与 “知识库里没有文档”完全一样，不会有任何错误提示。
     */
   def knowledge(
       dimension: Int,
       hybridConfig: PostgresHybridSearchConfig = PostgresHybridSearchConfig()
-  ): URLayer[DataSource, KnowledgeIndexStore & VectorStore] =
-    PostgresKnowledgeIndexStore.layer(dimension) ++ PostgresPgVectorStore.layer(dimension, hybridConfig)
+  ): URLayer[DataSource, KnowledgeIndexStore & VectorStore & KnowledgeIndexDirectory] =
+    PostgresKnowledgeIndexStore.layer(dimension) ++ PostgresPgVectorStore.layer(dimension, hybridConfig) ++
+      PostgresKnowledgeIndexDirectory.layer
 
   /** 0.4 的一站式 1536 维知识库层：在空库自动创建/校验 vector 扩展和知识表，再暴露版本摄取与检索 Store。
     *
@@ -94,13 +103,14 @@ object PostgresAgentPersistence:
     */
   def migratedKnowledge1536(
       hybridConfig: PostgresHybridSearchConfig = PostgresHybridSearchConfig()
-  ): RLayer[DataSource, KnowledgeIndexStore & VectorStore] =
+  ): RLayer[DataSource, KnowledgeIndexStore & VectorStore & KnowledgeIndexDirectory] =
     ZLayer.fromZIOEnvironment {
       for
         dataSource <- ZIO.service[DataSource]
         _          <- AgentPostgresMigrations.migrateKnowledge1536(dataSource)
       yield ZEnvironment[KnowledgeIndexStore](PostgresKnowledgeIndexStore(dataSource, 1536)) ++
-        ZEnvironment[VectorStore](PostgresPgVectorStore(dataSource, 1536, hybridConfig))
+        ZEnvironment[VectorStore](PostgresPgVectorStore(dataSource, 1536, hybridConfig)) ++
+        ZEnvironment[KnowledgeIndexDirectory](PostgresKnowledgeIndexDirectory(dataSource))
     }
 
   /** 生产评测趋势仓库。

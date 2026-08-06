@@ -2,7 +2,7 @@ package com.zyblw.agent.runtime
 
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
-import com.zyblw.agent.tools.ToolPolicyConfig
+import com.zyblw.agent.tools.{ToolPolicyConfig, ToolPolicySource}
 import java.time.Instant
 import zio.*
 import zio.json.ast.Json
@@ -24,7 +24,7 @@ object AgentCommandServiceSpec extends ZIOSpecDefault:
           runs,
           commands,
           environment.get[RunSubmissionStore],
-          ToolPolicyConfig.secureDefault
+          ToolPolicySource.static(ToolPolicyConfig.secureDefault)
         )
       )
 

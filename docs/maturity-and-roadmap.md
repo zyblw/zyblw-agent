@@ -24,6 +24,8 @@
 | 分层指令与指纹 | core / `core` | Foundation | System/Developer 顺序、版本、重复和稳定 fingerprint 测试 | 动态指令函数与 eval 身份自动关联 |
 | Provider-neutral 模型流 | core / `model` | Foundation | 统一事件和测试模型 | capability 矩阵持续演进 |
 | 类型化工具与策略 | core / `tools`,`guardrails` | Foundation | schema、allowlist、风险和结果测试 | policy 管理 UX |
+| 管理面与运维控制台 | core / `admin`；zio-http；agent-dashboard | Beta | scope fail-closed、CAS 覆盖写入与审计、keyset 游标（含亚毫秒回归）、能力探测、七个面板、无真实凭据的 Playwright 浏览器契约 | SSE 调试器、跨 Run 成本聚合、嵌入式部署 |
+| 模型治理与运行时切换 | core / `admin`,`core`；providers | Beta | 覆盖到达真实请求、目录 fail-closed 校验、探活不泄漏凭据、HTTP 错误稳定分类、计费口径、模型页浏览器契约 | 按 Agent 粒度覆盖、Provider 自动降级链 |
 | 单 Agent loop | core / `runtime` | Foundation | budget、工具、审批、恢复、遥测测试 | 长运行与大负载故障注入 |
 | durable command worker | core / `app`,`scheduler`,`runtime` | Foundation | 有界多 Run lane、同 Run 串行、claim/lease/heartbeat/fencing、三实例 drain、中断重领、低敏队列快照 | 长时多节点 soak、容量曲线、运维 dashboard |
 | HTTP v1 公共协议 | zio-http / `http.contract`,`http` | Foundation/Beta | 独立 DTO、Endpoint、OpenAPI、route test | 客户端 SDK、兼容升级演练 |
@@ -38,6 +40,7 @@
 | Anthropic/Gemini | providers / 对应 package | Beta | Provider contract tests | zyblw QA 业务尚未启用 |
 | OTLP/Langfuse | opentelemetry | Beta | 基数、脱敏、stub tests | 生产告警与 SLO |
 | Cache/Reasoning token | core/providers/opentelemetry | Beta | OpenAI 两类协议、状态累计、指标测试 | 其他 Provider 明细语义与真实成本基线 |
+| 成本估算 | core / `core` | Beta | 部署声明价格表、缓存/推理 token 不重复计费、混币拒绝 | 框架不内置厂商价目表，价格由部署提供 |
 | Eval/趋势门禁 | evals；仓库内 eval-cli | Experimental | snapshot、trend、release gate、有界多试验与 `pass@k`/`pass^k` | outcome/trajectory 分离、固定真实数据集与人工校准 |
 | MCP client | mcp / `mcp` | Beta/Experimental | 协议与测试基础 | OAuth/server/Roots、供应链与隔离 |
 | 可靠写工具 | core / `sideeffects` | Experimental | outbox/inbox/补偿抽象 | 真实 transport 与业务案例 |

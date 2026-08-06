@@ -39,6 +39,9 @@ object MavenConsumerSmoke:
   val durableApplication: URLayer[AgentApplication.DurableDependencies, AgentApplication.Services] =
     AgentApplication.durable(WorkerId("maven-consumer-worker"), applicationConfig)
 
+  val providerUnauthorized: AgentError.ModelHttpFailure =
+    AgentError.ModelHttpFailure("consumer-provider", 401, Some("invalid_api_key"))
+
   def main(args: Array[String]): Unit =
     val agentId = AgentId("maven-consumer")
     val message = AgentMessage.user("consumer contract")
@@ -46,3 +49,4 @@ object MavenConsumerSmoke:
     require(agentId.value == "maven-consumer")
     require(message.text == "consumer contract")
     require(applicationConfig.worker.parallelism == 4)
+    require(providerUnauthorized.category == ErrorCategory.Authentication)

@@ -38,7 +38,12 @@ final case class RagQuery(
 final class RagApplication(
     ingestion: DocumentIngestionService,
     retriever: Retriever,
-    config: RagApplicationConfig = RagApplicationConfig()
+    config: RagApplicationConfig = RagApplicationConfig(),
+    /** 可选的运行时工作点；None 表示始终使用 `config.defaultTopK`。
+      *
+      * 用 `Option` 而不是给一个静态默认解析器，是为了让"未接入管理面"与"接入后覆盖恰好等于默认值"在代码里 可区分：前者不该受管理台影响，后者应该。
+      */
+    policies: Option[RetrievalPolicySource] = None
 ):
 
   /** 单文档摄取，保留已配置的 FailFast/Continue 语义。 */
@@ -51,11 +56,15 @@ final class RagApplication(
   ): ZStream[Any, RetrievalError, DocumentIngestionOutcome] =
     ingestion.ingest(requests)
 
-  /** 在进入 Embedding/数据库前验证 query 与 topK，避免错误调用消耗远程额度或创建超大候选池。 */
+  /** 在进入 Embedding/数据库前验证 query 与 topK，避免错误调用消耗远程额度或创建超大候选池。
+    *
+    * `maxTopK` 始终取自部署基线，即使运行时覆盖把默认 topK 调到更高：覆盖层移动工作点，基线定义安全边界。 因此一个越界的覆盖会在这里被拒绝，而不是悄悄放大候选池。
+    */
   def retrieve(query: RagQuery): IO[RetrievalError, RetrievalResult] =
-    val normalized = query.text.trim
-    val codePoints = normalized.codePointCount(0, normalized.length)
-    val limit      = query.limit.getOrElse(config.defaultTopK)
+    val normalized  = query.text.trim
+    val codePoints  = normalized.codePointCount(0, normalized.length)
+    val defaultTopK = policies.fold(config.defaultTopK)(_.current().topK)
+    val limit       = query.limit.getOrElse(defaultTopK)
     if normalized.isEmpty then ZIO.fail(AgentError.RetrievalFailed("RAG query 不能为空"))
     else if codePoints > config.maxQueryCodePoints then
       ZIO.fail(
@@ -77,4 +86,13 @@ object RagApplication:
   ): URLayer[DocumentIngestionService & Retriever, RagApplication] =
     ZLayer.fromFunction((ingestion: DocumentIngestionService, retriever: Retriever) =>
       RagApplication(ingestion, retriever, config)
+    )
+
+  /** 接入运行时覆盖的装配；默认 topK 改由管理台控制，硬上限仍由 `config` 固定。 */
+  def governed(
+      config: RagApplicationConfig = RagApplicationConfig()
+  ): URLayer[DocumentIngestionService & Retriever & RetrievalPolicySource, RagApplication] =
+    ZLayer.fromFunction(
+      (ingestion: DocumentIngestionService, retriever: Retriever, policies: RetrievalPolicySource) =>
+        RagApplication(ingestion, retriever, config, Some(policies))
     )

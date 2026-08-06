@@ -37,14 +37,46 @@ jobs:
 
       - uses: sbt/setup-sbt@v1
 
+      # 版本号只是 Maven-local 往返验证的标签，与发布版本线无关；固定为 0.0.0-local
+      # 可避免它每次发布后变成一个看起来在验证旧版本的过期字面量。
       - name: Format, test, and publish to Maven-local
-        run: sbt -batch 'set ThisBuild / version := "0.3.0-local"; scalafmtCheckAll; scalafmtSbtCheck; testFull; publishM2'
+        run: sbt -batch 'set ThisBuild / version := "0.0.0-local"; scalafmtCheckAll; scalafmtSbtCheck; testFull; publishM2'
 
       - name: Compile independent Maven consumer
         working-directory: integration-tests/maven-consumer
         env:
-          ZYBLW_AGENT_VERSION: 0.3.0-local
+          ZYBLW_AGENT_VERSION: 0.0.0-local
         run: sbt -batch compile
+
+  dashboard:
+    name: dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: modules/agent-dashboard
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: modules/agent-dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        run: npm ci
+
+      - name: Typecheck, lint, and build
+        run: npx tsc --noEmit && npm run lint && npm run build
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser contract
+        run: npm run test:e2e
 
   postgres:
     name: postgres

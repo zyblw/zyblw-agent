@@ -1,5 +1,6 @@
 package com.zyblw.agent.persistence.postgres
 
+import com.zyblw.agent.admin.CursorTime
 import com.zyblw.agent.core.*
 import com.zyblw.agent.rag.*
 import java.sql.{Connection, ResultSet, SQLException, Timestamp}
@@ -670,51 +671,9 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
     finally statement.close()
   }
 
-  /** 把数据库行解码为类型化 manifest；未知状态或脏 metadata 会作为协议错误失败。 */
+  /** 与管理面目录共用的行解码。 */
   private def readManifest(result: ResultSet): KnowledgeIndexManifest =
-    val key        = KnowledgeDocumentKey(TenantId(result.getString(1)), result.getString(2))
-    val descriptor = EmbeddingProviderDescriptor(
-      result.getString(9),
-      result.getString(10),
-      result.getInt(11),
-      result.getInt(12),
-      result.getBoolean(13)
-    )
-    val build = KnowledgeIndexBuild(
-      key,
-      result.getLong(3),
-      result.getString(4),
-      result.getString(6),
-      descriptor,
-      result.getString(14)
-    )
-    val permissions = result.getArray(7).getArray.asInstanceOf[Array[AnyRef]].iterator.map(_.toString).toSet
-    val metadata    = result
-      .getString(8)
-      .fromJson[Map[String, String]]
-      .fold(
-        error => throw IllegalStateException(s"knowledge manifest metadata 解码失败: $error"),
-        identity
-      )
-    val status = result.getString(15) match
-      case "building"   => KnowledgeIndexStatus.Building
-      case "ready"      => KnowledgeIndexStatus.Ready
-      case "superseded" => KnowledgeIndexStatus.Superseded
-      case "failed"     => KnowledgeIndexStatus.Failed
-      case "retired"    => KnowledgeIndexStatus.Retired
-      case other        => throw IllegalStateException(s"未知 knowledge status: $other")
-    KnowledgeIndexManifest(
-      build,
-      result.getString(5),
-      permissions,
-      metadata,
-      status,
-      result.getBoolean(16),
-      result.getInt(17),
-      Option(result.getString(18)),
-      result.getTimestamp(19).toInstant,
-      result.getTimestamp(20).toInstant
-    )
+    KnowledgeManifestRow.decode(result)
 
   /** 同 ingestionId 的所有不可变字段都必须一致。 */
   private def sameRequest(manifest: KnowledgeIndexManifest, request: BeginKnowledgeIndex): Boolean =
@@ -777,10 +736,31 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
 
   /** 在 blocking executor 执行 JDBC，并仅暴露 SQLSTATE 分类，不记录 SQL 参数或正文。 */
   private def jdbc[A](operation: String)(effect: => A): IO[RetrievalError, A] =
-    ZIO.attemptBlocking(effect).mapError(error => databaseError(operation, error))
+    ZIO.attemptBlocking(effect).mapError(error => KnowledgeManifestRow.databaseError(operation, error))
+
+  /** ResultSet 列顺序的唯一来源；修改 migration 字段时应同步更新 `readManifest`。 */
+  private val manifestSelect = KnowledgeManifestRow.Select
+
+object PostgresKnowledgeIndexStore:
+  /** 构造与 optional migration 固定维度一致的 Store Layer。 */
+  def layer(dimension: Int): URLayer[DataSource, KnowledgeIndexStore] =
+    ZLayer.fromFunction((dataSource: DataSource) => PostgresKnowledgeIndexStore(dataSource, dimension))
+
+/** manifest 行的 SELECT 列表、解码与 SQLSTATE 分类。
+  *
+  * 版本库与管理面目录读的是同一张表的同一组列，因此共用一份投影。复制一份 20 列的解码会让两者在下一次 migration 增列时静默分叉——管理台可能显示一个与摄入路径不一致的状态。
+  */
+private object KnowledgeManifestRow:
+  /** ResultSet 列顺序的唯一来源；修改 migration 字段时必须同步更新 [[decode]]。 */
+  val Select: String =
+    """SELECT tenant_id, document_id, index_version, ingestion_id, source_uri, content_hash,
+      |       permissions, metadata::text, embedding_provider, embedding_model, embedding_dimension,
+      |       embedding_max_batch_size, embedding_supports_dimensions, indexing_strategy,
+      |       status, active, chunk_count, failure_code, created_at, updated_at
+      |FROM zyblw_agent_knowledge.agent_knowledge_documents""".stripMargin
 
   /** 08/40/53 与数据库重启 SQLSTATE 可重试；约束和协议错误保持不可重试。 */
-  private def databaseError(operation: String, error: Throwable): RetrievalError =
+  def databaseError(operation: String, error: Throwable): RetrievalError =
     val sqlState = error match
       case sql: SQLException => Option(sql.getSQLState).getOrElse("unknown")
       case _                 => "not-sql"
@@ -788,15 +768,129 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
       Set("57P01", "57P02", "57P03").contains(sqlState)
     AgentError.RetrievalFailed(s"PostgreSQL knowledge $operation 失败 (sqlState=$sqlState)", retryable)
 
-  /** ResultSet 列顺序的唯一来源；修改 migration 字段时应同步更新 `readManifest`。 */
-  private val manifestSelect =
-    """SELECT tenant_id, document_id, index_version, ingestion_id, source_uri, content_hash,
-      |       permissions, metadata::text, embedding_provider, embedding_model, embedding_dimension,
-      |       embedding_max_batch_size, embedding_supports_dimensions, indexing_strategy,
-      |       status, active, chunk_count, failure_code, created_at, updated_at
-      |FROM zyblw_agent_knowledge.agent_knowledge_documents""".stripMargin
+  /** 把数据库行解码为类型化 manifest；未知状态或脏 metadata 会作为协议错误失败。 */
+  def decode(result: ResultSet): KnowledgeIndexManifest =
+    val key        = KnowledgeDocumentKey(TenantId(result.getString(1)), result.getString(2))
+    val descriptor = EmbeddingProviderDescriptor(
+      result.getString(9),
+      result.getString(10),
+      result.getInt(11),
+      result.getInt(12),
+      result.getBoolean(13)
+    )
+    val build = KnowledgeIndexBuild(
+      key,
+      result.getLong(3),
+      result.getString(4),
+      result.getString(6),
+      descriptor,
+      result.getString(14)
+    )
+    val permissions = result.getArray(7).getArray.asInstanceOf[Array[AnyRef]].iterator.map(_.toString).toSet
+    val metadata    = result
+      .getString(8)
+      .fromJson[Map[String, String]]
+      .fold(
+        error => throw IllegalStateException(s"knowledge manifest metadata 解码失败: $error"),
+        identity
+      )
+    val status = result.getString(15) match
+      case "building"   => KnowledgeIndexStatus.Building
+      case "ready"      => KnowledgeIndexStatus.Ready
+      case "superseded" => KnowledgeIndexStatus.Superseded
+      case "failed"     => KnowledgeIndexStatus.Failed
+      case "retired"    => KnowledgeIndexStatus.Retired
+      case other        => throw IllegalStateException(s"未知 knowledge status: $other")
+    KnowledgeIndexManifest(
+      build,
+      result.getString(5),
+      permissions,
+      metadata,
+      status,
+      result.getBoolean(16),
+      result.getInt(17),
+      Option(result.getString(18)),
+      result.getTimestamp(19).toInstant,
+      result.getTimestamp(20).toInstant
+    )
 
-object PostgresKnowledgeIndexStore:
-  /** 构造与 optional migration 固定维度一致的 Store Layer。 */
-  def layer(dimension: Int): URLayer[DataSource, KnowledgeIndexStore] =
-    ZLayer.fromFunction((dataSource: DataSource) => PostgresKnowledgeIndexStore(dataSource, dimension))
+/** 知识索引清单目录的 PostgreSQL 实现。
+  *
+  * 过滤与 keyset 条件全部下推到 SQL，因此管理台翻页不会把整个知识库的清单加载进堆。它与 [[PostgresKnowledgeIndexStore]]
+  * 读同一张表的同一组列，保证管理台看到的状态就是摄入路径写入的状态。
+  *
+  * 排序固定为 `(updated_at DESC, document_id DESC, index_version DESC)`，与 `KnowledgeIndexDirectory` 契约
+  * 及内存实现一致，因此同一个游标在两种实现下含义相同。
+  *
+  * @param dataSource
+  *   宿主共享连接池；框架不创建隐藏连接池
+  */
+final class PostgresKnowledgeIndexDirectory(dataSource: DataSource) extends KnowledgeIndexDirectory:
+  def list(
+      tenantId: Option[TenantId],
+      limit: Int,
+      cursor: Option[KnowledgeIndexCursor]
+  ): IO[RetrievalError, KnowledgeIndexPage] =
+    val bounded    = KnowledgeIndexDirectory.boundedLimit(limit)
+    val conditions = Chunk.fromIterable(tenantId.map(_ => "tenant_id = ?")) ++
+      // 行值比较让 PostgreSQL 直接在复合索引上定位游标位置；拆成 OR 条件通常退化为顺序扫描。
+      Chunk.fromIterable(cursor.map(_ => "(updated_at, document_id, index_version) < (?, ?, ?)"))
+    val whereSql = if conditions.isEmpty then "" else conditions.mkString(" WHERE ", " AND ", "")
+    val sql      =
+      s"""${KnowledgeManifestRow.Select}$whereSql
+         |ORDER BY updated_at DESC, document_id DESC, index_version DESC
+         |LIMIT ?""".stripMargin
+
+    ZIO
+      .scoped {
+        ZIO
+          .acquireRelease(
+            ZIO.attemptBlocking(dataSource.getConnection)
+          )(connection => ZIO.attemptBlocking(connection.close()).ignore)
+          .flatMap { connection =>
+            ZIO.attemptBlocking {
+              val statement = connection.prepareStatement(sql)
+              try
+                var index       = 0
+                def next(): Int = { index += 1; index }
+                tenantId.foreach(value => statement.setString(next(), value.value))
+                cursor.foreach { value =>
+                  statement.setTimestamp(
+                    next(),
+                    Timestamp.from(CursorTime.toInstant(value.updatedAtEpochMicro))
+                  )
+                  statement.setString(next(), value.documentId)
+                  statement.setLong(next(), value.indexVersion)
+                }
+                // 多取一条用于判定 hasMore，避免额外一次 COUNT 查询。
+                statement.setInt(next(), bounded + 1)
+                val result  = statement.executeQuery()
+                val builder = ChunkBuilder.make[KnowledgeIndexManifest]()
+                while result.next() do builder += KnowledgeManifestRow.decode(result)
+                builder.result()
+              finally statement.close()
+            }
+          }
+      }
+      .mapError(KnowledgeManifestRow.databaseError("list manifests", _))
+      .map { rows =>
+        val window  = rows.take(bounded)
+        val hasMore = rows.length > window.length
+        KnowledgeIndexPage(
+          window,
+          window.lastOption
+            .filter(_ => hasMore)
+            .map(last =>
+              KnowledgeIndexCursor(
+                CursorTime.epochMicro(last.updatedAt),
+                last.build.key.documentId,
+                last.build.version
+              )
+            ),
+          hasMore
+        )
+      }
+
+object PostgresKnowledgeIndexDirectory:
+  val layer: URLayer[DataSource, KnowledgeIndexDirectory] =
+    ZLayer.fromFunction((dataSource: DataSource) => PostgresKnowledgeIndexDirectory(dataSource))

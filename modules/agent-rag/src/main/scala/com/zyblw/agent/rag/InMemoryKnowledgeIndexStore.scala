@@ -324,6 +324,14 @@ final class InMemoryKnowledgeIndexStore private (
   def published(key: KnowledgeDocumentKey): UIO[Chunk[IndexedChunk]] =
     state.get.map(_.published.getOrElse(key, Chunk.empty))
 
+  /** 返回全部索引清单的快照，供 `KnowledgeIndexDirectory` 做管理面投影。
+    *
+    * 该能力只出现在具体内存实现上，不进入 `KnowledgeIndexStore` trait：给已发布 trait 增加抽象方法会让所有外部 实现无法编译，而清单枚举只被管理列表需要。返回值只含
+    * manifest，不含暂存块、已发布块和向量。
+    */
+  def manifests: UIO[Chunk[KnowledgeIndexManifest]] =
+    state.get.map(current => Chunk.fromIterable(current.manifests.values))
+
   private def cosine(left: Embedding, right: Embedding): Double =
     if left.values.length != right.values.length then 0.0
     else
