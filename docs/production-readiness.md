@@ -156,7 +156,7 @@ ZYBLW_AGENT_VERSION=0.5.0-local.1 sbt -batch 'clean; compile'
 使用控制台的部署还需在 `modules/agent-dashboard` 执行：
 
 ```bash
-npx tsc --noEmit && npm run lint && npm run build
+npm run typecheck && npm run lint && npm run build
 npm run test:e2e
 ```
 

@@ -69,8 +69,11 @@ jobs:
       - name: Install dashboard dependencies
         run: npm ci
 
+      # `LayoutProps` and the other route-aware helpers are generated into `.next/types`, so a bare
+      # `tsc --noEmit` only passes on a machine that already ran a build. `next typegen` produces
+      # them without building, which keeps type checking a real gate on a clean checkout.
       - name: Typecheck, lint, and build
-        run: npx tsc --noEmit && npm run lint && npm run build
+        run: npm run typecheck && npm run lint && npm run build
 
       - name: Install Chromium
         run: npx playwright install --with-deps chromium

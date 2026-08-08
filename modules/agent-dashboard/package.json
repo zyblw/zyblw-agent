@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "typecheck": "next typegen && tsc --noEmit",
     "lint": "eslint",
     "test:e2e": "playwright test",
     "test:e2e:install": "playwright install chromium"

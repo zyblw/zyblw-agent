@@ -153,6 +153,10 @@ see [docs/upgrading-to-0.5.0.md](docs/upgrading-to-0.5.0.md).
   carries `Accept: text/event-stream` and an initial `Last-Event-ID`; a second interrupts the stream with `stream_error` after one
   event and asserts the reconnect resumes from the last confirmed sequence rather than replaying, since replayed events would be
   rejected by the client's own contiguity check.
+- The dashboard type check runs `next typegen` first. Route-aware helpers such as `LayoutProps` are generated into
+  `.next/types`, so a bare `tsc --noEmit` silently passed on machines that had already built and failed on a clean CI
+  checkout. `next typegen` produces those declarations without a full build, which keeps type checking a real gate instead
+  of a step that only reports the state of a local build directory.
 - Release gates re-run on the tagged tree: format checks and `testFull` pass with no failures, `RUN_POSTGRES_INTEGRATION=1
   postgres/testFull` applies core `V001 → V002` on a real PostgreSQL 16 container with 54 passing contracts, `publishM2` produces
   POM, binary, sources and Scaladoc JARs for all eleven published modules with no unresolved Scaladoc links, and the independent

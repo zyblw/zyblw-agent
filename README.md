@@ -323,7 +323,7 @@ cd integration-tests/maven-consumer && ZYBLW_AGENT_VERSION=0.5.0-local.1 sbt -ba
 
 ```bash
 cd modules/agent-dashboard
-npx tsc --noEmit && npm run lint && npm run build
+npm run typecheck && npm run lint && npm run build
 npm run test:e2e:install && npm run test:e2e
 ```
 

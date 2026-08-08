@@ -94,7 +94,7 @@ Central artifact 不可覆盖；失败修复必须用新版本。
 6. `integration-tests/maven-consumer` 设置 `ZYBLW_AGENT_VERSION` 后仅依赖本地发布物也能编译。
 7. 0.5.0 必须验证核心 `V001 + V002` 可在既有 0.4 库上顺序应用、生成列与 keyset 分页在真实 PostgreSQL 上通过、专属
    `zyblw_agent_knowledge` schema 与两套 history 可幂等重放；发布后的 patch 还必须验证代表性升级库，且不得修改已发布 migration。
-8. 启用控制台时，`modules/agent-dashboard` 的 `tsc --noEmit`、`lint`、`build` 与 Playwright 浏览器契约全部通过。
+8. 启用控制台时，`modules/agent-dashboard` 的 `typecheck`、`lint`、`build` 与 Playwright 浏览器契约全部通过。
 9. POM 包含 name、description、URL、license、developer 和 SCM。
 10. 无密钥、真实用户数据或敏感 trace 进入 Git 历史和 artifact。
 11. 私有业务仓库使用相同 Maven-local 版本完成下游兼容验证，但任何私有源码、token 或日志都不进入公开 workflow。

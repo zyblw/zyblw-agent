@@ -73,5 +73,5 @@ deadline 后 timeout 胜出。恢复只消费由 owner/token/generation/expiry �
 
 `0.5.0` 发布前必须同时通过：格式检查、完整 `testFull`、真实 PostgreSQL 16/pgvector（含 `V002` 生成列与 keyset 分页）、
 核心后知识的组合迁移、重复启动、`publishM2`、独立 Maven consumer、HTTP/OpenAPI 契约、管理面授权边界测试，以及控制台的
-类型检查、lint、生产构建与 Playwright 浏览器契约。发布标签必须来自远端 `main`，且 CHANGELOG 与
+`typecheck`、lint、生产构建与 Playwright 浏览器契约。发布标签必须来自远端 `main`，且 CHANGELOG 与
 `docs/upgrading-to-0.5.0.md` 一致——`.github/scripts/verify-release.sh` 会 fail-closed 校验这三者。

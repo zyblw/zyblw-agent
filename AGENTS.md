@@ -118,8 +118,11 @@ ZYBLW_AGENT_VERSION=0.5.0-local sbt -batch compile
 Console changes additionally require, in `modules/agent-dashboard`:
 
 ```bash
-npx tsc --noEmit && npm run lint && npm run build && npm run test:e2e
+npm run typecheck && npm run lint && npm run build && npm run test:e2e
 ```
+
+Use `npm run typecheck`, not a bare `tsc --noEmit`: route-aware helpers such as `LayoutProps` are
+generated into `.next/types`, so a bare `tsc` only passes on a machine that already built.
 
 `test` is incremental in sbt 2; CI, releases, and PostgreSQL contracts must use `testFull`. Live
 provider tests are opt-in and must never run on an ordinary pull request.

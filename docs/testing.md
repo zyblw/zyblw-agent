@@ -40,7 +40,7 @@ Testcontainer 改为先执行核心 migration、再执行知识 migration、最�
 - staging 不可见、原子发布/回滚/退役、ACL、hybrid retrieval、父级/相邻扩展和复合 document/chunk 身份通过；
 - 管理面授权边界通过：缺少 scope 在触达适配器之前被拒、write 蕴含 read、debug **不**被 write 蕴含、未装配能力返回 404
   且 capability 探测如实报告不可用；
-- `modules/agent-dashboard` 的 `tsc --noEmit`、`lint`、`build` 与 Playwright 浏览器契约通过；
+- `modules/agent-dashboard` 的 `typecheck`、`lint`、`build` 与 Playwright 浏览器契约通过；
 - `0.5.0-local.1 publishM2`、独立 Maven consumer 与关键示例成功。
 
 ### 最近一次完整本地证据
@@ -52,7 +52,8 @@ Testcontainer 改为先执行核心 migration、再执行知识 migration、最�
   注释顺序应用，54 项通过、0 失败、0 忽略；
 - `0.5.0-local publishM2` 生成 11 个公开模块的 POM、binary、sources 与 Scaladoc JAR；独立 Maven consumer 仅依赖本地
   发布物重新编译生产装配；
-- 控制台 `tsc --noEmit`、`lint`、`next build` 通过；
+- 控制台在删除 `.next` 与 `next-env.d.ts` 的干净状态下 `typecheck`、`lint`、`next build` 与四项 Playwright 浏览器
+  契约全部通过；
 - 修复了一处会让 CI 随机变红的测试耦合：`OpenAICompatibleEmbeddingHttpSpec` 原先在同一个 `Client` 上先制造一次超时
   中断、再断言取消传播。被放弃的在途连接是否留在连接池由 Client 回收时机决定，取消请求可能被发到那条连接上而丢失。
   两个契约现在各自持有 Client，隔离后连续五次运行稳定通过。

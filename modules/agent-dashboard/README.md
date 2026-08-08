@@ -106,12 +106,16 @@ npm run dev
 ## 校验
 
 ```bash
-npx tsc --noEmit    # 类型检查
+npm run typecheck   # next typegen + tsc --noEmit
 npm run lint        # ESLint
 npm run build       # 生产构建
 npm run test:e2e:install  # 首次安装 Chromium
 npm run test:e2e    # 浏览器契约：凭据门禁、模型目录、键盘操作、探活与脱敏
 ```
+
+类型检查必须走 `npm run typecheck` 而不是直接 `tsc --noEmit`。`LayoutProps` 等路由感知类型由 Next.js 生成到
+`.next/types`，裸跑 `tsc` 只在已经构建过的机器上通过，在干净检出上会失败。`next typegen` 不做完整构建就生成这些
+类型，因此类型检查在 CI 上仍然是一道真实门禁。
 
 浏览器测试拦截 `/api/v1/admin/**` 并返回确定性契约响应，不读取真实环境变量、不访问真实 Provider，也不会产生费用。
 它验证的是控制台与管理 API wire shape 的集成；真实 Provider 的 TLS、凭据和在线协议仍由 opt-in live smoke 负责。

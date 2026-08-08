@@ -82,7 +82,7 @@ ZYBLW_AGENT_VERSION=0.5.0-local sbt -batch compile
 Console changes additionally require, in `modules/agent-dashboard`:
 
 ```bash
-npx tsc --noEmit && npm run lint && npm run build && npm run test:e2e
+npm run typecheck && npm run lint && npm run build && npm run test:e2e
 ```
 
 Live-provider tests remain opt-in. Never expose secrets, raw private prompts, provider payloads, or
