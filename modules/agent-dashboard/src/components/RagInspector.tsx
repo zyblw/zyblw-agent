@@ -1,431 +1,690 @@
 'use client';
 
-import React, { useState } from 'react';
-import { DocumentBlock, KnowledgeDocumentView, RetrievalHit } from '@/types/agent';
+/**
+ * 知识库：索引清单、检索沙盒与异步摄入。
+ *
+ * 检索沙盒是这个页面的核心。它的价值不是"能搜东西"，而是**以某个业务主体的租户与权限视角复现一次真实
+ * 召回，并展示检索链每一阶段留下的原始信号**。用管理员自己的权限去查会让 ACL 问题永远无法复现，因此
+ * 租户和权限必须由使用者显式填写。
+ *
+ * 沙盒会调用 Embedding Provider 并产生真实费用，所以它需要 `agent:admin:debug`，且只在点击时发起请求，
+ * 不因窗口重新聚焦或组件重挂载而自动重发。
+ *
+ * 整个页面共用一个租户：清单过滤、沙盒模拟身份与摄入目标指向同一个值。三个各自为政的租户输入会让人以为
+ * 自己在某个租户下调试，而实际上正在往另一个租户里写文档。
+ */
+
+import React, { useMemo, useState } from 'react';
 import {
-  CheckCircle2,
-  FileText,
-  Filter,
-  FolderPlus,
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  FlaskConical,
   Layers,
-  Play,
-  RefreshCw,
   Search,
-  ShieldCheck,
-  Sparkles,
-  Table,
-  Type,
-  UploadCloud
+  Upload,
 } from 'lucide-react';
+import {
+  useIngestionJobs,
+  useKnowledgeDocuments,
+  useKnowledgeRetrieve,
+  useRetireDocument,
+  useSubmitIngestion,
+} from '@/lib/queries';
+import { useToast } from '@/lib/toast';
+import { useDebouncedUrlValue } from '@/lib/urlState';
+import type { IngestionJobView, KnowledgeDocumentPage, KnowledgeRetrievalHitView } from '@/types/admin';
+import {
+  formatBytes,
+  formatCount,
+  formatDuration,
+  formatInstant,
+  formatRelative,
+  formatScore,
+  ingestionStatusTone,
+  parseList,
+} from '@/lib/format';
+import {
+  Badge,
+  Button,
+  CopyableId,
+  EmptyState,
+  ErrorBanner,
+  Field,
+  FOCUS_RING,
+  LoadingRows,
+  Mono,
+  Panel,
+  StatCard,
+  TextInput,
+} from '@/components/ui';
 
-interface RagInspectorProps {
-  initialDocs: KnowledgeDocumentView[];
-  blocks: DocumentBlock[];
-  hits: RetrievalHit[];
-}
+/** 一页索引清单的条数；比 Run 目录小，因为每一行的信息密度高得多。 */
+const DOCUMENTS_PAGE_SIZE = 25;
 
-export const RagInspector: React.FC<RagInspectorProps> = ({
-  initialDocs,
-  blocks,
-  hits
-}) => {
-  const [docs, setDocs] = useState<KnowledgeDocumentView[]>(initialDocs);
-  const [selectedDocId, setSelectedDocId] = useState<string>(docs[0]?.id || '');
-  const [selectedBlockId, setSelectedBlockId] = useState<string | null>(blocks[0]?.id || null);
+export function RagInspector() {
+  // 三处租户输入共用一个防抖绑定：草稿只驱动输入框，已提交值驱动查询与游标栈。否则敲一个租户 ID 会让
+  // 清单、摄入任务两组查询各重发一次每个字符。
+  const [tenantDraft, setTenant, tenant] = useDebouncedUrlValue('ragTenant');
 
-  // Ingestion Form State
-  const [uploadFileName, setUploadFileName] = useState('');
-  const [loaderEngine, setLoaderEngine] = useState<'Docling' | 'Apache Tika'>('Docling');
-  const [chunkerStrategy, setChunkerStrategy] = useState<'DocumentStructureChunker' | 'SlidingWindowChunker'>('DocumentStructureChunker');
-  const [tenantId, setTenantId] = useState('tenant-enterprise-a');
-  const [permissions, setPermissions] = useState('knowledge:read');
-  const [isIngesting, setIsIngesting] = useState(false);
-  const [ingestStep, setIngestStep] = useState<string | null>(null);
+  // 游标栈与产生它的租户绑定；租户一变就在渲染时判定失效并从第一页开始，不需要 effect 去清理。
+  const [paging, setPaging] = useState<{ key: string; stack: (string | undefined)[] }>({
+    key: tenant,
+    stack: [undefined],
+  });
+  const cursorStack = paging.key === tenant ? paging.stack : [undefined];
+  const cursor = cursorStack[cursorStack.length - 1];
 
-  // Retrieval Sandbox State
-  const [queryText, setQueryText] = useState('PDF RAG 结构切分与向量表隔离');
-  const [searchHits, setSearchHits] = useState<RetrievalHit[]>(hits);
+  const documents = useKnowledgeDocuments({
+    tenantId: tenant || undefined,
+    limit: DOCUMENTS_PAGE_SIZE,
+    cursor,
+  });
+  const jobs = useIngestionJobs({ tenantId: tenant || undefined, limit: 20 });
 
-  const selectedBlock = blocks.find((b) => b.id === selectedBlockId) || blocks[0];
-  const originBox = selectedBlock?.origins[0]?.boundingBox;
-
-  const handleSimulateUpload = () => {
-    const fileName = uploadFileName.trim() || '未命名业务资料文档.pdf';
-    setIsIngesting(true);
-    setIngestStep('1/4 读取 DocumentInput 并启动解析...');
-
-    setTimeout(() => setIngestStep('2/4 Docling 结构解析与 DocumentBlock 识别...'), 700);
-    setTimeout(() => setIngestStep('3/4 Governed Embedding 缓存与向量编码...'), 1400);
-    setTimeout(() => {
-      setIngestStep('4/4 Staging 验证并原子发布至 Active 向量库!');
-      const newDoc: KnowledgeDocumentView = {
-        id: `doc-${Date.now()}`,
-        fileName: fileName,
-        sourceUri: `knowledge://local/docs/${fileName}`,
-        mediaType: fileName.endsWith('.pdf') ? 'application/pdf' : 'text/markdown',
-        fileSizeBytes: 980000,
-        status: 'Active',
-        totalChunks: 14,
-        tenantId: tenantId,
-        permissions: permissions.split(',').map((p) => p.trim()),
-        loaderEngine: loaderEngine,
-        chunkerStrategy: chunkerStrategy,
-        createdAt: new Date().toISOString(),
-        sha256: '9f3e478a89bc21374092...'
-      };
-      setDocs([newDoc, ...docs]);
-      setSelectedDocId(newDoc.id);
-      setIsIngesting(false);
-      setUploadFileName('');
-      setTimeout(() => setIngestStep(null), 3000);
-    }, 2200);
-  };
-
-  const handleRunSearch = () => {
-    setSearchHits(hits);
-  };
+  const activeCount = documents.data?.items.filter((doc) => doc.active).length ?? 0;
+  const totalChunks =
+    documents.data?.items.reduce((sum, doc) => sum + (doc.active ? doc.chunkCount : 0), 0) ?? 0;
 
   return (
-    <div className="p-6 bg-slate-950 text-slate-100 font-sans space-y-6 min-h-[calc(100vh-100px)]">
-      {/* Top Banner & Schema Info */}
-      <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 flex flex-wrap items-center justify-between gap-4 shadow-xl backdrop-blur-sm">
-        <div className="flex items-center space-x-3">
-          <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-400">
-            <Layers className="w-6 h-6" />
-          </div>
-          <div>
-            <div className="flex items-center space-x-2">
-              <h2 className="font-bold text-base text-slate-100">
-                PostgreSQL 专属 Schema: <span className="font-mono text-indigo-400">zyblw_agent_knowledge</span>
-              </h2>
-              <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-xs px-2.5 py-0.5 rounded-full font-bold">
-                Active 向量库 V1
-              </span>
-            </div>
-            <p className="text-xs text-slate-400 mt-0.5">
-              独立的 Flyway 迁移历史 • public.vector(1536) • 完整 DocumentStructure 结构谱系保留
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-center space-x-6 text-xs font-mono">
-          <div>
-            <span className="text-slate-500 block text-[10px]">已摄入文档总数</span>
-            <span className="font-bold text-slate-200">{docs.length} 份文档</span>
-          </div>
-          <div className="h-6 w-px bg-slate-800" />
-          <div>
-            <span className="text-slate-500 block text-[10px]">ACTIVE CHUNKS 总数</span>
-            <span className="font-bold text-indigo-300">1,480 个 Chunk 节点</span>
-          </div>
-          <div className="h-6 w-px bg-slate-800" />
-          <div>
-            <span className="text-slate-500 block text-[10px]">向量维度契约</span>
-            <span className="font-bold text-cyan-300">1536 维 Float32</span>
-          </div>
-        </div>
+    <div className="space-y-4 p-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <StatCard label="索引版本" value={formatCount(documents.data?.items.length)} hint="当前页可见" />
+        <StatCard label="生效文档" value={formatCount(activeCount)} tone="good" hint="当前页可见" />
+        <StatCard label="生效 chunk" value={formatCount(totalChunks)} hint="当前页可见" />
+        <StatCard
+          label="进行中摄入"
+          value={formatCount(
+            jobs.data?.filter((job) => job.status !== 'Completed' && job.status !== 'Failed').length ?? 0,
+          )}
+          tone="warn"
+        />
       </div>
 
-      {/* Grid: Document Upload Studio & Ingested List */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Document Upload & Parsing Studio (5 Cols) */}
-        <div className="lg:col-span-5 bg-slate-900/80 rounded-2xl border border-slate-800 p-5 space-y-4 shadow-xl backdrop-blur-sm">
-          <h3 className="font-bold text-sm text-slate-200 border-b border-slate-800 pb-3 flex items-center gap-2">
-            <UploadCloud className="w-4 h-4 text-indigo-400" />
-            多源文档一键导入与向量化测试
-          </h3>
+      <RetrievalSandbox tenant={tenantDraft} onTenantChange={setTenant} />
 
-          {/* File Input Mock */}
-          <div className="border-2 border-dashed border-slate-800 hover:border-indigo-500/50 rounded-xl p-4 text-center cursor-pointer transition-all bg-slate-950/40">
-            <FolderPlus className="w-8 h-8 text-indigo-400 mx-auto mb-2 opacity-80" />
-            <input
-              type="text"
-              value={uploadFileName}
-              onChange={(e) => setUploadFileName(e.target.value)}
-              placeholder="输入文件名 (如：业务规范说明书.pdf)..."
-              className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-sans focus:outline-none focus:border-indigo-500 text-center mb-1"
-            />
-            <span className="text-[11px] text-slate-500 block">
-              支持 PDF、Markdown (.md)、Word (.docx)、TXT 格式
+      <div className="grid gap-4 xl:grid-cols-2">
+        <IndexManifests
+          tenant={tenantDraft}
+          onTenantChange={setTenant}
+          page={documents.data}
+          error={documents.error}
+          pending={documents.isPending}
+          canGoBack={cursorStack.length > 1}
+          onPrevious={() => setPaging({ key: tenant, stack: cursorStack.slice(0, -1) })}
+          onNext={() =>
+            setPaging({ key: tenant, stack: [...cursorStack, documents.data?.nextCursor ?? undefined] })
+          }
+        />
+        <IngestionPanel tenant={tenantDraft} onTenantChange={setTenant} jobs={jobs.data} jobsError={jobs.error} jobsPending={jobs.isPending} />
+      </div>
+    </div>
+  );
+}
+
+/** 检索沙盒。 */
+function RetrievalSandbox({ tenant, onTenantChange }: { tenant: string; onTenantChange: (value: string) => void }) {
+  const [query, setQuery] = useState('');
+  const [permissions, setPermissions] = useState('');
+  const [limit, setLimit] = useState('5');
+  const [rerank, setRerank] = useState(true);
+  const [expandContext, setExpandContext] = useState(true);
+  const [selectedChunk, setSelectedChunk] = useState<string | null>(null);
+
+  const retrieve = useKnowledgeRetrieve();
+  const result = retrieve.data;
+
+  const canRun = query.trim().length > 0 && tenant.trim().length > 0;
+
+  function run() {
+    setSelectedChunk(null);
+    retrieve.mutate({
+      query: query.trim(),
+      tenantId: tenant.trim(),
+      permissions: parseList(permissions),
+      limit: Math.max(1, Math.min(50, Number.parseInt(limit, 10) || 5)),
+      rerank,
+      expandContext,
+    });
+  }
+
+  const selected = result?.hits.find((hit) => hit.chunk.chunkId === selectedChunk) ?? null;
+
+  return (
+    <Panel
+      title="检索沙盒"
+      description="以指定租户与权限视角执行一次真实检索；会调用 Embedding Provider 并产生费用"
+      actions={
+        <>
+          <Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">
+            需要 agent:admin:debug
+          </Badge>
+          <Button onClick={run} disabled={!canRun || retrieve.isPending}>
+            <Search className="h-3 w-3" />
+            {retrieve.isPending ? '检索中…' : '执行检索'}
+          </Button>
+        </>
+      }
+    >
+      <div className="grid gap-3 lg:grid-cols-[3fr_1fr_1fr_auto]">
+        <TextInput label="查询" value={query} onChange={setQuery} placeholder="要复现的检索问题" />
+        <TextInput
+          label="模拟租户"
+          value={tenant}
+          onChange={onTenantChange}
+          placeholder="必填"
+          hint="与下方索引清单共用同一个租户"
+        />
+        <TextInput
+          label="模拟权限（逗号分隔）"
+          value={permissions}
+          onChange={setPermissions}
+          placeholder="留空表示无额外授权"
+        />
+        <TextInput label="topK" value={limit} onChange={setLimit} className="w-20" inputMode="numeric" />
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-slate-300">
+        <label className="flex items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={rerank}
+            onChange={(event) => setRerank(event.target.checked)}
+            className={`rounded border-slate-700 bg-slate-950 ${FOCUS_RING}`}
+          />
+          执行重排
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={expandContext}
+            onChange={(event) => setExpandContext(event.target.checked)}
+            className={`rounded border-slate-700 bg-slate-950 ${FOCUS_RING}`}
+          />
+          上下文扩展（相邻 / 父级）
+        </label>
+        <span className="text-slate-500">
+          关闭重排可以判断一次不理想的召回是向量不准还是重排把正确结果压了下去。
+        </span>
+      </div>
+
+      <div className="mt-3">
+        <ErrorBanner error={retrieve.error} context="执行检索" />
+      </div>
+
+      {result && (
+        <>
+          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs text-slate-400">
+            <Badge className="text-sky-300 bg-sky-500/10 ring-sky-500/30">
+              {formatDuration(result.elapsedMillis)}
+            </Badge>
+            <span>
+              {result.embeddingProvider} / {result.embeddingModel} · {result.embeddingDimension} 维
+            </span>
+            <Badge className={result.rerankApplied ? 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30' : ''}>
+              重排 {result.rerankApplied ? '已执行' : '未执行'}
+            </Badge>
+            <Badge className={result.contextExpanded ? 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30' : ''}>
+              上下文扩展 {result.contextExpanded ? '已执行' : '未执行'}
+            </Badge>
+            <span className="ml-auto">
+              {result.hits.length} 条命中 · {result.citations.length} 条引用
             </span>
           </div>
 
-          {/* Options: Loader Engine & Chunker Strategy */}
-          <div className="grid grid-cols-2 gap-3 text-xs">
-            <div>
-              <label className="text-[10px] font-mono text-slate-400 block mb-1">
-                解析引擎 (Loader Engine)
-              </label>
-              <select
-                value={loaderEngine}
-                onChange={(e) => setLoaderEngine(e.target.value as any)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-slate-200 font-mono focus:outline-none"
-              >
-                <option value="Docling">Docling (无损 JSON + PDF BBox)</option>
-                <option value="Apache Tika">Apache Tika (文本解析)</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="text-[10px] font-mono text-slate-400 block mb-1">
-                切分策略 (Chunker Strategy)
-              </label>
-              <select
-                value={chunkerStrategy}
-                onChange={(e) => setChunkerStrategy(e.target.value as any)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-slate-200 font-mono focus:outline-none"
-              >
-                <option value="DocumentStructureChunker">结构切分 (Structure Lineage)</option>
-                <option value="SlidingWindowChunker">滑动窗口 (Sliding Window)</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Tenant & Permissions */}
-          <div className="grid grid-cols-2 gap-3 text-xs">
-            <div>
-              <label className="text-[10px] font-mono text-slate-400 block mb-1">
-                租户归属 (Tenant ID)
-              </label>
-              <input
-                type="text"
-                value={tenantId}
-                onChange={(e) => setTenantId(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-200 font-mono focus:outline-none"
+          {result.hits.length === 0 ? (
+            <div className="mt-3">
+              <EmptyState
+                title="没有命中"
+                reason="可能是该租户下没有生效索引、模拟权限不足以访问任何文档，或最低得分阈值过高。"
               />
             </div>
-
-            <div>
-              <label className="text-[10px] font-mono text-slate-400 block mb-1">
-                授权集合 (ACL Permissions)
-              </label>
-              <input
-                type="text"
-                value={permissions}
-                onChange={(e) => setPermissions(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-200 font-mono focus:outline-none"
-              />
-            </div>
-          </div>
-
-          <button
-            onClick={handleSimulateUpload}
-            disabled={isIngesting}
-            className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold py-2 rounded-xl text-xs flex items-center justify-center space-x-2 shadow-lg shadow-indigo-600/20 transition-all"
-          >
-            {isIngesting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-            <span>{isIngesting ? '正在执行向量摄入流水线...' : '开始解析并摄入向量库'}</span>
-          </button>
-
-          {ingestStep && (
-            <div className="p-3 bg-indigo-500/10 border border-indigo-500/30 rounded-xl text-xs text-indigo-300 font-mono flex items-center space-x-2">
-              <Sparkles className="w-4 h-4 text-indigo-400 animate-pulse" />
-              <span>{ingestStep}</span>
+          ) : (
+            <div className="mt-3 grid gap-3 xl:grid-cols-[1.4fr_1fr]">
+              <div className="space-y-2">
+                {result.hits.map((hit, index) => (
+                  <HitRow
+                    key={hit.chunk.chunkId}
+                    hit={hit}
+                    rank={index + 1}
+                    selected={hit.chunk.chunkId === selectedChunk}
+                    onSelect={() => setSelectedChunk(hit.chunk.chunkId)}
+                  />
+                ))}
+              </div>
+              <div className="space-y-3">
+                {selected ? (
+                  <ChunkDetail hit={selected} />
+                ) : (
+                  <EmptyState title="选择一条命中以查看谱系与信号" />
+                )}
+              </div>
             </div>
           )}
+        </>
+      )}
+
+      {!result && !retrieve.isPending && (
+        <div className="mt-3">
+          <EmptyState
+            title="尚未执行检索"
+            reason="填写查询与要模拟的租户后点击执行。沙盒不会自动重发请求，因为每次调用都产生真实的 Embedding 费用。"
+          />
         </div>
+      )}
+    </Panel>
+  );
+}
 
-        {/* Ingested Documents List Table (7 Cols) */}
-        <div className="lg:col-span-7 bg-slate-900/80 rounded-2xl border border-slate-800 p-5 space-y-3 shadow-xl backdrop-blur-sm">
-          <div className="pb-3 border-b border-slate-800 flex items-center justify-between">
-            <h3 className="font-bold text-sm text-slate-200 flex items-center gap-2">
-              <FileText className="w-4 h-4 text-cyan-400" />
-              知识库文档清单与发布状态
-            </h3>
-            <span className="text-[10px] text-slate-500 font-mono">
-              KnowledgeIndexStore Metadata
+/** 单条命中；signals 直接展示后端给出的原始键，不做白名单过滤。 */
+function HitRow({
+  hit,
+  rank,
+  selected,
+  onSelect,
+}: {
+  hit: KnowledgeRetrievalHitView;
+  rank: number;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const signalKeys = useMemo(() => Object.keys(hit.signals).sort(), [hit.signals]);
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`w-full rounded-lg border px-3 py-2 text-left transition ${FOCUS_RING} ${
+        selected ? 'border-indigo-600 bg-indigo-950/30' : 'border-slate-800 bg-slate-950/40 hover:bg-slate-900/60'
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="grid h-5 w-5 shrink-0 place-items-center rounded bg-slate-800 text-[10px] font-semibold text-slate-300">
+          {rank}
+        </span>
+        <Mono className="text-slate-400" title={hit.chunk.documentId}>
+          {hit.chunk.documentId}
+        </Mono>
+        <Badge className="ml-auto text-indigo-300 bg-indigo-500/10 ring-indigo-500/30">
+          {formatScore(hit.score)}
+        </Badge>
+      </div>
+      {hit.chunk.headingPath.length > 0 && (
+        <div className="mt-1 flex items-center gap-1 text-[11px] text-slate-500">
+          {hit.chunk.headingPath.map((heading, index) => (
+            <React.Fragment key={`${heading}-${index}`}>
+              {index > 0 && <ChevronRight className="h-2.5 w-2.5" />}
+              <span>{heading}</span>
+            </React.Fragment>
+          ))}
+        </div>
+      )}
+      <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-slate-300">{hit.chunk.text}</p>
+      {signalKeys.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {signalKeys.map((key) => (
+            <span
+              key={key}
+              className="rounded bg-slate-800/60 px-1.5 py-0.5 text-[10px] tabular-nums text-slate-400"
+            >
+              {key} {formatScore(hit.signals[key], 3)}
             </span>
-          </div>
+          ))}
+        </div>
+      )}
+    </button>
+  );
+}
 
-          <div className="space-y-2.5 overflow-y-auto max-h-[280px] pr-1 custom-scrollbar">
-            {docs.map((doc) => (
+/** 命中 chunk 的谱系、定位与权限详情。 */
+function ChunkDetail({ hit }: { hit: KnowledgeRetrievalHitView }) {
+  const { chunk } = hit;
+  return (
+    <Panel title="Chunk 详情" className="bg-slate-950/40">
+      <div className="divide-y divide-slate-900">
+        <Field label="Chunk ID">
+          <CopyableId value={chunk.chunkId} label="chunk ID" truncate={24} className="text-slate-200" />
+        </Field>
+        <Field label="文档">
+          <CopyableId value={chunk.documentId} label="文档 ID" truncate={24} className="text-slate-200" />
+        </Field>
+        <Field label="来源">{chunk.sourceUri}</Field>
+        <Field label="索引版本">{chunk.indexVersion}</Field>
+        <Field label="序号">{chunk.ordinal ?? '—'}</Field>
+        <Field label="父 chunk">{chunk.parentId ? <Mono>{chunk.parentId}</Mono> : '—'}</Field>
+        <Field label="前 / 后">
+          {chunk.previousChunkId ? '有' : '—'} / {chunk.nextChunkId ? '有' : '—'}
+        </Field>
+        <Field label="租户">{chunk.tenantId}</Field>
+        <Field label="权限">{chunk.permissions.length > 0 ? chunk.permissions.join(', ') : '公开'}</Field>
+      </div>
+
+      {chunk.origins.length > 0 && (
+        <div className="mt-3">
+          <div className="mb-1.5 text-xs font-medium text-slate-300">页面定位</div>
+          <div className="space-y-1">
+            {chunk.origins.map((origin, index) => (
               <div
-                key={doc.id}
-                onClick={() => setSelectedDocId(doc.id)}
-                className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
-                  doc.id === selectedDocId
-                    ? 'bg-slate-800 border-indigo-500 shadow-md shadow-indigo-500/10'
-                    : 'bg-slate-950/60 border-slate-800/80 hover:border-slate-700'
-                }`}
+                key={`${origin.pageNumber}-${origin.blockId ?? index}`}
+                className="flex items-center gap-2 rounded bg-slate-900/60 px-2 py-1 text-[11px] text-slate-400"
               >
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-semibold text-xs text-slate-200 flex items-center gap-1.5">
-                    <FileText className="w-3.5 h-3.5 text-indigo-400" />
-                    {doc.fileName}
+                <Badge>第 {origin.pageNumber} 页</Badge>
+                {origin.blockId && <Mono className="text-slate-500">{origin.blockId}</Mono>}
+                {origin.left !== null && origin.left !== undefined && (
+                  <span className="ml-auto tabular-nums text-slate-500">
+                    ({formatScore(origin.left, 1)}, {formatScore(origin.top, 1)}) →(
+                    {formatScore(origin.right, 1)}, {formatScore(origin.bottom, 1)})
                   </span>
-                  <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[10px] px-2 py-0.5 rounded-full font-bold">
-                    {doc.status}
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono mt-2 pt-2 border-t border-slate-900">
-                  <span>Engine: {doc.loaderEngine}</span>
-                  <span>Strategy: {doc.chunkerStrategy}</span>
-                  <span className="text-indigo-300 font-bold">{doc.totalChunks} Chunks</span>
-                </div>
+                )}
               </div>
             ))}
           </div>
         </div>
+      )}
+
+      <div className="mt-3">
+        <div className="mb-1.5 flex items-center justify-between text-xs font-medium text-slate-300">
+          <span>正文</span>
+          {chunk.textTruncated && (
+            <Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">已截断</Badge>
+          )}
+        </div>
+        <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-slate-950 p-2 text-[11px] leading-relaxed text-slate-300">
+          {chunk.text}
+        </pre>
       </div>
+    </Panel>
+  );
+}
 
-      {/* Grid: PDF Visual Overlay vs DocumentStructure Blocks Tree */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* PDF Canvas Overlay (6 Cols) */}
-        <div className="lg:col-span-6 bg-slate-900/80 rounded-2xl border border-slate-800 p-4 flex flex-col shadow-xl backdrop-blur-sm overflow-hidden">
-          <div className="pb-3 border-b border-slate-800 mb-3 flex items-center justify-between">
-            <h3 className="font-bold text-xs uppercase tracking-wider text-slate-200 flex items-center gap-1.5">
-              <FileText className="w-4 h-4 text-indigo-400" />
-              PDF 原文 Canvas 渲染与 BoundingBox 矩形高亮
-            </h3>
-            <span className="text-[10px] bg-slate-800 px-2 py-0.5 rounded font-mono text-slate-400">
-              第 {selectedBlock?.origins[0]?.pageNumber || 1} 页
-            </span>
-          </div>
+/** 索引清单与退役操作。 */
+function IndexManifests({
+  tenant,
+  onTenantChange,
+  page,
+  error,
+  pending,
+  canGoBack,
+  onPrevious,
+  onNext,
+}: {
+  tenant: string;
+  onTenantChange: (value: string) => void;
+  page: KnowledgeDocumentPage | undefined;
+  error: unknown;
+  pending: boolean;
+  canGoBack: boolean;
+  onPrevious: () => void;
+  onNext: () => void;
+}) {
+  const retire = useRetireDocument();
+  const { notify } = useToast();
+  const [confirming, setConfirming] = useState<string | null>(null);
 
-          <div className="flex-1 bg-slate-950 rounded-xl border border-slate-800 p-6 flex flex-col items-center justify-start overflow-y-auto relative custom-scrollbar min-h-[380px]">
-            <div className="w-[440px] h-[520px] bg-slate-900 border border-slate-800 rounded-lg p-6 relative shadow-2xl overflow-hidden text-slate-300">
-              <div className="text-[10px] text-slate-500 border-b border-slate-800 pb-2 mb-4 font-mono flex justify-between">
-                <span>CONFIDENTIAL TECHNICAL SPECIFICATION</span>
-                <span>zyblw-agent v0.4.0</span>
-              </div>
+  return (
+    <Panel
+      title="知识索引清单"
+      description="每一行是一个索引版本；只有 active 版本参与检索。翻页使用后端返回的 keyset 游标"
+      actions={
+        <>
+          <TextInput
+            value={tenant}
+            onChange={onTenantChange}
+            placeholder="按租户过滤"
+            className="w-40"
+          />
+          <Button variant="secondary" disabled={!canGoBack} onClick={onPrevious}>
+            <ChevronLeft className="h-3 w-3" /> 上一页
+          </Button>
+          <Button variant="secondary" disabled={!page?.hasMore || !page?.nextCursor} onClick={onNext}>
+            下一页 <ChevronRight className="h-3 w-3" />
+          </Button>
+        </>
+      }
+    >
+      <ErrorBanner error={error} context="读取索引清单" />
+      <ErrorBanner error={retire.error} context="退役索引版本" />
 
-              <div className="space-y-3 text-xs font-sans">
-                <h2 className="text-sm font-bold text-slate-100 border-b border-slate-800 pb-1">
-                  zyblw-agent 0.4.0 架构与 RAG 谱系规范
-                </h2>
-                <h3 className="text-xs font-bold text-indigo-300 mt-2">
-                  1. 结构化切分与 pgvector 隔离
-                </h3>
-                <p className="text-[11px] text-slate-300 leading-relaxed">
-                  DocumentStructureChunker 优先按文档层级结构 block 切分，合并同标题同父级的相邻小块，并在数据库中保留 zyblw_agent_knowledge 专属 Schema 隔离。
-                </p>
-                <div className="bg-slate-950 p-2 rounded border border-slate-800 text-[10px] font-mono">
-                  <p>| 模块名 | 数据库 Schema | 维数 |</p>
-                  <p>| Agent Core | public (default) | N/A |</p>
-                  <p>| Agent Knowledge | zyblw_agent_knowledge | 1536 |</p>
-                </div>
-              </div>
-
-              {/* Highlight Box Overlay */}
-              {originBox && (
-                <div
-                  className="absolute border-2 border-amber-400 bg-amber-400/20 rounded shadow-lg shadow-amber-400/20 transition-all duration-300 pointer-events-none flex items-start justify-end p-1"
-                  style={{
-                    left: `${(originBox.left / (originBox.pageWidth || 595)) * 100}%`,
-                    top: `${(originBox.top / (originBox.pageHeight || 842)) * 100}%`,
-                    width: `${((originBox.right - originBox.left) / (originBox.pageWidth || 595)) * 100}%`,
-                    height: `${((originBox.bottom - originBox.top) / (originBox.pageHeight || 842)) * 100}%`
-                  }}
+      {pending ? (
+        <LoadingRows rows={4} />
+      ) : (page?.items.length ?? 0) === 0 ? (
+        <EmptyState
+          title="没有索引版本"
+          reason="若已摄入过文档，请确认宿主装配了知识索引目录适配器；仅使用内存索引时列表在进程重启后会清空。"
+        />
+      ) : (
+        <div className="space-y-2">
+          {page?.items.map((doc) => (
+            <div
+              key={`${doc.tenantId}/${doc.documentId}/${doc.indexVersion}`}
+              className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2"
+            >
+              <div className="flex items-center gap-2">
+                <CopyableId value={doc.documentId} label="文档 ID" truncate={28} />
+                <Badge>v{doc.indexVersion}</Badge>
+                <Badge
+                  className={
+                    doc.active
+                      ? 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30'
+                      : 'text-slate-400 bg-slate-500/10 ring-slate-500/30'
+                  }
                 >
-                  <span className="bg-amber-400 text-slate-950 font-mono text-[9px] font-bold px-1 rounded shadow">
-                    BBox #{selectedBlock.id}
-                  </span>
+                  {doc.status}
+                  {doc.active ? ' · 生效' : ''}
+                </Badge>
+                <span className="ml-auto text-[11px] text-slate-500">
+                  {formatRelative(doc.updatedAtEpochMilli)}
+                </span>
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+                <span>{doc.sourceUri}</span>
+                <span>{formatCount(doc.chunkCount)} chunk</span>
+                <span>
+                  {doc.embeddingProvider}/{doc.embeddingModel} · {doc.embeddingDimension} 维
+                </span>
+                <span>{doc.indexingStrategy || '默认切分'}</span>
+                {doc.permissions.length > 0 && <span>权限 {doc.permissions.join(', ')}</span>}
+                {doc.failureCode && (
+                  <Badge className="text-rose-300 bg-rose-500/10 ring-rose-500/30">
+                    {doc.failureCode}
+                  </Badge>
+                )}
+              </div>
+              {doc.active && (
+                <div className="mt-2 flex items-center gap-2">
+                  {confirming === doc.documentId ? (
+                    <>
+                      <span className="text-[11px] text-rose-300">
+                        退役后该文档立即不再参与检索，确认？
+                      </span>
+                      <Button
+                        variant="danger"
+                        disabled={retire.isPending}
+                        onClick={() => {
+                          retire.mutate(
+                            {
+                              documentId: doc.documentId,
+                              tenantId: doc.tenantId,
+                              expectedActiveVersion: doc.indexVersion,
+                            },
+                            {
+                              onSuccess: () =>
+                                notify('success', '索引版本已退役', `${doc.documentId} v${doc.indexVersion} 不再参与检索`),
+                              onError: (failure) =>
+                                notify(
+                                  'error',
+                                  '退役失败',
+                                  failure instanceof Error ? failure.message : String(failure),
+                                ),
+                            },
+                          );
+                          setConfirming(null);
+                        }}
+                      >
+                        确认退役
+                      </Button>
+                      <Button variant="secondary" onClick={() => setConfirming(null)}>
+                        取消
+                      </Button>
+                    </>
+                  ) : (
+                    <Button variant="secondary" onClick={() => setConfirming(doc.documentId)}>
+                      退役此版本
+                    </Button>
+                  )}
                 </div>
               )}
             </div>
-          </div>
+          ))}
         </div>
-
-        {/* DocumentStructure Blocks Tree & Lineage (6 Cols) */}
-        <div className="lg:col-span-6 bg-slate-900/80 rounded-2xl border border-slate-800 p-4 flex flex-col shadow-xl backdrop-blur-sm overflow-hidden">
-          <div className="pb-3 border-b border-slate-800 mb-3 flex items-center justify-between">
-            <h3 className="font-bold text-xs uppercase tracking-wider text-slate-200 flex items-center gap-1.5">
-              <Sparkles className="w-4 h-4 text-cyan-400" />
-              DocumentStructure Block 结构树
-            </h3>
-            <span className="text-[10px] text-slate-500 font-mono">Docling Lineage Projection</span>
-          </div>
-
-          <div className="flex-1 overflow-y-auto space-y-3 pr-1 mb-4 custom-scrollbar max-h-[360px]">
-            {blocks.map((block) => {
-              const isSelected = block.id === selectedBlockId;
-              return (
-                <div
-                  key={block.id}
-                  onClick={() => setSelectedBlockId(block.id)}
-                  className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
-                    isSelected
-                      ? 'bg-slate-800 border-amber-400/80 shadow-md shadow-amber-400/5'
-                      : 'bg-slate-950/60 border-slate-800/80 hover:border-slate-700'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <div className="flex items-center space-x-2">
-                      <span className="font-mono text-xs font-bold text-indigo-300">#{block.id}</span>
-                      <span className="bg-slate-900 border border-slate-800 text-[10px] font-mono px-2 py-0.5 rounded text-slate-300 flex items-center gap-1">
-                        {block.kind === 'Table' ? (
-                          <Table className="w-3 h-3 text-cyan-400" />
-                        ) : (
-                          <Type className="w-3 h-3 text-indigo-400" />
-                        )}
-                        {block.kind}
-                      </span>
-                    </div>
-                    <span className="text-[10px] text-slate-500 font-mono">
-                      Ordinal: {block.ordinal}
-                    </span>
-                  </div>
-
-                  <p className="text-xs text-slate-200 leading-relaxed font-sans line-clamp-2">
-                    {block.text}
-                  </p>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Hybrid Retrieval Playground */}
-          <div className="border-t border-slate-800 pt-4">
-            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
-              <Search className="w-3.5 h-3.5 text-indigo-400" />
-              Hybrid 混合检索与 ACL 测试沙盒 (Vector + FTS + Reranker)
-            </h4>
-
-            <div className="flex space-x-2 mb-3">
-              <input
-                type="text"
-                value={queryText}
-                onChange={(e) => setQueryText(e.target.value)}
-                className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-sans focus:outline-none focus:border-indigo-500"
-                placeholder="测试检索 Query..."
-              />
-              <button
-                onClick={handleRunSearch}
-                className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1"
-              >
-                <Search className="w-3.5 h-3.5" />
-                <span>执行检索</span>
-              </button>
-            </div>
-
-            <div className="flex items-center space-x-4 text-[11px] text-slate-400 font-mono mb-2">
-              <span className="flex items-center gap-1">
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                租户隔离: {tenantId}
-              </span>
-              <span className="flex items-center gap-1">
-                <Filter className="w-3.5 h-3.5 text-indigo-400" />
-                ACL 权限: {permissions}
-              </span>
-            </div>
-
-            {searchHits.length > 0 && (
-              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800/80 space-y-1 text-xs">
-                <div className="flex justify-between items-center text-[11px] font-mono text-emerald-400 font-semibold">
-                  <span>命中的 Chunk: {searchHits[0].chunk.id}</span>
-                  <span>综合得分: {searchHits[0].score}</span>
-                </div>
-                <div className="text-[10px] font-mono text-slate-400 flex space-x-3">
-                  <span>向量余弦: {searchHits[0].signals.vectorScore}</span>
-                  <span>FTS 全文: {searchHits[0].signals.textScore}</span>
-                  <span>RRF 名次: #{searchHits[0].signals.hybridRrfRank}</span>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
+      )}
+    </Panel>
   );
-};
+}
+
+/** 异步摄入：上传与任务进度。 */
+function IngestionPanel({
+  tenant,
+  onTenantChange,
+  jobs,
+  jobsError,
+  jobsPending,
+}: {
+  tenant: string;
+  onTenantChange: (value: string) => void;
+  jobs: IngestionJobView[] | undefined;
+  jobsError: unknown;
+  jobsPending: boolean;
+}) {
+  const [permissions, setPermissions] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+  const submit = useSubmitIngestion();
+  const { notify } = useToast();
+
+  function upload() {
+    if (!file || !tenant.trim()) return;
+    submit.mutate(
+      {
+        params: {
+          fileName: file.name,
+          tenantId: tenant.trim(),
+          mediaType: file.type || 'application/octet-stream',
+          permissions: parseList(permissions),
+        },
+        content: file,
+      },
+      {
+        onSuccess: (job) => notify('success', '摄入任务已提交', `${job.fileName} · 任务 ${job.jobId}`),
+        onError: (error) =>
+          notify('error', '提交摄入失败', error instanceof Error ? error.message : String(error)),
+      },
+    );
+    setFile(null);
+  }
+
+  return (
+    <Panel
+      title="文档摄入"
+      description="提交后立即返回任务 ID，加载、切分与向量化在后台执行"
+      actions={
+        <Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">需要 agent:admin:debug</Badge>
+      }
+    >
+      <div className="grid gap-3 md:grid-cols-2">
+        <TextInput
+          label="租户"
+          value={tenant}
+          onChange={onTenantChange}
+          placeholder="必填"
+          hint="与索引清单、检索沙盒共用同一个租户"
+        />
+        <TextInput
+          label="权限标签（逗号分隔）"
+          value={permissions}
+          onChange={setPermissions}
+          placeholder="留空表示公开"
+        />
+      </div>
+
+      <div className="mt-3 flex items-center gap-2">
+        <label
+          className={`flex-1 cursor-pointer rounded-md border border-dashed border-slate-700 px-3 py-2 text-xs text-slate-400 hover:border-slate-600 focus-within:border-indigo-500`}
+        >
+          <span className="sr-only">选择要摄入的文件</span>
+          <input
+            type="file"
+            className="sr-only"
+            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+          />
+          {file ? (
+            <span className="text-slate-200">
+              {file.name} · {formatBytes(file.size)}
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5">
+              <Upload className="h-3.5 w-3.5" /> 选择文件（上限 32 MiB）
+            </span>
+          )}
+        </label>
+        <Button onClick={upload} disabled={!file || !tenant.trim() || submit.isPending}>
+          {submit.isPending ? '提交中…' : '提交摄入'}
+        </Button>
+      </div>
+
+      <div className="mt-3">
+        <ErrorBanner error={submit.error} context="提交摄入任务" />
+        <ErrorBanner error={jobsError} context="读取摄入任务" />
+      </div>
+
+      <div className="mt-3 space-y-2">
+        <div className="flex items-center gap-1.5 text-xs font-medium text-slate-300">
+          <Layers className="h-3.5 w-3.5" /> 最近任务
+        </div>
+        {jobsPending ? (
+          <LoadingRows rows={3} />
+        ) : (jobs?.length ?? 0) === 0 ? (
+          <EmptyState title="没有摄入任务" />
+        ) : (
+          jobs?.map((job) => (
+            <div key={job.jobId} className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2">
+              <div className="flex items-center gap-2 text-xs">
+                <span className="truncate text-slate-200">{job.fileName}</span>
+                <Badge className={ingestionStatusTone(job.status)}>{job.status}</Badge>
+                <span className="ml-auto text-[11px] text-slate-500">
+                  {formatRelative(job.createdAtEpochMilli)}
+                </span>
+              </div>
+              <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-800">
+                <div
+                  className={`h-full transition-all ${
+                    job.status === 'Failed' ? 'bg-rose-500' : 'bg-indigo-500'
+                  }`}
+                  style={{ width: `${job.progressPercent}%` }}
+                />
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-x-3 text-[11px] text-slate-500">
+                <span>租户 {job.tenantId}</span>
+                {job.documentId && <CopyableId value={job.documentId} label="文档 ID" truncate={20} className="text-slate-400" />}
+                {job.chunkCount !== null && job.chunkCount !== undefined && (
+                  <span>{formatCount(job.chunkCount)} chunk</span>
+                )}
+                {job.indexVersion && <span>v{job.indexVersion}</span>}
+                <span className="ml-auto">{formatInstant(job.updatedAtEpochMilli)}</span>
+              </div>
+              {job.failureCode && (
+                <div className="mt-1.5 inline-flex items-center gap-1.5 rounded bg-rose-950/40 px-2 py-1 text-[11px] text-rose-300">
+                  <AlertTriangle className="h-3 w-3" /> 失败分类 <Mono>{job.failureCode}</Mono>
+                </div>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+
+      <p className="mt-3 flex items-start gap-1.5 text-[11px] text-slate-600">
+        <FlaskConical className="mt-0.5 h-3 w-3 shrink-0" />
+        进度阶段对应后端索引状态机的 begin → stage → activate，不是按时间推进的动画；因此停在某一阶段
+        意味着该阶段确实仍在执行。
+      </p>
+    </Panel>
+  );
+}

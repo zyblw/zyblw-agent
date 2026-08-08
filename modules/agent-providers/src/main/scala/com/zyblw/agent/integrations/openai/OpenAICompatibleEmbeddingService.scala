@@ -71,6 +71,16 @@ final case class OpenAICompatibleEmbeddingConfig(
       s"model=$model, dimension=$dimension, maxBatchSize=$maxBatchSize, maxParallelBatches=$maxParallelBatches)"
 
 object OpenAICompatibleEmbeddingConfig:
+  /** 本 loader 读取 API Key 的环境变量名。
+    *
+    * Embedding 与聊天使用**独立**的凭据键:兼容 `/chat/completions` 的服务不一定提供 `/embeddings`，很多部署的 向量化走的是另一家厂商或另一个账号。复用聊天 Key
+    * 会让这种常见拓扑无法表达。
+    */
+  val ApiKeyVariable: String = "EMBEDDING_API_KEY"
+
+  /** 默认 Provider ID；只是一个路由与索引 manifest 标签，切换真实厂商时必须显式覆盖。 */
+  val DefaultProviderId: String = "openai-embeddings"
+
   /** 使用 OpenAI 官方 API 的便捷配置；维度应与业务索引 migration 保持一致。 */
   def openAI(
       apiKey: String,
@@ -78,13 +88,53 @@ object OpenAICompatibleEmbeddingConfig:
       dimension: Int = 1536
   ): OpenAICompatibleEmbeddingConfig =
     OpenAICompatibleEmbeddingConfig(
-      providerId = "openai-embeddings",
+      providerId = DefaultProviderId,
       baseUrl = "https://api.openai.com/v1",
       apiKey = apiKey,
       model = model,
       dimension = dimension,
       sendDimensions = true
     )
+
+  /** OpenAI-compatible Embedding 的 ZIO Config 描述。
+    *
+    * `EMBEDDING_MODEL` 与 `EMBEDDING_DIMENSION` 刻意没有默认值。维度必须与知识库 migration 里的 `vector(N)` 一致，
+    * 而模型决定了既有向量的可比性；给这两项一个"看起来合理"的默认值，会让一次遗漏配置表现为整库召回质量下降， 而不是启动失败。缺失时在装配期以 `InvalidConfiguration` 快速失败要便宜得多。
+    *
+    * API Key 使用 `Config.Secret`，因此配置错误、测试报告和调试输出都不会展开它。
+    */
+  val environmentConfig: Config[OpenAICompatibleEmbeddingConfig] =
+    (
+      Config.string("EMBEDDING_PROVIDER_ID").withDefault(DefaultProviderId) ++
+        Config.string("EMBEDDING_BASE_URL").withDefault("https://api.openai.com/v1") ++
+        Config.secret(ApiKeyVariable) ++
+        Config.string("EMBEDDING_MODEL") ++
+        Config.int("EMBEDDING_DIMENSION") ++
+        Config.boolean("EMBEDDING_SEND_DIMENSIONS").withDefault(true) ++
+        Config.int("EMBEDDING_MAX_BATCH_SIZE").withDefault(128) ++
+        Config.duration("EMBEDDING_REQUEST_TIMEOUT").withDefault(60.seconds)
+    ).mapAttempt {
+      case (providerId, baseUrl, apiKey, model, dimension, sendDimensions, maxBatchSize, timeout) =>
+        OpenAICompatibleEmbeddingConfig(
+          providerId = providerId,
+          baseUrl = baseUrl,
+          apiKey = apiKey.stringValue,
+          model = model,
+          dimension = dimension,
+          sendDimensions = sendDimensions,
+          maxBatchSize = maxBatchSize,
+          requestTimeout = timeout
+        )
+    }
+
+  /** 从当前 ZIO `ConfigProvider` 构造配置。
+    *
+    * 错误只保留 ZIO Config 自己的键名与原因描述；`Config.Secret` 保证其中不含 Key 值。
+    */
+  def fromEnvironment: IO[AgentError, OpenAICompatibleEmbeddingConfig] =
+    ZIO
+      .config(environmentConfig)
+      .mapError(error => AgentError.InvalidConfiguration(s"Embedding 配置无效: $error"))
 
 /** OpenAI-compatible `/embeddings` 的 ZIO HTTP Adapter。
   *

@@ -185,4 +185,4 @@ sequenceDiagram
 - [0014 收敛公共模块](architecture/0014-consolidate-public-modules.md)
 - [0015 独立公共仓库](architecture/0015-independent-public-repository.md)
 - [0016 Agent Application Runtime 与三层边界](architecture/0016-agent-application-runtime.md)
-- [0017 agent-dashboard 前端控制台架构与设计方案](architecture/0017-agent-dashboard-architecture.md)
+- [0017 agent-dashboard 前端控制台架构与管理 API 边界](architecture/0017-agent-dashboard-architecture.md)

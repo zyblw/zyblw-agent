@@ -161,7 +161,7 @@ object GeminiInteractionsHttpContractSpec extends ZIOSpecDefault:
             Chunk(
               ProviderFailureProbe(
                 "429",
-                ErrorCategory.Unavailable,
+                ErrorCategory.RateLimit,
                 true,
                 model.complete(request("http-429"))
               ),

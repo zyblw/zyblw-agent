@@ -1,6 +1,7 @@
 package com.zyblw.agent.integrations.openai
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.integrations.CredentialReference
 import com.zyblw.agent.model.*
 import zio.*
 import zio.json.ast.Json
@@ -54,12 +55,18 @@ final case class OpenAIResponsesConfig(
       s"requestTimeout=$requestTimeout, store=$store, parallelToolCalls=$parallelToolCalls)"
 
 object OpenAIResponsesConfig:
+  /** 本 loader 读取 API Key 的环境变量名；管理面据此展示凭据来源，而不是猜一个名字。 */
+  val ApiKeyVariable: String = "OPENAI_API_KEY"
+
+  /** 可展示的凭据引用；只含变量名，不含值。 */
+  val credentialReference: String = CredentialReference.environment(ApiKeyVariable)
+
   /** Responses 原生协议的 ZIO Config 描述。 Secret 不进入 case class 的自动打印路径；最终配置自身也覆盖了 `toString`，形成加载期和运行期两层脱敏。
     */
   val environmentConfig: Config[OpenAIResponsesConfig] =
     (
       Config.string("OPENAI_BASE_URL").withDefault("https://api.openai.com/v1") ++
-        Config.secret("OPENAI_API_KEY") ++
+        Config.secret(ApiKeyVariable) ++
         Config.string("OPENAI_MODEL") ++
         Config.string("OPENAI_ORGANIZATION").optional ++
         Config.string("OPENAI_PROJECT").optional

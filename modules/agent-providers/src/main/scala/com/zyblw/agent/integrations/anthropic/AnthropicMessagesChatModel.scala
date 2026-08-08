@@ -84,15 +84,9 @@ final class AnthropicMessagesChatModel(client: Client, config: AnthropicMessages
     case other             =>
       AgentError.ModelFailure(provider, "Anthropic transport failure", retryable = true, Some(other))
 
-  /** HTTP 错误只记录状态与 Anthropic error type，不保存可能包含敏感请求片段的完整 body。 408、409、429、529 和全部 5xx 允许可靠性层退避重试。
-    */
-  private def httpError(status: Int, body: String): AgentError.ModelFailure =
-    val retryable = status == 408 || status == 409 || status == 429 || status == 529 || status >= 500
-    AgentError.ModelFailure(
-      provider,
-      s"Anthropic HTTP $status (${AnthropicMessagesWire.errorType(body).getOrElse("unknown_error")})",
-      retryable
-    )
+  /** HTTP 错误只记录状态与 Anthropic error type，不保存可能包含敏感请求片段的完整 body。 */
+  private def httpError(status: Int, body: String): AgentError.ModelHttpFailure =
+    AgentError.ModelHttpFailure(provider, status, AnthropicMessagesWire.errorType(body))
 
   /** 单次请求超过部署预算后的稳定错误。 */
   private def timeoutError: AgentError =

@@ -98,7 +98,8 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
       guardrailEngine: GuardrailEngine = GuardrailEngine(
         ConfiguredGuardrails(Chunk.empty, Chunk.empty, Chunk.empty, Chunk.empty)
       ),
-      toolPolicy: ToolPolicyConfig = ToolPolicyConfig.secureDefault
+      toolPolicy: ToolPolicyConfig = ToolPolicyConfig.secureDefault,
+      modelPolicies: ModelPolicySource = ModelPolicySource.default
   ) =
     ZLayer.make[AgentRuntime & RunStore](
       ZLayer.succeed[ChatModel](model),
@@ -108,7 +109,8 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
       ContextCompressor.deterministic,
       DefaultContextManager.layer,
       ZLayer.succeed(guardrailEngine),
-      ZLayer.succeed(toolPolicy),
+      ZLayer.succeed(ToolPolicySource.static(toolPolicy)),
+      ZLayer.succeed(modelPolicies),
       RunObserver.noop,
       AgentRuntimeLive.layer
     )
@@ -132,7 +134,8 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
       RunStore.inMemory,
       ZLayer.succeed[ContextManager](manager),
       GuardrailEngine.empty,
-      ZLayer.succeed(ToolPolicyConfig.secureDefault),
+      ZLayer.succeed(ToolPolicySource.static(ToolPolicyConfig.secureDefault)),
+      ModelPolicySource.defaultLayer,
       ZLayer.succeed[RunObserver](observer),
       AgentRuntimeLive.layer
     )
@@ -148,7 +151,8 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
       DefaultContextManager.layer,
       ZLayer.succeed[ContextSourceResolver](resolver),
       GuardrailEngine.empty,
-      ZLayer.succeed(ToolPolicyConfig.secureDefault),
+      ZLayer.succeed(ToolPolicySource.static(ToolPolicyConfig.secureDefault)),
+      ModelPolicySource.defaultLayer,
       RunObserver.noop,
       AgentRuntimeLive.layerWithContextSources
     )
@@ -171,7 +175,8 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
       ZLayer.succeed(
         GuardrailEngine(ConfiguredGuardrails(Chunk.empty, Chunk.empty, Chunk.empty, Chunk.empty))
       ),
-      ZLayer.succeed(ToolPolicyConfig.secureDefault),
+      ZLayer.succeed(ToolPolicySource.static(ToolPolicyConfig.secureDefault)),
+      ModelPolicySource.defaultLayer,
       RunObserver.noop,
       AgentRuntimeLive.layer,
       AgentCommandServiceLive.layer
@@ -179,6 +184,44 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
 
   /** 定义耐久状态机、审批和崩溃恢复的核心回归用例。 */
   def spec: Spec[TestEnvironment & Scope, Any] = suite("AgentRuntime")(
+    test("模型覆盖到达真实请求，未覆盖字段沿用 Agent 定义，价格表折算进 estimatedCost") {
+      // 这个测试守住"保存成功却毫无效果"这一整类缺陷：只断言覆盖被存下来无法证明它影响了任何一次模型调用，
+      // 因此这里断言的是 ChatModel 实际收到的 settings 与状态里的累计费用。
+      val defined = agent.copy(modelSettings =
+        ModelSettings(provider = Some("primary"), model = Some("defined-model"), temperature = Some(0.9))
+      )
+      val policies = ModelPolicySource.static(
+        ModelPolicy(provider = Some("fallback"), model = Some("cheap-model")),
+        ModelPriceBook.of(
+          ("fallback", "cheap-model", ModelPrice(BigDecimal(2), BigDecimal(10))),
+          ("primary", "defined-model", ModelPrice(BigDecimal(1000), BigDecimal(9000)))
+        )
+      )
+      for
+        model  <- ScriptedChatModel.make(Chunk(finalResponse("switched")))
+        result <- (for
+          runtime  <- ZIO.service[AgentRuntime]
+          runs     <- ZIO.service[RunStore]
+          outcome  <- runtime.run(defined, RunRequest(ThreadId("model-switch"), AgentMessage.user("你好")))
+          state    <- runs.load(runIdOf(outcome))
+          requests <- model.recordedRequests
+        yield (state, requests)).provideLayer(layers(model, Nil, modelPolicies = policies))
+        (state, requests) = result
+        settings          = requests.head.settings
+      yield assertTrue(
+        requests.length == 1,
+        // Provider 与模型被覆盖成故障切换目标。
+        settings.provider.contains("fallback"),
+        settings.model.contains("cheap-model"),
+        // 未覆盖的温度必须保留 Agent 自己的取值，而不是被抹成 Provider 默认。
+        settings.temperature.contains(0.9),
+        // 步骤记录的模型名也必须是实际使用的那个，否则事后排查会指向一个从未被调用的模型。
+        state.steps.collect { case step: AgentStep.ModelStep => step.model } == Chunk("cheap-model"),
+        // finalResponse 的用量是 TokenUsage(3, 2)：3 * 2 / 1e6 + 2 * 10 / 1e6 = 0.000026。
+        // 按被覆盖前的 primary 单价会得到 0.021，两者不可能混淆。
+        state.usage.estimatedCost == BigDecimal("0.000026")
+      )
+    },
     test("Start 命令由 WorkerHost 在 lease fencing 下创建 RunStarted 并完成，HTTP 无需持有执行 Fiber") {
       for
         model  <- ScriptedChatModel.make(Chunk(finalResponse("async-completed")))

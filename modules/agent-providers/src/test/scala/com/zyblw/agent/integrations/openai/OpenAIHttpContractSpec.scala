@@ -28,8 +28,14 @@ object OpenAIHttpContractSpec extends ZIOSpecDefault:
       request.body.asString
         .flatMap { body =>
           val response =
-            if body.contains("\"model\":\"rate-limit\"") then
-              Response.json("""{"error":{"message":"slow down"}}""").copy(status = Status.TooManyRequests)
+            if body.contains("\"model\":\"unauthorized\"") then
+              Response
+                .json("""{"error":{"type":"invalid_api_key","message":"rejected key=sk-must-not-leak"}}""")
+                .copy(status = Status.Unauthorized)
+            else if body.contains("\"model\":\"rate-limit\"") then
+              Response
+                .json("""{"error":{"type":"rate_limit_error","message":"slow down"}}""")
+                .copy(status = Status.TooManyRequests)
             else if body.contains("\"model\":\"server-error\"") then
               Response
                 .json("""{"error":{"message":"temporary unavailable"}}""")
@@ -92,7 +98,15 @@ object OpenAIHttpContractSpec extends ZIOSpecDefault:
             compatibility = OpenAICompatibility.openAI
           )
           model = OpenAICompatibleChatModel(client, config)
-          success <- model.complete(ChatRequest(Chunk(AgentMessage.user("hello"))))
+          success      <- model.complete(ChatRequest(Chunk(AgentMessage.user("hello"))))
+          unauthorized <- model
+            .complete(
+              ChatRequest(
+                Chunk(AgentMessage.user("hello")),
+                settings = ModelSettings(model = Some("unauthorized"))
+              )
+            )
+            .exit
           limited <- model
             .complete(
               ChatRequest(
@@ -118,26 +132,32 @@ object OpenAIHttpContractSpec extends ZIOSpecDefault:
             )
             .exit
           sent <- bodies.get
-        yield (success, limited, unavailable, invalidUsage, sent)).provide(
+        yield (success, unauthorized, limited, unavailable, invalidUsage, sent)).provide(
           Client.default,
           TestServer.default
         )
-        limitedRetryable = result._2 match
-          case Exit.Failure(cause) => cause.failureOption.exists(_.retryable)
-          case Exit.Success(_)     => false
-        unavailableRetryable = result._3 match
-          case Exit.Failure(cause) => cause.failureOption.exists(_.retryable)
-          case Exit.Success(_)     => false
+        unauthorized = result._2 match
+          case Exit.Failure(cause) => cause.failureOption
+          case Exit.Success(_)     => None
+        limited = result._3 match
+          case Exit.Failure(cause) => cause.failureOption
+          case Exit.Success(_)     => None
+        unavailable = result._4 match
+          case Exit.Failure(cause) => cause.failureOption
+          case Exit.Success(_)     => None
       yield assertTrue(
         result._1.message.text == "stub ok",
         result._1.usage == TokenUsage(7, 3, cachedInputTokens = 4, reasoningOutputTokens = 2),
-        result._2.isFailure,
-        limitedRetryable,
-        result._3.isFailure,
-        unavailableRetryable,
-        result._4.isFailure,
-        result._5.length == 4,
-        result._5.head.contains("\"model\":\"stub-model\"")
+        unauthorized.exists(_.category == ErrorCategory.Authentication),
+        unauthorized.exists(!_.retryable),
+        unauthorized.forall(!_.message.contains("sk-must-not-leak")),
+        limited.exists(_.category == ErrorCategory.RateLimit),
+        limited.exists(_.retryable),
+        unavailable.exists(_.category == ErrorCategory.Unavailable),
+        unavailable.exists(_.retryable),
+        result._5.isFailure,
+        result._6.length == 5,
+        result._6.head.contains("\"model\":\"stub-model\"")
       )
     } @@ TestAspect.withLiveClock @@ TestAspect.sequential,
     test("断流和慢流超时都形成类型化失败") {

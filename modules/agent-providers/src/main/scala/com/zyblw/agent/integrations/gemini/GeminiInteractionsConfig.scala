@@ -1,6 +1,7 @@
 package com.zyblw.agent.integrations.gemini
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.integrations.CredentialReference
 import com.zyblw.agent.model.*
 import zio.*
 import zio.json.ast.Json
@@ -40,13 +41,19 @@ final case class GeminiInteractionsConfig(
       s"requestTimeout=$requestTimeout)"
 
 object GeminiInteractionsConfig:
+  /** 本 loader 读取 API Key 的环境变量名；管理面据此展示凭据来源，而不是猜一个名字。 */
+  val ApiKeyVariable: String = "GEMINI_API_KEY"
+
+  /** 可展示的凭据引用；只含变量名，不含值。 */
+  val credentialReference: String = CredentialReference.environment(ApiKeyVariable)
+
   /** Gemini Interactions 的 ZIO Config 描述。 API Key 通过 `Config.Secret` 加载；自定义 ConfigProvider 使测试和 Secret
     * backend 无需修改 Adapter 代码。
     */
   val environmentConfig: Config[GeminiInteractionsConfig] =
     (
       Config.string("GEMINI_BASE_URL").withDefault("https://generativelanguage.googleapis.com/v1") ++
-        Config.secret("GEMINI_API_KEY") ++
+        Config.secret(ApiKeyVariable) ++
         Config.string("GEMINI_MODEL") ++
         Config.duration("GEMINI_REQUEST_TIMEOUT").withDefault(90.seconds)
     ).mapAttempt { case (baseUrl, apiKey, model, timeout) =>

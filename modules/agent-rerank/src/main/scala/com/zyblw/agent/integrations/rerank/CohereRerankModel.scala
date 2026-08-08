@@ -45,7 +45,7 @@ import zio.stream.*
 final case class CohereRerankConfig(
     baseUrl: String,
     apiKey: String,
-    model: String = "rerank-v4.0-pro",
+    model: String = CohereRerankConfig.DefaultModel,
     maxCandidates: Int = 100,
     maxQueryCodePoints: Int = 16_000,
     maxDocumentCodePoints: Int = 32_000,
@@ -94,6 +94,45 @@ final case class CohereRerankConfig(
   override def toString: String =
     s"CohereRerankConfig(baseUrl=$baseUrl, apiKey=<redacted>, model=$model, maxCandidates=$maxCandidates, " +
       s"maxAttempts=$maxAttempts, requestTimeout=$requestTimeout)"
+
+object CohereRerankConfig:
+  /** 本 loader 读取 API Key 的环境变量名。 */
+  val ApiKeyVariable: String = "COHERE_API_KEY"
+
+  /** 默认模型版本；升级模型必须重建评测基线，因此这里不跟随厂商"最新版"漂移。 */
+  val DefaultModel: String = "rerank-v4.0-pro"
+
+  /** Cohere v2 Rerank 的 ZIO Config 描述。
+    *
+    * 只暴露部署真正需要调的项：凭据、endpoint、模型版本，以及候选量/超时/重试这三项直接决定外发数据量、尾延迟和 费用的预算。`allowInsecureHttp`
+    * 刻意**不**从配置读取——一个能通过环境变量把 Bearer token 发到明文 HTTP 的开关， 迟早会有人在生产上打开它来"临时排障"。
+    *
+    * API Key 使用 `Config.Secret`，加载失败的错误文本不会展开它。
+    */
+  val environmentConfig: Config[CohereRerankConfig] =
+    (
+      Config.string("COHERE_BASE_URL").withDefault("https://api.cohere.com") ++
+        Config.secret(ApiKeyVariable) ++
+        Config.string("COHERE_RERANK_MODEL").withDefault(DefaultModel) ++
+        Config.int("COHERE_RERANK_MAX_CANDIDATES").withDefault(100) ++
+        Config.duration("COHERE_RERANK_REQUEST_TIMEOUT").withDefault(10.seconds) ++
+        Config.int("COHERE_RERANK_MAX_ATTEMPTS").withDefault(3)
+    ).mapAttempt { case (baseUrl, apiKey, model, maxCandidates, timeout, maxAttempts) =>
+      CohereRerankConfig(
+        baseUrl = baseUrl,
+        apiKey = apiKey.stringValue,
+        model = model,
+        maxCandidates = maxCandidates,
+        requestTimeout = timeout,
+        maxAttempts = maxAttempts
+      )
+    }
+
+  /** 从当前 ZIO `ConfigProvider` 构造配置；缺失凭据在装配期失败，而不是等第一次检索降级。 */
+  def fromEnvironment: IO[AgentError, CohereRerankConfig] =
+    ZIO
+      .config(environmentConfig)
+      .mapError(error => AgentError.InvalidConfiguration(s"Cohere Rerank 配置无效: $error"))
 
 /** Cohere v2 Rerank 的 ZIO HTTP Adapter。
   *

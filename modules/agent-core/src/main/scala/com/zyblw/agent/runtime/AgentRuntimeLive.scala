@@ -23,7 +23,8 @@ final class AgentRuntimeLive(
     contextManager: ContextManager,
     contextSources: ContextSourceResolver,
     guardrails: GuardrailEngine,
-    toolDefaults: ToolPolicyConfig,
+    toolPolicies: ToolPolicySource,
+    modelPolicies: ModelPolicySource,
     observer: RunObserver,
     eventQueue: FiberRef[Option[Queue[Take[AgentError, AgentEvent]]]],
     activeRuns: Ref[Map[RunId, Fiber.Runtime[AgentError, RunOutcome]]],
@@ -56,7 +57,13 @@ final class AgentRuntimeLive(
     for
       now     <- Clock.instant
       eventId <- EventId.random
-      initial      = RunInitialization.initialState(runId, agent, request, toolDefaults.maxCallsPerRun, now)
+      initial = RunInitialization.initialState(
+        runId,
+        agent,
+        request,
+        toolPolicies.current().maxCallsPerRun,
+        now
+      )
       createdEvent = AgentEvent.RunCreated(runId, initial.sessionId, now.toEpochMilli)
       persisted    = PersistedAgentEvent(eventId, runId, 0L, createdEvent, now.toEpochMilli)
       _       <- store.createWithEvents(initial, NonEmptyChunk(persisted))
@@ -352,33 +359,43 @@ final class AgentRuntimeLive(
       )
       allowed = agent.allowedTools.map(ToolName(_))
       definitions <- registry.definitions(allowed)
-      request = ChatRequest(prepared.messages, definitions, agent.modelSettings)
-      capabilities <- model.capabilities(agent.modelSettings.model)
+      // 部署级模型覆盖在这里叠加到 Agent 自己的设置上，之后的能力校验、事件、步骤记录与计费全部使用
+      // 叠加后的结果。在更靠后的位置应用会让 CapabilityValidator 校验一个并非实际发送的模型。
+      settings = modelPolicies.current().applyTo(agent.modelSettings)
+      request  = ChatRequest(prepared.messages, definitions, settings)
+      capabilities <- model.capabilities(settings.model)
       _            <- CapabilityValidator.validate(request, capabilities)
       startedAt    <- Clock.currentTime(TimeUnit.MILLISECONDS)
+      resolvedProvider = settings.provider.getOrElse(model.provider)
+      resolvedModel    = settings.model.getOrElse("default")
       _ <- emit(AgentEvent.StepStarted(contextState.runId, contextState.budget.steps + 1, startedAt))
       _ <- emit(
         AgentEvent.ModelCallStarted(
           contextState.runId,
-          agent.modelSettings.provider.getOrElse(model.provider),
-          agent.modelSettings.model.getOrElse("default"),
+          resolvedProvider,
+          resolvedModel,
           startedAt
         )
       )
       response <- invokeModel(contextState, request)
       _        <- ZIO
-        .fail(AgentError.BudgetExceeded("toolCallsPerStep", toolDefaults.maxCallsPerStep.toLong))
-        .when(response.message.toolCalls.length > toolDefaults.maxCallsPerStep)
+        .fail(AgentError.BudgetExceeded("toolCallsPerStep", toolPolicies.current().maxCallsPerStep.toLong))
+        .when(response.message.toolCalls.length > toolPolicies.current().maxCallsPerStep)
       now <- Clock.instant
       step = AgentStep.ModelStep(
         contextState.steps.length + 1,
         model.provider,
-        agent.modelSettings.model.getOrElse("default"),
+        resolvedModel,
         response.usage,
         response.finishReason,
         now.toEpochMilli
       )
-      usage = contextState.usage.addModel(response.usage)
+      // 用实际路由到的 provider/model 查价，而不是 ChatModel.provider——后者在多 Provider 部署里是 "router"，
+      // 拿它查价会永远查不到条目，让成本看板静默停留在零。
+      usage = contextState.usage.addModel(
+        response.usage,
+        modelPolicies.prices.estimate(resolvedProvider, resolvedModel, response.usage)
+      )
       _ <- ensureUsageBudget(contextState.budget.limits, usage)
       _ <- ZIO
         .fail(AgentError.BudgetExceeded("toolCalls", contextState.budget.limits.maxToolCalls))
@@ -606,14 +623,15 @@ final class AgentRuntimeLive(
               Chunk(ToolExecutionBatch(NonEmptyChunk.fromChunk(invocations).get)),
               invocations.length
             )
-            report <- ToolBatchExecutor.execute(executionPlan, toolDefaults.maxParallelism) { invocation =>
-              val item = DurableToolPlanItem(invocation.ordinal, invocation.call)
-              executeToolResult(
-                state,
-                item,
-                invocation.tool,
-                forceRetry = approvedCallIds.contains(invocation.call.id)
-              )
+            report <- ToolBatchExecutor.execute(executionPlan, toolPolicies.current().maxParallelism) {
+              invocation =>
+                val item = DurableToolPlanItem(invocation.ordinal, invocation.call)
+                executeToolResult(
+                  state,
+                  item,
+                  invocation.tool,
+                  forceRetry = approvedCallIds.contains(invocation.call.id)
+                )
             }
             ordered <- ZIO.foreach(report.outcomes) { outcome =>
               ZIO
@@ -767,7 +785,7 @@ final class AgentRuntimeLive(
       )
       active   <- store.transitionToolExecution(existing.status, existing.attempt, running)
       _        <- emit(AgentEvent.ToolExecutionStarted(state.runId, call.id, now))
-      executor <- ToolExecutor.make(toolDefaults.copy(allowedTools = Set(ToolName(call.name))))
+      executor <- ToolExecutor.make(toolPolicies.current().copy(allowedTools = Set(ToolName(call.name))))
       result   <- executor
         .execute(tool, call, executionContext(state, call))
         .foldZIO(
@@ -1336,7 +1354,7 @@ final class AgentRuntimeLive(
     *   `None` 表示允许继续，`Some` 中的中文原因会进入 ApprovalRequest
     */
   private def approvalReason(metadata: ToolMetadata): Option[String] =
-    toolDefaults.approvalPolicy match
+    toolPolicies.current().approvalPolicy match
       case ApprovalPolicy.Never     => None
       case ApprovalPolicy.Always    => Some("当前运行策略要求所有工具调用经过人工审批")
       case ApprovalPolicy.RiskBased =>
@@ -1373,8 +1391,8 @@ object AgentRuntimeLive:
   /** 以 scoped layer 创建运行时；FiberRef 隔离每个流的事件队列，活动 Fiber 表支持同进程精确取消。
     */
   val layer: URLayer[
-    ChatModel & RegisteredToolRegistry & RunStore & ContextManager & GuardrailEngine & ToolPolicyConfig &
-      RunObserver,
+    ChatModel & RegisteredToolRegistry & RunStore & ContextManager & GuardrailEngine & ToolPolicySource &
+      ModelPolicySource & RunObserver,
     AgentRuntime & LeaseAwareAgentRuntime
   ] = makeLayer(ContextSourceResolver.emptyValue)
 
@@ -1384,7 +1402,7 @@ object AgentRuntimeLive:
     */
   val layerWithContextSources: URLayer[
     ChatModel & RegisteredToolRegistry & RunStore & ContextManager & ContextSourceResolver & GuardrailEngine &
-      ToolPolicyConfig & RunObserver,
+      ToolPolicySource & ModelPolicySource & RunObserver,
     AgentRuntime & LeaseAwareAgentRuntime
   ] = ZLayer.scoped {
     for
@@ -1395,15 +1413,15 @@ object AgentRuntimeLive:
 
   /** 用指定 ContextSourceResolver 构造纯工具 Agent 层，并集中管理 Runtime 的 scoped 资源。 */
   private def makeLayer(resolver: ContextSourceResolver): URLayer[
-    ChatModel & RegisteredToolRegistry & RunStore & ContextManager & GuardrailEngine & ToolPolicyConfig &
-      RunObserver,
+    ChatModel & RegisteredToolRegistry & RunStore & ContextManager & GuardrailEngine & ToolPolicySource &
+      ModelPolicySource & RunObserver,
     AgentRuntime & LeaseAwareAgentRuntime
   ] = ZLayer.scoped(build(resolver))
 
   /** 创建 FiberRef、活动 Fiber 注册表和租约上下文。 */
   private def build(resolver: ContextSourceResolver): ZIO[
-    ChatModel & RegisteredToolRegistry & RunStore & ContextManager & GuardrailEngine & ToolPolicyConfig &
-      RunObserver & Scope,
+    ChatModel & RegisteredToolRegistry & RunStore & ContextManager & GuardrailEngine & ToolPolicySource &
+      ModelPolicySource & RunObserver & Scope,
     Nothing,
     AgentRuntimeLive
   ] =
@@ -1413,7 +1431,8 @@ object AgentRuntimeLive:
       store          <- ZIO.service[RunStore]
       contextManager <- ZIO.service[ContextManager]
       guardrails     <- ZIO.service[GuardrailEngine]
-      toolDefaults   <- ZIO.service[ToolPolicyConfig]
+      toolPolicies   <- ZIO.service[ToolPolicySource]
+      modelPolicies  <- ZIO.service[ModelPolicySource]
       observer       <- ZIO.service[RunObserver]
       eventQueue     <- FiberRef.make(Option.empty[Queue[Take[AgentError, AgentEvent]]])
       activeRuns     <- Ref.make(Map.empty[RunId, Fiber.Runtime[AgentError, RunOutcome]])
@@ -1425,7 +1444,8 @@ object AgentRuntimeLive:
       contextManager,
       resolver,
       guardrails,
-      toolDefaults,
+      toolPolicies,
+      modelPolicies,
       observer,
       eventQueue,
       activeRuns,

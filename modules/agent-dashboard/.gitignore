@@ -12,6 +12,8 @@
 
 # testing
 /coverage
+/test-results/
+/playwright-report/
 
 # next.js
 /.next/
@@ -32,6 +34,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# 模板不含机密，且 README 的启动步骤要求 `cp .env.example .env.local`；
+# 若被忽略，一份全新 clone 会缺少该文件，照文档操作会直接失败。
+!.env.example
 
 # vercel
 .vercel

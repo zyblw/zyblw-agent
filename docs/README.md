@@ -1,7 +1,7 @@
 # zyblw-agent 文档地图
 
 > 状态：当前
-> 最后核验：2026-08-02
+> 最后核验：2026-08-08
 > 事实来源：`build.sbt`、发布工作流、模块源码、测试与数据库迁移
 
 ## 按目标选择阅读路径
@@ -21,17 +21,18 @@
 3. [持久化](persistence.md)与[宿主数据库迁移](database-migrations.md)
 4. [ZIO HTTP 生产宿主](http-host.md)
 5. [安全](security.md)、[可观测性](observability.md)与[测试](testing.md)
+6. [管理 API 与运维控制台](admin-console.md)
 
 ### 我要理解内核
 
 1. [核心概念](core-concepts.md)
 2. [架构总览](architecture.md)
 3. [Agent Application Runtime ADR](architecture/0016-agent-application-runtime.md)
-4. [Agent Dashboard 前端控制台架构 ADR](architecture/0017-agent-dashboard-architecture.md)
+4. [agent-dashboard 与管理 API 边界 ADR](architecture/0017-agent-dashboard-architecture.md)
 5. [运行时](runtime.md)
-5. [工具](tools.md) 与 [可靠写工具](side-effects.md)
-6. [持久化](persistence.md) 与 [数据库 Schema](database-schema.md)
-7. [声明式 Workflow](workflow.md)
+6. [工具](tools.md) 与 [可靠写工具](side-effects.md)
+7. [持久化](persistence.md) 与 [数据库 Schema](database-schema.md)
+8. [声明式 Workflow](workflow.md)
 
 ### 我要深入读源码和参与开发
 
@@ -59,6 +60,7 @@
 - [模块与依赖选择](modules.md)
 - [版本、Maven Central 发布与回滚](releasing.md)
 - [兼容性契约与版本边界](compatibility.md)
+- [升级到 0.5.0：管理面、运行时配置覆盖与模型治理](upgrading-to-0.5.0.md)
 - [升级到 0.4.0：结构化 RAG 与独立知识 schema](upgrading-to-0.4.0.md)
 - [升级到 0.3.0：核心控制面清库重建](upgrading-to-0.3.0.md)
 - [从 0.1.0 升级到 0.2.0](upgrading-to-0.2.0.md)
@@ -82,6 +84,7 @@
 - [真实 Provider smoke](provider-live-smoke.md)
 - [HTTP 公共协议与版本](http-api-versioning.md)
 - [Run Inspector、Timeline 与安全调试](run-inspection.md)
+- [管理 API 与运维控制台](admin-console.md)
 - [ZIO HTTP 生产宿主](http-host.md)
 - [耐久 SSE](durable-streaming.md)
 

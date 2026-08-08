@@ -29,6 +29,32 @@ final case class ToolPolicyConfig(
 object ToolPolicyConfig:
   val secureDefault: ToolPolicyConfig = ToolPolicyConfig()
 
+/** 同步返回当前生效工具治理配置的解析器。
+  *
+  * 它刻意返回裸值而不是 `UIO[ToolPolicyConfig]`。Runtime 在规划批次、判断审批和检查预算时会在纯表达式里读取策略， 把这些读取全部改成效果会迫使 `approvalReason`
+  * 之类的纯函数变成 `ZIO`，进而把工具规划逻辑重写成 for 推导——这既放大了改动 面，也没有换来任何额外保证：读取一个不可变 `ToolPolicyConfig` 引用本来就是无副作用的。
+  *
+  * 实现必须保证 [[current]] 是无阻塞、无异常的引用读取。管理面覆盖通过替换被引用的不可变值生效，而不是原地修改配置对象。
+  *
+  * 一次 Run 进行到一半时策略被替换是允许的，且在两个方向上都是安全的：收紧策略会让后续工具调用被拒绝或要求审批， 放宽策略只影响尚未规划的批次。已经冻结进 `AgentState` 的预算（例如
+  * `maxCallsPerRun`）不受影响。
+  */
+trait ToolPolicySource:
+  /** 读取当前生效配置。 */
+  def current(): ToolPolicyConfig
+
+object ToolPolicySource:
+  /** 永远返回同一份部署基线；未接入管理面覆盖时使用。 */
+  def static(config: ToolPolicyConfig): ToolPolicySource = new ToolPolicySource:
+    def current(): ToolPolicyConfig = config
+
+  /** 从已装配的 `ToolPolicyConfig` 构造静态解析器。
+    *
+    * 该层让既有装配图在不引入管理面依赖的前提下满足 Runtime 的新环境要求。接入运行时覆盖的部署应改为提供 由 `RuntimeSettingsService` 支撑的解析器。
+    */
+  val staticLayer: URLayer[ToolPolicyConfig, ToolPolicySource] =
+    ZLayer.fromFunction((config: ToolPolicyConfig) => static(config))
+
 /** 集中处理超时、并发度和结果大小，不让每个工具重复实现。 */
 final class ToolExecutor private (semaphore: Semaphore, policy: ToolPolicyConfig):
   /** 在统一治理边界内执行一个已注册工具。

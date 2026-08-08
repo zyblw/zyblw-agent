@@ -1,0 +1,16 @@
+# 必须排除 node_modules：builder 阶段的 `COPY . .` 会用宿主目录覆盖掉 deps 阶段安装的依赖，
+# 而宿主的原生模块通常是为另一套 libc/架构编译的。
+node_modules
+.next
+
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+Dockerfile
+.dockerignore
+
+*.tsbuildinfo
+npm-debug.log*

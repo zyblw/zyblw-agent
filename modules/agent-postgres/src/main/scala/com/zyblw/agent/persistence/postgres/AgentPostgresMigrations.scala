@@ -54,7 +54,9 @@ object AgentPostgresMigrations:
     "agent_workflow_checkpoints",
     "agent_workflow_node_executions",
     "agent_workflow_waits",
-    "agent_workflow_signals"
+    "agent_workflow_signals",
+    "agent_runtime_overrides",
+    "agent_ingestion_jobs"
   )
 
   private val Knowledge1536Relations = Chunk(

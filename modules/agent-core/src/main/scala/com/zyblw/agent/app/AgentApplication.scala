@@ -211,6 +211,8 @@ object AgentApplication:
   def durable(owner: WorkerId, config: AgentApplicationConfig): URLayer[DurableDependencies, Services] =
     ZLayer.makeSome[DurableDependencies, Services](
       ZLayer.succeed(config.toolPolicy),
+      ToolPolicySource.staticLayer,
+      ModelPolicySource.defaultLayer,
       TokenCounter.approximate,
       ContextCompressor.deterministic,
       DefaultContextManager.layer,
@@ -239,6 +241,8 @@ object AgentApplication:
   ): URLayer[DurableContextCompressionDependencies, Services] =
     ZLayer.makeSome[DurableContextCompressionDependencies, Services](
       ZLayer.succeed(config.toolPolicy),
+      ToolPolicySource.staticLayer,
+      ModelPolicySource.defaultLayer,
       TokenCounter.approximate,
       DefaultContextManager.layer,
       AgentRuntimeLive.layerWithContextSources,
@@ -255,6 +259,8 @@ object AgentApplication:
     ZLayer.makeSome[InMemoryDependencies, Services](
       AgentPersistence.inMemory,
       ZLayer.succeed(config.toolPolicy),
+      ToolPolicySource.staticLayer,
+      ModelPolicySource.defaultLayer,
       TokenCounter.approximate,
       ContextCompressor.deterministic,
       DefaultContextManager.layer,
@@ -275,6 +281,8 @@ object AgentApplication:
     ZLayer.makeSome[InMemoryContextCompressionDependencies, Services](
       AgentPersistence.inMemory,
       ZLayer.succeed(config.toolPolicy),
+      ToolPolicySource.staticLayer,
+      ModelPolicySource.defaultLayer,
       TokenCounter.approximate,
       DefaultContextManager.layer,
       AgentRuntimeLive.layerWithContextSources,
@@ -298,6 +306,8 @@ object AgentApplication:
       GuardrailEngine.empty,
       RunObserver.noop,
       ZLayer.succeed(config.toolPolicy),
+      ToolPolicySource.staticLayer,
+      ModelPolicySource.defaultLayer,
       TokenCounter.approximate,
       ContextCompressor.deterministic,
       DefaultContextManager.layer,
@@ -323,6 +333,8 @@ object AgentApplication:
       GuardrailEngine.empty,
       RunObserver.noop,
       ZLayer.succeed(config.toolPolicy),
+      ToolPolicySource.staticLayer,
+      ModelPolicySource.defaultLayer,
       TokenCounter.approximate,
       DefaultContextManager.layer,
       AgentRuntimeLive.layerWithContextSources,

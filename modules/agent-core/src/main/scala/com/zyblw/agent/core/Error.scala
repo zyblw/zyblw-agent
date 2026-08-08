@@ -40,6 +40,46 @@ object AgentError:
     override val diagnostic = Map("provider" -> provider) ++ code.map("providerCode" -> _)
     override def getCause: Throwable | Null = cause.orNull
 
+  /** 模型 Provider 返回非成功 HTTP 状态。
+    *
+    * HTTP 状态是认证、授权、限流、超时和暂时不可用之间唯一稳定且不读取响应正文的分类依据。Provider 原始响应 不能进入此错误：它可能回显请求正文、账号信息或网关 HTML。`providerCode`
+    * 只接受短、低基数字符串；不满足 约束的值会被丢弃，而不是截断后伪装成可信分类。
+    */
+  final class ModelHttpFailure private (
+      val provider: String,
+      val status: Int,
+      val providerCode: Option[String]
+  ) extends ModelError:
+    val message: String =
+      s"Model provider '$provider' returned HTTP $status" +
+        providerCode.fold("")(code => s" ($code)")
+
+    val category: ErrorCategory = status match
+      case 401 | 407             => ErrorCategory.Authentication
+      case 403                   => ErrorCategory.Authorization
+      case 408                   => ErrorCategory.Timeout
+      case 409                   => ErrorCategory.Conflict
+      case 429                   => ErrorCategory.RateLimit
+      case value if value >= 500 => ErrorCategory.Unavailable
+      case _                     => ErrorCategory.Validation
+
+    override val retryable: Boolean =
+      status == 408 || status == 409 || status == 429 || status >= 500
+
+    override val diagnostic: Map[String, String] =
+      Map("provider" -> provider, "httpStatus" -> status.toString) ++
+        providerCode.map("providerCode" -> _)
+
+  object ModelHttpFailure:
+    private val ProviderCodePattern = "[A-Za-z0-9][A-Za-z0-9_.-]{0,79}".r
+
+    def apply(provider: String, status: Int, providerCode: Option[String] = None): ModelHttpFailure =
+      val safeCode = providerCode.map(_.trim).filter(ProviderCodePattern.matches)
+      new ModelHttpFailure(provider, status, safeCode)
+
+    def unapply(error: ModelHttpFailure): (String, Int, Option[String]) =
+      (error.provider, error.status, error.providerCode)
+
   final case class InvalidModelResponse(message: String) extends ModelError:
     val category = ErrorCategory.Validation
 

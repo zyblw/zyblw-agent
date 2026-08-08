@@ -1,389 +1,351 @@
 'use client';
 
-import React, { useState } from 'react';
-import { AgentRunView, ToolCallLedgerItem } from '@/types/agent';
+/**
+ * Run 目录：状态总览、过滤、keyset 翻页与单个 Run 的元数据详情。
+ *
+ * 翻页使用后端返回的不透明游标而不是页号。Run 会在翻页过程中持续更新，基于 OFFSET 的分页会让同一条记录
+ * 重复出现或被整页跳过——这在排查一个正在跑的批次时尤其危险。
+ *
+ * 这里只展示元数据。用户输入、模型输出和工具参数属于业务数据，跨租户的运维界面不应成为它们的导出通道。
+ *
+ * 过滤条件与选中的 Run 都放在 URL 里：值班交接时"你看一下这几个失败的 Run"必须是一个可以直接发出去的地址。
+ */
+
+import React, { useMemo, useState } from 'react';
+import { CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, Filter } from 'lucide-react';
+import { RunEventStream } from '@/components/RunEventStream';
+import { useRuns, useRunsOverview } from '@/lib/queries';
 import {
-  CheckCircle2,
-  Clock,
-  Code2,
-  Coins,
-  ExternalLink,
-  Flame,
-  Play,
-  ShieldAlert,
-  ShieldCheck,
-  Terminal,
-  UserCheck,
-  XCircle,
-  Zap
-} from 'lucide-react';
+  langfuseTraceUrl,
+  traceIdForRun,
+  type AdminCapabilitiesView,
+  type RunSummaryView,
+} from '@/types/admin';
+import { formatCount, formatInstant, formatRelative, runStatusTone } from '@/lib/format';
+import { encodeFlag, encodeList, useDebouncedUrlValue, useUrlState } from '@/lib/urlState';
+import {
+  Badge,
+  Button,
+  CopyableId,
+  EmptyState,
+  ErrorBanner,
+  Field,
+  FOCUS_RING,
+  LoadingRows,
+  Mono,
+  Panel,
+  StatCard,
+  TextInput,
+} from '@/components/ui';
 
-interface RunInspectorProps {
-  runs: AgentRunView[];
-  selectedRunId: string;
-  onSelectRun: (id: string) => void;
-  langfuseUrl: string;
-}
+/** 与后端 `RunStatus` 一致的过滤选项。 */
+const STATUS_OPTIONS = ['Running', 'AwaitingApproval', 'Succeeded', 'Failed', 'Cancelled'];
 
-export const RunInspector: React.FC<RunInspectorProps> = ({
-  runs,
-  selectedRunId,
-  onSelectRun,
-  langfuseUrl
-}) => {
-  const currentRun = runs.find((r) => r.runId === selectedRunId) || runs[0];
-  const [approvals, setApprovals] = useState<ToolCallLedgerItem[]>(
-    currentRun?.pendingApprovals || []
+export function RunInspector({ capabilities }: { capabilities: AdminCapabilitiesView | undefined }) {
+  const url = useUrlState();
+  // 两个文本筛选走防抖：草稿驱动输入框，已提交值驱动查询与游标栈，否则每次击键都是一次跨租户目录扫描。
+  const [tenantDraft, setTenantDraft, tenantId] = useDebouncedUrlValue('runTenant');
+  const [agentDraft, setAgentDraft, agentId] = useDebouncedUrlValue('runAgent');
+  // 状态集合以编码形式读入再派生成数组：直接用 `getList` 会在每次渲染产生一个新数组，让下游的 query key
+  // 每帧都变，React Query 会因此不停重新获取。
+  const statusKey = url.get('runStatus');
+  const statuses = useMemo(() => statusKey.split(',').filter(Boolean), [statusKey]);
+  const awaitingOnly = url.getFlag('runAwaiting');
+  const selectedRunId = url.get('runId');
+
+  // 游标栈：栈顶是当前页的游标，出栈即返回上一页。只保存 nextCursor 无法后退。
+  //
+  // 游标本身不进 URL：它是一个只对某一组过滤条件有效的不透明 keyset 令牌，分享一个带游标的地址会让对方从
+  // 一个无法解释的位置开始看。栈与产生它的过滤条件一起保存，条件一变就在渲染时判定为失效并从头开始——
+  // 这比在 effect 里监听过滤变化再清栈少一轮渲染，也不会出现"用旧游标查新过滤"的中间态。
+  const filterKey = `${tenantId}|${agentId}|${statuses.join(',')}|${awaitingOnly}`;
+  const [paging, setPaging] = useState<{ key: string; stack: (string | undefined)[] }>({
+    key: filterKey,
+    stack: [undefined],
+  });
+  const cursorStack = paging.key === filterKey ? paging.stack : [undefined];
+  const cursor = cursorStack[cursorStack.length - 1];
+
+  const query = useMemo(
+    () => ({
+      tenantId: tenantId || undefined,
+      agentId: agentId || undefined,
+      statuses: statuses.length > 0 ? statuses : undefined,
+      awaitingApproval: awaitingOnly || undefined,
+      cursor,
+      limit: 25,
+    }),
+    [tenantId, agentId, statuses, awaitingOnly, cursor],
   );
-  const [approvalFeedback, setApprovalFeedback] = useState<string | null>(null);
 
-  // SSE Debugger state
-  const [ssePrompt, setSsePrompt] = useState('');
-  const [sseLogs, setSseLogs] = useState<string[]>([]);
-  const [isStreaming, setIsStreaming] = useState(false);
+  const runs = useRuns(query);
+  const overview = useRunsOverview(tenantId || undefined);
 
-  const handleApprove = (callId: string) => {
-    setApprovals(approvals.filter((item) => item.callId !== callId));
-    setApprovalFeedback(`已向 /api/v1/commands 提交【已批准】命令 (callId: ${callId})`);
-    setTimeout(() => setApprovalFeedback(null), 4000);
-  };
+  function toggleStatus(status: string) {
+    const next = statuses.includes(status)
+      ? statuses.filter((item) => item !== status)
+      : [...statuses, status];
+    url.set({ runStatus: encodeList(next) });
+  }
 
-  const handleReject = (callId: string) => {
-    setApprovals(approvals.filter((item) => item.callId !== callId));
-    setApprovalFeedback(`已向 /api/v1/commands 提交【拒绝并终止】命令 (callId: ${callId})`);
-    setTimeout(() => setApprovalFeedback(null), 4000);
-  };
-
-  const handleStartSseStream = () => {
-    if (!ssePrompt.trim()) return;
-    setIsStreaming(true);
-    setSseLogs([`[系统日志] POST /api/v1/agents/${currentRun.agentId}/runs 命令提交成功`]);
-
-    setTimeout(() => {
-      setSseLogs((prev) => [
-        ...prev,
-        `[SSE 事件流] event: run.started { runId: "run-live-${Date.now()}" }`,
-        `[SSE 事件流] event: delta { text: "已收到您的 Prompt，正在解析上下文并检索已授权 RAG 知识..." }`
-      ]);
-    }, 600);
-
-    setTimeout(() => {
-      setSseLogs((prev) => [
-        ...prev,
-        `[SSE 事件流] event: tool.started { name: "knowledge_search", callId: "call-live-1" }`,
-        `[SSE 事件流] event: tool.completed { name: "knowledge_search", status: "success" }`
-      ]);
-    }, 1500);
-
-    setTimeout(() => {
-      setSseLogs((prev) => [
-        ...prev,
-        `[SSE 事件流] event: delta { text: "根据已授权知识库谱系得出结论：架构模式完全符合 0.4.0 规范。" }`,
-        `[SSE 事件流] event: run.completed { status: "Completed" }`
-      ]);
-      setIsStreaming(false);
-    }, 2800);
-  };
-
-  const getStatusBadgeClass = (status: string) => {
-    switch (status) {
-      case 'Completed':
-        return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30';
-      case 'Running':
-        return 'bg-blue-500/10 text-blue-400 border-blue-500/30';
-      case 'Paused':
-        return 'bg-amber-500/10 text-amber-400 border-amber-500/30 animate-pulse';
-      case 'Failed':
-        return 'bg-rose-500/10 text-rose-400 border-rose-500/30';
-      default:
-        return 'bg-slate-800 text-slate-400 border-slate-700';
-    }
-  };
+  const items = runs.data?.items ?? [];
+  const selected = items.find((run) => run.runId === selectedRunId) ?? null;
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 h-[calc(100vh-100px)] p-6 bg-slate-950 text-slate-100 font-sans">
-      {/* ------------------ Left Pane: Run Selection Thread (3 Cols) ------------------ */}
-      <div className="lg:col-span-3 bg-slate-900/80 rounded-2xl border border-slate-800 p-4 flex flex-col shadow-xl backdrop-blur-sm">
-        <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-3">
-          <h2 className="font-bold text-sm text-slate-200 tracking-wide flex items-center gap-2">
-            <Terminal className="w-4 h-4 text-indigo-400" />
-            智能体运行实例 ({runs.length})
-          </h2>
-          <span className="text-[10px] text-slate-500 font-mono">Durable Runs</span>
-        </div>
-
-        <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 custom-scrollbar">
-          {runs.map((run) => {
-            const isSelected = run.runId === currentRun.runId;
-            return (
-              <div
-                key={run.runId}
-                onClick={() => {
-                  onSelectRun(run.runId);
-                  setApprovals(run.pendingApprovals || []);
-                }}
-                className={`p-3.5 rounded-xl border cursor-pointer transition-all duration-200 ${
-                  isSelected
-                    ? 'bg-slate-800/90 border-indigo-500 shadow-md shadow-indigo-500/10'
-                    : 'bg-slate-950/40 border-slate-800/80 hover:bg-slate-800/40 hover:border-slate-700'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="font-mono text-xs font-bold text-indigo-300">
-                    {run.runId}
-                  </span>
-                  <span
-                    className={`text-[10px] px-2 py-0.5 rounded-full font-semibold border ${getStatusBadgeClass(
-                      run.status
-                    )}`}
-                  >
-                    {run.status === 'Paused' ? '等待审批' : run.status === 'Completed' ? '已完成' : run.status}
-                  </span>
-                </div>
-                <p className="text-xs text-slate-300 line-clamp-2 mb-2 font-medium">
-                  {run.userQuery}
-                </p>
-                <div className="flex items-center justify-between text-[11px] text-slate-500 font-mono">
-                  <span>{new Date(run.createdAt).toLocaleTimeString()}</span>
-                  <span>{run.cumulativeUsage.totalTokens} Tokens</span>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+    <div className="space-y-4 p-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <StatCard label="Run 总数" value={formatCount(overview.data?.totalRuns)} hint={
+          overview.data ? `采样于 ${formatRelative(overview.data.capturedAtEpochMilli)}` : undefined
+        } />
+        <StatCard
+          label="等待审批"
+          value={formatCount(overview.data?.awaitingApproval)}
+          tone={overview.data && overview.data.awaitingApproval > 0 ? 'warn' : 'neutral'}
+          hint="需要人工决策"
+        />
+        <StatCard label="运行中" value={formatCount(overview.data?.countsByStatus?.Running ?? 0)} tone="good" />
+        <StatCard
+          label="失败"
+          value={formatCount(overview.data?.countsByStatus?.Failed ?? 0)}
+          tone={(overview.data?.countsByStatus?.Failed ?? 0) > 0 ? 'danger' : 'neutral'}
+        />
       </div>
 
-      {/* ------------------ Center Pane: Timeline & Tool Ledger (5 Cols) ------------------ */}
-      <div className="lg:col-span-5 bg-slate-900/80 rounded-2xl border border-slate-800 p-5 flex flex-col shadow-xl overflow-hidden backdrop-blur-sm">
-        {/* Run Metadata Header */}
-        <div className="pb-4 border-b border-slate-800 mb-4 flex items-center justify-between">
-          <div>
-            <div className="flex items-center space-x-2">
-              <span className="font-mono text-sm font-bold text-slate-100">
-                {currentRun.runId}
-              </span>
-              <span className="text-xs text-slate-400 font-mono">({currentRun.agentId})</span>
-            </div>
-            <p className="text-xs text-slate-400 mt-1">{currentRun.userQuery}</p>
-          </div>
+      <ErrorBanner error={overview.error} context="读取 Run 总览" />
 
-          {/* Langfuse Deep Link */}
-          {currentRun.traceId && (
-            <a
-              href={`${langfuseUrl}/trace/${currentRun.traceId}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center space-x-1.5 text-xs bg-amber-500/10 text-amber-300 border border-amber-500/30 px-3 py-1.5 rounded-lg font-medium hover:bg-amber-500/20 transition-all"
+      <Panel
+        title="Run 目录"
+        description="按 (更新时间, RunId) 稳定倒序排列，使用 keyset 游标翻页"
+        actions={
+          <>
+            <Button
+              variant="secondary"
+              disabled={cursorStack.length <= 1}
+              onClick={() => setPaging({ key: filterKey, stack: cursorStack.slice(0, -1) })}
             >
-              <Flame className="w-3.5 h-3.5 text-amber-400" />
-              <span>在 Langfuse 中打开 Trace</span>
-              <ExternalLink className="w-3 h-3 text-amber-400 opacity-70" />
-            </a>
-          )}
+              <ChevronLeft className="h-3 w-3" /> 上一页
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={!runs.data?.hasMore || !runs.data?.nextCursor}
+              onClick={() =>
+                setPaging({ key: filterKey, stack: [...cursorStack, runs.data?.nextCursor ?? undefined] })
+              }
+            >
+              下一页 <ChevronRight className="h-3 w-3" />
+            </Button>
+          </>
+        }
+      >
+        <div className="mb-3 grid gap-3 md:grid-cols-[1fr_1fr_auto]">
+          <TextInput
+            label="租户"
+            value={tenantDraft}
+            onChange={setTenantDraft}
+            placeholder="留空表示跨租户"
+          />
+          <TextInput
+            label="Agent"
+            value={agentDraft}
+            onChange={setAgentDraft}
+            placeholder="留空表示全部 Agent"
+          />
+          <label className="flex items-center gap-2 pb-1.5 text-xs text-slate-300">
+            <input
+              type="checkbox"
+              checked={awaitingOnly}
+              onChange={(event) => url.set({ runAwaiting: encodeFlag(event.target.checked) })}
+              className={`rounded border-slate-700 bg-slate-950 ${FOCUS_RING}`}
+            />
+            仅显示待审批
+          </label>
         </div>
 
-        {/* Step Waterfall Timeline */}
-        <div className="flex-1 overflow-y-auto space-y-4 pr-1 custom-scrollbar">
-          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-            执行步骤时间线 (Step Execution Timeline)
-          </h3>
-
-          {currentRun.steps.map((step) => (
-            <div
-              key={step.stepIndex}
-              className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-4 hover:border-slate-700 transition-all"
+        <div className="mb-3 flex flex-wrap items-center gap-1.5">
+          <Filter className="h-3 w-3 text-slate-500" />
+          {STATUS_OPTIONS.map((status) => (
+            <button
+              key={status}
+              type="button"
+              aria-pressed={statuses.includes(status)}
+              onClick={() => toggleStatus(status)}
+              className={`rounded-md px-2 py-0.5 text-xs ring-1 ring-inset transition ${FOCUS_RING} ${
+                statuses.includes(status)
+                  ? runStatusTone(status)
+                  : 'text-slate-500 ring-slate-800 hover:text-slate-300'
+              }`}
             >
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center space-x-2">
-                  <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 font-mono text-xs flex items-center justify-center font-bold">
-                    {step.stepIndex}
-                  </span>
-                  <span className="font-semibold text-xs text-slate-200">{step.nodeName}</span>
-                </div>
-                <div className="flex items-center space-x-2 text-[11px] text-slate-400 font-mono">
-                  <Clock className="w-3 h-3 text-slate-500" />
-                  <span>{step.durationMs}ms</span>
-                </div>
-              </div>
-
-              {/* Token Metrics if Model Inference */}
-              {step.usage && (
-                <div className="mt-2 pt-2 border-t border-slate-800/60 flex items-center space-x-4 text-[11px] text-slate-400 font-mono">
-                  <span className="flex items-center gap-1">
-                    <Coins className="w-3 h-3 text-amber-400" />
-                    输入: {step.usage.inputTokens}
-                  </span>
-                  <span>输出: {step.usage.outputTokens}</span>
-                  {step.usage.promptCacheHits ? (
-                    <span className="text-emerald-400">
-                      Cache 命中: {step.usage.promptCacheHits}
-                    </span>
-                  ) : null}
-                </div>
-              )}
-
-              {/* Tool Calls if Any */}
-              {step.toolCalls && step.toolCalls.length > 0 && (
-                <div className="mt-3 space-y-2">
-                  {step.toolCalls.map((tool) => (
-                    <div
-                      key={tool.callId}
-                      className="bg-slate-900 border border-slate-800 rounded-lg p-3 text-xs"
-                    >
-                      <div className="flex items-center justify-between mb-1.5">
-                        <div className="flex items-center space-x-2">
-                          <Code2 className="w-3.5 h-3.5 text-cyan-400" />
-                          <span className="font-mono font-bold text-cyan-300">
-                            {tool.toolName}
-                          </span>
-                        </div>
-                        <span
-                          className={`text-[10px] px-2 py-0.5 rounded font-mono font-semibold ${
-                            tool.riskLevel === 'High'
-                              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                              : 'bg-slate-800 text-slate-300'
-                          }`}
-                        >
-                          风险等级: {tool.riskLevel}
-                        </span>
-                      </div>
-                      <div className="bg-slate-950 p-2 rounded font-mono text-[11px] text-slate-300 overflow-x-auto">
-                        <pre>{JSON.stringify(tool.arguments, null, 2)}</pre>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+              {status}
+            </button>
           ))}
         </div>
 
-        {/* Final Answer Banner if Completed */}
-        {currentRun.finalAnswer && (
-          <div className="mt-4 pt-3 border-t border-slate-800 bg-emerald-950/20 border-emerald-500/30 p-3.5 rounded-xl border">
-            <h4 className="text-xs font-bold text-emerald-400 flex items-center gap-1.5 mb-1">
-              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-              最终输出答案已验证
-            </h4>
-            <p className="text-xs text-slate-200 leading-relaxed font-sans">
-              {currentRun.finalAnswer}
-            </p>
+        <ErrorBanner error={runs.error} context="查询 Run 目录" />
+
+        {runs.isPending ? (
+          <LoadingRows rows={6} />
+        ) : items.length === 0 ? (
+          <EmptyState
+            title="没有匹配的 Run"
+            reason="若刚接入框架，请确认宿主装配的是 PostgreSQL 的 RunDirectory 适配器；仅使用内存 Store 时该列表将始终为空。"
+          />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="text-slate-500">
+                <tr className="border-b border-slate-800">
+                  <th className="py-2 pr-3 font-medium">Run</th>
+                  <th className="py-2 pr-3 font-medium">Agent</th>
+                  <th className="py-2 pr-3 font-medium">状态</th>
+                  <th className="py-2 pr-3 font-medium">步数</th>
+                  <th className="py-2 pr-3 font-medium">Token</th>
+                  <th className="py-2 pr-3 font-medium">费用</th>
+                  <th className="py-2 pr-3 font-medium">租户</th>
+                  <th className="py-2 pr-3 font-medium">更新</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((run) => (
+                  <tr
+                    key={run.runId}
+                    tabIndex={0}
+                    onClick={() => url.set({ runId: run.runId })}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        url.set({ runId: run.runId });
+                      }
+                    }}
+                    className={`cursor-pointer border-b border-slate-900 transition hover:bg-slate-900/60 ${FOCUS_RING} ${
+                      run.runId === selectedRunId ? 'bg-slate-900' : ''
+                    }`}
+                  >
+                    <td className="py-2 pr-3">
+                      <CopyableId value={run.runId} label="Run ID" truncate={8} />
+                    </td>
+                    <td className="py-2 pr-3 text-slate-300">{run.agentId}</td>
+                    <td className="py-2 pr-3">
+                      <Badge className={runStatusTone(run.status)}>{run.status}</Badge>
+                      {run.awaitingApproval && (
+                        <Badge className="ml-1 text-amber-300 bg-amber-500/10 ring-amber-500/30">
+                          审批
+                        </Badge>
+                      )}
+                    </td>
+                    <td className="py-2 pr-3 tabular-nums text-slate-400">{run.steps}</td>
+                    <td className="py-2 pr-3 tabular-nums text-slate-400">
+                      {formatCount(run.usage.totalTokens)}
+                    </td>
+                    <td className="py-2 pr-3 tabular-nums text-slate-400">{run.usage.estimatedCost}</td>
+                    <td className="py-2 pr-3 text-slate-500">{run.tenantId ?? '—'}</td>
+                    <td className="py-2 pr-3 text-slate-500">{formatRelative(run.updatedAtEpochMilli)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
-      </div>
+      </Panel>
 
-      {/* ------------------ Right Pane: Approvals & SSE Debugger (4 Cols) ------------------ */}
-      <div className="lg:col-span-4 flex flex-col space-y-5">
-        {/* Human-in-the-Loop Approvals Box */}
-        <div className="bg-slate-900/80 rounded-2xl border border-slate-800 p-4 flex flex-col shadow-xl backdrop-blur-sm">
-          <div className="pb-3 border-b border-slate-800 mb-3 flex items-center justify-between">
-            <h3 className="font-bold text-xs uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
-              <ShieldAlert className="w-4 h-4 text-amber-400" />
-              Human-in-the-Loop 人工写工具审批
-            </h3>
-            <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full font-mono font-bold">
-              {approvals.length} 个待审批
-            </span>
-          </div>
-
-          {approvalFeedback && (
-            <div className="mb-3 p-2.5 bg-indigo-500/20 border border-indigo-500/30 rounded-lg text-xs text-indigo-200 font-mono">
-              {approvalFeedback}
-            </div>
-          )}
-
-          {approvals.length === 0 ? (
-            <div className="py-6 text-center text-xs text-slate-500 font-sans flex flex-col items-center">
-              <ShieldCheck className="w-8 h-8 text-slate-600 mb-2 opacity-50" />
-              当前没有处于暂停等待状态的写工具审批请求
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {approvals.map((item) => (
-                <div
-                  key={item.callId}
-                  className="bg-slate-950 border border-amber-500/30 p-3.5 rounded-xl text-xs space-y-2.5 shadow-md shadow-amber-500/5"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono font-bold text-amber-300">{item.toolName}</span>
-                    <span className="bg-rose-500/20 text-rose-300 px-2 py-0.5 rounded text-[10px] font-bold">
-                      {item.riskLevel} 级风险
-                    </span>
-                  </div>
-
-                  <div className="bg-slate-900 p-2 rounded font-mono text-[11px] text-slate-300 overflow-x-auto">
-                    <pre>{JSON.stringify(item.arguments, null, 2)}</pre>
-                  </div>
-
-                  <div className="flex space-x-2 pt-1">
-                    <button
-                      onClick={() => handleApprove(item.callId)}
-                      className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-1.5 rounded-lg text-xs flex items-center justify-center space-x-1 shadow-md shadow-emerald-600/20 transition-all"
-                    >
-                      <UserCheck className="w-3.5 h-3.5" />
-                      <span>批准执行</span>
-                    </button>
-
-                    <button
-                      onClick={() => handleReject(item.callId)}
-                      className="flex-1 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 font-semibold py-1.5 rounded-lg text-xs flex items-center justify-center space-x-1 transition-all"
-                    >
-                      <XCircle className="w-3.5 h-3.5" />
-                      <span>拒绝并终止</span>
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* SSE Event Stream Live Debugger */}
-        <div className="bg-slate-900/80 rounded-2xl border border-slate-800 p-4 flex-1 flex flex-col shadow-xl backdrop-blur-sm">
-          <div className="pb-3 border-b border-slate-800 mb-3 flex items-center justify-between">
-            <h3 className="font-bold text-xs uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
-              <Zap className="w-4 h-4 text-cyan-400" />
-              SSE 事件流实时调试器
-            </h3>
-            <span className="text-[10px] text-slate-500 font-mono">/api/v1/events/stream</span>
-          </div>
-
-          {/* Test Prompt Input */}
-          <div className="flex space-x-2 mb-3">
-            <input
-              type="text"
-              value={ssePrompt}
-              onChange={(e) => setSsePrompt(e.target.value)}
-              placeholder="输入测试 Prompt 并观察流式 SSE 事件..."
-              className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-sans"
-            />
-            <button
-              onClick={handleStartSseStream}
-              disabled={isStreaming}
-              className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1 transition-all"
-            >
-              <Play className="w-3.5 h-3.5" />
-              <span>提交</span>
-            </button>
-          </div>
-
-          {/* Terminal Console Log */}
-          <div className="flex-1 bg-slate-950 rounded-xl p-3 border border-slate-800/80 font-mono text-[11px] text-slate-300 overflow-y-auto space-y-1.5 custom-scrollbar">
-            {sseLogs.length === 0 ? (
-              <span className="text-slate-600 italic">等待提交测试 Prompt 以捕获 SSE 事件流...</span>
-            ) : (
-              sseLogs.map((log, index) => (
-                <div key={index} className="leading-relaxed">
-                  <span className="text-slate-500">{new Date().toLocaleTimeString()}</span>{' '}
-                  <span className={log.includes('started') ? 'text-amber-400' : 'text-cyan-300'}>
-                    {log}
-                  </span>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      </div>
+      {selected && (
+        <>
+          <RunDetail run={selected} capabilities={capabilities} />
+          {capabilities?.runEventStream && <RunEventStream key={selected.runId} run={selected} />}
+        </>
+      )}
     </div>
   );
-};
+}
+
+/** 单个 Run 的元数据详情与外部 trace 深链。 */
+function RunDetail({
+  run,
+  capabilities,
+}: {
+  run: RunSummaryView;
+  capabilities: AdminCapabilitiesView | undefined;
+}) {
+  const traceUrl = capabilities ? langfuseTraceUrl(capabilities.observability, run.runId) : null;
+  const traceId = capabilities ? traceIdForRun(capabilities.observability, run.runId) : null;
+
+  return (
+    <Panel
+      title="Run 详情"
+      description="仅元数据；输入、输出与工具参数需在业务侧按各自授权规则查看"
+      actions={
+        traceUrl ? (
+          <a
+            href={traceUrl}
+            target="_blank"
+            rel="noreferrer"
+            className={`inline-flex items-center gap-1 rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800 ${FOCUS_RING}`}
+          >
+            在 Langfuse 中查看 trace <ExternalLink className="h-3 w-3" />
+          </a>
+        ) : (
+          <Badge>未配置 Langfuse 深链</Badge>
+        )
+      }
+    >
+      <div className="grid gap-x-8 md:grid-cols-3">
+        <div className="divide-y divide-slate-900">
+          <Field label="Run ID">
+            <CopyableId value={run.runId} label="Run ID" className="text-slate-200" />
+          </Field>
+          <Field label="Trace ID">
+            {traceId ? (
+              <CopyableId value={traceId} label="trace ID" truncate={12} className="text-slate-200" />
+            ) : (
+              '—'
+            )}
+          </Field>
+          <Field label="Session">
+            <CopyableId value={run.sessionId} label="Session ID" className="text-slate-200" />
+          </Field>
+          <Field label="Thread">{run.threadId ?? '—'}</Field>
+          <Field label="Agent">{run.agentId}</Field>
+          <Field label="状态">
+            <Badge className={runStatusTone(run.status)}>{run.status}</Badge>
+          </Field>
+        </div>
+        <div className="divide-y divide-slate-900">
+          <Field label="模型调用">{formatCount(run.usage.modelCalls)}</Field>
+          <Field label="工具调用">{formatCount(run.usage.toolCalls)}</Field>
+          <Field label="输入 Token">{formatCount(run.usage.inputTokens)}</Field>
+          <Field label="输出 Token">{formatCount(run.usage.outputTokens)}</Field>
+          <Field label="缓存命中 Token">{formatCount(run.usage.cachedInputTokens)}</Field>
+          <Field label="推理 Token">{formatCount(run.usage.reasoningOutputTokens)}</Field>
+          <Field label="预估费用">{run.usage.estimatedCost}</Field>
+        </div>
+        <div className="divide-y divide-slate-900">
+          <Field label="租户 / 用户">
+            {run.tenantId ?? '—'} / {run.userId ?? '—'}
+          </Field>
+          <Field label="状态版本">{run.stateVersion}</Field>
+          <Field label="最后事件序号">{run.lastEventSequence}</Field>
+          <Field label="创建时间">{formatInstant(run.createdAtEpochMilli)}</Field>
+          <Field label="更新时间">{formatInstant(run.updatedAtEpochMilli)}</Field>
+        </div>
+      </div>
+
+      {run.awaitingApproval ? (
+        <div className="mt-4 rounded-lg border border-amber-900/60 bg-amber-950/20 px-3 py-2 text-xs">
+          <div className="font-medium text-amber-200">等待人工审批</div>
+          <div className="mt-1 text-amber-300/80">
+            工具 <Mono>{run.pendingApprovalToolName ?? '未知'}</Mono>，风险等级{' '}
+            <Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">
+              {run.pendingApprovalRisk ?? '未知'}
+            </Badge>
+          </div>
+          <div className="mt-1 text-amber-300/60">
+            审批决定通过业务 Run API 提交，管理台不代替业务主体做出决策。
+          </div>
+        </div>
+      ) : (
+        <div className="mt-4 inline-flex items-center gap-1.5 text-xs text-slate-500">
+          <CheckCircle2 className="h-3.5 w-3.5" /> 无待处理审批
+        </div>
+      )}
+    </Panel>
+  );
+}

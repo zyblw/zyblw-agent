@@ -98,15 +98,11 @@ final class OpenAIResponsesChatModel(client: Client, config: OpenAIResponsesConf
   /** 把网络库异常映射成稳定的 Provider typed error；已有 AgentError 不重复包装。 */
   private def mapTransportError(error: Throwable): AgentError = error match
     case value: AgentError => value
-    case other => AgentError.ModelFailure(provider, other.getMessage, retryable = true, Some(other))
+    case other => AgentError.ModelFailure(provider, "OpenAI transport failure", retryable = true, Some(other))
 
-  /** 根据 HTTP 状态码判断是否允许可靠性层退避重试。 */
-  private def httpError(status: Int, body: String): AgentError.ModelFailure =
-    AgentError.ModelFailure(
-      provider = provider,
-      message = s"HTTP $status: ${body.take(2000)}",
-      retryable = status == 408 || status == 409 || status == 429 || status >= 500
-    )
+  /** 只保留 HTTP 状态与 OpenAI 风格 envelope 的低基数 code/type；原始响应正文不进入错误。 */
+  private def httpError(status: Int, body: String): AgentError.ModelHttpFailure =
+    AgentError.ModelHttpFailure(provider, status, OpenAIHttpError.code(body))
 
   /** 单次请求或完整流超过部署预算时使用的统一错误。 */
   private def timeoutError: AgentError =
