@@ -1,7 +1,7 @@
 # 模块与发布坐标
 
 > 状态：当前
-> 最后核验：2026-08-02
+> 最后核验：2026-08-08
 > 事实来源：`build.sbt`、各模块 `src/main`、`maturity-and-roadmap.md`
 
 ## 先理解两个不同的边界
@@ -49,7 +49,7 @@ libraryDependencies ++= Seq(
 | `zyblw-agent-document-loaders` | PDF/EPUB/Office 摄取 | Apache Tika 与 Docling Serve HTTP 都是可选重型/协议边界 |
 | `zyblw-agent-rerank` | 调用外部 reranker | 会产生网络和数据驻留边界 |
 | `zyblw-agent-postgres` | 耐久 Run、Workflow execution/checkpoint、Memory、RAG、评测 | JDBC、Flyway、数据库 schema 与生命周期独立 |
-| `zyblw-agent-zio-http` | 暴露控制面或独立 Agent 服务 | ZIO HTTP Endpoint、routes、host 属于传输边界 |
+| `zyblw-agent-zio-http` | 暴露控制面或独立 Agent 服务；也包含可选的 `/api/v1/admin` 管理子面 | ZIO HTTP Endpoint、routes、host 属于传输边界 |
 | `zyblw-agent-mcp` | MCP client 与受控 workspace | 外部工具互操作和执行安全边界独立；server 仍在路线图 |
 | `zyblw-agent-opentelemetry` | OTLP traces/metrics | SDK/exporter 有资源与后台线程，不进入零成本 SPI |
 | `zyblw-agent-evals` | 离线评测、发布门禁、趋势 | 通常只在测试和 CI 使用 |
@@ -69,13 +69,21 @@ libraryDependencies ++= Seq(
 RAG 业务还需加入 `zyblw-agent-rag`；PDF/EPUB 再加入 `zyblw-agent-document-loaders`，模型 rerank 再加入
 `zyblw-agent-rerank`。不要因为只想使用结构切分就被迫引入 Tika、Docling 或远程 reranker。
 
+`zyblw-agent-rag` 里除了主线的 `rag` package，还有一个 `knowledge` package（`Entity`/`Relation`/`KnowledgeGraph`
+与一个内存实现）。它是**未经测试的 Experimental 探索性接口**，没有 PostgreSQL Adapter，也没有进入任何 RAG 主线路径；
+不要在业务中依赖它，除非你准备好在它变更时自行承担迁移。
+
+`modules/agent-dashboard` 是浏览器端控制台，**不发布 Maven 制品**。它通过 HTTP 消费 `zyblw-agent-zio-http` 暴露的管理
+子面，因此不构成第 12 个 artifact。
+
 ## 内核中的 package
 
 下列能力属于同一个 `zyblw-agent-core` artifact，但保持独立 package：
 
 | Package | 职责 |
 |---|---|
-| `core` | ID、错误、Definition、分层 Instruction、State、Event、Run SPI |
+| `core` | ID、错误、Definition、分层 Instruction、State、Event、Run SPI、Model/Retrieval PolicySource、价目表 |
+| `admin` | 管理 scope、Run 目录、运行时配置覆盖、模型与知识管理 SPI；只有宿主装配后才有效 |
 | `model` | Provider-neutral `ChatModel` 与流事件 |
 | `tools` | Tool schema、注册表、权限和结构化执行结果 |
 | `guardrails` | 输入、输出和工具调用策略 |

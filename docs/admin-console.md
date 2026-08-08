@@ -1,6 +1,7 @@
 # 管理 API 与运维控制台
 
-> 状态：当前
+> 状态：当前（Beta；不属于稳定 OpenAPI 承诺，见 [HTTP API 演进 §2.1](http-api-versioning.md)）
+> 最后核验：2026-08-08
 > 事实来源：`modules/agent-core/src/main/scala/com/zyblw/agent/admin/`、
 > `modules/agent-zio-http/.../AdminHttpApi.scala`、`modules/agent-dashboard/`、
 > `agent-postgres` 的 `V002__zyblw_agent_admin_surface.sql`

@@ -49,7 +49,8 @@ Maturity is tracked per capability in `docs/maturity-and-roadmap.md`, not per mo
 - **Beta**: context and memory, RAG and document loading, providers, admin surface and console,
   model governance, PostgreSQL, OTLP/Langfuse, cost estimation.
 - **Experimental**: workflow graph, artifacts, side-effect tooling, MCP, workspace/sandbox,
-  multimodal, evaluation trend gating.
+  multimodal, knowledge graph, evaluation trend gating. `multimodal` and `rag/knowledge` currently
+  have no test coverage at all; treat them as unsupported until they do.
 
 Never promote a capability in a document without new test, failure-injection, or production
 evidence. "Implemented" is not "production proven".

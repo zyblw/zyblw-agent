@@ -46,7 +46,8 @@
 | 可靠写工具 | core / `sideeffects` | Experimental | outbox/inbox/补偿抽象 | 真实 transport 与业务案例 |
 | Workflow Graph | core + postgres / `workflow` | Experimental | 显式 nodes/edges、identity/version、启动校验、单调 checkpoint、`AllSucceeded` 取消、execution ledger/pending outcome、lease/fencing、复合游标低敏 timeline、durable wait/signal 与受监督 wake worker | kill/restart/multi-worker soak、人工任务、子图、完整 Inspector 与图级 eval |
 | Workspace/Sandbox | mcp / `workspace` | Experimental | 能力边界 | 真实 OCI 隔离与攻击测试 |
-| Multimodal | core / `multimodal` | Experimental | 抽象 | 产品场景、Provider 与 eval |
+| Multimodal | core / `multimodal` | Experimental | 仅有 ADT 抽象，**无任何测试覆盖** | 产品场景、Provider 打通与 eval |
+| 知识图谱 | rag / `knowledge` | Experimental | 仅有 `Entity`/`Relation`/`KnowledgeGraph` SPI 与内存实现，**无任何测试覆盖**，未接入 RAG 主线 | 决定保留或移除；保留则需持久化 Adapter、租户隔离测试与真实检索证据 |
 
 ## 0.5.0 收口状态与下一批必须完成项
 
