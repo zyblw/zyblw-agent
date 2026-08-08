@@ -172,27 +172,43 @@ object OpenAICompatibleEmbeddingHttpSpec extends ZIOSpecDefault:
           case Exit.Success(_)     => false
       yield assertTrue(exits._1.isFailure, limitedRetryable, exits._2.isFailure, exits._3.isFailure)
     } @@ TestAspect.withLiveClock @@ TestAspect.sequential,
-    test("慢 Body 超时且 Fiber 取消会关闭服务端响应流") {
+    test("慢 Body 超时被类型化拒绝且标记可重试") {
       for
         bodies        <- Ref.make(Chunk.empty[String])
         authorization <- Ref.make(Chunk.empty[String])
         cancelStarted <- Promise.make[Nothing, Unit]
         cancelClosed  <- Promise.make[Nothing, Unit]
-        observed      <- (for
-          _       <- TestServer.addRoutes(routes(bodies, authorization, cancelStarted, cancelClosed))
-          port    <- ZIO.serviceWithZIO[Server](_.port)
-          client  <- ZIO.service[Client]
-          timeout <- service(client, port, 100.millis).embed(Chunk("slow")).exit
-          fiber   <- service(client, port, 5.seconds).embed(Chunk("cancel")).fork
-          _       <- cancelStarted.await.timeoutFail(new RuntimeException("cancel request did not start"))(
-            2.seconds
-          )
-          _      <- fiber.interrupt
-          closed <- cancelClosed.await.timeout(2.seconds)
-        yield (timeout, closed)).provide(Client.default, TestServer.default)
-        timeoutRetryable = observed._1 match
+        timeout       <- (for
+          _      <- TestServer.addRoutes(routes(bodies, authorization, cancelStarted, cancelClosed))
+          port   <- ZIO.serviceWithZIO[Server](_.port)
+          client <- ZIO.service[Client]
+          exit   <- service(client, port, 100.millis).embed(Chunk("slow")).exit
+        yield exit).provide(Client.default, TestServer.default)
+        retryable = timeout match
           case Exit.Failure(cause) => cause.failureOption.exists(_.retryable)
           case Exit.Success(_)     => false
-      yield assertTrue(observed._1.isFailure, timeoutRetryable, observed._2.isDefined)
+      yield assertTrue(timeout.isFailure, retryable)
+    } @@ TestAspect.withLiveClock @@ TestAspect.sequential,
+    // 取消传播必须使用自己的 Client：超时场景会在响应写回之前放弃一个在途请求，而被放弃的连接是否留在
+    // 连接池里由 Client 的回收时机决定。复用同一个 Client 时，取消请求可能被发到那条连接上并随之丢失，
+    // 使断言在服务端从未收到请求的情况下超时。
+    test("Fiber 取消会关闭服务端响应流") {
+      for
+        bodies        <- Ref.make(Chunk.empty[String])
+        authorization <- Ref.make(Chunk.empty[String])
+        cancelStarted <- Promise.make[Nothing, Unit]
+        cancelClosed  <- Promise.make[Nothing, Unit]
+        closed        <- (for
+          _      <- TestServer.addRoutes(routes(bodies, authorization, cancelStarted, cancelClosed))
+          port   <- ZIO.serviceWithZIO[Server](_.port)
+          client <- ZIO.service[Client]
+          fiber  <- service(client, port, 5.seconds).embed(Chunk("cancel")).fork
+          _      <- cancelStarted.await.timeoutFail(new RuntimeException("cancel request did not start"))(
+            5.seconds
+          )
+          _      <- fiber.interrupt
+          closed <- cancelClosed.await.timeout(5.seconds)
+        yield closed).provide(Client.default, TestServer.default)
+      yield assertTrue(closed.isDefined)
     } @@ TestAspect.withLiveClock @@ TestAspect.sequential
   )

@@ -61,7 +61,7 @@ final case class KnowledgeIndexPage(
   * 或幂等键定位；目录是管理面的扫描投影，需要过滤、排序和分页。把扫描能力塞进发布协议 还会诱使摄入代码用扫描代替按键读取。
   *
   * 实现必须保证：结果按 `(updatedAt DESC, documentId DESC, indexVersion DESC)` 稳定排序，`limit` 被收敛到
-  * [[KnowledgeIndexDirectory.MaxLimit]]，且只返回 manifest——正文与向量不属于管理列表。
+  * `KnowledgeIndexDirectory.MaxLimit`，且只返回 manifest——正文与向量不属于管理列表。
   */
 trait KnowledgeIndexDirectory:
   /** 按可选租户分页列出索引清单。
@@ -69,7 +69,7 @@ trait KnowledgeIndexDirectory:
     * @param tenantId
     *   限定租户；None 表示跨租户查看，调用方必须已经持有管理 scope
     * @param limit
-    *   单页条数，实现必须收敛到 [[KnowledgeIndexDirectory.MaxLimit]]
+    *   单页条数，实现必须收敛到 `KnowledgeIndexDirectory.MaxLimit`
     * @param cursor
     *   上一页返回的 keyset 游标
     */

@@ -179,7 +179,7 @@ object RuntimeOverrideRecord:
   * 写入使用 compare-and-set：两个管理员同时编辑同一份配置时，后提交的一方必须看到冲突并重新加载，而不是静默覆盖 对方的改动。这与 `RunStore` 的乐观锁是同一个理由。
   */
 trait RuntimeOverrideStore:
-  /** 读取当前生效的覆盖记录；从未写入时返回 [[RuntimeOverrideRecord.initial]]。 */
+  /** 读取当前生效的覆盖记录；从未写入时返回 `RuntimeOverrideRecord.initial`。 */
   def current: IO[StoreError, RuntimeOverrideRecord]
 
   /** 使用 compare-and-set 写入新的完整覆盖快照。

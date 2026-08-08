@@ -1,7 +1,7 @@
 # zyblw-agent 文档地图
 
 > 状态：当前
-> 最后核验：2026-08-02
+> 最后核验：2026-08-08
 > 事实来源：`build.sbt`、发布工作流、模块源码、测试与数据库迁移
 
 ## 按目标选择阅读路径
@@ -30,9 +30,9 @@
 3. [Agent Application Runtime ADR](architecture/0016-agent-application-runtime.md)
 4. [agent-dashboard 与管理 API 边界 ADR](architecture/0017-agent-dashboard-architecture.md)
 5. [运行时](runtime.md)
-5. [工具](tools.md) 与 [可靠写工具](side-effects.md)
-6. [持久化](persistence.md) 与 [数据库 Schema](database-schema.md)
-7. [声明式 Workflow](workflow.md)
+6. [工具](tools.md) 与 [可靠写工具](side-effects.md)
+7. [持久化](persistence.md) 与 [数据库 Schema](database-schema.md)
+8. [声明式 Workflow](workflow.md)
 
 ### 我要深入读源码和参与开发
 

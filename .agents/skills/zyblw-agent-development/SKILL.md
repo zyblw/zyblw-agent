@@ -24,6 +24,8 @@ Work from the checked-in implementation, not from an imagined framework.
 - Add an artifact only for a real dependency, lifecycle, protocol, security, or license boundary.
 - Let the model propose intent; validate, authorize, execute, trace, and stop in the harness.
 - Prefer one bounded agent loop. Add orchestration only after replayable evals demonstrate a need.
+- Treat administration as an optional sub-surface: every capability is a host-supplied `Option`,
+  unwired capabilities mount no route, and admin scopes never reuse the business ownership rule.
 
 ## Implement in this order
 
@@ -44,24 +46,48 @@ Work from the checked-in implementation, not from an imagined framework.
 - For Scala or sbt behavior, prefer the official documentation and the repository's actual build.
 - Do not paste remembered signatures when compilation can prove the contract.
 
+## Run sbt outside the Cursor sandbox
+
+Cursor's default command sandbox breaks sbt. Do not probe in-sandbox first.
+
+Always invoke any `sbt` command with `required_permissions: ["all"]`. `full_network` alone is not
+enough: the client/server path needs local IPC and hostname resolution, and sbt writes boot/cache
+state under `~/.sbt` and the Coursier/Ivy home outside the workspace.
+
+While iterating:
+
+- Prefer the narrowest task that can falsify the change (`core/compile`, `http/testOnly …Spec`).
+- Reuse a warm sbt server across turns; do not shut it down unless plugins or JVM options changed.
+- Use `sbt --server -batch …` only when you need a foreground single process; it still requires
+  `["all"]`.
+- Run the full release gates below before release or merge readiness, not after every small edit.
+
 ## Release and compatibility gate
 
 Treat Scala APIs, serialized state, HTTP/schema contracts, Maven coordinates, and Flyway migrations
 as separate compatibility surfaces. During `0.x`, preserve public Scala APIs within a minor line for
 patch releases. Never edit a released migration.
 
-Run the smallest relevant checks during development and the full gates before release:
+Run the smallest relevant checks during development and the full gates before release. From a Cursor
+agent shell, every command below still needs `required_permissions: ["all"]`:
 
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.1.0-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.5.0-local"; publishM2'
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.1.0-local sbt -batch compile
+ZYBLW_AGENT_VERSION=0.5.0-local sbt -batch compile
+```
+
+Console changes additionally require, in `modules/agent-dashboard`:
+
+```bash
+npx tsc --noEmit && npm run lint && npm run build && npm run test:e2e
 ```
 
 Live-provider tests remain opt-in. Never expose secrets, raw private prompts, provider payloads, or
-production traces in source, fixtures, logs, documentation, or CI artifacts.
+production traces in source, fixtures, logs, documentation, or CI artifacts. An intermittently
+failing test is a defect: fix the coupling that makes it racy rather than widening its timeout.
 
 ## Deliver evidence
 

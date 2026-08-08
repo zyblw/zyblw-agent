@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-02
+> 最后核验：2026-08-08
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -23,22 +23,39 @@ sbt testFull
 Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基线由仓库 `.scalafmt.conf` 与
 `sbt-scalafmt` 锁定，不以某位开发者的编辑器配置为准。
 
-### 0.4.0 发布候选必须重新通过的门禁
+### 0.5.0 发布候选必须重新通过的门禁
 
 0.4 收口审计发现：只在空数据库单独测试核心和知识 migration，无法证明生产中的“先核心、后知识”顺序。两套 history 若共同管理非空
 `public` schema，Flyway 会正确拒绝启动。当前实现已经把知识表和专属 history 固定到 `zyblw_agent_knowledge`，并把真实知识
-Testcontainer 改为先执行核心 migration、再执行知识 migration、最后重复执行知识 migration。
+Testcontainer 改为先执行核心 migration、再执行知识 migration、最后重复执行知识 migration。这条约束在 0.5 继续有效，
+并追加核心 `V001 → V002` 的顺序应用证据。
 
-`0.4.0` 标签前必须重新取得以下完整证据，任一项缺失都不能称为已发布：
+`0.5.0` 标签前必须重新取得以下完整证据，任一项缺失都不能称为已发布：
 
 - `scalafmtCheckAll; scalafmtSbtCheck; testFull` 全部通过；
-- `RUN_POSTGRES_INTEGRATION=1 postgres/testFull` 在 PostgreSQL 16/pgvector 下全部通过；
+- `RUN_POSTGRES_INTEGRATION=1 postgres/testFull` 在 PostgreSQL 16/pgvector 下全部通过，且覆盖 `V002` 生成列抽取、
+  keyset 分页与内存实现一致、亚毫秒游标推进、append-only 覆盖历史与并发写入的乐观锁裁决；
 - 组合顺序首次知识迁移执行 1 项、重复启动执行 0 项，并验证专属 schema/history、`public.vector >= 0.8.0`、
   `vector(1536)`、关键列和完整 lineage；
 - staging 不可见、原子发布/回滚/退役、ACL、hybrid retrieval、父级/相邻扩展和复合 document/chunk 身份通过；
-- `0.4.0-local.1 publishM2`、独立 Maven consumer 与关键示例成功。
+- 管理面授权边界通过：缺少 scope 在触达适配器之前被拒、write 蕴含 read、debug **不**被 write 蕴含、未装配能力返回 404
+  且 capability 探测如实报告不可用；
+- `modules/agent-dashboard` 的 `tsc --noEmit`、`lint`、`build` 与 Playwright 浏览器契约通过；
+- `0.5.0-local.1 publishM2`、独立 Maven consumer 与关键示例成功。
 
 ### 最近一次完整本地证据
+
+2026-08-08 的 `0.5.0` 发布候选复核：
+
+- `scalafmtCheckAll; scalafmtSbtCheck; testFull`：全部通过、0 失败；
+- `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`：PostgreSQL 16.14 Testcontainer，核心 `V001 → V002` 与 repeatable
+  注释顺序应用，54 项通过、0 失败、0 忽略；
+- `0.5.0-local publishM2` 生成 11 个公开模块的 POM、binary、sources 与 Scaladoc JAR；独立 Maven consumer 仅依赖本地
+  发布物重新编译生产装配；
+- 控制台 `tsc --noEmit`、`lint`、`next build` 通过；
+- 修复了一处会让 CI 随机变红的测试耦合：`OpenAICompatibleEmbeddingHttpSpec` 原先在同一个 `Client` 上先制造一次超时
+  中断、再断言取消传播。被放弃的在途连接是否留在连接池由 Client 回收时机决定，取消请求可能被发到那条连接上而丢失。
+  两个契约现在各自持有 Client，隔离后连续五次运行稳定通过。
 
 2026-08-02 的业务生产基线候选复核：
 

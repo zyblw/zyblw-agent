@@ -124,6 +124,11 @@ see [docs/upgrading-to-0.5.0.md](docs/upgrading-to-0.5.0.md).
   `MAX(version)` guard inside the insert cannot see an uncommitted concurrent insert under `READ COMMITTED`, so the race is settled
   by the version primary key; classifying that unique violation as a generic database error turned an ordinary simultaneous edit
   into a 500, and the console only prompts for a reload on 409.
+- The OpenAI-compatible embedding HTTP contract no longer fails intermittently. One test asserted a client-side timeout and
+  cancellation propagation through a single shared `Client`: the timeout scenario deliberately abandons an in-flight request, and
+  whether that connection stays in the pool depends on the client's reclamation timing, so the cancellation request could be sent
+  on it and lost. Both contracts are still asserted, each with its own client, which removes the coupling rather than widening a
+  timeout around it.
 
 ### Verification
 
@@ -148,6 +153,10 @@ see [docs/upgrading-to-0.5.0.md](docs/upgrading-to-0.5.0.md).
   carries `Accept: text/event-stream` and an initial `Last-Event-ID`; a second interrupts the stream with `stream_error` after one
   event and asserts the reconnect resumes from the last confirmed sequence rather than replaying, since replayed events would be
   rejected by the client's own contiguity check.
+- Release gates re-run on the tagged tree: format checks and `testFull` pass with no failures, `RUN_POSTGRES_INTEGRATION=1
+  postgres/testFull` applies core `V001 → V002` on a real PostgreSQL 16 container with 54 passing contracts, `publishM2` produces
+  POM, binary, sources and Scaladoc JARs for all eleven published modules with no unresolved Scaladoc links, and the independent
+  Maven consumer compiles against those artifacts alone.
 
 ## 0.4.0 - 2026-08-02
 

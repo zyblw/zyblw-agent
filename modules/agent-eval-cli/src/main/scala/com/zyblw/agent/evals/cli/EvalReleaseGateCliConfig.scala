@@ -18,7 +18,7 @@ enum EvalReleaseStoreBackend:
 /** 一次性 PostgreSQL CLI 的连接与 Store 容量配置。
   *
   * 正式常驻业务服务应复用宿主监控过的连接池；该 CLI 每次只执行“查一个基线 + 追加一条快照”后退出，因此使用 PostgreSQL 驱动的 `PGSimpleDataSource`，不会为两个顺序 JDBC
-  * 操作额外启动连接池线程。密码保持为 [[Config.Secret]]，直到最外层 DataSource Adapter 构造时才展开。
+  * 操作额外启动连接池线程。密码保持为 `Config.Secret`，直到最外层 DataSource Adapter 构造时才展开。
   *
   * @param jdbcUrl
   *   PostgreSQL JDBC URL；禁止在 URL query 中携带 password/sslpassword
