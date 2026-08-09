@@ -18,7 +18,7 @@ COMMENT ON TABLE agent_business_operations IS '可靠写工具的 producer 幂�
 COMMENT ON TABLE agent_outbox_events IS '事务提交后的至少一次事件投递队列；event_id 在所有重试中保持稳定';
 COMMENT ON TABLE agent_inbox_messages IS '下游 consumer/message_id 去重事实；必须与消费者业务 mutation 同事务提交';
 COMMENT ON TABLE agent_compensations IS '显式 Saga 补偿计划；Registered 只有经策略或人工激活后才能被 worker 执行';
-COMMENT ON TABLE agent_embedding_cache IS '按 tenant/provider/model/dimension/version/hash 精确命中的 Embedding 缓存，不保存原文';
+COMMENT ON TABLE agent_embedding_cache IS '按 tenant/purpose/provider/model/dimension/version/hash 精确命中的 Embedding 缓存，不保存原文';
 COMMENT ON TABLE agent_embedding_quota_windows IS 'Embedding 租户硬配额窗口；行锁保证并发检查与累加原子完成';
 COMMENT ON TABLE agent_embedding_quota_reservations IS 'Embedding request_id/hash 幂等账本；防止网络或 worker 重试重复计费';
 COMMENT ON TABLE agent_eval_snapshots IS 'Agent/RAG/Context Compression 的低敏不可变评测快照与发布趋势事实';

@@ -50,7 +50,7 @@ object KnowledgeIndexerSpec extends ZIOSpecDefault:
         first.manifest.status == KnowledgeIndexStatus.Ready,
         first.manifest.active,
         first.manifest.chunkCount == 2,
-        first.manifest.build.indexingStrategy == "sliding-window-v1:max=4:overlap=0",
+        first.manifest.build.indexingStrategy == "sliding-window-v1:max=4:overlap=0:lexical=simple-cjk-bigram-v1",
         second.manifest == first.manifest,
         second.embeddingUsage.isEmpty,
         active.contains(first.manifest),

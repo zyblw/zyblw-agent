@@ -1,7 +1,7 @@
 # 开源发布与版本维护
 
 > 状态：运行手册  
-> 最后核验：2026-08-08
+> 最后核验：2026-08-09
 > 事实来源：`build.sbt`、`project/plugins.sbt`、`.github/workflows/*.yml`、`integration-tests/maven-consumer`
 
 ## 发布目标
@@ -48,8 +48,8 @@ Git、Actions cache 或日志。发布步骤还会先停止前序验证启动的
 使用与 CHANGELOG、升级指南一致的 annotated tag 触发发布，例如：
 
 ```bash
-git tag -a v0.5.0 -m "zyblw-agent v0.5.0"
-git push origin v0.5.0
+git tag -a v0.6.0 -m "zyblw-agent v0.6.0"
+git push origin v0.6.0
 ```
 
 标签触发 release workflow：
@@ -73,11 +73,14 @@ Central artifact 不可覆盖；失败修复必须用新版本。
 - `0.5.0` 是加法型 minor：新增可选管理面、运行时配置覆盖与模型治理，追加核心 `V002`，不改动 0.4 知识 schema。
   `0.5.x` patch 保护公共 Scala API、state JSON、业务 HTTP/OpenAPI 和两套 Flyway history；`/api/v1/admin/**` 是
   显式标记的 Beta 表面，不进入该 patch 承诺。破坏性演进进入下一个 minor。
+- `0.6.0` 为新建 RAG 库建立独立的 1024 维基线，并追加核心 `V003` 使 Embedding 缓存按用途隔离。它不把已发布的
+  1536 knowledge schema 原地改维度；保留数据的宿主必须新建 snapshot、重建向量并在评测后切换。此公共 API/物理契约变化属于
+  minor，不能作为 `0.5.x` patch 发布。
 - `1.x`：公共核心、迁移、HTTP 契约和运维承诺达到稳定后再进入。
 - Provider、Beta/Experimental 模块也跟随统一版本，减少多模块组合矩阵。
 - `modules/agent-dashboard` 是浏览器应用，随仓库一起打标签，但不发布 Maven 制品，也不占用一个新的 artifact 坐标。
 
-当前 build 使用 `early-semver`。所有已发布制品与 tag 保持不可变；真实 `0.5.0` artifact 是后续 0.5 patch 的兼容基线，不能用
+当前 build 使用 `early-semver`。所有已发布制品与 tag 保持不可变；真实 `0.6.0` artifact 是后续 0.6 patch 的兼容基线，不能用
 空检查或开发分支替代。
 
 在 sbt 2 的 MiMa/version-policy 生态完成当前版本兼容性验证前，现有的独立 Maven consumer 与平台下游回归仍是必须
@@ -92,8 +95,9 @@ Central artifact 不可覆盖；失败修复必须用新版本。
 4. `RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull` 成功。
 5. `sbt -batch publishM2` 成功，所有公开模块生成 POM/source/doc。
 6. `integration-tests/maven-consumer` 设置 `ZYBLW_AGENT_VERSION` 后仅依赖本地发布物也能编译。
-7. 0.5.0 必须验证核心 `V001 + V002` 可在既有 0.4 库上顺序应用、生成列与 keyset 分页在真实 PostgreSQL 上通过、专属
-   `zyblw_agent_knowledge` schema 与两套 history 可幂等重放；发布后的 patch 还必须验证代表性升级库，且不得修改已发布 migration。
+7. 0.6.0 必须验证核心 `V001 + V002 + V003` 可在既有 0.5 库上顺序应用，1024 knowledge baseline 在全新专属
+   `zyblw_agent_knowledge` schema/history 可幂等重放，且 pgvector 维度与缓存用途隔离在真实 PostgreSQL 上通过；发布后的 patch
+   还必须验证代表性升级库，且不得修改已发布 migration。
 8. 启用控制台时，`modules/agent-dashboard` 的 `typecheck`、`lint`、`build` 与 Playwright 浏览器契约全部通过。
 9. POM 包含 name、description、URL、license、developer 和 SCM。
 10. 无密钥、真实用户数据或敏感 trace 进入 Git 历史和 artifact。

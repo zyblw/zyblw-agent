@@ -50,8 +50,8 @@ migration。完整操作见[PostgreSQL 迁移发布契约](database-migrations.m
 
 框架不会因 JAR 或普通 Store Layer 被加载而自动修改数据库。宿主可显式调用 `AgentPostgresMigrations.migrate`，也可选择
 `PostgresAgentPersistence.migratedLayer` 在服务构建前自动 migrate/validate/verify；两者都使用独立历史表
-`flyway_zyblw_agent_schema_history`，失败时阻止启动而不是回退内存。1536 维知识库另用
-`migrateKnowledge1536`/`migratedKnowledge1536`，固定管理 `zyblw_agent_knowledge` schema 及其中的独立 history，避免与
+`flyway_zyblw_agent_schema_history`，失败时阻止启动而不是回退内存。1024 维知识库另用
+`migrateKnowledge1024`/`migratedKnowledge1024`，固定管理 `zyblw_agent_knowledge` schema 及其中的独立 history，避免与
 `public` 核心 V001 冲突。运行时知识 SQL 使用完整 schema 名，不依赖连接 `search_path`。
 
 `PostgresRunStore`、`PostgresRunCommandStore` 与 `PostgresRunSubmissionStore` 使用同一个宿主 JDBC DataSource。

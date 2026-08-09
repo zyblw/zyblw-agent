@@ -67,7 +67,7 @@ val allRoutes = agentApi.routes ++ adminApi.routes
 数据库压力，连接池较小的部署应调大它。
 
 `KnowledgeIndexDirectory` 需要一个可枚举的清单来源。`PostgresAgentPersistence.knowledge` 与
-`migratedKnowledge1536` 已经把 PostgreSQL 目录随知识库一起提供，`KnowledgeIndexDirectory.inMemoryKnowledge`
+`migratedKnowledge1024` 已经把 PostgreSQL 目录随知识库一起提供，`KnowledgeIndexDirectory.inMemoryKnowledge`
 则用于本地开发。只装配了自定义 `KnowledgeIndexStore` 的部署可以使用显式空实现挂载路由，但控制台的文档列表会
 **永远为空**——它明确返回空页而不是报错，以便部署能先跑起来。
 

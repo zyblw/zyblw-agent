@@ -68,7 +68,7 @@ active chunks、FTS/HNSW 和 parent/ordinal/previous/next/heading/page/origin/bl
 staging/active 字段对称，因此 `activate` 可在同一短事务内发布向量和谱系；
 正式 chunk 使用 tenant/document/chunk 复合身份，局部 ID 在另一文档复用不会覆盖或串联。
 
-`vector(N)` 维度是 schema 契约。当前示例为 1536；选择其他模型时必须生成对应维度的独立 migration/schema，不在运行时混存。大规模首次导入先批量加载、再建索引；
+`vector(N)` 维度是 schema 契约。当前生产基线为 1024；选择其他模型时必须发布新的 minor 基线，不在运行时混存。大规模首次导入先批量加载、再建索引；
 持续更新需监测 WAL、autovacuum、HNSW recall/latency 和连接池。
 
 ## 6. 检索、重排和扩展的正确顺序

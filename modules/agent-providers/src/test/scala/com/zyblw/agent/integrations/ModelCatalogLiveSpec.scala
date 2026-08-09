@@ -104,16 +104,16 @@ object ModelCatalogLiveSpec extends ZIOSpecDefault:
     },
     test("Embedding 视图只读且携带框架统一的不可切换说明") {
       val view = ModelCatalogLive.embeddingView(
-        EmbeddingProviderDescriptor("stub-embeddings", "embed-1", 1536, 64, supportsDimensions = true),
-        indexDimension = Some(1536)
+        EmbeddingProviderDescriptor("stub-embeddings", "embed-1", 1024, 64, supportsDimensions = true),
+        indexDimension = Some(1024)
       )
       for
         catalog   <- registry.map(ModelCatalogLive.make(_, ModelPriceBook.empty, Some(view)))
         embedding <- catalog.embedding
       yield assertTrue(
         embedding.exists(!_.switchable),
-        embedding.exists(_.dimension == 1536),
-        embedding.exists(_.indexDimension.contains(1536)),
+        embedding.exists(_.dimension == 1024),
+        embedding.exists(_.indexDimension.contains(1024)),
         embedding.exists(_.immutableReason == EmbeddingModelView.DimensionLockedReason)
       )
     },

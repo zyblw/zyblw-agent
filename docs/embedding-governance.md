@@ -42,11 +42,12 @@ ID，缺失时框架生成随机 UUID。
 缓存键由下列字段组成：
 
 ```text
-tenantId + provider + model + dimension + cacheKeyVersion + SHA-256(exact UTF-8 text)
+tenantId + purpose + provider + model + dimension + cacheKeyVersion + SHA-256(exact UTF-8 text)
 ```
 
-正文不会写入键。tenantId 是键的一部分，因此相同文字在不同租户中默认不共享。改变模型、维度或文本预处理算法时必须
-改变相应字段，旧向量不会被误用。
+正文不会写入键。tenantId 与 purpose 都是键的一部分，因此相同文字不会在不同租户、`Query` / `Indexing` / `Memory`
+用途间共享。后者尤其重要：带 query/document instruction 的模型会为同一正文产出不同向量。改变模型、维度、用途指令或
+文本预处理算法时必须改变相应契约字段，旧向量不会被误用。
 
 一次请求中的重复正文先按键去重，Provider 只接收首次出现的文本；结果再按原始位置重组，所以输出数量与顺序保持不变。
 只有 cache miss 会进入 Provider 和配额预留。Provider 返回数量或维度漂移会整体失败，不写入不完整缓存。
@@ -109,11 +110,11 @@ Provider HTTP 调用永远发生在这两个数据库短事务之外。
 
 ## 6. PostgreSQL 原子性与清理
 
-V001 基线包含三张治理表：
+V001/V003 演进后包含三张治理表：
 
 | 表 | 作用 | 关键不变量 |
 |---|---|---|
-| `agent_embedding_cache` | 精确向量缓存 | 完整键含 tenant/model/dimension/version/hash，数组长度必须等于 dimension |
+| `agent_embedding_cache` | 精确向量缓存 | 完整键含 tenant/purpose/model/dimension/version/hash，数组长度必须等于 dimension；升级前行标为 `legacy` 并安全失效 |
 | `agent_embedding_quota_windows` | 窗口内三项确定性用量 | `(tenant, window_millis, window_start)` 是锁和计数单位 |
 | `agent_embedding_quota_reservations` | requestId/hash 幂等账本 | `(tenant, request_id)` 唯一，与窗口计数同事务提交 |
 

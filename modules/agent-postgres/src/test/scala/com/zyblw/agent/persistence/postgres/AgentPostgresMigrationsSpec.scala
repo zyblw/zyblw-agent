@@ -8,11 +8,11 @@ object AgentPostgresMigrationsSpec extends ZIOSpecDefault:
 
   def spec = suite("AgentPostgresMigrations")(
     test("核心与知识库使用独立 location、schema 和 history") {
-      val knowledge = AgentPostgresMigrationConfig.knowledge1536
+      val knowledge = AgentPostgresMigrationConfig.knowledge1024
       assertTrue(
-        knowledge.locations == List(AgentPostgresMigrations.OptionalPgVectorLocation),
-        AgentPostgresMigrations.Knowledge1536Schema == "zyblw_agent_knowledge",
-        knowledge.historyTable == AgentPostgresMigrations.Knowledge1536HistoryTable,
+        knowledge.locations == List(AgentPostgresMigrations.OptionalPgVector1024Location),
+        AgentPostgresMigrations.Knowledge1024Schema == "zyblw_agent_knowledge",
+        knowledge.historyTable == AgentPostgresMigrations.Knowledge1024HistoryTable,
         knowledge.historyTable != AgentPostgresMigrations.DefaultHistoryTable
       )
     },
@@ -20,7 +20,7 @@ object AgentPostgresMigrationsSpec extends ZIOSpecDefault:
       val invalid = AgentPostgresMigrationConfig(
         locations = List(
           AgentPostgresMigrations.DefaultLocation,
-          AgentPostgresMigrations.OptionalPgVectorLocation
+          AgentPostgresMigrations.OptionalPgVector1024Location
         )
       )
       assertZIO(
@@ -29,7 +29,7 @@ object AgentPostgresMigrationsSpec extends ZIOSpecDefault:
     },
     test("拒绝从通用入口绕过知识库专属 schema") {
       val invalid = AgentPostgresMigrationConfig(
-        locations = List(AgentPostgresMigrations.OptionalPgVectorLocation)
+        locations = List(AgentPostgresMigrations.OptionalPgVector1024Location)
       )
       assertZIO(
         AgentPostgresMigrations.migrate(null, invalid).exit
@@ -38,5 +38,13 @@ object AgentPostgresMigrationsSpec extends ZIOSpecDefault:
     test("拒绝用 baselineOnMigrate 接管未知 schema") {
       val invalid = AgentPostgresMigrationConfig(baselineOnMigrate = true)
       assertTrue(invalid.validated.isLeft)
+    },
+    test("平台共享 public schema 只能使用受限的 version 0 baseline") {
+      val shared = AgentPostgresMigrationConfig.sharedPublicSchema
+      assertTrue(
+        shared.validated.isRight,
+        shared.isSharedPublicSchemaBaseline,
+        shared.baselineVersion.contains("0")
+      )
     }
   )

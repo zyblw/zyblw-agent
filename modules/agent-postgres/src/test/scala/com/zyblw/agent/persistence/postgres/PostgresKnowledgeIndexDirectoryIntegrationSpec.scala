@@ -36,20 +36,20 @@ object PostgresKnowledgeIndexDirectoryIntegrationSpec extends ZIOSpecDefault:
         value: DataSource
       }
       _         <- AgentPostgresMigrations.migrate(dataSource)
-      _         <- AgentPostgresMigrations.migrateKnowledge1536(dataSource)
+      _         <- AgentPostgresMigrations.migrateKnowledge1024(dataSource)
       knowledge <- PostgresAgentPersistence
-        .knowledge(1536, PostgresHybridSearchConfig(enableHnswIterativeScan = false))
+        .knowledge(1024, PostgresHybridSearchConfig(enableHnswIterativeScan = false))
         .build
         .provideSome[Scope](ZLayer.succeed[DataSource](dataSource))
     yield Harness(knowledge.get[KnowledgeIndexStore], PostgresKnowledgeIndexDirectory(dataSource))
   }
 
   private val descriptor =
-    EmbeddingProviderDescriptor("integration-embedding", "v1", 1536, 100, supportsDimensions = false)
+    EmbeddingProviderDescriptor("integration-embedding", "v1", 1024, 100, supportsDimensions = false)
 
   private def unitVector(slot: Int): Embedding =
-    val values = Array.fill[Float](1536)(0.0f)
-    values(slot % 1536) = 1.0f
+    val values = Array.fill[Float](1024)(0.0f)
+    values(slot % 1024) = 1.0f
     Embedding(Chunk.fromArray(values))
 
   private def request(

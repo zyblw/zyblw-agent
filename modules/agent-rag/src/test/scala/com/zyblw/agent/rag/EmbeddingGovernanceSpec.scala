@@ -33,7 +33,7 @@ object EmbeddingGovernanceSpec extends ZIOSpecDefault:
     )
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("Embedding governance")(
-    test("同租户请求内去重并命中缓存，其他租户不能观察或复用向量") {
+    test("同租户同用途请求内去重并命中缓存，其他用途或租户不能复用向量") {
       for
         calls        <- Ref.make(Chunk.empty[Chunk[String]])
         dependencies <- stores
@@ -58,10 +58,10 @@ object EmbeddingGovernanceSpec extends ZIOSpecDefault:
         )
         batches <- calls.get
       yield assertTrue(
-        batches == Chunk(Chunk("甲", "乙"), Chunk("甲")),
+        batches == Chunk(Chunk("甲", "乙"), Chunk("甲", "乙"), Chunk("甲")),
         first.embeddings.length == 3,
         second.embeddings.length == 2,
-        second.usage.isEmpty,
+        second.usage.nonEmpty,
         third.embeddings.length == 1
       )
     },

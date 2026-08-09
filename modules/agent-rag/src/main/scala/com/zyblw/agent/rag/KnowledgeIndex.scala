@@ -167,11 +167,14 @@ final class KnowledgeIndexer(
     embeddings: EmbeddingService,
     store: KnowledgeIndexStore,
     stageBatchSize: Int = 200,
-    indexingStrategy: String = ""
+    indexingStrategy: String = "",
+    lexical: LexicalProcessor = SimpleChineseLexicalProcessor
 ):
   require(stageBatchSize > 0, "stageBatchSize 必须为正数")
   private val resolvedIndexingStrategy =
-    Option(indexingStrategy.trim).filter(_.nonEmpty).getOrElse(chunker.strategyId)
+    Option(indexingStrategy.trim)
+      .filter(_.nonEmpty)
+      .getOrElse(s"${chunker.strategyId}:lexical=${lexical.strategyId}")
   require(resolvedIndexingStrategy.trim.nonEmpty, "Chunker strategyId 不能为空")
 
   /** 为一份文档建立并发布新索引版本。
@@ -217,23 +220,26 @@ final class KnowledgeIndexer(
           ZIO.succeed(KnowledgeIndexResult(manifest, None))
         case _ =>
           (for
-            chunks   <- chunker.split(document, tenantId, permissions)
+            chunks <- chunker.split(document, tenantId, permissions)
+            // `searchText` 是受控的派生数据，正文仍原样用于 embedding、citation 和 Agent context。
+            // 同一 lexical strategy 同时写入 manifest，策略变更会自然要求新 index version。
+            lexicalized = chunks.map(chunk => chunk.copy(searchText = Some(lexical.document(chunk.text))))
             detailed <- embeddings.embedScoped(
               EmbeddingRequestContext(
                 tenantId,
                 EmbeddingPurpose.Indexing,
                 s"knowledge-index:${document.id}:$ingestionId"
               ),
-              chunks.map(_.text)
+              lexicalized.map(_.text)
             )
             _ <- ZIO
               .fail(
                 AgentError.RetrievalFailed(
-                  s"Embedding 输出数量 ${detailed.embeddings.length} != chunk 数量 ${chunks.length}"
+                  s"Embedding 输出数量 ${detailed.embeddings.length} != chunk 数量 ${lexicalized.length}"
                 )
               )
-              .unless(detailed.embeddings.length == chunks.length)
-            indexed = chunks.zip(detailed.embeddings).map { case (chunk, vector) =>
+              .unless(detailed.embeddings.length == lexicalized.length)
+            indexed = lexicalized.zip(detailed.embeddings).map { case (chunk, vector) =>
               IndexedChunk(chunk.copy(indexVersion = build.version), vector)
             }
             // Chunk.grouped 返回 Iterator；物化为 List 后再由 ZIO 顺序执行，保持暂存批次顺序确定。
@@ -266,4 +272,18 @@ object KnowledgeIndexer:
   ): URLayer[Chunker & EmbeddingService & KnowledgeIndexStore, KnowledgeIndexer] =
     ZLayer.fromFunction((chunker: Chunker, embeddings: EmbeddingService, store: KnowledgeIndexStore) =>
       KnowledgeIndexer(chunker, embeddings, store, stageBatchSize, indexingStrategy)
+    )
+
+  /** 显式装配 lexical 策略的生产入口；未提供时保留 simple Chinese 默认工作点。 */
+  def withLexical(
+      stageBatchSize: Int = 200,
+      indexingStrategy: String = ""
+  ): URLayer[Chunker & EmbeddingService & KnowledgeIndexStore & LexicalProcessor, KnowledgeIndexer] =
+    ZLayer.fromFunction(
+      (
+          chunker: Chunker,
+          embeddings: EmbeddingService,
+          store: KnowledgeIndexStore,
+          lexical: LexicalProcessor
+      ) => KnowledgeIndexer(chunker, embeddings, store, stageBatchSize, indexingStrategy, lexical)
     )

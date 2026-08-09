@@ -22,7 +22,7 @@ object RagSecuritySpec extends ZIOSpecDefault:
         hits  <- store.search(query, RetrievalScope(tenantA, Set("read")), 10)
       yield assertTrue(hits.map(_.chunk.id) == Chunk("a"))).provide(InMemoryVectorStore.layer)
     },
-    test("DefaultRetriever 把原始 query 交给 hybrid store，并保持统一候选预算") {
+    test("DefaultRetriever 把受控 lexical query 交给 hybrid store，并保持统一候选预算") {
       for
         observed <- Ref.make(Option.empty[(String, Int)])
         tenant = TenantId("tenant-a")
@@ -46,7 +46,7 @@ object RagSecuritySpec extends ZIOSpecDefault:
               limit: Int
           ): IO[RetrievalError, Chunk[RetrievalHit]] = ZIO.dieMessage("不应回退到纯向量 search")
 
-          /** 记录 Retriever 传来的原始 query 与放大后的候选数。 */
+          /** 记录 Retriever 传来的受控 lexical query 与放大后的候选数。 */
           override def searchHybrid(
               queryText: String,
               query: Embedding,
@@ -63,7 +63,7 @@ object RagSecuritySpec extends ZIOSpecDefault:
         result <- DefaultRetriever(embedding, store, reranker).retrieve("桂枝", scope, 2)
         call   <- observed.get
       yield assertTrue(
-        call.contains("桂枝" -> 6),
+        call.contains("桂 枝 桂枝" -> 6),
         result.hits == Chunk(hit),
         result.hits.head.signals("textRank") == 2.0,
         result.citations.head.sourceUri == "doc://1"
@@ -94,6 +94,44 @@ object RagSecuritySpec extends ZIOSpecDefault:
       DefaultRetriever(explodingEmbedding, explodingStore, reranker)
         .retrieve("任意查询", RetrievalScope(TenantId("tenant-a"), Set("read")), 0)
         .map(result => assertTrue(result.hits.isEmpty, result.citations.isEmpty))
+    },
+    test("候选未通过最低分时返回可展示的证据不足状态，且不生成 citation") {
+      val tenant    = TenantId("tenant-a")
+      val hit       = RetrievalHit(DocumentChunk("weak", "doc-a", "弱相关", "a", tenant, Set("read")), 0.1)
+      val embedding = new EmbeddingService:
+        val dimension                                                         = 2
+        def embed(texts: Chunk[String]): IO[RetrievalError, Chunk[Embedding]] =
+          ZIO.succeed(Chunk(Embedding(Chunk(1.0f, 0.0f))))
+      val store = new VectorStore:
+        def upsert(chunks: Chunk[IndexedChunk]): IO[RetrievalError, Unit] = ZIO.unit
+        def search(
+            query: Embedding,
+            scope: RetrievalScope,
+            limit: Int
+        ): IO[RetrievalError, Chunk[RetrievalHit]] =
+          ZIO.succeed(Chunk(hit))
+        def deleteByDocument(documentId: String, tenantId: TenantId): IO[RetrievalError, Unit] = ZIO.unit
+      val reranker = new Reranker:
+        def rerank(query: String, hits: Chunk[RetrievalHit], limit: Int): UIO[Chunk[RetrievalHit]] =
+          ZIO.succeed(hits.take(limit))
+      val result = DefaultRetriever(
+        embedding,
+        store,
+        reranker,
+        policies = RetrievalPolicySource.static(RetrievalPolicy(minimumScore = 0.2))
+      )
+      result
+        .retrieve("查询", RetrievalScope(tenant, Set("read")), 1)
+        .map(value =>
+          assertTrue(
+            value.hits.isEmpty,
+            value.citations.isEmpty,
+            value.evidence.status == RetrievalEvidenceStatus.BelowMinimumScore,
+            !value.evidence.supportsGroundedAnswer,
+            value.evidence.candidateCount == 1,
+            value.evidence.topAcceptedScore.isEmpty
+          )
+        )
     },
     test("失陷 Reranker 不能向候选集注入另一个租户的文档") {
       val tenantA   = TenantId("tenant-a")

@@ -3,6 +3,13 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
+## 0.6.0 - 2026-08-09
+
+This release candidate establishes the fresh-install 1024-dimensional knowledge-index baseline used by the rebuilt platform RAG
+integration. It is intentionally a minor release rather than a 0.5.x patch: it adds public migration entry points and a new
+pgvector physical contract. It must be released to Maven Central before a server using `migrateCoreAndKnowledge1024` is built for
+CI or production; see [the 0.6.0 RAG upgrade guide](docs/upgrading-to-0.6.0.md).
+
 ## 0.5.0 - 2026-08-07
 
 Adds an optional administration sub-surface and the runtime resolver paths that make its overrides observable without a restart.

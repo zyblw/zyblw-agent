@@ -85,7 +85,7 @@ object OpenAICompatibleEmbeddingConfig:
   def openAI(
       apiKey: String,
       model: String = "text-embedding-3-small",
-      dimension: Int = 1536
+      dimension: Int = 1024
   ): OpenAICompatibleEmbeddingConfig =
     OpenAICompatibleEmbeddingConfig(
       providerId = DefaultProviderId,

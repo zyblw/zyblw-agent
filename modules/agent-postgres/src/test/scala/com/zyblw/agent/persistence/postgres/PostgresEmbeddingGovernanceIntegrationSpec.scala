@@ -76,8 +76,20 @@ object PostgresEmbeddingGovernanceIntegrationSpec extends ZIOSpecDefault:
       .mkString
 
   /** 构造包含模型契约和租户边界的缓存键。 */
-  private def key(tenant: String, text: String): EmbeddingCacheKey =
-    EmbeddingCacheKey(TenantId(tenant), "integration-provider", "embedding-v1", 2, "exact-v1", hash(text))
+  private def key(
+      tenant: String,
+      text: String,
+      purpose: EmbeddingPurpose = EmbeddingPurpose.Query
+  ): EmbeddingCacheKey =
+    EmbeddingCacheKey(
+      TenantId(tenant),
+      purpose,
+      "integration-provider",
+      "embedding-v1",
+      2,
+      "exact-v1",
+      hash(text)
+    )
 
   /** 构造一次真实 Provider miss 对应的幂等预留。 */
   private def reservation(tenant: String, requestId: String, requestHash: String): EmbeddingQuotaReservation =
@@ -93,21 +105,23 @@ object PostgresEmbeddingGovernanceIntegrationSpec extends ZIOSpecDefault:
     test("批量 cache upsert 可跨 Worker 命中，租户隔离、维度校验和有界过期清理成立") {
       (for
         harness <- ZIO.service[Harness]
-        now     = Instant.parse("2026-07-15T00:00:00Z")
-        a1      = key("tenant-a", "甲")
-        a2      = key("tenant-a", "乙")
-        b1      = key("tenant-b", "甲")
-        expired = key("tenant-a", "过期")
+        now      = Instant.parse("2026-07-15T00:00:00Z")
+        a1       = key("tenant-a", "甲")
+        a2       = key("tenant-a", "乙")
+        indexing = key("tenant-a", "甲", EmbeddingPurpose.Indexing)
+        b1       = key("tenant-b", "甲")
+        expired  = key("tenant-a", "过期")
         _ <- harness.cacheA.put(
           Chunk(
             EmbeddingCacheEntry(a1, Embedding(Chunk(1.0f, 2.0f)), now.plusSeconds(60)),
             EmbeddingCacheEntry(a2, Embedding(Chunk(3.0f, 4.0f)), now.plusSeconds(60)),
+            EmbeddingCacheEntry(indexing, Embedding(Chunk(9.0f, 10.0f)), now.plusSeconds(60)),
             EmbeddingCacheEntry(b1, Embedding(Chunk(5.0f, 6.0f)), now.plusSeconds(60)),
             EmbeddingCacheEntry(expired, Embedding(Chunk(7.0f, 8.0f)), now.minusSeconds(1))
           )
         )
         // cacheB 是另一个 Store 实例，命中证明状态不依赖进程内 Ref。
-        read        <- harness.cacheB.get(Chunk(a1, a2, expired), now)
+        read        <- harness.cacheB.get(Chunk(a1, a2, indexing, expired), now)
         crossTenant <- harness.cacheB.get(Chunk(b1), now)
         invalid     <- harness.cacheA
           .put(
@@ -119,7 +133,7 @@ object PostgresEmbeddingGovernanceIntegrationSpec extends ZIOSpecDefault:
         purged <- harness.cacheB.purgeExpired(now, 1)
         none   <- harness.cacheA.get(Chunk(expired), now.minusSeconds(2))
       yield assertTrue(
-        read.keySet == Set(a1, a2),
+        read.keySet == Set(a1, a2, indexing),
         crossTenant.keySet == Set(b1),
         invalid.isFailure,
         purged == 1L,

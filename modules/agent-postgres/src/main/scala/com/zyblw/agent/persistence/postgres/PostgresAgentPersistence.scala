@@ -96,20 +96,16 @@ object PostgresAgentPersistence:
     PostgresKnowledgeIndexStore.layer(dimension) ++ PostgresPgVectorStore.layer(dimension, hybridConfig) ++
       PostgresKnowledgeIndexDirectory.layer
 
-  /** 0.4 的一站式 1536 维知识库层：在空库自动创建/校验 vector 扩展和知识表，再暴露版本摄取与检索 Store。
-    *
-    * 维度被 migration 固定为 1536，因此此入口不接受运行时 dimension，消除“ZLayer 配置与物理列不一致”的无效状态。 如果生产数据库由 DBA/部署任务负责 DDL，请先显式调用
-    * `migrateKnowledge1536`，运行进程再使用 [[knowledge]]。
-    */
-  def migratedKnowledge1536(
+  /** 1024 维一站式知识层。迁移失败会阻止层构建，绝不退化为内存检索。 */
+  def migratedKnowledge1024(
       hybridConfig: PostgresHybridSearchConfig = PostgresHybridSearchConfig()
   ): RLayer[DataSource, KnowledgeIndexStore & VectorStore & KnowledgeIndexDirectory] =
     ZLayer.fromZIOEnvironment {
       for
         dataSource <- ZIO.service[DataSource]
-        _          <- AgentPostgresMigrations.migrateKnowledge1536(dataSource)
-      yield ZEnvironment[KnowledgeIndexStore](PostgresKnowledgeIndexStore(dataSource, 1536)) ++
-        ZEnvironment[VectorStore](PostgresPgVectorStore(dataSource, 1536, hybridConfig)) ++
+        _          <- AgentPostgresMigrations.migrateKnowledge1024(dataSource)
+      yield ZEnvironment[KnowledgeIndexStore](PostgresKnowledgeIndexStore(dataSource, 1024)) ++
+        ZEnvironment[VectorStore](PostgresPgVectorStore(dataSource, 1024, hybridConfig)) ++
         ZEnvironment[KnowledgeIndexDirectory](PostgresKnowledgeIndexDirectory(dataSource))
     }
 

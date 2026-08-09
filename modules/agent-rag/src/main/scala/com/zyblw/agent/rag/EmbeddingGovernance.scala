@@ -21,9 +21,13 @@ enum EmbeddingPurpose:
 final case class EmbeddingRequestContext(tenantId: TenantId, purpose: EmbeddingPurpose, requestId: String):
   require(requestId.trim.nonEmpty && requestId.length <= 500, "Embedding requestId 长度必须位于 1..500")
 
-/** 缓存键包含租户、模型契约、算法版本和正文摘要，不保存原始正文。 */
+/** 缓存键包含租户、用途、模型契约、算法版本和正文摘要，不保存原始正文。
+  *
+  * `purpose` 不能只用于配额。带 query/document instruction 的 embedding 模型会为相同正文按不同用途产生不同向量；若缓存键省略它， 查询向量可能错误复用索引向量。
+  */
 final case class EmbeddingCacheKey(
     tenantId: TenantId,
+    purpose: EmbeddingPurpose,
     provider: String,
     model: String,
     dimension: Int,
@@ -242,7 +246,7 @@ final class GovernedEmbeddingService(
     else
       for
         now <- Clock.instant
-        keyed  = texts.zipWithIndex.map { case (text, index) => (index, text, key(context.tenantId, text)) }
+        keyed  = texts.zipWithIndex.map { case (text, index) => (index, text, key(context, text)) }
         unique = Chunk.fromIterable(keyed.groupBy(_._3).values.map(_.minBy(_._1))).sortBy(_._1)
         cached <- cacheRead(unique.map(_._3), now)
         misses = unique.filterNot(item => cached.contains(item._3))
@@ -272,7 +276,8 @@ final class GovernedEmbeddingService(
     val characters  = texts.foldLeft(0L)((sum, text) => sum + text.codePointCount(0, text.length).toLong)
     val reservation = EmbeddingQuotaReservation(context, hash, 1L, texts.length.toLong, characters)
     quota.reserve(reservation, quotaPolicy, now) *>
-      delegate.embedDetailed(texts).flatMap { result =>
+      // 让 Provider 看见可信 purpose；例如带 instruction 的 Qwen/OpenAI-compatible Adapter 可据此分别格式化 query 与 document。
+      delegate.embedScoped(context, texts).flatMap { result =>
         if result.embeddings.length != texts.length then
           ZIO.fail(AgentError.RetrievalFailed("Embedding Provider 输出数量与去重后输入不一致"))
         else if result.embeddings.exists(_.values.length != dimension) then
@@ -295,9 +300,10 @@ final class GovernedEmbeddingService(
         if config.cacheFailureMode == CacheFailureMode.FailOpen then ZIO.unit else ZIO.fail(error)
       )
 
-  private def key(tenantId: TenantId, text: String): EmbeddingCacheKey =
+  private def key(context: EmbeddingRequestContext, text: String): EmbeddingCacheKey =
     EmbeddingCacheKey(
-      tenantId,
+      context.tenantId,
+      context.purpose,
       descriptor.provider,
       descriptor.model,
       dimension,

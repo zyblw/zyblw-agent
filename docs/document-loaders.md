@@ -270,7 +270,7 @@ query code point 与 topK。
 
 ```scala
 PostgresAgentPersistence.knowledge(
-  dimension = 1536,
+  dimension = 1024,
   hybridConfig = PostgresHybridSearchConfig()
 )
 ```

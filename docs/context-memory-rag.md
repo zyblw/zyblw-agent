@@ -269,7 +269,7 @@ val embeddingConfig = OpenAICompatibleEmbeddingConfig(
   baseUrl = sys.env("EMBEDDING_BASE_URL"),
   apiKey = sys.env("EMBEDDING_API_KEY"),
   model = sys.env("EMBEDDING_MODEL"),
-  dimension = 1536,
+  dimension = 1024,
   sendDimensions = true,
   maxBatchSize = 128,
   maxParallelBatches = 4,
@@ -307,7 +307,7 @@ OpenAI 官方支持 `encoding_format=float`，部分模型支持 `dimensions`；
 
 ```scala
 val vectorStoreLayer = PostgresPgVectorStore.layer(
-  dimension = 1536,
+  dimension = 1024,
   hybridConfig = PostgresHybridSearchConfig(
     textSearchConfig = "simple",
     vectorCandidateMultiplier = 4,
@@ -343,7 +343,7 @@ begin(Building version)
 
 ```scala
 val indexStoreLayer: ZLayer[DataSource, Nothing, KnowledgeIndexStore] =
-  PostgresKnowledgeIndexStore.layer(dimension = 1536)
+  PostgresKnowledgeIndexStore.layer(dimension = 1024)
 
 val indexer = KnowledgeIndexer(
   chunker = MarkdownStructureChunker(
@@ -369,7 +369,7 @@ val result = indexer.index(
 val knowledgePersistence
     : URLayer[DataSource, KnowledgeIndexStore & VectorStore] =
   PostgresAgentPersistence.knowledge(
-    dimension = 1536,
+    dimension = 1024,
     hybridConfig = PostgresHybridSearchConfig()
   )
 ```

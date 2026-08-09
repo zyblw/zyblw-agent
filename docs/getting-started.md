@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-08
+> 最后核验：2026-08-09
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -15,16 +15,16 @@
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.5.0",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.5.0"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.6.0",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.6.0"
 )
 ```
 
 需要 ZIO HTTP 控制面再加入 `zyblw-agent-zio-http`；需要 PostgreSQL 耐久化再加入
 `zyblw-agent-postgres`。完整矩阵见 [模块选择](modules.md)。
 
-`0.5.0` 由 `v0.5.0` annotated tag 发布到 Maven Central。验证尚未发布的候选时，可以在框架目录执行
-`sbt -batch 'set ThisBuild / version := "0.5.0-local.1"; publishM2'`，宿主临时使用同一唯一版本并显式启用 Maven
+`0.6.0` 由 `v0.6.0` annotated tag 发布到 Maven Central。验证尚未发布的候选时，可以在框架目录执行
+`sbt -batch 'set ThisBuild / version := "0.6.0-local"; publishM2'`，宿主临时使用同一唯一版本并显式启用 Maven
 Local；不要覆盖旧本地版本，也不要把本地版本或 `SNAPSHOT` 当作可重复生产发布物。完整命令见
 [server 消费指南](consuming-from-server.md)。
 
@@ -187,11 +187,11 @@ val localRagLayer = ZLayer.make[RagApplication](
 ```
 
 生产环境把 `InMemoryKnowledgeIndexStore.knowledge` 替换为
-`PostgresAgentPersistence.knowledge(dimension = 1536)`；后者同时提供版本化摄取和 hybrid 查询所需 SPI，并共享宿主
+`PostgresAgentPersistence.knowledge(dimension = 1024)`；后者同时提供版本化摄取和 hybrid 查询所需 SPI，并共享宿主
 `DataSource`、向量维度和正式快照。应用账号负责 DDL 时可直接使用
-`PostgresAgentPersistence.migratedKnowledge1536()`；平台负责 DDL 时先执行
-`AgentPostgresMigrations.migrateKnowledge1536(dataSource)`，再使用普通 `knowledge(1536)`。两条路径都会校验 pgvector 版本、
-`vector(1536)` 和完整谱系列。
+`PostgresAgentPersistence.migratedKnowledge1024()`；平台负责 DDL 时先执行
+`AgentPostgresMigrations.migrateKnowledge1024(dataSource)`，再使用普通 `knowledge(1024)`。两条路径都会校验 pgvector 版本、
+`vector(1024)` 和完整谱系列。
 
 单文档调用 `rag.ingestOne(request)`；队列调用 `rag.ingest(requestStream)`；查询使用
 `rag.retrieve(RagQuery(text, trustedScope, limit))`。门面会在 Embedding/数据库之前拒绝空 query、超长 query 和越界

@@ -101,7 +101,7 @@ test('模型目录可键盘选择，探活失败给出可执行处置且不泄�
             provider: 'openai',
             model: 'text-embedding-test',
             dimension: 3072,
-            indexDimension: 1536,
+            indexDimension: 1024,
             switchable: false,
             immutableReason: '索引维度已锁定；更换模型必须重建索引并全量重新摄入。',
           },

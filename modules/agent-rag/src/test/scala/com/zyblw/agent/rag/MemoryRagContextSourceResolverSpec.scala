@@ -107,6 +107,36 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
         count   <- calls.get
       yield assertTrue(count == 0, sources.retrieval.isEmpty)
     }.provide(MemoryStore.inMemory),
+    test("Retriever 明确报告证据不足时不把弱相关资料注入模型上下文") {
+      for
+        store     <- ZIO.service[MemoryStore]
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        retriever = new Retriever:
+          def retrieve(
+              query: String,
+              scope: RetrievalScope,
+              limit: Int
+          ): IO[RetrievalError, RetrievalResult] =
+            ZIO.succeed(
+              RetrievalResult(
+                Chunk.empty,
+                Chunk.empty,
+                RetrievalEvidence(
+                  RetrievalEvidenceStatus.BelowMinimumScore,
+                  candidateCount = 2,
+                  acceptedCount = 0,
+                  minimumScore = 0.3
+                )
+              )
+            )
+        resolver = MemoryRagContextSourceResolver(store, retriever, MemoryRagContextPolicy())
+        sources <- resolver.resolve(
+          state(runId, sessionId, Some("tenant-a")),
+          AgentDefinition(AgentId("a"), "a", "i")
+        )
+      yield assertTrue(sources.retrieval.isEmpty)
+    }.provide(MemoryStore.inMemory),
     test("observed resolver 把真实 Memory/RAG 来源接入统一观测但不记录 query 和正文") {
       for
         store      <- ZIO.service[MemoryStore]

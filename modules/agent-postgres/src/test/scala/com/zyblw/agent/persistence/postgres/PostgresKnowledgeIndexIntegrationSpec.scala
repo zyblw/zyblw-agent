@@ -19,6 +19,7 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
   final private case class Harness(
       index: KnowledgeIndexStore,
       vectors: VectorStore,
+      coreReplayMigrations: Int,
       firstMigrations: Int,
       replayMigrations: Int,
       vectorExtensionVersion: Option[String]
@@ -42,13 +43,27 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         value.setPassword(container.password)
         value: DataSource
       }
-      _               <- AgentPostgresMigrations.migrate(dataSource)
-      firstMigration  <- AgentPostgresMigrations.migrateKnowledge1536(dataSource)
-      replayMigration <- AgentPostgresMigrations.migrateKnowledge1536(dataSource)
-      verification    <- AgentPostgresMigrations.verifyKnowledge1536(dataSource)
+      // 模拟平台已经在 public schema 中创建业务对象；agent 只能以受限 version 0 baseline 接入，
+      // 不能因此跳过 V001+ 或接管已有 agent core 表。
+      _ <- ZIO.attemptBlocking {
+        val connection = dataSource.getConnection
+        try
+          val statement = connection.createStatement()
+          try statement.execute("CREATE TABLE platform_shared_schema_marker (id bigint PRIMARY KEY)")
+          finally statement.close()
+        finally connection.close()
+      }
+      _ <- AgentPostgresMigrations.migrate(dataSource, AgentPostgresMigrationConfig.sharedPublicSchema)
+      coreReplay <- AgentPostgresMigrations.migrate(
+        dataSource,
+        AgentPostgresMigrationConfig.sharedPublicSchema
+      )
+      firstMigration  <- AgentPostgresMigrations.migrateKnowledge1024(dataSource)
+      replayMigration <- AgentPostgresMigrations.migrateKnowledge1024(dataSource)
+      verification    <- AgentPostgresMigrations.verifyKnowledge1024(dataSource)
       knowledge       <- PostgresAgentPersistence
         .knowledge(
-          1536,
+          1024,
           PostgresHybridSearchConfig(enableHnswIterativeScan = false)
         )
         .build
@@ -56,15 +71,16 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
     yield Harness(
       knowledge.get[KnowledgeIndexStore],
       knowledge.get[VectorStore],
+      coreReplay.migrationsExecuted,
       firstMigration.migrationsExecuted,
       replayMigration.migrationsExecuted,
       verification.extensionVersion
     )
   }
 
-  /** 创建 1536 维单位向量；slot 用于制造可预测 cosine 排名。 */
+  /** 创建 1024 维单位向量；slot 用于制造可预测 cosine 排名。 */
   private def unitVector(slot: Int): Embedding =
-    val values = Array.fill[Float](1536)(0.0f)
+    val values = Array.fill[Float](1024)(0.0f)
     values(slot) = 1.0f
     Embedding(Chunk.fromArray(values))
 
@@ -72,7 +88,7 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
   private val descriptor = EmbeddingProviderDescriptor(
     "integration-embedding",
     "v1",
-    1536,
+    1024,
     100,
     supportsDimensions = false
   )
@@ -212,6 +228,7 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         sharedHits <- harness.vectors.searchHybrid("共享标识", unitVector(3), scope, 10)
       yield assertTrue(
         before.isEmpty,
+        harness.coreReplayMigrations == 0,
         harness.firstMigrations == 1,
         harness.replayMigrations == 0,
         harness.vectorExtensionVersion.exists(_.startsWith("0.8.")),

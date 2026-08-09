@@ -128,7 +128,7 @@ val config = OpenAICompatibleEmbeddingConfig(
   baseUrl = "https://api.openai.com/v1",
   apiKey = sys.env("OPENAI_API_KEY"),
   model = "text-embedding-3-small",
-  dimension = 1536
+  dimension = 1024
 )
 
 val layer = OpenAICompatibleEmbeddingService.configured(config)
@@ -137,7 +137,7 @@ val layer = OpenAICompatibleEmbeddingService.configured(config)
 DeepSeek、GLM 或其他国内厂商只有在其部署明确提供兼容 `/embeddings` 协议时才能复用该 Adapter；聊天兼容不等于
 Embedding 兼容。切换模型、维度或向量归一化语义必须创建新知识索引版本，不能对旧向量表混写。
 
-**Embedding 模型与 Chat 模型不同，不能在运行时切换。** 维度由 Flyway 迁移固定（当前为 1536），而一份索引里的向量
+**Embedding 模型与 Chat 模型不同，不能在运行时切换。** 维度由 Flyway 迁移固定（当前为 1024），而一份索引里的向量
 只能与生成它的模型比较——换模型等于让整个知识库的既有向量失去意义。因此控制台以只读方式展示它，并不提供切换入口：
 一个能保存成功却悄悄让 RAG 召回质量崩塌的开关，比没有这个开关危险得多。真正需要更换模型的部署必须执行新维度迁移
 并全量重新摄入。

@@ -1,7 +1,7 @@
 # zyblw-agent 文档地图
 
 > 状态：当前
-> 最后核验：2026-08-08
+> 最后核验：2026-08-09
 > 事实来源：`build.sbt`、发布工作流、模块源码、测试与数据库迁移
 
 ## 按目标选择阅读路径
@@ -60,6 +60,7 @@
 - [模块与依赖选择](modules.md)
 - [版本、Maven Central 发布与回滚](releasing.md)
 - [兼容性契约与版本边界](compatibility.md)
+- [升级到 0.6.0：1024 维 RAG 新库基线与缓存用途隔离](upgrading-to-0.6.0.md)
 - [升级到 0.5.0：管理面、运行时配置覆盖与模型治理](upgrading-to-0.5.0.md)
 - [升级到 0.4.0：结构化 RAG 与独立知识 schema](upgrading-to-0.4.0.md)
 - [升级到 0.3.0：核心控制面清库重建](upgrading-to-0.3.0.md)

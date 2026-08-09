@@ -1,8 +1,8 @@
 # zyblw-agent 总体使用手册
 
-> 状态：0.5.0 当前使用契约
+> 状态：0.6.0 当前使用契约
 >
-> 最后核验：2026-08-08
+> 最后核验：2026-08-09
 >
 > 事实来源：公开源码、可运行示例、独立 Maven consumer、数据库 migration 与测试
 
@@ -24,10 +24,10 @@ Agent 的核心边界始终是：模型提出文本、结构化结果或工具�
 
 ## 2. 环境与依赖
 
-框架 0.5.0 的开发基线是 JDK 21、Scala 3.8.4、sbt 2.0.1、ZIO 2.1.26。业务只引入实际需要的模块：
+框架 0.6.0 的开发基线是 JDK 21、Scala 3.8.4、sbt 2.0.1、ZIO 2.1.26。业务只引入实际需要的模块：
 
 ```scala
-val zyblwAgentVersion = "0.5.0"
+val zyblwAgentVersion = "0.6.0"
 
 libraryDependencies ++= Seq(
   "io.github.zyblw" %% "zyblw-agent-core"      % zyblwAgentVersion,
@@ -148,7 +148,7 @@ AgentApplication.durable(WorkerId("unique-worker-id"), applicationConfig)
 ```scala
 for
   _ <- AgentPostgresMigrations.migrate(dataSource)
-  _ <- AgentPostgresMigrations.migrateKnowledge1536(dataSource) // 使用 RAG 时
+  _ <- AgentPostgresMigrations.migrateKnowledge1024(dataSource) // 使用 RAG 时
 yield ()
 ```
 
@@ -156,18 +156,18 @@ yield ()
 
 ```scala
 PostgresAgentPersistence.layer
-PostgresAgentPersistence.knowledge(1536)
+PostgresAgentPersistence.knowledge(1024)
 ```
 
 由应用启动负责 DDL：
 
 ```scala
 PostgresAgentPersistence.migratedLayer
-PostgresAgentPersistence.migratedKnowledge1536()
+PostgresAgentPersistence.migratedKnowledge1024()
 ```
 
 `migrated*` 在 ZLayer 构建时执行 Flyway migrate/validate 和结构探针；缺表、版本不匹配、pgvector 低于 0.8.0 或
-`vector(1536)` 不一致都会阻止应用启动。核心控制面位于宿主默认 schema；知识表及其独立 history 固定在
+`vector(1024)` 不一致都会阻止应用启动。核心控制面位于宿主默认 schema；知识表及其独立 history 固定在
 `zyblw_agent_knowledge`，vector 类型来自 `public`。不能把两个 V001 放入同一 Flyway 实例或让两套 history 管理同一 schema。
 正式生产通常推荐独立 migration Job 和最小权限运行账号，详细说明见[数据库迁移](database-migrations.md)。
 
@@ -277,10 +277,10 @@ artifact。Provider 类型不能进入 core，数据库 DTO 不能成为 HTTP wi
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.5.0-local.1"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.6.0-local"; publishM2'
 
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.5.0-local.1 sbt -batch 'clean; compile'
+ZYBLW_AGENT_VERSION=0.6.0-local sbt -batch 'clean; compile'
 ```
 
 业务还必须补充自己的权限、质量、成本、容量、数据库重启、Worker kill、Provider 断流、备份恢复和数据删除验证。框架测试

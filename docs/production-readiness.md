@@ -2,9 +2,9 @@
 
 > 状态：当前运行手册
 >
-> 最后核验：2026-08-08
+> 最后核验：2026-08-09
 >
-> 事实来源：源码、测试、0.3 core baseline、0.5 admin V002、0.4 knowledge baseline、CI/发布工作流与本项目成熟度矩阵
+> 事实来源：源码、测试、0.3 core baseline、0.5 admin V002、0.6 knowledge baseline、CI/发布工作流与本项目成熟度矩阵
 
 本文面向准备基于 `zyblw-agent` 开发真实业务的团队。它把“框架可以被使用”“某个业务可以小流量上线”和“已经经过
 通用大规模生产验证”分开，避免用单元测试数量或功能清单替代上线证据。
@@ -12,19 +12,19 @@
 ## 当前结论与版本建议
 
 当前源码已经具备开发真实业务的主干：耐久提交、异步 Worker、有界多 Run 并发、lease/fencing、类型化工具与权限、
-审批/取消/恢复、PostgreSQL、HTTP/SSE、低敏观测、RAG 和 Eval。新业务可以基于 0.5.0 构建垂直切片，
+审批/取消/恢复、PostgreSQL、HTTP/SSE、低敏观测、RAG 和 Eval。新业务统一基于 0.6.0 构建垂直切片，
 不需要等待 Harness、多 Agent、Graph Studio 或完整 GraphRAG。
 
-**`0.5.0` 延续 0.3.0 的核心“业务生产基线”与 0.4.0 的结构化 RAG，并新增可选的管理面与模型治理**，适合从 staging
+**`0.6.0` 统一 core V001/V002/V003 与 1024 维结构化 RAG 基线**，适合从 staging
 进入受限生产验收，而不是已经通过任意规模验证的通用 GA：
 
-- 0.3.0 的 core V001、业务 HTTP v1、state/outcome 与核心控制面保持冻结；0.5.0 只追加 `V002`，不改写已发布 migration；
-- 0.4.0 的结构化 RAG 契约与知识 schema 在 0.5 不变，从 0.4.x 升级**不需要**重建派生知识索引；
+- 核心 V001/V002/V003、业务 HTTP v1、state/outcome 与核心控制面保持冻结；空库按顺序执行全部三项 core migration；
+- RAG 固定使用独立 1024 knowledge schema/history；所有新索引都按同一模型身份、维度与 lexical strategy 建立；
 - 管理面（`/api/v1/admin/**`）与控制台是 **Beta 且完全可选**：不装配任何管理能力就不挂载任何管理路由，业务主线行为不变；
-- 业务先在 staging 和受限流量使用 0.5.0，完成自己的数据、权限、Provider、容量和恢复验收后再扩大流量；
+- 业务先在 staging 和受限流量使用 0.6.0，完成自己的数据、权限、Provider、容量和恢复验收后再扩大流量；
 - Workflow、Artifact、MCP/Sandbox 等标记为 Experimental 的能力不自动继承核心主线的成熟度。
 
-发布流水线完成前，业务仓库应使用唯一的内部 `0.5.0-local.*` 候选；Maven Central 显示 Published 后固定精确 `0.5.0`，不要使用
+发布流水线完成前，业务仓库应使用唯一的内部 `0.6.0-local.*` 候选；Maven Central 显示 Published 后固定精确 `0.6.0`，不要使用
 移动分支、版本范围或 `latest.release`。
 
 启用管理面时，它本身也是一条需要单独验收的暴露面：管理路由必须只对运维身份开放，`agent:admin:debug` 会产生真实
@@ -136,8 +136,8 @@ consumer 会从制品重新编译这条生产装配，而不是引用仓库源�
 
 ### 6. 发布与升级
 
-- fresh 核心 schema 执行冻结的 core V001 与追加的 `V002`（生成列会重写 `agent_runs`，大表需安排窗口）；需要 RAG 时在
-  `zyblw_agent_knowledge` 专属 schema/history 执行唯一 0.4 knowledge V001；所有派生 RAG 索引可重建；
+- 空核心 schema 执行冻结的 core V001、V002 与 V003（V002 生成列会重写 `agent_runs`，大表需安排窗口）；需要 RAG 时在
+  `zyblw_agent_knowledge` 专属 schema/history 执行唯一 0.6 的 1024 knowledge V001；
 - 格式、`testFull`、PostgreSQL 16、`publishM2` 和独立 Maven consumer 全部通过；启用控制台时另加类型检查、lint、
   生产构建与 Playwright 浏览器契约；
 - CHANGELOG、升级指南、tag、远端 main 和 Maven 制品来自同一提交；
@@ -148,9 +148,9 @@ consumer 会从制品重新编译这条生产装配，而不是引用仓库源�
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.5.0-local.1"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.6.0-local"; publishM2'
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.5.0-local.1 sbt -batch 'clean; compile'
+ZYBLW_AGENT_VERSION=0.6.0-local sbt -batch 'clean; compile'
 ```
 
 使用控制台的部署还需在 `modules/agent-dashboard` 执行：

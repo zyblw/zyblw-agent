@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-02
+> 最后核验：2026-08-09
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -33,7 +33,7 @@
 | `agent_compensations` | 显式注册、激活、租约执行与死信的 Saga 补偿计划 | Succeeded/Cancelled 可归档；DeadLetter 必须先处理 |
 | `agent_memories` | Session/User/Tenant 长期记忆、证据、敏感级别、CAS 版本与删除 tombstone | active 按过期策略注入；deleted 不保留 value/search 正文 |
 | `agent_memory_audit` | 用户查看/搜索/纠正/删除的低敏不可变事实；只保存 key hash、版本和数量 | 不含正文/query/scopes；按合规审计窗口归档 |
-| `agent_embedding_cache` | 不含正文的租户/模型/维度/版本/hash 精确向量缓存 | expires_at 有界清理；读取不写 last-access |
+| `agent_embedding_cache` | 不含正文的租户/用途/模型/维度/版本/hash 精确向量缓存 | expires_at 有界清理；读取不写 last-access；用途隔离 query/indexing/memory 指令向量 |
 | `agent_embedding_quota_windows` | 租户、窗口长度和窗口起点范围内的请求/文本/字符硬计数 | 行锁保证跨 Worker 原子检查与累加 |
 | `agent_embedding_quota_reservations` | requestId/hash 幂等预留 | 随所属窗口级联清理；同 ID 不同 hash 拒绝 |
 | `agent_eval_snapshots` | Agent/RAG/Context Compression 的低敏不可变评测快照与发布基线 | 不含业务正文；按数据集治理策略归档，不能静默覆盖 |
@@ -54,10 +54,10 @@
 原子删除正式块并写 Retired；`purgeInactive` 通过部分索引和 `SKIP LOCKED` 只清理截止时间前的非活动终态，绝不删除
 Building 或 Ready/active。
 
-0.4 optional pgvector location 固定管理 `zyblw_agent_knowledge` schema 及其中的独立 Flyway history，且只有一份
-fresh-install V001：一次建立 1536 维 manifest、staging、active read model、FTS/HNSW 与
-parent/ordinal/previous/next/heading/page/origin/block 谱系。vector extension/type 固定从 `public` 解析。0.3 的旧
-location/V001 只为公开制品 checksum 审计保留，不与 0.4 location 混用。
+0.6 的 1024 optional pgvector location 固定管理 `zyblw_agent_knowledge` schema 及其中独立的
+`flyway_zyblw_agent_knowledge_1024_history`，且只有一份 fresh-install V001：一次建立 1024 维 manifest、staging、active
+read model、FTS/HNSW 与 parent/ordinal/previous/next/heading/page/origin/block 谱系。vector extension/type 固定从 `public`
+解析。运行时只装配 1024 location 与其 schema/history。
 
 通用 `agent_checkpoints` 不存在于全新基线。Agent Runtime 直接保存 `AgentState`。生产异步创建通过
 `PostgresRunSubmissionStore` 在同一事务写 `agent_runs + agent_events + agent_run_commands + agent_run_dispatch`；任一插入
@@ -185,33 +185,33 @@ Agent Run 时级联删除仍需投递或审计的业务事实。宿主必须为�
 
 ## pgvector
 
-0.4 可选 migration 位于：
+新库的 0.6 可选 migration 位于：
 
-`modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/optional/pgvector_1536_v0_4/V001__agent_knowledge_pgvector_1536_baseline.sql`
+`modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/optional/pgvector_1024_v0_6/V001__agent_knowledge_pgvector_1024_baseline.sql`
 
 三张表的完整名称是 `zyblw_agent_knowledge.agent_knowledge_documents`、
 `zyblw_agent_knowledge.agent_knowledge_chunk_staging` 和 `zyblw_agent_knowledge.agent_knowledge_chunks`。业务 SQL 不应在
 `public` 创建同名替代物，也不应依赖 `search_path` 省略 schema。
 
-它默认使用 `vector(1536)`。维度是表和索引契约，必须与 Embedding Provider 一致，不能在同一列混用不同维度。
+它固定使用 `vector(1024)`。维度是表和索引契约，必须与 Embedding Provider 一致，不能在同一列混用不同维度。
 `PostgresPgVectorStore` 的查询先执行 tenant 与权限包含关系，再进行 cosine/全文排序。`searchHybrid` 使用
 `websearch_to_tsquery + ts_rank_cd` 和 pgvector 两个候选集，通过 weighted RRF 合并；原始分数和名次保存在
 `RetrievalHit.signals`。
 
 ```scala
 val vectorStoreLayer: ZLayer[DataSource, Nothing, VectorStore] =
-  PostgresPgVectorStore.layer(dimension = 1536)
+  PostgresPgVectorStore.layer(dimension = 1024)
 
 val indexStoreLayer: ZLayer[DataSource, Nothing, KnowledgeIndexStore] =
-  PostgresKnowledgeIndexStore.layer(dimension = 1536)
+  PostgresKnowledgeIndexStore.layer(dimension = 1024)
 
 // 应用负责 DDL 时：构建 ZLayer 会先 migrate/validate/verify，再创建 Store。
 val autoMigrated: RLayer[DataSource, KnowledgeIndexStore & VectorStore] =
-  PostgresAgentPersistence.migratedKnowledge1536()
+  PostgresAgentPersistence.migratedKnowledge1024()
 ```
 
-生产平台若由独立任务/DBA 执行 DDL，则先调用 `AgentPostgresMigrations.migrateKnowledge1536(dataSource)`，应用进程继续使用普通
-`PostgresAgentPersistence.knowledge(1536)`。两种模式不可重复实现自己的建表 SQL。
+生产平台若由独立任务/DBA 执行 DDL，则先调用 `AgentPostgresMigrations.migrateKnowledge1024(dataSource)`，应用进程继续使用普通
+`PostgresAgentPersistence.knowledge(1024)`。两种模式不可重复实现自己的建表 SQL。
 
 索引写入不是逐行覆盖正式表。`begin` 分配 Building 版本，`stage` 分批幂等 upsert，`activate` 在文档 advisory
 transaction lock 下校验块数并原子切换 active 快照。Embedding HTTP 不进入数据库事务。失败版本保留稳定
@@ -229,7 +229,7 @@ HNSW 的参数不是通用最优值；应使用自己的中医文档、引用正
 - 必需表只有一个可执行事实源：
   [`V001__zyblw_agent_0_3_baseline.sql`](../modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/migration/V001__zyblw_agent_0_3_baseline.sql)。
   已发布 V001 不改 checksum，后续中文目录说明由 repeatable COMMENT migration 维护。
-- 需要 RAG 时，确认 extension 权限后调用 `migrateKnowledge1536`；不要复制一份手工 SQL 到业务仓库。
+- 新建 RAG 库时，确认 extension 权限后调用 `migrateKnowledge1024`；不要复制一份手工 SQL 到业务仓库。
 - 不要把数据库密码写入 SQL、README 或 Git；通过部署平台 Secret 注入 DataSource 配置。
 
 PostgreSQL 的事务、行锁和 `SKIP LOCKED` 等语义应以

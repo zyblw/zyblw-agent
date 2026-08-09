@@ -49,7 +49,7 @@
 | Multimodal | core / `multimodal` | Experimental | 仅有 ADT 抽象，**无任何测试覆盖** | 产品场景、Provider 打通与 eval |
 | 知识图谱 | rag / `knowledge` | Experimental | 仅有 `Entity`/`Relation`/`KnowledgeGraph` SPI 与内存实现，**无任何测试覆盖**，未接入 RAG 主线 | 决定保留或移除；保留则需持久化 Adapter、租户隔离测试与真实检索证据 |
 
-## 0.5.0 收口状态与下一批必须完成项
+## 0.6.0 收口状态与下一批必须完成项
 
 `0.5.0` 已经收口的范围：管理面授权边界、能力探测、keyset 目录、CAS 配置覆盖与审计历史、Run SSE 调试器、模型目录
 fail-closed 校验与运行时切换、脱敏 HTTP 失败分类、部署声明价目表的成本估算，以及七面板控制台的浏览器契约。核心

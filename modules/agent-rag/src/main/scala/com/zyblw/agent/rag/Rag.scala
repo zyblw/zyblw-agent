@@ -110,7 +110,50 @@ final case class Citation(
     /** 用于 PDF 高亮的可选页内几何信息。 */
     origins: Chunk[DocumentOrigin] = Chunk.empty
 )
-final case class RetrievalResult(hits: Chunk[RetrievalHit], citations: Chunk[Citation])
+
+/** 检索证据是否足以进入回答上下文。
+  *
+  * 这不是模型置信度，也不声称答案为真；它只说明经过授权、重排和已配置最低分门槛后，是否还有可引用的资料。
+  */
+enum RetrievalEvidenceStatus:
+  /** 默认值供自定义 Retriever 的旧构造调用过渡；生产 Retriever 应显式给出实际状态。 */
+  case NotEvaluated
+
+  /** 至少一个 seed 命中通过最低分门槛。 */
+  case Supported
+
+  /** 授权范围内没有任何候选。 */
+  case NoCandidates
+
+  /** 有候选，但重排后没有接受的 seed。 */
+  case NoAcceptedHits
+
+  /** 接受的 seed 全部低于当前 minimumScore。 */
+  case BelowMinimumScore
+
+final case class RetrievalEvidence(
+    status: RetrievalEvidenceStatus = RetrievalEvidenceStatus.NotEvaluated,
+    candidateCount: Int = 0,
+    acceptedCount: Int = 0,
+    topAcceptedScore: Option[Double] = None,
+    minimumScore: Double = 0.0
+):
+  require(candidateCount >= 0 && acceptedCount >= 0 && acceptedCount <= candidateCount, "检索证据数量无效")
+  require(minimumScore.isFinite, "检索证据最低分必须是有限数")
+  require(topAcceptedScore.forall(java.lang.Double.isFinite), "检索证据最高分必须是有限数")
+
+  /** 仅在明确没有足够证据时阻止资料注入；`NotEvaluated` 保持对旧自定义 Retriever 的兼容。 */
+  def supportsGroundedAnswer: Boolean = status match
+    case RetrievalEvidenceStatus.NoCandidates | RetrievalEvidenceStatus.NoAcceptedHits |
+        RetrievalEvidenceStatus.BelowMinimumScore =>
+      false
+    case RetrievalEvidenceStatus.NotEvaluated | RetrievalEvidenceStatus.Supported => true
+
+final case class RetrievalResult(
+    hits: Chunk[RetrievalHit],
+    citations: Chunk[Citation],
+    evidence: RetrievalEvidence = RetrievalEvidence()
+)
 
 trait Chunker:
   /** 能完整区分算法及其影响输出参数的稳定标识；索引 manifest 默认使用它阻止错误重放。 */
@@ -367,11 +410,19 @@ final class DefaultRetriever(
     vectors: VectorStore,
     reranker: Reranker,
     expansion: RetrievalExpansionConfig = RetrievalExpansionConfig(),
-    policies: RetrievalPolicySource = RetrievalPolicySource.default
+    policies: RetrievalPolicySource = RetrievalPolicySource.default,
+    lexical: LexicalProcessor = SimpleChineseLexicalProcessor
 ) extends Retriever:
   /** 把单 query 编码后搜索并重排，最终引用保留 source 与 metadata。 */
   def retrieve(query: String, scope: RetrievalScope, limit: Int): IO[RetrievalError, RetrievalResult] =
-    if limit <= 0 then ZIO.succeed(RetrievalResult(Chunk.empty, Chunk.empty))
+    if limit <= 0 then
+      ZIO.succeed(
+        RetrievalResult(
+          Chunk.empty,
+          Chunk.empty,
+          RetrievalEvidence(RetrievalEvidenceStatus.NoAcceptedHits)
+        )
+      )
     else if query.trim.isEmpty then ZIO.fail(AgentError.RetrievalFailed("Retrieval query 不能为空"))
     else
       // 单次检索内只读取一次工作点，避免同一次调用的重排开关和阈值来自不同版本的覆盖。
@@ -387,7 +438,8 @@ final class DefaultRetriever(
           .orElseFail(AgentError.RetrievalFailed("Embedding provider 返回空结果"))
         // 候选池放大三倍供 reranker 选择；Long 中间值防止外部错误 limit 造成 Int 溢出。
         candidateLimit = Math.min(limit.toLong * 3L, Int.MaxValue.toLong).toInt
-        candidates <- vectors.searchHybrid(query, queryEmbedding, scope, candidateLimit)
+        // 文本 query 与 vector query 语义分离：FTS 只接收与摄取端同策略生成的 lexical representation。
+        candidates <- vectors.searchHybrid(lexical.query(query), queryEmbedding, scope, candidateLimit)
         // 关闭重排时直接截断候选池。这里不能跳过后续校验：截断结果同样要满足数量、去重和权限契约，
         // 而 searchHybrid 来自存储 Adapter，与 reranker 一样位于信任边界之外。
         reranked <-
@@ -397,7 +449,18 @@ final class DefaultRetriever(
         validated <- validateReranked(candidates, reranked, scope, limit)
         // 阈值只作用于 seed 命中。上下文扩展块按 expandedScoreFactor 主动降分，
         // 用同一个阈值筛掉它们会让"提高阈值"意外地同时关闭上下文扩展。
-        hits = validated.filter(_.score >= policy.minimumScore)
+        hits     = validated.filter(_.score >= policy.minimumScore)
+        evidence = RetrievalEvidence(
+          status =
+            if candidates.isEmpty then RetrievalEvidenceStatus.NoCandidates
+            else if validated.isEmpty then RetrievalEvidenceStatus.NoAcceptedHits
+            else if hits.isEmpty then RetrievalEvidenceStatus.BelowMinimumScore
+            else RetrievalEvidenceStatus.Supported,
+          candidateCount = candidates.length,
+          acceptedCount = hits.length,
+          topAcceptedScore = hits.map(_.score).maxOption,
+          minimumScore = policy.minimumScore
+        )
         expanded <- vectors.expandContext(hits, scope, expansion)
         context  <- validateExpanded(hits, expanded, scope, expansion.maxAdditionalChunks)
         citations = context.zipWithIndex.map { case (hit, index) =>
@@ -411,7 +474,7 @@ final class DefaultRetriever(
             origins
           )
         }
-      yield RetrievalResult(context, citations)
+      yield RetrievalResult(context, citations, evidence)
 
   /** 在 Reranker 信任边界之后重新验证身份、授权、数量和数值。
     *
@@ -470,6 +533,27 @@ object DefaultRetriever:
           reranker: Reranker,
           policies: RetrievalPolicySource
       ) => DefaultRetriever(embeddings, vectors, reranker, RetrievalExpansionConfig(), policies)
+    )
+
+  /** 让宿主以 ZLayer 明确替换中文 baseline，例如接入经过评测的领域词典 tokenizer。 */
+  val lexicalLayer: URLayer[EmbeddingService & VectorStore & Reranker & LexicalProcessor, Retriever] =
+    ZLayer.fromFunction(
+      (embeddings: EmbeddingService, vectors: VectorStore, reranker: Reranker, lexical: LexicalProcessor) =>
+        DefaultRetriever(embeddings, vectors, reranker, lexical = lexical)
+    )
+
+  val governedLexicalLayer: URLayer[
+    EmbeddingService & VectorStore & Reranker & RetrievalPolicySource & LexicalProcessor,
+    Retriever
+  ] =
+    ZLayer.fromFunction(
+      (
+          embeddings: EmbeddingService,
+          vectors: VectorStore,
+          reranker: Reranker,
+          policies: RetrievalPolicySource,
+          lexical: LexicalProcessor
+      ) => DefaultRetriever(embeddings, vectors, reranker, RetrievalExpansionConfig(), policies, lexical)
     )
 
 /** 确定性测试 embedding，不应用于真实语义检索。 */

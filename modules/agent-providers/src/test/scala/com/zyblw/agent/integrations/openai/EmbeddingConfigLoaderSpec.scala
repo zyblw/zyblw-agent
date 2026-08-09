@@ -10,13 +10,13 @@ object EmbeddingConfigLoaderSpec extends ZIOSpecDefault:
       val values = Map(
         "EMBEDDING_API_KEY"   -> "embedding-secret",
         "EMBEDDING_MODEL"     -> "embed-test",
-        "EMBEDDING_DIMENSION" -> "1536"
+        "EMBEDDING_DIMENSION" -> "1024"
       )
       OpenAICompatibleEmbeddingConfig.fromEnvironment.provide(provider(values)).map { config =>
         assertTrue(
           config.providerId == OpenAICompatibleEmbeddingConfig.DefaultProviderId,
           config.model == "embed-test",
-          config.dimension == 1536,
+          config.dimension == 1024,
           config.sendDimensions,
           config.maxBatchSize == 128,
           config.requestTimeout == 60.seconds,

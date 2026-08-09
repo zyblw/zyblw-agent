@@ -34,7 +34,7 @@ object MavenConsumerSmoke:
   ] = PostgresAgentPersistence.layer
 
   val postgresKnowledge: URLayer[DataSource, KnowledgeIndexStore & VectorStore] =
-    PostgresAgentPersistence.knowledge(dimension = 1536)
+    PostgresAgentPersistence.knowledge(dimension = 1024)
 
   val durableApplication: URLayer[AgentApplication.DurableDependencies, AgentApplication.Services] =
     AgentApplication.durable(WorkerId("maven-consumer-worker"), applicationConfig)

@@ -28,7 +28,7 @@ final case class PostgresEmbeddingCacheConfig(
 /** 使用普通 PostgreSQL `REAL[]` 保存精确 Embedding 缓存。
   *
   * 这里刻意不使用 pgvector：缓存只做完整键的等值命中，不进行相似度搜索；`REAL[]` 允许 OpenAI、Gemini、 DeepSeek 或本地模型在同一张表中使用不同维度。主键包含
-  * tenant/provider/model/dimension/keyVersion/hash， 因而不会发生跨租户或跨模型复用。读取不更新 last-access 时间，避免热门 key
+  * tenant/purpose/provider/model/dimension/keyVersion/hash， 因而不会发生跨租户、跨用途或跨模型复用。读取不更新 last-access 时间，避免热门 key
   * 造成无意义写放大和表膨胀。
   *
   * @param dataSource
@@ -94,16 +94,17 @@ final class PostgresEmbeddingCacheStore(
         jdbc("purge expired cache") {
           val statement = connection.prepareStatement(
             """WITH candidates AS (
-            |  SELECT tenant_id, provider, model, dimension, key_version, content_hash
+            |  SELECT tenant_id, purpose, provider, model, dimension, key_version, content_hash
             |  FROM agent_embedding_cache
             |  WHERE expires_at <= ?
-            |  ORDER BY expires_at, tenant_id, provider, model, dimension, key_version, content_hash
+            |  ORDER BY expires_at, tenant_id, purpose, provider, model, dimension, key_version, content_hash
             |  FOR UPDATE SKIP LOCKED
             |  LIMIT ?
             |)
             |DELETE FROM agent_embedding_cache cache
             |USING candidates candidate
             |WHERE cache.tenant_id = candidate.tenant_id
+            |  AND cache.purpose = candidate.purpose
             |  AND cache.provider = candidate.provider
             |  AND cache.model = candidate.model
             |  AND cache.dimension = candidate.dimension
@@ -126,18 +127,20 @@ final class PostgresEmbeddingCacheStore(
     withConnection { connection =>
       jdbc("read embedding cache") {
         val statement = connection.prepareStatement(
-          """WITH requested(tenant_id, provider, model, dimension, key_version, content_hash) AS (
-            |  SELECT * FROM unnest(?::text[], ?::text[], ?::text[], ?::int[], ?::text[], ?::text[])
+          """WITH requested(tenant_id, purpose, provider, model, dimension, key_version, content_hash) AS (
+            |  SELECT * FROM unnest(?::text[], ?::text[], ?::text[], ?::text[], ?::int[], ?::text[], ?::text[])
             |)
-            |SELECT cache.tenant_id, cache.provider, cache.model, cache.dimension,
+            |SELECT cache.tenant_id, cache.purpose, cache.provider, cache.model, cache.dimension,
             |       cache.key_version, cache.content_hash, cache.embedding
             |FROM requested
             |JOIN agent_embedding_cache cache USING
-            |  (tenant_id, provider, model, dimension, key_version, content_hash)
+            |  (tenant_id, purpose, provider, model, dimension, key_version, content_hash)
             |WHERE cache.expires_at > ?""".stripMargin
         )
         val arrays = Chunk(
           connection.createArrayOf("text", batch.map(_.tenantId.value).toArray),
+          connection
+            .createArrayOf("text", batch.map(_.purpose.toString.toLowerCase(java.util.Locale.ROOT)).toArray),
           connection.createArrayOf("text", batch.map(_.provider).toArray),
           connection.createArrayOf("text", batch.map(_.model).toArray),
           connection.createArrayOf("int4", batch.map(key => Integer.valueOf(key.dimension)).toArray),
@@ -146,20 +149,21 @@ final class PostgresEmbeddingCacheStore(
         )
         try
           arrays.zipWithIndex.foreach((array, index) => statement.setArray(index + 1, array))
-          statement.setTimestamp(7, Timestamp.from(now))
+          statement.setTimestamp(8, Timestamp.from(now))
           val result  = statement.executeQuery()
           val builder = Map.newBuilder[EmbeddingCacheKey, Embedding]
           while result.next() do
-            val dimension = result.getInt(4)
+            val dimension = result.getInt(5)
             val key       = EmbeddingCacheKey(
               TenantId(result.getString(1)),
-              result.getString(2),
+              purposeFromDatabase(result.getString(2)),
               result.getString(3),
+              result.getString(4),
               dimension,
-              result.getString(5),
-              result.getString(6)
+              result.getString(6),
+              result.getString(7)
             )
-            val sqlArray = result.getArray(7)
+            val sqlArray = result.getArray(8)
             val values   =
               try decodeFloats(sqlArray.getArray)
               finally
@@ -186,9 +190,9 @@ final class PostgresEmbeddingCacheStore(
     jdbc("write embedding cache") {
       val statement = connection.prepareStatement(
         """INSERT INTO agent_embedding_cache
-          |(tenant_id, provider, model, dimension, key_version, content_hash, embedding, expires_at)
-          |VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-          |ON CONFLICT (tenant_id, provider, model, dimension, key_version, content_hash) DO UPDATE SET
+          |(tenant_id, purpose, provider, model, dimension, key_version, content_hash, embedding, expires_at)
+          |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          |ON CONFLICT (tenant_id, purpose, provider, model, dimension, key_version, content_hash) DO UPDATE SET
           |embedding = EXCLUDED.embedding,
           |expires_at = EXCLUDED.expires_at,
           |updated_at = CURRENT_TIMESTAMP""".stripMargin
@@ -197,15 +201,16 @@ final class PostgresEmbeddingCacheStore(
       try
         batch.foreach { entry =>
           statement.setString(1, entry.key.tenantId.value)
-          statement.setString(2, entry.key.provider)
-          statement.setString(3, entry.key.model)
-          statement.setInt(4, entry.key.dimension)
-          statement.setString(5, entry.key.keyVersion)
-          statement.setString(6, entry.key.contentHash)
+          statement.setString(2, entry.key.purpose.toString.toLowerCase(java.util.Locale.ROOT))
+          statement.setString(3, entry.key.provider)
+          statement.setString(4, entry.key.model)
+          statement.setInt(5, entry.key.dimension)
+          statement.setString(6, entry.key.keyVersion)
+          statement.setString(7, entry.key.contentHash)
           val vector = connection.createArrayOf("real", entry.embedding.values.map(Float.box).toArray)
           arrays += vector
-          statement.setArray(7, vector)
-          statement.setTimestamp(8, Timestamp.from(entry.expiresAt))
+          statement.setArray(8, vector)
+          statement.setTimestamp(9, Timestamp.from(entry.expiresAt))
           statement.addBatch()
         }
         statement.executeBatch()
@@ -226,6 +231,13 @@ final class PostgresEmbeddingCacheStore(
         case number: java.lang.Number => number.floatValue()
         case _                        => throw IllegalStateException("embedding cache 包含非数值数组元素")
     })
+
+  /** 数据库枚举使用固定小写 ASCII，不依赖 JVM 默认 Locale（例如土耳其 locale 会把 i 转成非 ASCII 字符）。 */
+  private def purposeFromDatabase(value: String): EmbeddingPurpose = value match
+    case "query"    => EmbeddingPurpose.Query
+    case "indexing" => EmbeddingPurpose.Indexing
+    case "memory"   => EmbeddingPurpose.Memory
+    case other      => throw IllegalStateException(s"embedding cache 包含未知 purpose: $other")
 
   /** 在访问数据库之前验证所有键，错误不会泄漏正文，因为表中只保存 hash。 */
   private def validateKeys(keys: Chunk[EmbeddingCacheKey]): IO[RetrievalError, Unit] =

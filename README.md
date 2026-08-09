@@ -10,16 +10,16 @@ Service、Agent、Harness 或 Durable Workflow。
         → 暂停/恢复/取消 → 低敏 Inspector、Trace 与 Eval
 ```
 
-当前版本线是 `0.5.0`，正式制品以
+当前版本线是 `0.6.0`，正式制品以
 [Maven Central](https://central.sonatype.com/artifact/io.github.zyblw/zyblw-agent-core_3) 的 Published 状态和
-[`v0.5.0`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.5.0) Release 为准。项目仍处于 `0.x` 演进期：
+[`v0.6.0`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.6.0) Release 为准。项目仍处于 `0.x` 演进期：
 核心单 Agent 控制面适合 staging 与受限生产验收，外围 Adapter、管理面和 Durable Workflow 等能力按证据标记为 Beta 或
 Experimental；“有实现”不等于已经经过大规模生产验证。若 Central 尚未显示 Published，请等待 tag 驱动的发布流水线完成，
 不要回退到分支或 SNAPSHOT。
 
-`0.5.0` 是一次**加法型** minor：新增可选的管理面、运行时配置覆盖与模型治理，业务主线契约不变。不装配任何管理能力的
-部署不会挂载任何新路由，但核心 schema 的 `V002` migration 与两处 Layer 签名变化仍然适用，见
-[升级到 0.5.0](docs/upgrading-to-0.5.0.md)。
+`0.6.0` 将新库 RAG 统一为 `vector(1024)`，并通过核心 `V003` 将 Embedding 缓存按 query/indexing/memory 用途隔离。
+所有生产装配都使用 1024 基线；部署从空库开始，不提供旧维度或旧知识 schema 的接入路径。完整操作见
+[升级到 0.6.0](docs/upgrading-to-0.6.0.md)。
 
 ## 什么时候使用哪一层
 
@@ -45,8 +45,8 @@ Harness 不是第二套模型循环；Workflow 也不替代普通函数。多 Ag
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.5.0",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.5.0"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.6.0",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.6.0"
 )
 ```
 
@@ -207,9 +207,9 @@ PDF/Markdown
 → Rerank / 有界谱系扩展 / Citation / Context Budget
 ```
 
-本地可用 `InMemoryKnowledgeIndexStore.knowledge`；生产替换为
-`PostgresAgentPersistence.migratedKnowledge1536()`（应用启动时自动迁移），或由部署任务先调用
-`AgentPostgresMigrations.migrateKnowledge1536` 后使用 `PostgresAgentPersistence.knowledge(1536)`。知识对象与 Flyway history
+本地可用 `InMemoryKnowledgeIndexStore.knowledge`；新建生产知识库在 0.6.0 Published 后替换为
+`PostgresAgentPersistence.migratedKnowledge1024()`（应用启动时自动迁移），或由部署任务先调用
+`AgentPostgresMigrations.migrateKnowledge1024` 后使用 `PostgresAgentPersistence.knowledge(1024)`。知识对象与 Flyway history
 位于 `zyblw_agent_knowledge` 专属 schema。详细代码见
 [文档摄取](docs/document-loaders.md)、[PDF RAG 生产流水线](docs/pdf-rag-pipeline.md)、[Context/Memory/RAG](docs/context-memory-rag.md) 与
 [RAG 评测](docs/rag-evaluation.md)。
@@ -274,11 +274,9 @@ ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`
 
 ## 兼容、升级与故障定位
 
-`0.3.0` 是核心控制面相对 `0.2.x` 的一次性破坏基线；`0.4.0` 保持该核心 V001 不变，重构了仍处于 Beta 的结构化 RAG
-公共契约，并在 `zyblw_agent_knowledge` 专属 schema 使用独立的 0.4 knowledge history/V001。`0.5.0` 在核心 schema
-**追加** `V002`（生成列 + 运行时覆盖表 + 摄入任务表），不改动知识 schema，因此从 0.4.x 升级不需要重建 RAG 派生索引；
-生成列会重写 `agent_runs`，大规模部署必须安排窗口。已发布的 migration 一律不修改、不 repair。
-完整边界见 [兼容性契约](docs/compatibility.md)与[升级到 0.5.0](docs/upgrading-to-0.5.0.md)。
+`0.6.0` 的空库依次执行 core V001/V002/V003 与独立 1024 knowledge V001。V002 的生成列会重写 `agent_runs`，
+大规模部署仍须安排窗口；V003 仅使可再生 Embedding 缓存安全失效旧用途。已发布 migration 一律不修改、不 repair。
+完整边界见 [兼容性契约](docs/compatibility.md)与[升级到 0.6.0](docs/upgrading-to-0.6.0.md)。
 
 常见问题先按边界定位：
 
@@ -315,8 +313,8 @@ ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.5.0-local.1"; publishM2'
-cd integration-tests/maven-consumer && ZYBLW_AGENT_VERSION=0.5.0-local.1 sbt -batch compile
+sbt -batch 'set ThisBuild / version := "0.6.0-local"; publishM2'
+cd integration-tests/maven-consumer && ZYBLW_AGENT_VERSION=0.6.0-local sbt -batch compile
 ```
 
 控制台单独验证：

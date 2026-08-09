@@ -275,8 +275,8 @@ object ModelGovernanceSpec extends ZIOSpecDefault:
             EmbeddingModelView(
               provider = "openai",
               model = "text-embedding-3-small",
-              dimension = 1536,
-              indexDimension = Some(1536),
+              dimension = 1024,
+              indexDimension = Some(1024),
               switchable = false,
               immutableReason = EmbeddingModelView.DimensionLockedReason
             )

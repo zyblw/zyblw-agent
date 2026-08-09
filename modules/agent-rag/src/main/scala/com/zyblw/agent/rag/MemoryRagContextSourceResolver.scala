@@ -120,7 +120,9 @@ final class MemoryRagContextSourceResolver(
           .fold(retrieval)(_.retrieval(state.runId, "retrieve")(retrieval)(_.hits.length.toLong))
           .mapError(retrievalError)
           .map { result =>
-            result.hits.zip(result.citations).filter(_._1.score >= policy.minimumRetrievalScore)
+            if result.evidence.supportsGroundedAnswer then
+              result.hits.zip(result.citations).filter(_._1.score >= policy.minimumRetrievalScore)
+            else Chunk.empty
           }
       case _ => ZIO.succeed(Chunk.empty)
 
