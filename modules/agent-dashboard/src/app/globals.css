@@ -1,18 +1,12 @@
 @import "tailwindcss";
 
 /*
- * 把 layout.tsx 加载的 Geist 接进 Tailwind 主题。
- *
- * 之前 `next/font` 加载了 Geist 却没有任何选择器使用它，body 走 system-ui、`font-mono` 走 Tailwind 默认栈：
- * 字体被下载但从不显示。在 `@theme` 里改写 `--font-sans` / `--font-mono` 而不是只改 body，是因为 `font-sans`
- * 与 `font-mono` 工具类也必须指向同一份字体，否则等宽标识仍然会退回系统字体。
- *
- * 中文字形不在 Geist 的 latin 子集里，因此回退栈必须保留系统字体——控制台的界面文案是中文。
+ * 使用系统字体栈，生产构建不访问 Google Fonts；中文控制台在 Linux/macOS/Windows 上均有明确回退。
  */
 @theme {
-  --font-sans: var(--font-geist-sans), system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
     'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
-  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 :root {

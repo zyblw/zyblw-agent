@@ -185,24 +185,28 @@ export function Header({
               Grafana <ExternalLink className="h-3 w-3" />
             </a>
           )}
-          <button
-            type="button"
-            onClick={() => onToggleConnection(!connectionOpen)}
-            aria-expanded={connectionOpen}
-            aria-controls="connection-settings"
-            className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition ${FOCUS_RING} ${
-              hasToken
-                ? 'border-slate-700 text-slate-300 hover:bg-slate-800'
-                : 'border-amber-800 bg-amber-950/40 text-amber-300'
-            }`}
-          >
-            <KeyRound className="h-3 w-3" />
-            {hasToken ? '已连接' : '未提供凭据'}
-          </button>
+          {config.authMode === 'host-session' ? (
+            <Badge>站点账号 · 管理授权</Badge>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onToggleConnection(!connectionOpen)}
+              aria-expanded={connectionOpen}
+              aria-controls="connection-settings"
+              className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition ${FOCUS_RING} ${
+                hasToken
+                  ? 'border-slate-700 text-slate-300 hover:bg-slate-800'
+                  : 'border-amber-800 bg-amber-950/40 text-amber-300'
+              }`}
+            >
+              <KeyRound className="h-3 w-3" />
+              {hasToken ? '已连接' : '未提供凭据'}
+            </button>
+          )}
         </div>
       </div>
 
-      {connectionOpen && (
+      {connectionOpen && config.authMode !== 'host-session' && (
         <div id="connection-settings" className="border-t border-slate-800 bg-slate-900/60 px-4 py-3">
           <div className="grid gap-3 md:grid-cols-[2fr_2fr_auto] md:items-end">
             <TextInput
@@ -232,6 +236,11 @@ export function Header({
             <code className="text-slate-400">write</code> / <code className="text-slate-400">debug</code> scope。
             地址保存在 localStorage，token 仅保存在 sessionStorage。
           </p>
+        </div>
+      )}
+      {config.authMode === 'host-session' && capabilities && (
+        <div className="border-t border-slate-800 bg-slate-900/40 px-4 py-2 text-xs text-slate-400">
+          当前管理台复用主站登录会话，不存在单独的 Agent 用户名或密码；权限由服务端按稳定 userId 授予并审计。
         </div>
       )}
     </header>

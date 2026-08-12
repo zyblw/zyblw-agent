@@ -47,7 +47,7 @@ export default function Home() {
 
 function Console() {
   const url = useUrlState();
-  const { hasToken } = useConnection();
+  const { config, hasToken } = useConnection();
   const [connectionOpen, setConnectionOpen] = useState(false);
   const capabilities = useCapabilities(hasToken);
 
@@ -83,6 +83,16 @@ function Console() {
                 <AlertTriangle className="h-3.5 w-3.5" /> 排查顺序
               </div>
               <ol className="list-decimal space-y-1 pl-4">
+                {config.authMode === 'host-session' && (
+                  <>
+                    <li>
+                      先在主站登录；管理台不维护第二套账号密码，而是复用站点的 HttpOnly 安全会话。
+                    </li>
+                    <li>
+                      确认该业务账号的稳定 userId 已被授予 Agent 管理权限。普通用户知道地址也会被 403 拒绝。
+                    </li>
+                  </>
+                )}
                 <li>确认后端地址正确，且 <code className="text-slate-300">/api/v1/admin/capabilities</code> 可达。</li>
                 <li>确认宿主已把 <code className="text-slate-300">AdminHttpApi</code> 的路由合并进 HTTP 应用。</li>
                 <li>

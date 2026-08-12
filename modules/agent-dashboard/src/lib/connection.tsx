@@ -18,6 +18,7 @@ const TOKEN_KEY = 'zyblw-agent-dashboard.token';
 
 /** 构建期默认地址；未设置时回退到本地开发端口。 */
 const DEFAULT_BASE_URL = process.env.NEXT_PUBLIC_AGENT_BASE_URL ?? 'http://localhost:8080';
+const AUTH_MODE = process.env.NEXT_PUBLIC_AGENT_AUTH_MODE === 'host-session' ? 'host-session' : 'bearer';
 
 /**
  * 把浏览器存储当作外部数据源订阅。
@@ -87,8 +88,8 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
 
   const value = useMemo<ConnectionContextValue>(
     () => ({
-      config: { baseUrl, token: token || undefined },
-      hasToken: token.length > 0,
+      config: { baseUrl, token: token || undefined, authMode: AUTH_MODE },
+      hasToken: AUTH_MODE === 'host-session' || token.length > 0,
       setBaseUrl,
       setToken,
       clearToken,

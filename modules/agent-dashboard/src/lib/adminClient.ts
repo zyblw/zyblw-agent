@@ -75,6 +75,10 @@ export interface AdminClientConfig {
   baseUrl: string;
   /** 可选 Bearer token；由宿主的认证方案决定其含义。 */
   token?: string;
+  /**
+   * `bearer` 由控制台直接发送 token；`host-session` 复用同源宿主的 HttpOnly Cookie/BFF，浏览器不接触 JWT。
+   */
+  authMode?: 'bearer' | 'host-session';
 }
 
 /** 已按 SSE framing 解码的一条消息；`data` 仍是服务端 JSON 字符串。 */
@@ -99,8 +103,14 @@ function normalizeBaseUrl(baseUrl: string): string {
 function headers(config: AdminClientConfig, json: boolean): HeadersInit {
   const result: Record<string, string> = { Accept: 'application/json' };
   if (json) result['Content-Type'] = 'application/json';
-  if (config.token) result.Authorization = `Bearer ${config.token}`;
+  if (config.authMode === 'host-session') result['X-ZYBLW-CSRF'] = '1';
+  else if (config.token) result.Authorization = `Bearer ${config.token}`;
   return result;
+}
+
+/** 宿主会话模式必须显式携带同源 Cookie；Bearer 模式保持既有跨域管理台行为。 */
+function credentials(config: AdminClientConfig): RequestCredentials | undefined {
+  return config.authMode === 'host-session' ? 'same-origin' : undefined;
 }
 
 /**
@@ -138,6 +148,7 @@ async function request<T>(
   try {
     const response = await fetch(`${normalizeBaseUrl(config.baseUrl)}${path}`, {
       ...rest,
+      credentials: credentials(config),
       headers: { ...headers(config, hasJsonBody), ...(rest.headers ?? {}) },
       body: hasJsonBody ? JSON.stringify(json) : rest.body,
     });
@@ -266,7 +277,7 @@ export const adminApi = {
     try {
       const response = await fetch(
         `${normalizeBaseUrl(config.baseUrl)}${ADMIN_BASE}/runs/${encodeURIComponent(runId)}/events/stream`,
-        { headers: requestHeaders, signal: options.signal },
+        { headers: requestHeaders, signal: options.signal, credentials: credentials(config) },
       );
       if (!response.ok) await decode<never>(response);
       await consumeSse(response, options.signal, options.onMessage);

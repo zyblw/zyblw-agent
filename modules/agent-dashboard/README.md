@@ -85,8 +85,8 @@ keyset 游标刻意不进 URL：它是只对某一组过滤条件有效的不透
 | `agent:admin:write` | 改变部署行为：工具白名单、审批策略、模型切换、死信重排、索引退役（蕴含读权限） |
 | `agent:admin:debug` | 产生真实 Provider 费用：检索沙盒、文档摄入、模型探活（不被写权限蕴含） |
 
-框架不自带认证中间件。身份由宿主的 `AgentRequestContextResolver` 解析，控制台只负责透传一个 Bearer
-token，不假设它是 JWT、opaque token 还是网关注入的头。
+框架不自带认证中间件。身份由宿主的 `AgentRequestContextResolver` 解析。独立模式下控制台透传 Bearer token；
+同域嵌入模式下，宿主 BFF 使用 HttpOnly Cookie 完成认证，控制台 JavaScript 不读取 JWT。
 
 地址保存在 `localStorage`，token 只保存在 `sessionStorage`：管理 token 能改工具白名单和审批策略，让它在
 关闭标签页后继续留在磁盘上没有必要的收益。
@@ -111,6 +111,7 @@ npm run lint        # ESLint
 npm run build       # 生产构建
 npm run test:e2e:install  # 首次安装 Chromium
 npm run test:e2e    # 浏览器契约：凭据门禁、模型目录、键盘操作、探活与脱敏
+npm run test:e2e:host # 同域宿主会话、BFF 路径、无 Authorization 与 CSRF 契约
 ```
 
 类型检查必须走 `npm run typecheck` 而不是直接 `tsc --noEmit`。`LayoutProps` 等路由感知类型由 Next.js 生成到
@@ -130,6 +131,19 @@ docker run -p 3000:3000 zyblw-agent-dashboard
 
 `NEXT_PUBLIC_AGENT_BASE_URL` 只是**默认值**，运行时仍可在界面上切换。同一份镜像可以用于多个环境，不必为
 每个环境重新构建。
+
+### 嵌入宿主站点
+
+```bash
+docker build -t zyblw-agent-dashboard \
+  --build-arg NEXT_PUBLIC_AGENT_BASE_URL=/api/backend \
+  --build-arg NEXT_PUBLIC_AGENT_AUTH_MODE=host-session \
+  --build-arg NEXT_PUBLIC_AGENT_BASE_PATH=/admin/agent .
+```
+
+宿主必须把 `/admin/agent/**` 反向代理到该容器，并让 `/api/backend/**` 以同源 HttpOnly 会话转发到 Agent 管理
+API。`host-session` 模式自动携带同源 Cookie 与 `X-ZYBLW-CSRF: 1`，界面隐藏连接/token 输入；401 和 403 仍由
+宿主认证与 `AgentRequestContextResolver` 决定。
 
 Langfuse、Grafana 和 OTLP 端点刻意不由前端配置，而是后端通过 `capabilities` 下发（对应
 `ZYBLW_AGENT_OBSERVABILITY_*` 环境变量）。这样一次后端部署配置就能同时纠正所有页面的跳转目标。

@@ -83,6 +83,23 @@ jobs:
           RUN_POSTGRES_INTEGRATION: "1"
         run: sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull; publishM2'
 
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: modules/agent-dashboard/package-lock.json
+
+      - name: Verify dashboard standalone and host-session contracts
+        working-directory: modules/agent-dashboard
+        run: |
+          npm ci
+          npm run typecheck
+          npm run lint
+          npm run build
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+          npm run test:e2e:host
+
       - name: Compile independent Maven consumer
         working-directory: integration-tests/maven-consumer
         shell: bash
