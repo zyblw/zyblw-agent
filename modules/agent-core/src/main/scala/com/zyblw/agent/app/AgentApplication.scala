@@ -155,6 +155,13 @@ object AgentApplication:
     ChatModel & RegisteredToolRegistry & RunStore & RunCommandStore & RunSubmissionStore &
       ContextSourceResolver & GuardrailEngine & RunObserver
 
+  /** 接入宿主管理面的生产装配依赖。
+    *
+    * 与 [[DurableDependencies]] 相比，工具与模型策略不再由框架用静态默认值覆盖，而是由宿主提供可热更新的 `ToolPolicySource` /
+    * `ModelPolicySource`。这保证管理面保存的配置会真实进入下一次模型和工具调用，而不是 只停留在数据库与控制台中。
+    */
+  type DurableGovernedDependencies = DurableDependencies & ToolPolicySource & ModelPolicySource
+
   /** 启用 `CompressionMode.ModelAssisted` 的生产装配依赖。
     *
     * `ContextCompressor` 被单独列入环境，是为了让业务明确决定压缩数据发送给哪个 Provider，而不是由 app 模块偷偷复用主 模型或读取全局配置。若 AgentDefinition
@@ -213,6 +220,27 @@ object AgentApplication:
       ZLayer.succeed(config.toolPolicy),
       ToolPolicySource.staticLayer,
       ModelPolicySource.defaultLayer,
+      TokenCounter.approximate,
+      ContextCompressor.deterministic,
+      DefaultContextManager.layer,
+      AgentRuntimeLive.layerWithContextSources,
+      AgentCommandServiceLive.layer,
+      WorkerHost.layer(owner, config.worker),
+      live
+    )
+
+  /** 使用宿主动态治理源的生产耐久装配。
+    *
+    * 该入口保留 [[durable]] 的存储、Context、Guardrail、Observer 与 Worker 语义，只移除框架内部的 `ToolPolicySource.staticLayer` 和
+    * `ModelPolicySource.defaultLayer`。宿主通常把 `RuntimeSettingsService` 投影成这两个 Source；管理面更新后，新读取到的策略会进入后续调用。
+    *
+    * `AgentApplicationConfig.toolPolicy` 仍作为宿主管理服务的部署基线，但本 Layer 不会再创建第二份静态副本。
+    */
+  def durableGoverned(
+      owner: WorkerId,
+      config: AgentApplicationConfig
+  ): URLayer[DurableGovernedDependencies, Services] =
+    ZLayer.makeSome[DurableGovernedDependencies, Services](
       TokenCounter.approximate,
       ContextCompressor.deterministic,
       DefaultContextManager.layer,

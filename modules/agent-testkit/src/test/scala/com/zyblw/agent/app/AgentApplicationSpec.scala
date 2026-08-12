@@ -190,6 +190,46 @@ object AgentApplicationSpec extends ZIOSpecDefault:
         events.exists(_.isInstanceOf[AgentEvent.RunCompleted])
       )
     },
+    test("durableGoverned 使用宿主策略源并把模型覆盖送入真实调用") {
+      val defined = simpleAgent.copy(modelSettings =
+        ModelSettings(provider = Some("scripted"), model = Some("baseline-model"), temperature = Some(0.8))
+      )
+      val modelPolicies = ModelPolicySource.static(
+        ModelPolicy(model = Some("managed-model"), temperature = Some(0.2))
+      )
+      for
+        model  <- ScriptedChatModel.make(Chunk(finalResponse("governed")))
+        result <- (for
+          app <- ZIO.service[AgentApplication]
+          _   <- app.submit(
+            defined,
+            RunRequest(ThreadId("governed-layer-thread"), AgentMessage.user("hello")),
+            "governed-layer-request"
+          )
+          _        <- app.claimOnce
+          requests <- model.recordedRequests
+        yield requests).provide(
+          ZLayer.succeed[ChatModel](model),
+          RegisteredToolRegistry.fromTools(Nil),
+          AgentPersistence.inMemory,
+          ContextSourceResolver.empty,
+          GuardrailEngine.empty,
+          RunObserver.noop,
+          ZLayer.succeed[ToolPolicySource](ToolPolicySource.static(ToolPolicyConfig.secureDefault)),
+          ZLayer.succeed[ModelPolicySource](modelPolicies),
+          AgentApplication.durableGoverned(
+            WorkerId("governed-layer-worker"),
+            AgentApplicationConfig(worker = workerConfig)
+          )
+        )
+        settings = result.head.settings
+      yield assertTrue(
+        result.length == 1,
+        settings.provider.contains("scripted"),
+        settings.model.contains("managed-model"),
+        settings.temperature.contains(0.2)
+      )
+    },
     test("WithContextCompressor 入口让 ModelAssisted 策略真实进入主循环并持久化辅助 usage") {
       final case class LookupInput(query: String) derives JsonCodec
       final case class LookupOutput(content: String) derives JsonCodec

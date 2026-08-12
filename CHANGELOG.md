@@ -3,6 +3,14 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
+## 0.6.1 - 2026-08-13
+
+Adds the production host-integration seam required by the full administration console without changing persisted schemas or
+stable HTTP contracts. `AgentApplication.durableGoverned` consumes host-provided tool and model policy sources so saved runtime
+overrides reach real executions. The dashboard can now run below a base path in `host-session` mode, where a same-origin BFF owns
+the HttpOnly session and CSRF boundary; standalone Bearer-token deployments remain compatible. Production dashboard builds no
+longer download Google Fonts.
+
 ## 0.6.0 - 2026-08-09
 
 This release candidate establishes the fresh-install 1024-dimensional knowledge-index baseline used by the rebuilt platform RAG

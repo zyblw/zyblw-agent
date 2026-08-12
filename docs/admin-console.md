@@ -107,7 +107,7 @@ RagApplication.governed(...)
 ```scala
 // 模型工作点与价格表
 val modelPolicies = ZLayer.fromFunction((s: RuntimeSettingsService) => s.modelPolicySource)
-AgentRuntimeLive.layer   // 消费 ModelPolicySource
+AgentApplication.durableGoverned(owner, config) // 同时消费 ToolPolicySource 与 ModelPolicySource
 ```
 
 不接这些解析器的部署行为不变：三个解析器都有返回部署基线的默认实现（`ModelPolicySource.default` 表示完全
