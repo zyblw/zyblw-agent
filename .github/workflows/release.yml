@@ -154,6 +154,9 @@ jobs:
           PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
           SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
           SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          # sbt-ci-release uses this standard CI variable to distinguish a
+          # stable tag recovery from a branch/SNAPSHOT build.
+          CI_COMMIT_TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
 
