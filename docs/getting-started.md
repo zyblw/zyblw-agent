@@ -15,16 +15,16 @@
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.6.1",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.6.1"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.6.2",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.6.2"
 )
 ```
 
 需要 ZIO HTTP 控制面再加入 `zyblw-agent-zio-http`；需要 PostgreSQL 耐久化再加入
 `zyblw-agent-postgres`。完整矩阵见 [模块选择](modules.md)。
 
-`0.6.1` 由 `v0.6.1` annotated tag 发布到 Maven Central。验证尚未发布的候选时，可以在框架目录执行
-`sbt -batch 'set ThisBuild / version := "0.6.1-local"; publishM2'`，宿主临时使用同一唯一版本并显式启用 Maven
+`0.6.2` 由 `v0.6.2` annotated tag 发布到 Maven Central。验证尚未发布的候选时，可以在框架目录执行
+`sbt -batch 'set ThisBuild / version := "0.6.3-local"; publishM2'`，宿主临时使用同一唯一版本并显式启用 Maven
 Local；不要覆盖旧本地版本，也不要把本地版本或 `SNAPSHOT` 当作可重复生产发布物。完整命令见
 [server 消费指南](consuming-from-server.md)。
 

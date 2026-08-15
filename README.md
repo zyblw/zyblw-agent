@@ -10,16 +10,16 @@ Service、Agent、Harness 或 Durable Workflow。
         → 暂停/恢复/取消 → 低敏 Inspector、Trace 与 Eval
 ```
 
-当前版本线是 `0.6.1`，正式制品以
+当前版本线是 `0.6.2`，正式制品以
 [Maven Central](https://central.sonatype.com/artifact/io.github.zyblw/zyblw-agent-core_3) 的 Published 状态和
-[`v0.6.1`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.6.1) Release 为准。项目仍处于 `0.x` 演进期：
+[`v0.6.2`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.6.2) Release 为准。项目仍处于 `0.x` 演进期：
 核心单 Agent 控制面适合 staging 与受限生产验收，外围 Adapter、管理面和 Durable Workflow 等能力按证据标记为 Beta 或
 Experimental；“有实现”不等于已经经过大规模生产验证。若 Central 尚未显示 Published，请等待 tag 驱动的发布流水线完成，
 不要回退到分支或 SNAPSHOT。
 
 `0.6.0` 将新库 RAG 统一为 `vector(1024)`，并通过核心 `V003` 将 Embedding 缓存按 query/indexing/memory 用途隔离。
-所有生产装配都使用 1024 基线；部署从空库开始，不提供旧维度或旧知识 schema 的接入路径。完整操作见
-[升级到 0.6.0](docs/upgrading-to-0.6.0.md)。
+`0.6.2` 在不改 migration 的前提下加入可观察的 PDF 提取级联。所有生产装配都使用 1024 基线；部署从空库开始，不提供旧维度或旧知识 schema 的接入路径。完整操作见
+[升级到 0.6.0](docs/upgrading-to-0.6.0.md) 和 [升级到 0.6.2](docs/upgrading-to-0.6.2.md)。
 
 ## 什么时候使用哪一层
 
@@ -45,8 +45,8 @@ Harness 不是第二套模型循环；Workflow 也不替代普通函数。多 Ag
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.6.1",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.6.1"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.6.2",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.6.2"
 )
 ```
 
@@ -313,8 +313,8 @@ ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.6.1-local"; publishM2'
-cd integration-tests/maven-consumer && ZYBLW_AGENT_VERSION=0.6.1-local sbt -batch compile
+sbt -batch 'set ThisBuild / version := "0.6.3-local"; publishM2'
+cd integration-tests/maven-consumer && ZYBLW_AGENT_VERSION=0.6.3-local sbt -batch compile
 ```
 
 控制台单独验证：

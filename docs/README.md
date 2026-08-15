@@ -61,6 +61,7 @@
 - [版本、Maven Central 发布与回滚](releasing.md)
 - [兼容性契约与版本边界](compatibility.md)
 - [升级到 0.6.0：1024 维 RAG 新库基线与缓存用途隔离](upgrading-to-0.6.0.md)
+- [升级到 0.6.2：可观察的 PDF 提取级联](upgrading-to-0.6.2.md)
 - [升级到 0.6.1：宿主管理台安全嵌入与动态治理装配](upgrading-to-0.6.1.md)
 - [升级到 0.5.0：管理面、运行时配置覆盖与模型治理](upgrading-to-0.5.0.md)
 - [升级到 0.4.0：结构化 RAG 与独立知识 schema](upgrading-to-0.4.0.md)

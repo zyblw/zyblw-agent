@@ -1,6 +1,6 @@
 # PostgreSQL 独立宿主快速接入
 
-> 状态：0.6.1 可执行接入路径
+> 状态：0.6.2 可执行接入路径
 > 最后核验：2026-08-14
 > 事实来源：`PostgresQuickstartExample.scala`、`AgentPostgresMigrations.scala`、`PostgresAgentPersistence.scala`
 
@@ -26,8 +26,8 @@ host DataSource
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"     % "0.6.1",
-  "io.github.zyblw" %% "zyblw-agent-postgres" % "0.6.1"
+  "io.github.zyblw" %% "zyblw-agent-core"     % "0.6.2",
+  "io.github.zyblw" %% "zyblw-agent-postgres" % "0.6.2"
 )
 ```
 

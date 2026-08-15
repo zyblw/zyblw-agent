@@ -95,9 +95,9 @@ agent shell, every command below still needs `required_permissions: ["all"]`:
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.6.1-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.6.3-local"; publishM2'
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.6.1-local sbt -batch compile
+ZYBLW_AGENT_VERSION=0.6.3-local sbt -batch compile
 ```
 
 Console changes additionally require, in `modules/agent-dashboard`:

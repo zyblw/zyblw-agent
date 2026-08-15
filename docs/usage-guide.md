@@ -1,6 +1,6 @@
 # zyblw-agent 总体使用手册
 
-> 状态：0.6.1 当前使用契约
+> 状态：0.6.2 当前使用契约
 >
 > 最后核验：2026-08-13
 >
@@ -24,10 +24,10 @@ Agent 的核心边界始终是：模型提出文本、结构化结果或工具�
 
 ## 2. 环境与依赖
 
-框架 0.6.1 的开发基线是 JDK 21、Scala 3.8.4、sbt 2.0.1、ZIO 2.1.26。业务只引入实际需要的模块：
+框架 0.6.2 的开发基线是 JDK 21、Scala 3.8.4、sbt 2.0.1、ZIO 2.1.26。业务只引入实际需要的模块：
 
 ```scala
-val zyblwAgentVersion = "0.6.1"
+val zyblwAgentVersion = "0.6.2"
 
 libraryDependencies ++= Seq(
   "io.github.zyblw" %% "zyblw-agent-core"      % zyblwAgentVersion,
@@ -277,10 +277,10 @@ artifact。Provider 类型不能进入 core，数据库 DTO 不能成为 HTTP wi
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.6.1-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.6.3-local"; publishM2'
 
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.6.1-local sbt -batch 'clean; compile'
+ZYBLW_AGENT_VERSION=0.6.3-local sbt -batch 'clean; compile'
 ```
 
 业务还必须补充自己的权限、质量、成本、容量、数据库重启、Worker kill、Provider 断流、备份恢复和数据删除验证。框架测试
