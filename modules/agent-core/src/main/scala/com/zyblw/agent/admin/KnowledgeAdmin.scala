@@ -26,7 +26,11 @@ final case class KnowledgeDocumentView(
     indexingStrategy: String,
     failureCode: Option[String],
     createdAtEpochMilli: Long,
-    updatedAtEpochMilli: Long
+    updatedAtEpochMilli: Long,
+    extractionMode: Option[String] = None,
+    extractionMethod: Option[String] = None,
+    extractionQuality: Option[String] = None,
+    extractionFallbackUsed: Option[Boolean] = None
 ) derives JsonCodec
 
 /** 一页知识索引清单。 */

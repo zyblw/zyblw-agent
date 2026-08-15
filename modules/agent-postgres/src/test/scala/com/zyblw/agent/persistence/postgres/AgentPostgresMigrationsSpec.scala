@@ -39,7 +39,7 @@ object AgentPostgresMigrationsSpec extends ZIOSpecDefault:
       val invalid = AgentPostgresMigrationConfig(baselineOnMigrate = true)
       assertTrue(invalid.validated.isLeft)
     },
-    test("平台共享 public schema 只能使用受限的 version 0 baseline") {
+    test("宿主共享 public schema 只能使用受限的 version 0 baseline") {
       val shared = AgentPostgresMigrationConfig.sharedPublicSchema
       assertTrue(
         shared.validated.isRight,

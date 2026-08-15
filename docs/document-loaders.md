@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-29
+> 最后核验：2026-08-16
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -87,7 +87,8 @@ val loader = TikaDocumentLoader(
     maxExtractedCodePoints = 2_000_000,
     parseTimeout = 30.seconds,
     allowOcr = false,
-    requireDetectedTypeMatch = true
+    requireDetectedTypeMatch = true,
+    enabledMediaTypes = TikaDocumentLoader.SupportedMediaTypes
   )
 )
 ```
@@ -95,6 +96,17 @@ val loader = TikaDocumentLoader(
 实现不会预先把业务声明写入 Tika 的 `Content-Type`，否则自动解析器可能直接相信声明而失去内容嗅探意义。解析后才比较
 声明类型与实测类型。OCR 默认关闭，同时关闭通用 Tesseract 与 PDF OCR，避免部署机器是否安装 Tesseract 悄悄改变延迟、
 成本和数据流向。
+
+`enabledMediaTypes` 只允许从框架审核过的 `SupportedMediaTypes` 中收窄，不能扩展任意解析类型。典型用途是把 PDF 唯一路由到
+隔离的 Docling/OCR 服务，同时继续由 Tika 处理 Markdown、HTML 与 EPUB：
+
+```scala
+TikaDocumentLoaderConfig(
+  enabledMediaTypes = TikaDocumentLoader.SupportedMediaTypes - "application/pdf"
+)
+```
+
+注册表仍会拒绝多个 loader 竞争同一 MIME；调用方不能借该配置扩大解析攻击面。
 
 ## 5. Docling Serve：PDF→Markdown + 无损结构
 
@@ -131,8 +143,33 @@ Adapter 固定调用 Docling Serve 稳定 v1 `/v1/convert/file` multipart 协议
 仍保留 `retryable` 分类，由持有稳定 ingestion/task ID 的业务 Worker 决定是否重试。部署应固定 Docling Serve 镜像版本或
 digest，配置 `X-Api-Key`、非 root、CPU/内存/PID 限额、默认出站断网和模型缓存，不使用浮动 `latest` 作为可复现生产版本。
 
-`DocumentLoaderRegistry` 不允许 Tika 与 Docling 同时声明 `application/pdf`。宿主必须明确选择一种 PDF 策略；需要降级时也
-应在业务任务中记录“主解析失败→显式选择另一个 Loader”，不能靠注册顺序静默切换表示。
+`DocumentLoaderRegistry` 仍然不允许两个 Loader 同时声明 `application/pdf`。要把廉价文本层、OCR 和视觉转录组合起来时，应注册一个 `CascadingDocumentLoader` 作为 PDF 的唯一拥有者，而不是依赖 classpath 顺序。
+
+## 5.1 提取质量门禁与级联解析
+
+扫描件、字体子集损坏的 PDF 常会抽出空白、页码或 `(cid:12)` 伪影。`ExtractionQuality` 按字母/汉字密度和 CID 占比判断正文是否足以索引；不足时不得把文档标成 `Indexed`。
+
+默认 `extractionMode=auto`：程序按质量自动从廉价文本层升到 OCR，再到可选视觉。业务可在 `DocumentInput.metadata` 写入 `extractionMode=text|ocr|vision` 强制只走对应档；未装配该档时 fail-closed。不要把“人工挑选每本 PDF 的解析器”当成默认流程。
+
+`CascadingDocumentLoader` 把输入字节收集一次，再按成本递增回放给各阶段：
+
+```scala
+val pdf = CascadingDocumentLoader(
+  Chunk(
+    ExtractionStage.text(TikaDocumentLoader(TikaDocumentLoaderConfig(enabledMediaTypes = Set("application/pdf")))),
+    ExtractionStage.ocr(docling),
+    ExtractionStage.vision(vision)
+  )
+)
+```
+
+第一份质量合格的结果胜出。manifest metadata 只记录 `extractionMode`、`extractionMethod`、`extractionFallbackUsed` 和低敏 `extractionQuality` 摘要，不含正文或模型输出。全部阶段失败或质量仍不足时 fail-closed。摄入结果另外通过 `KnowledgeIndexResult.extractedMarkdown` 把全文交给宿主持久化，不要把 Markdown 再塞进向量行。
+
+## 5.2 可选逐页视觉转录
+
+`VisionPageDocumentLoader` 只应作为 OCR 之后的最后一档，而不是默认把整本 PDF 交给多模态模型。它使用 PDFBox 逐页光栅化为 JPEG，经 `ChatModel` 的 `ContentPart.ImageUrl` 转录为 Markdown，并生成带 1-based 页码的 `DocumentStructure`。硬上限包括 `maxPages`、长边像素、JPEG 大小和页并发；超过 `maxPages` 会失败而不是静默截断前几页。页面内容按不可信资料处理，提示词要求忽略页上指令。bbox 不会被伪造。
+
+OpenAI-compatible Chat Completions 适配器在消息含图片时发送标准 `image_url` content 数组；未声明 `vision` 的 Provider profile 会在发请求前拒绝。
 
 ## 6. 结构优先切分与 Markdown 降级
 
@@ -147,6 +184,8 @@ val chunker = DocumentStructureChunker(
   )
 )
 ```
+
+默认装箱预算仍是 Unicode code point，以保持已发布 `strategyId`。可选 `maxTokens` + `TokenCounter.CjkApproximate` 只改变合并/切分预算，不是 Embedding tokenizer 对齐；启用后必须出现在 `strategyId` 中并新建索引版本。
 
 它直接基于 `DocumentBlock` 工作：合并相邻、同父节点、同标题路径的小 block，只在单个 block 超限时使用
 Unicode-safe overlap 切分。产出的 `ChunkLineage` 保留 `parentId/previousChunkId/nextChunkId/ordinal`、页码、bbox 和
@@ -288,10 +327,10 @@ PostgresAgentPersistence.knowledge(
 也应放在该隔离边界内；本项目当前不把 `allowOcr=true` 宣称为生产 OCR 方案。
 
 已由自动测试覆盖：纯文本、HTML 脚本排除、真实 Tika PDF/EPUB、声明长度预拒绝、实际字节越界、MIME 伪装、并发顺序、
-单项失败隔离、Fiber 取消、Docling v1 multipart/API Key/容量/低敏错误，以及 Markdown 标题/表格/fenced code/Unicode/
+单项失败隔离、Fiber 取消、Docling v1 multipart/API Key/容量/低敏错误、提取质量门禁、级联回放与 fail-closed、视觉 stub 页转录、OpenAI `image_url` 编码，以及 Markdown 标题/表格/fenced code/Unicode/
 稳定 ID、Docling Markdown+JSON 解码、block/page/bbox lineage、结构切分、本地目录 Source、0.4 单文件 pgvector 基线谱系回读，以及
 ACL 复核后的相邻/同父级有界扩展。Docling 测试是本地 HTTP stub 契约，真实 Docling/OCR 质量、恶意 PDF corpus、
-多页复杂表格/图片 VLM 和大规模容量仍需业务环境验收。
+多页复杂表格和大规模容量仍需业务环境验收。
 
 ## 10. 设计参考与取舍
 

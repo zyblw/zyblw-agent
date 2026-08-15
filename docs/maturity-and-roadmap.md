@@ -34,7 +34,7 @@
 | Artifact | core / `artifacts` | Experimental | session/user 隔离、不可变版本、二进制不进入 State/JSON、容量与 metadata 限制、内存契约测试 | durable Adapter、保留/删除审计、Tool 与多模态接入证据 |
 | 模型辅助压缩 | core / `context.llm` | Beta | evidence 校验和 eval | 多 Provider 质量/成本基线 |
 | Memory | core / `memory`,`memory.llm` | Beta | Store/SPI 与治理设计 | 用户查看/删除 UX、长期质量 |
-| RAG | rag、document-loaders、rerank | Beta/Experimental | `RagApplication`、目录 Source、Docling Markdown+JSON、page/bbox lineage、结构切分、版本摄取、hybrid/rerank/谱系扩展、citation/eval | 恶意 PDF/真实 OCR、token-aware、容量与线上质量 |
+| RAG | rag、document-loaders、rerank | Beta/Experimental | `RagApplication`、目录 Source、Docling Markdown+JSON、提取质量门禁、Tika→OCR→VLM 级联、可选逐页视觉转录、page/bbox lineage、结构切分、版本摄取、hybrid/rerank/谱系扩展、citation/eval | 恶意 PDF/真实 OCR smoke、embedding tokenizer 对齐、容量与线上质量 |
 | PostgreSQL | postgres | Beta | Testcontainers、迁移、并发、连接耗尽、pause/recover、pg_dump/restore | 大库升级、主备切换、性能/RTO |
 | OpenAI-compatible | providers / `integrations.openai` | Beta | stream/tool/error stub 与 smoke | 长期真实 Provider 观测 |
 | Anthropic/Gemini | providers / 对应 package | Beta | Provider contract tests | zyblw QA 业务尚未启用 |
@@ -193,9 +193,9 @@ PostgreSQL Testcontainers 与故障注入证据。
    `KnowledgeIndexStore & VectorStore` 指向相同 active snapshot，示例不再绕过 Loader/Indexer；
 7. **已完成 R2-B 契约层**：保留 Docling JSON block/page/bbox lineage，`DocumentStructureChunker` 生成 parent/neighbor，
    0.4 单文件 pgvector 基线随 active snapshot 原子发布；rerank 后相邻/同父级扩展重新应用 tenant ACL 和数量上限；
-8. **下一步 R2-C**：真实 Docling/OCR smoke、恶意 PDF corpus、tokenizer-aligned chunking、索引构建性能/成本/质量趋势、
-   低证据拒答门禁和保留期 Worker；
-9. **随后 R2-D**：在视觉复杂 corpus 证明纯文本无法达标后，再引入可选 VLM/late-interaction 页面检索 Adapter。
+8. **下一步 R2-C**：真实 Docling/OCR smoke、恶意 PDF corpus、与 Embedding tokenizer 对齐的切分、索引构建性能/成本/质量趋势、
+   低证据拒答门禁和保留期 Worker。提取质量门禁、可回放解析级联和可选逐页 VLM 转录已作为契约落地，但不能代替上述运行证据。
+9. **随后 R2-D**：在视觉复杂 corpus 证明布局/OCR 仍不足后，再引入 late-interaction 页面检索 Adapter。整页 VLM 转录只是摄取回退，不是检索替换。
 
 退出标准：质量和权限评测通过，语料可追溯/撤回，成本可预测。
 

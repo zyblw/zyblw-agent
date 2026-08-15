@@ -145,7 +145,10 @@ trait KnowledgeIndexStore:
   */
 final case class KnowledgeIndexResult(
     manifest: KnowledgeIndexManifest,
-    embeddingUsage: Option[EmbeddingUsage]
+    embeddingUsage: Option[EmbeddingUsage],
+    extraction: Option[ExtractionReport] = None,
+    extractedMarkdown: Option[String] = None,
+    extractedOutline: Chunk[ExtractedHeading] = Chunk.empty
 )
 
 /** 组合 Chunker、EmbeddingService 与 KnowledgeIndexStore 的高层摄取服务。

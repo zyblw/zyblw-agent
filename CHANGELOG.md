@@ -3,6 +3,14 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
+## 0.6.2 - 2026-08-16
+
+Makes PDF ingestion operator-usable: quality-gated cascade with `extractionMode=auto` by default, optional operator override (`text|ocr|vision`), replay-safe Tika → Docling → page-bounded vision transcription, and fail-closed indexing when the extract is empty or CID garbage. Successful ingestions return compact extraction reports plus extracted Markdown/outline for the host to persist; the knowledge manifest still stores only short metadata. OpenAI-compatible Chat Completions now sends `image_url` content parts instead of stringifying images. Structure chunking may optionally use an approximate CJK token budget; the default `strategyId` is unchanged. Completes the PostgreSQL catalog dictionary for the 26 core control-plane tables.
+
+Admin HTTP (explicitly evolutionary) accepts `extractionMode` on ingestion and surfaces requested/actual extraction on document views. No knowledge or core Flyway history changes.
+
+See [the 0.6.2 upgrade guide](docs/upgrading-to-0.6.2.md).
+
 ## 0.6.1 - 2026-08-13
 
 Adds the production host-integration seam required by the full administration console without changing persisted schemas or

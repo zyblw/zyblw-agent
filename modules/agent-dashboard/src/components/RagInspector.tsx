@@ -33,7 +33,7 @@ import {
 } from '@/lib/queries';
 import { useToast } from '@/lib/toast';
 import { useDebouncedUrlValue } from '@/lib/urlState';
-import type { IngestionJobView, KnowledgeDocumentPage, KnowledgeRetrievalHitView } from '@/types/admin';
+import type { IngestionJobView, KnowledgeDocumentPage, KnowledgeDocumentView, KnowledgeRetrievalHitView } from '@/types/admin';
 import {
   formatBytes,
   formatCount,
@@ -61,6 +61,37 @@ import {
 
 /** 一页索引清单的条数；比 Run 目录小，因为每一行的信息密度高得多。 */
 const DOCUMENTS_PAGE_SIZE = 25;
+
+const EXTRACTION_MODE_OPTIONS = [
+  { value: 'auto', label: '自动识别（按文本质量升档）' },
+  { value: 'text', label: '仅文字层' },
+  { value: 'ocr', label: '仅版面 OCR' },
+  { value: 'vision', label: '仅视觉转录' },
+] as const;
+
+function extractionModeLabel(mode: string | null | undefined): string {
+  switch (mode) {
+    case 'auto':
+      return '自动';
+    case 'text':
+      return '文字层';
+    case 'ocr':
+      return 'OCR';
+    case 'vision':
+      return '视觉';
+    default:
+      return mode?.trim() ?? '';
+  }
+}
+
+function extractionLabel(doc: KnowledgeDocumentView): string | null {
+  const method = doc.extractionMethod?.trim();
+  const mode = extractionModeLabel(doc.extractionMode);
+  if (!method && !mode) return null;
+  return [mode ? `请求 ${mode}` : null, method ? `实际 ${method}` : null, doc.extractionFallbackUsed ? '已升档' : null]
+    .filter(Boolean)
+    .join(' · ');
+}
 
 export function RagInspector() {
   // 三处租户输入共用一个防抖绑定：草稿只驱动输入框，已提交值驱动查询与游标栈。否则敲一个租户 ID 会让
@@ -482,6 +513,9 @@ function IndexManifests({
                   {doc.embeddingProvider}/{doc.embeddingModel} · {doc.embeddingDimension} 维
                 </span>
                 <span>{doc.indexingStrategy || '默认切分'}</span>
+                {extractionLabel(doc) && (
+                  <Badge className="text-sky-300 bg-sky-500/10 ring-sky-500/30">{extractionLabel(doc)}</Badge>
+                )}
                 {doc.permissions.length > 0 && <span>权限 {doc.permissions.join(', ')}</span>}
                 {doc.failureCode && (
                   <Badge className="text-rose-300 bg-rose-500/10 ring-rose-500/30">
@@ -556,6 +590,7 @@ function IngestionPanel({
   jobsPending: boolean;
 }) {
   const [permissions, setPermissions] = useState('');
+  const [extractionMode, setExtractionMode] = useState('auto');
   const [file, setFile] = useState<File | null>(null);
   const submit = useSubmitIngestion();
   const { notify } = useToast();
@@ -569,6 +604,7 @@ function IngestionPanel({
           tenantId: tenant.trim(),
           mediaType: file.type || 'application/octet-stream',
           permissions: parseList(permissions),
+          extractionMode,
         },
         content: file,
       },
@@ -584,7 +620,7 @@ function IngestionPanel({
   return (
     <Panel
       title="文档摄入"
-      description="提交后立即返回任务 ID，加载、切分与向量化在后台执行"
+      description="默认自动按文本质量选择文字层、OCR 或视觉。只有自动结果不对时才手动指定。"
       actions={
         <Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">需要 agent:admin:debug</Badge>
       }
@@ -604,6 +640,20 @@ function IngestionPanel({
           placeholder="留空表示公开"
         />
       </div>
+      <label className="mt-3 block text-xs text-slate-400">
+        提取方式
+        <select
+          value={extractionMode}
+          onChange={(event) => setExtractionMode(event.target.value)}
+          className={`mt-1 w-full rounded-md border border-slate-800 bg-slate-950 px-2 py-1.5 text-xs text-slate-200 ${FOCUS_RING}`}
+        >
+          {EXTRACTION_MODE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
 
       <div className="mt-3 flex items-center gap-2">
         <label

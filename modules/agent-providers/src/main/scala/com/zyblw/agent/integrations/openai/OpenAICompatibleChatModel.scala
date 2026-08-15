@@ -166,6 +166,8 @@ private[openai] object OpenAIWire:
       Left(AgentError.UnsupportedModelCapability(provider, "tool calls", "tools were supplied"))
     else if request.tools.nonEmpty && unsupportedChoice.nonEmpty then
       Left(AgentError.UnsupportedModelCapability(provider, "tool_choice", unsupportedChoice.get))
+    else if hasImageUrl(request) && !compatibility.descriptor.capabilities.vision then
+      Left(AgentError.UnsupportedModelCapability(provider, "vision", "请求包含图片"))
     else if reserved.nonEmpty then
       Left(
         AgentError.InvalidConfiguration(
@@ -253,16 +255,19 @@ private[openai] object OpenAIWire:
         )
       )
 
-  /** 编码单条消息，并按 Provider 能力映射 developer 角色和 reasoning 字段。 */
+  /** 编码单条消息。纯文本保持字符串 content；出现图片时改用 Chat Completions 多模态 content 数组。 */
   private def encodeMessage(message: AgentMessage, compatibility: OpenAICompatibility): Json =
-    val content = message.content.map {
-      case ContentPart.Text(value)      => value
-      case ContentPart.JsonValue(value) => value.toJson
-      case ContentPart.ImageUrl(url, _) => s"[image: $url]"
-    }.mkString
+    val contentJson =
+      if message.content.exists(isImageUrl) then arr(message.content.map(encodeContentPart))
+      else
+        Json.Str(message.content.map {
+          case ContentPart.Text(value)      => value
+          case ContentPart.JsonValue(value) => value.toJson
+          case ContentPart.ImageUrl(url, _) => s"[image: $url]"
+        }.mkString)
     val base = List(
       "role"    -> Json.Str(roleName(message.role, compatibility)),
-      "content" -> Json.Str(content)
+      "content" -> contentJson
     )
     val toolCallId = message.toolCallId.map(value => "tool_call_id" -> Json.Str(value))
     val name       = message.name.map(value => "name" -> Json.Str(value))
@@ -285,6 +290,24 @@ private[openai] object OpenAIWire:
       .flatten
       .map(value => "reasoning_content" -> Json.Str(value))
     obj(base ++ List(toolCallId, name, calls, reasoning).flatten*)
+
+  private def encodeContentPart(part: ContentPart): Json = part match
+    case ContentPart.Text(value) =>
+      obj("type" -> Json.Str("text"), "text" -> Json.Str(value))
+    case ContentPart.JsonValue(value) =>
+      obj("type" -> Json.Str("text"), "text" -> Json.Str(value.toJson))
+    case ContentPart.ImageUrl(url, detail) =>
+      val image = obj(
+        List("url" -> Json.Str(url)) ++ detail.map(value => "detail" -> Json.Str(value)).toList*
+      )
+      obj("type" -> Json.Str("image_url"), "image_url" -> image)
+
+  private def isImageUrl(part: ContentPart): Boolean = part match
+    case ContentPart.ImageUrl(_, _) => true
+    case _                          => false
+
+  private def hasImageUrl(request: ChatRequest): Boolean =
+    request.messages.exists(_.content.exists(isImageUrl))
 
   /** 编码 function tool；不支持 strict 时明确省略对应字段。 */
   private def encodeTool(tool: ToolDefinition, compatibility: OpenAICompatibility): Json =

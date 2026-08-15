@@ -32,7 +32,7 @@ object PostgresAgentPersistence:
 
   /** 自动迁移后再构造核心持久化 Adapter 的便捷生产层。
     *
-    * 该层只在 ZLayer 构建阶段执行一次 Flyway migrate/validate 和关键表探针；失败会阻止应用及 Worker 启动，绝不回退到内存。 已由平台统一执行 migration
+    * 该层只在 ZLayer 构建阶段执行一次 Flyway migrate/validate 和关键表探针；失败会阻止应用及 Worker 启动，绝不回退到内存。 已由宿主部署任务统一执行 migration
     * 的大型宿主可继续使用 [[layer]]，避免应用账号持有 DDL 权限。
     */
   val migratedLayer: RLayer[DataSource, RunStore & RunCommandStore & RunSubmissionStore] =

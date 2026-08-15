@@ -327,7 +327,11 @@ object KnowledgeAdminLive:
     indexingStrategy = manifest.build.indexingStrategy,
     failureCode = manifest.failureCode,
     createdAtEpochMilli = manifest.createdAt.toEpochMilli,
-    updatedAtEpochMilli = manifest.updatedAt.toEpochMilli
+    updatedAtEpochMilli = manifest.updatedAt.toEpochMilli,
+    extractionMode = manifest.metadata.get("extractionMode"),
+    extractionMethod = manifest.metadata.get("extractionMethod"),
+    extractionQuality = manifest.metadata.get("extractionQuality"),
+    extractionFallbackUsed = manifest.metadata.get("extractionFallbackUsed").map(_ == "true")
   )
 
   /** 投影一条命中及其全部可解释信号。 */

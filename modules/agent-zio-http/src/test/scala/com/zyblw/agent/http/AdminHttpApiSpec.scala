@@ -749,6 +749,23 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
           recorded.exists(_.endsWith(":acme/operator-1"))
         )
       },
+      test("非法 extractionMode 在解析阶段拒绝，不进入摄入") {
+        for
+          tuple <- fullApi
+          (api, calls) = tuple
+          response <- api.routes.runZIO(
+            withScopes(
+              Request.post(
+                (admin / "knowledge" / "ingestions")
+                  .addQueryParams("fileName=guide.md&tenantId=acme&extractionMode=magic"),
+                Body.fromString("# 标题")
+              ),
+              AdminAuthorization.DebugScope
+            )
+          )
+          recorded <- calls.get
+        yield assertTrue(response.status == Status.BadRequest, recorded.isEmpty)
+      },
       test("不存在的摄入任务返回 404 而不是 200 加空正文") {
         for
           tuple <- fullApi

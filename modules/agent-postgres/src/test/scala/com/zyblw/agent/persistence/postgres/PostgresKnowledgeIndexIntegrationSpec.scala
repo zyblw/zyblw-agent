@@ -43,13 +43,13 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         value.setPassword(container.password)
         value: DataSource
       }
-      // 模拟平台已经在 public schema 中创建业务对象；agent 只能以受限 version 0 baseline 接入，
+      // 模拟独立宿主已经在 public schema 中创建业务对象；agent 只能以受限 version 0 baseline 接入，
       // 不能因此跳过 V001+ 或接管已有 agent core 表。
       _ <- ZIO.attemptBlocking {
         val connection = dataSource.getConnection
         try
           val statement = connection.createStatement()
-          try statement.execute("CREATE TABLE platform_shared_schema_marker (id bigint PRIMARY KEY)")
+          try statement.execute("CREATE TABLE host_shared_schema_marker (id bigint PRIMARY KEY)")
           finally statement.close()
         finally connection.close()
       }
@@ -229,7 +229,8 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
       yield assertTrue(
         before.isEmpty,
         harness.coreReplayMigrations == 0,
-        harness.firstMigrations == 1,
+        // V001 结构基线 + R__ 中文数据字典；二次启动仍为零次执行。
+        harness.firstMigrations == 2,
         harness.replayMigrations == 0,
         harness.vectorExtensionVersion.exists(_.startsWith("0.8.")),
         firstReady.active,

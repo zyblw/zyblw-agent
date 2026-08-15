@@ -81,5 +81,59 @@ object DocumentStructureChunkerSpec extends ZIOSpecDefault:
       )
       for chunks <- DocumentStructureChunker().split(document, tenant, scope)
       yield assertTrue(chunks.nonEmpty, chunks.forall(_.lineage.exists(_.origins.isEmpty)))
+    },
+    test("默认 strategyId 不含 token 计数器；启用后才进入身份") {
+      val defaultId = DocumentStructureChunker().strategyId
+      val tokenId   = DocumentStructureChunker(
+        DocumentStructureChunkerConfig(maxTokens = Some(256), tokenCounter = TokenCounter.CjkApproximate)
+      ).strategyId
+      assertTrue(
+        !defaultId.contains("tokens="),
+        tokenId.contains("tokens=256"),
+        tokenId.contains("counter=cjk-approx-v1")
+      )
+    },
+    test("CJK 近似 token 预算阻止把超长同级段落合并进同一块") {
+      val long      = "太阳中风发热汗出恶风脉缓者名为中风。".repeat(20)
+      val structure = DocumentStructure(
+        "vision-page-markdown",
+        Some("v1"),
+        Chunk(
+          DocumentBlock(
+            "#/p/1",
+            Some("root"),
+            0,
+            DocumentBlockKind.Paragraph,
+            long,
+            Chunk("辨太阳病"),
+            Chunk(DocumentOrigin(1))
+          ),
+          DocumentBlock(
+            "#/p/2",
+            Some("root"),
+            1,
+            DocumentBlockKind.Paragraph,
+            long,
+            Chunk("辨太阳病"),
+            Chunk(DocumentOrigin(2))
+          )
+        )
+      )
+      val document = SourceDocument(
+        "token-doc",
+        long,
+        "knowledge://token-doc",
+        representation = DocumentRepresentation.Markdown,
+        structure = Some(structure)
+      )
+      val chunker = DocumentStructureChunker(
+        DocumentStructureChunkerConfig(
+          maxCharacters = 8000,
+          maxTokens = Some(80),
+          tokenCounter = TokenCounter.CjkApproximate
+        )
+      )
+      for chunks <- chunker.split(document, tenant, scope)
+      yield assertTrue(chunks.length >= 2)
     }
   )

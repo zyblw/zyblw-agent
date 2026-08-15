@@ -118,7 +118,16 @@ object AgentPostgresMigrations:
 
   /** 校验 Flyway 之外的核心结构后置条件。Flyway checksum 发现脚本漂移，本检查发现关键表被人工删除。 */
   def verifyCore(dataSource: DataSource): Task[AgentPostgresSchemaVerification] =
-    verifyRelations(dataSource, "core", CoreRelations)
+    ZIO.attemptBlocking {
+      val connection = dataSource.getConnection
+      try
+        verifyRelations(connection, "core", CoreRelations, None)
+        val schema = querySingleString(connection, "SELECT current_schema()")
+          .getOrElse("public")
+        verifyCommentCoverage(connection, "core", schema, CoreRelations)
+        AgentPostgresSchemaVerification("core", CoreRelations, Chunk.empty, None)
+      finally connection.close()
+    }
 
   /** 1024 baseline 的启动后置探针，校验 manifest、谱系、ACL 与向量维度契约。 */
   def verifyKnowledge1024(dataSource: DataSource): Task[AgentPostgresSchemaVerification] =
@@ -164,6 +173,7 @@ object AgentPostgresMigrations:
           if actual != s"vector($dimension)" then
             throw IllegalStateException(s"$component 表 $table 的 embedding 类型错误: $actual")
         }
+        verifyCommentCoverage(connection, component, schema, KnowledgeRelations)
         AgentPostgresSchemaVerification(component, KnowledgeRelations, columns, Some(extensionVersion))
       finally connection.close()
     }
@@ -196,19 +206,6 @@ object AgentPostgresMigrations:
     }
 
   private def verifyRelations(
-      dataSource: DataSource,
-      component: String,
-      relations: Chunk[String]
-  ): Task[AgentPostgresSchemaVerification] =
-    ZIO.attemptBlocking {
-      val connection = dataSource.getConnection
-      try
-        verifyRelations(connection, component, relations, None)
-        AgentPostgresSchemaVerification(component, relations, Chunk.empty, None)
-      finally connection.close()
-    }
-
-  private def verifyRelations(
       connection: Connection,
       component: String,
       relations: Chunk[String],
@@ -218,7 +215,7 @@ object AgentPostgresMigrations:
     if missing.nonEmpty then
       throw IllegalStateException(s"$component migration 缺少关键关系: ${missing.mkString(",")}")
 
-  /** 平台业务表可与 agent core 共用 public，但绝不能让首次 baseline 静默接管已有 agent 对象。
+  /** 宿主业务表可与 agent core 共用 public，但绝不能让首次 baseline 静默接管已有 agent 对象。
     *
     * 此检查只服务于 [[AgentPostgresMigrationConfig.sharedPublicSchema]]：已有普通业务表、Flyway 记录或 pgvector 扩展时允许创建 agent
     * history 的 version 0 基线；只要发现任一 framework core relation，就拒绝启动并要求使用 空库或经过审查的迁移路径。
@@ -292,6 +289,63 @@ object AgentPostgresMigrations:
       if result.next() then Option(result.getString(1)) else None
     finally statement.close()
 
+  private def querySingleLong(
+      connection: Connection,
+      sql: String,
+      schema: String,
+      relations: Chunk[String]
+  ): Long =
+    val statement = connection.prepareStatement(sql)
+    try
+      statement.setString(1, schema)
+      statement.setArray(2, connection.createArrayOf("text", relations.toArray))
+      val result = statement.executeQuery()
+      try
+        if !result.next() then throw IllegalStateException("schema comment probe did not return a row")
+        result.getLong(1)
+      finally result.close()
+    finally statement.close()
+
+  private def verifyCommentCoverage(
+      connection: Connection,
+      component: String,
+      schema: String,
+      relations: Chunk[String]
+  ): Unit =
+    val uncommentedTables = querySingleLong(
+      connection,
+      """SELECT count(*)
+        |FROM pg_class relation
+        |JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        |WHERE namespace.nspname = ?
+        |  AND relation.relname::text = ANY(?)
+        |  AND relation.relkind = 'r'
+        |  AND NULLIF(btrim(obj_description(relation.oid, 'pg_class')), '') IS NULL""".stripMargin,
+      schema,
+      relations
+    )
+    if uncommentedTables != 0 then
+      throw IllegalStateException(s"$component 存在 $uncommentedTables 张没有数据字典说明的表")
+    val uncommentedColumns = querySingleLong(
+      connection,
+      """SELECT count(*)
+        |FROM pg_attribute attribute
+        |JOIN pg_class relation ON relation.oid = attribute.attrelid
+        |JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        |WHERE namespace.nspname = ?
+        |  AND relation.relname::text = ANY(?)
+        |  AND relation.relkind = 'r'
+        |  AND attribute.attnum > 0
+        |  AND NOT attribute.attisdropped
+        |  AND NULLIF(btrim(col_description(relation.oid, attribute.attnum)), '') IS NULL""".stripMargin,
+      schema,
+      relations
+    )
+    if uncommentedColumns != 0 then
+      throw IllegalStateException(
+        s"$component 存在 $uncommentedColumns 个没有数据字典说明的字段"
+      )
+
   private def versionAtLeast(actual: String, major: Int, minor: Int, patch: Int): Boolean =
     val parsed = actual.split("[^0-9]+").iterator.filter(_.nonEmpty).take(3).map(_.toInt).toVector.padTo(3, 0)
     parsed(0) > major ||
@@ -311,7 +365,7 @@ final case class AgentPostgresMigrationConfig(
 ):
   /** 唯一允许 agent core 使用 Flyway baseline 的受限形态。
     *
-    * 平台的业务表和 `vector` 扩展已存在时，Flyway 必须先写入 version 0 history，才能继续运行 agent 自己的 V001+。 只允许默认 core location、默认
+    * 宿主的业务表和 `vector` 扩展已存在时，Flyway 必须先写入 version 0 history，才能继续运行 agent 自己的 V001+。 只允许默认 core location、默认
     * history table 与 version 0；调用 migration 前还会检查 public 中不存在旧 agent 表。
     */
   private[postgres] def isSharedPublicSchemaBaseline: Boolean =
@@ -334,9 +388,9 @@ final case class AgentPostgresMigrationConfig(
     else Right(copy(locations = locations.distinct))
 
 object AgentPostgresMigrationConfig:
-  /** 平台与 agent 共用非空 `public` schema 的安全 core 策略。
+  /** 独立宿主与 agent 共用非空 `public` schema 的安全 core 策略。
     *
-    * 首次仅当 history 不存在且 `public` 不包含 agent core 表时使用；后续启动以已创建的 history 继续 Flyway 校验。这让业务表、平台 Flyway 表和
+    * 首次仅当 history 不存在且 `public` 不包含 agent core 表时使用；后续启动以已创建的 history 继续 Flyway 校验。这让业务表、宿主 Flyway 表和
     * pgvector 扩展不会阻止全新 agent 安装，同时不会把旧 agent 数据伪装成已迁移状态。
     */
   val sharedPublicSchema: AgentPostgresMigrationConfig = AgentPostgresMigrationConfig(

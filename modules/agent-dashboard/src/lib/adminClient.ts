@@ -371,7 +371,13 @@ export const adminApi = {
    */
   submitIngestion(
     config: AdminClientConfig,
-    params: { fileName: string; tenantId: string; mediaType?: string; permissions?: string[] },
+    params: {
+      fileName: string;
+      tenantId: string;
+      mediaType?: string;
+      permissions?: string[];
+      extractionMode?: string;
+    },
     content: Blob,
   ): Promise<IngestionJobView> {
     return request(
@@ -381,6 +387,7 @@ export const adminApi = {
         tenantId: params.tenantId,
         mediaType: params.mediaType,
         permissions: params.permissions,
+        extractionMode: params.extractionMode,
       })}`,
       {
         method: 'POST',

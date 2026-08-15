@@ -73,5 +73,38 @@ object OpenAICompatibilitySpec extends ZIOSpecDefault:
         encoded.exists(_.contains("strict")),
         encoded.exists(_.contains("max_completion_tokens"))
       )
+    },
+    test("OpenAI encodes vision content parts instead of stringifying image URLs") {
+      val request = ChatRequest(
+        Chunk(
+          AgentMessage(
+            MessageRole.User,
+            Chunk(
+              ContentPart.Text("transcribe"),
+              ContentPart.ImageUrl("data:image/jpeg;base64,abc", Some("low"))
+            )
+          )
+        )
+      )
+      val encoded =
+        OpenAIWire.encodeRequest(request, "gpt-5.4-mini", OpenAICompatibility.openAI).map(_.toString)
+      assertTrue(
+        encoded.exists(_.contains("\"type\":\"image_url\"")),
+        encoded.exists(_.contains("data:image/jpeg;base64,abc")),
+        encoded.forall(!_.contains("[image:"))
+      )
+    },
+    test("DeepSeek rejects image parts because the profile has no vision") {
+      val request = ChatRequest(
+        Chunk(
+          AgentMessage(
+            MessageRole.User,
+            Chunk(ContentPart.ImageUrl("data:image/jpeg;base64,abc"))
+          )
+        )
+      )
+      val encoded =
+        OpenAIWire.encodeRequest(request, ProviderPresets.DeepSeekDefaultModel, OpenAICompatibility.deepSeek)
+      assertTrue(encoded.left.exists(_.isInstanceOf[AgentError.UnsupportedModelCapability]))
     }
   )

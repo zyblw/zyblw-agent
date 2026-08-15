@@ -510,8 +510,9 @@ final class AdminHttpApi(
       _        <- validateText("fileName", fileName, MaxFileNameChars)
       _        <- validateText("tenantId", tenantId, MaxTenantChars)
       mediaType = request.queryParam("mediaType").map(_.trim).filter(_.nonEmpty)
-      content <- HttpRequestBody.readBytes(request, KnowledgeAdminService.MaxUploadBytes.toLong)
-      _       <- ZIO
+      extractionMode <- validatedExtractionMode(request)
+      content        <- HttpRequestBody.readBytes(request, KnowledgeAdminService.MaxUploadBytes.toLong)
+      _              <- ZIO
         .fail(AgentError.InvalidConfiguration("摄入正文不能为空"))
         .when(content.isEmpty)
     yield IngestionSubmission(
@@ -526,7 +527,8 @@ final class AdminHttpApi(
         .map(_.trim)
         .filter(_.nonEmpty)
         .toSet,
-      content = content
+      content = content,
+      metadata = extractionMode.fold(Map.empty[String, String])(mode => Map("extractionMode" -> mode))
     )
 
   /** 校验读权限并返回操作者。 */
@@ -564,6 +566,9 @@ object AdminHttpApi:
   /** 上传文件名的最大字符数。 */
   private val MaxFileNameChars: Int = 400
 
+  /** 管理面摄入允许的提取模式。与 RAG `ExtractionMode` 线格式对齐，但不把 RAG 依赖引入 HTTP 模块。 */
+  private val AllowedExtractionModes: Set[String] = Set("auto", "text", "ocr", "vision")
+
   /** 从治理服务与既有认证上下文解析器装配。 */
   val layer: URLayer[AdminCapabilities & AgentRequestContextResolver, AdminHttpApi] =
     ZLayer.fromFunction(AdminHttpApi.apply)
@@ -591,6 +596,18 @@ object AdminHttpApi:
       .fail(AgentError.InvalidConfiguration(s"$field 不能超过 $maxChars 个字符"))
       .when(value.codePointCount(0, value.length) > maxChars)
       .unit
+
+  /** 解析可选提取模式；缺省表示由级联按质量自动升档。 */
+  private def validatedExtractionMode(request: Request): IO[AgentError, Option[String]] =
+    request.queryParam("extractionMode").map(_.trim).filter(_.nonEmpty) match
+      case None      => ZIO.succeed(None)
+      case Some(raw) =>
+        val normalized = raw.toLowerCase(java.util.Locale.ROOT)
+        if AdminHttpApi.AllowedExtractionModes.contains(normalized) then ZIO.succeed(Some(normalized))
+        else
+          ZIO.fail(
+            AgentError.InvalidConfiguration("extractionMode 无效，允许 auto|text|ocr|vision")
+          )
 
   /** 解析 Run 状态查询值；未知状态 fail-closed。 */
   private def parseRunStatus(value: String): IO[AgentError, RunStatus] =

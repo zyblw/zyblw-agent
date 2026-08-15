@@ -11,7 +11,7 @@
 ```text
 业务授权 + 文档目录/对象存储
   -> DocumentInput(ZStream[Byte])
-  -> 解析路由：数字 PDF / OCR / 选择性 VLM
+  -> CascadingDocumentLoader（Tika 文本层 / Docling OCR / 可选逐页 VLM）
   -> SourceDocument(Markdown + DocumentStructure)
   -> DocumentStructureChunker(block/parent/page/bbox/neighbor)
   -> GovernedEmbeddingService(cache/quota/model identity)
@@ -41,18 +41,23 @@ PDF 二进制或整份 Markdown。
 
 ## 3. 解析、OCR 与 VLM 路由
 
-1. 数字 PDF：默认使用 Docling standard pipeline，`doOcr=true, forceOcr=false`；已有可用文本层时不强制 OCR。
-2. 扫描 PDF：Docling 在无文本层的页面运行 OCR；OCR 语言必须按语料配置，并在真实中英文样本上评测。
-3. 图表/复杂页：先用布局/OCR 得到页面元素；只对低置信页、图片或表格区域调用 VLM，不默认把整本 PDF 交给远程模型。
-4. VLM 输出：保存 model/version/prompt hash/confidence 和页面 Artifact；它只是不可信内容，不能生成 tenant、ACL 或 authority。
+宿主应把 PDF 交给一个 `CascadingDocumentLoader`，而不是让 Tika 与 Docling 竞争同一 MIME。默认 **自动区分**：先试文字层，质量不够再 OCR，仍不够且宿主装配了视觉模型才逐页转录。运维只在自动结果明显错误时强制 `text|ocr|vision`。
+
+1. 数字 PDF：廉价 Tika 文本层。`ExtractionQuality` 确认字母/汉字密度足够后直接切分；已有可选中文字时不必付 OCR 费用。
+2. 扫描 PDF / CID 伪影：质量不足时回退到 Docling Serve，`doOcr=true, forceOcr=false`；OCR 语言必须按语料配置。
+3. 仍不足的复杂页：可选 `VisionPageDocumentLoader` 按页光栅化后调用视觉模型，输出 Markdown + 页级 structure。有硬页数/像素/并发上限；超过上限 fail-closed。不要默认把整本 PDF 交给远程多模态模型。
+4. 强制某档但当前部署未装配：立即失败并给出明确错误，不要静默改走别的档。
+5. 全部阶段失败或质量仍不足：拒绝索引。空白扫描件不会变成“已发布知识”。
+6. VLM 输出只是不可信内容。保存 model 名、页数和低敏质量摘要；不能生成 tenant、ACL 或 authority，也不伪造 bbox。
+
+摄入成功后框架把 Markdown 和标题大纲交给宿主。产品库应保存全文、目录和提取方法，阅读原件仍走对象存储；向量行只保存 chunk 与谱系。
 
 `DoclingDocumentLoader` 同时请求 Markdown 和无损 JSON。JSON 投影为类型化 `DocumentBlock`，保留父节点、标题路径、页码、bbox 和 block ID；原始 Provider JSON
 不进 metadata 和日志。
 
 ## 4. 切分和 Embedding
 
-`DocumentStructureChunker` 优先按 block/章节切分，合并同父级相邻小块，只对超大单 block 使用 overlap。表格不应从行中间切开；当后续加入 token-aware
-切分时，tokenizer 必须与 Embedding 模型对齐，切分策略变更必须提升 `strategyId` 并新建索引版本。
+`DocumentStructureChunker` 优先按 block/章节切分，合并同父级相邻小块，只对超大单 block 使用 overlap。默认按 Unicode code point 装箱。可选 `maxTokens` 使用近似 CJK 计数器，不是 Embedding tokenizer；变更必须提升 `strategyId` 并新建索引版本。表格不应从行中间切开。
 
 Embedding 不只是“调一个 API”：
 
@@ -106,7 +111,7 @@ Tool 的 query/topK/filter 必须校验，tenant/permissions 仍由运行时注�
 - 数据库重启、worker kill、Embedding 超时、重复 ingestion、撤回与重建的恢复演练；
 - 百万级 chunk 的 WAL、索引构建、vacuum、备份/恢复和容量曲线。
 
-当前代码已实现契约级的 Markdown+JSON 解码、page/bbox/block lineage、结构切分、0.4 单文件基线原子发布、ACL 后相邻/同父级扩展和真实 pgvector
+当前代码已实现契约级的 Markdown+JSON 解码、page/bbox/block lineage、结构切分、提取质量门禁、可回放解析级联、可选逐页视觉转录、0.4 单文件基线原子发布、ACL 后相邻/同父级扩展和真实 pgvector
 Testcontainer。上述质量/容量/敌对样本证据仍必须在业务语料与目标硬件上完成，不能由单元测试代替。
 
 ## 10. 一手设计参考

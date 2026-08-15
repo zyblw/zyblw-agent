@@ -14,6 +14,12 @@ Use the repository-local `zyblw-agent-development` skill for framework implement
 documentation, source-learning, and releases. It routes version-sensitive ZIO and ZIO HTTP work to
 their current official documentation without importing private product rules.
 
+Use the repository-local `zyblw-system-evolution` skill before cross-cutting architecture,
+reliability, scaling, data-boundary, compatibility, migration, context, memory, RAG, artifact, or
+multi-agent decisions. It turns external system-design patterns into evidence gates, the smallest
+reversible increment, executable verification, and rollback; it does not authorize speculative
+infrastructure. Combine it with `zyblw-agent-development` for implementation.
+
 ## Where things live
 
 | Path | Contents | Published |
@@ -38,11 +44,12 @@ lifecycle, protocol, security, or license boundary plus an ADR.
 
 ## Current state
 
-The version line is `0.5.0`. `0.3.0` froze the core control plane, `0.4.0` established structured
-RAG on a dedicated knowledge schema, and `0.5.0` adds the optional administration sub-surface,
-runtime configuration overrides and model governance without changing the business mainline.
+The version line is `0.6.1`. `0.3.0` froze the core control plane, `0.4.0` established structured
+RAG on a dedicated knowledge schema, `0.5.0` added the optional administration sub-surface, and
+`0.6.0` established the fresh-install 1024-dimensional knowledge baseline. `0.6.1` is a compatible
+patch for host governance and dashboard embedding; it does not change released migrations.
 
-Maturity is tracked per capability in `docs/maturity-and-roadmap.md`, not per module. As of `0.5.0`:
+Maturity is tracked per capability in `docs/maturity-and-roadmap.md`, not per module. As of `0.6.1`:
 
 - **Foundation**: runtime loop, typed tools and policy, durable command worker, layered
   instructions, business HTTP v1, run inspection.
@@ -111,9 +118,9 @@ Run the smallest relevant checks during development and the full gates before a 
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.5.0-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.6.1-local"; publishM2'
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.5.0-local sbt -batch compile
+ZYBLW_AGENT_VERSION=0.6.1-local sbt -batch compile
 ```
 
 Console changes additionally require, in `modules/agent-dashboard`:
@@ -121,6 +128,26 @@ Console changes additionally require, in `modules/agent-dashboard`:
 ```bash
 npm run typecheck && npm run lint && npm run build && npm run test:e2e
 ```
+
+For console design and interaction work, start with `zyblw-agent-development`, then use the
+repository-local frontend skills in this order:
+
+1. `frontend-design` to ground the visual direction in the actual operator job: connection setup,
+   capability discovery, run/trace inspection, model governance, configuration, and failure recovery.
+2. `ui-ux-pro-max` to compare dashboard density, hierarchy, color, typography, motion, accessibility,
+   and Next.js implementation guidance. In Codex or Cursor, run the script at the resolved absolute
+   path `<repository-root>/.agents/skills/ui-ux-pro-max/scripts/search.py` with `python3`; do not use
+   the upstream Claude-only `CLAUDE_PLUGIN_ROOT` example.
+3. `vercel-composition-patterns` and `vercel-react-best-practices` for maintainable React 19 / Next.js
+   16 component APIs, loading paths, rendering, and bundle performance.
+4. `vercel-react-view-transitions` only for motion that communicates continuity or state change, with
+   a non-animated fallback and `prefers-reduced-motion` support.
+5. `web-design-guidelines` for the final responsive, keyboard, focus, form-feedback, contrast, and
+   interaction audit.
+
+The dashboard is an operations console, not a marketing surface. Prefer calm hierarchy, explicit
+system state, legible dense data, predictable navigation, and recoverable actions over decorative
+motion or novelty.
 
 Use `npm run typecheck`, not a bare `tsc --noEmit`: route-aware helpers such as `LayoutProps` are
 generated into `.next/types`, so a bare `tsc` only passes on a machine that already built.

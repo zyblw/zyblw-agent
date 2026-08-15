@@ -77,6 +77,7 @@ Central artifact 不可覆盖；失败修复必须用新版本。
   1536 knowledge schema 原地改维度；保留数据的宿主必须新建 snapshot、重建向量并在评测后切换。此公共 API/物理契约变化属于
   minor，不能作为 `0.5.x` patch 发布。
 - `0.6.1` 是兼容 patch：新增宿主动态治理装配和 Dashboard 同域会话模式，不修改任何已发布 migration 或稳定线格式。
+- `0.6.2` 是兼容 patch：新增 PDF 提取级联、可选视觉转录和管理面提取方式字段，不修改任何已发布 migration 或稳定线格式。
 - `1.x`：公共核心、迁移、HTTP 契约和运维承诺达到稳定后再进入。
 - Provider、Beta/Experimental 模块也跟随统一版本，减少多模块组合矩阵。
 - `modules/agent-dashboard` 是浏览器应用，随仓库一起打标签，但不发布 Maven 制品，也不占用一个新的 artifact 坐标。

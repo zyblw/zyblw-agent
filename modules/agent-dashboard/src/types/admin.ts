@@ -381,6 +381,10 @@ export interface KnowledgeDocumentView {
   failureCode?: string | null;
   createdAtEpochMilli: number;
   updatedAtEpochMilli: number;
+  extractionMode?: string | null;
+  extractionMethod?: string | null;
+  extractionQuality?: string | null;
+  extractionFallbackUsed?: boolean | null;
 }
 
 /** 一页知识索引清单。 */

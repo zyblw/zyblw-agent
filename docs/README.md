@@ -1,7 +1,7 @@
 # zyblw-agent 文档地图
 
 > 状态：当前
-> 最后核验：2026-08-09
+> 最后核验：2026-08-14
 > 事实来源：`build.sbt`、发布工作流、模块源码、测试与数据库迁移
 
 ## 按目标选择阅读路径
@@ -18,7 +18,7 @@
 
 1. [生产接入基线与发布候选判定](production-readiness.md)
 2. [AgentApplication 与 Builder](application-builder.md)
-3. [持久化](persistence.md)与[宿主数据库迁移](database-migrations.md)
+3. [PostgreSQL 独立宿主快速接入](postgres-quickstart.md)、[持久化](persistence.md)与[宿主数据库迁移](database-migrations.md)
 4. [ZIO HTTP 生产宿主](http-host.md)
 5. [安全](security.md)、[可观测性](observability.md)与[测试](testing.md)
 6. [管理 API 与运维控制台](admin-console.md)
@@ -68,6 +68,7 @@
 - [从 0.1.0 升级到 0.2.0](upgrading-to-0.2.0.md)
 - [从 0.2.0 升级到 0.2.1](upgrading-to-0.2.1.md)
 - [宿主数据库迁移](database-migrations.md)
+- [PostgreSQL 独立宿主快速接入](postgres-quickstart.md)
 - [业务仓库消费与跨仓联调](consuming-from-server.md)
 - [独立公开仓库 ADR](architecture/0015-independent-public-repository.md)
 - [已被取代的原开源边界 ADR](architecture/0013-open-source-release-boundary.md)

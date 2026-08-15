@@ -17,11 +17,15 @@ final case class DocumentStructureChunkerConfig(
     maxCharacters: Int = 1200,
     overlapCharacters: Int = 120,
     mergePeers: Boolean = true,
-    strategyVersion: String = "document-structure-v1"
+    strategyVersion: String = "document-structure-v1",
+    /** 可选 token 装箱预算。未设置时保持历史 code point 行为，不改变 `strategyId`。 */
+    maxTokens: Option[Int] = None,
+    tokenCounter: TokenCounter = TokenCounter.CodePoints
 ):
   require(maxCharacters >= 128, "structure chunk maxCharacters 必须至少为 128")
   require(overlapCharacters >= 0 && overlapCharacters < maxCharacters, "structure chunk overlap 无效")
   require(strategyVersion.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,99}"), "strategyVersion 格式无效")
+  require(maxTokens.forall(_ >= 32), "structure chunk maxTokens 必须至少为 32")
 
 /** 直接基于结构 block 切分，保留页码、bbox、block ID、父级与阅读顺序。
   *
@@ -34,7 +38,9 @@ final class DocumentStructureChunker(
 ) extends Chunker:
 
   override val strategyId: String =
-    s"${config.strategyVersion}:max=${config.maxCharacters}:overlap=${config.overlapCharacters}:merge=${config.mergePeers}"
+    val base =
+      s"${config.strategyVersion}:max=${config.maxCharacters}:overlap=${config.overlapCharacters}:merge=${config.mergePeers}"
+    config.maxTokens.fold(base)(limit => s"$base:tokens=$limit:counter=${config.tokenCounter.id}")
 
   def split(
       document: SourceDocument,
@@ -103,16 +109,15 @@ final class DocumentStructureChunker(
         pending.clear()
 
     blocks.foreach { block =>
-      if codePoints(block.text) > availableBody(block.headingPath) then
+      if !fits(block.headingPath, block.text) then
         flush()
         result ++= splitOversized(block)
       else if pending.isEmpty then pending += block
       else
         val sameContext =
           pending.last.parentId == block.parentId && pending.last.headingPath == block.headingPath
-        val mergedSize = codePoints(pendingText) + 2 + codePoints(block.text)
-        if config.mergePeers && sameContext && mergedSize <= availableBody(block.headingPath) then
-          pending += block
+        val merged = pendingText + "\n\n" + block.text
+        if config.mergePeers && sameContext && fits(block.headingPath, merged) then pending += block
         else
           flush()
           pending += block
@@ -142,7 +147,14 @@ final class DocumentStructureChunker(
       .toVector
 
   private def availableBody(path: Chunk[String]): Int =
-    (config.maxCharacters - codePoints(renderPrefix(path)) - 2).max(1)
+    val headingBudget = codePoints(renderPrefix(path)) + 2
+    val charBudget    = (config.maxCharacters - headingBudget).max(1)
+    config.maxTokens.fold(charBudget)(limit => charBudget.min(limit).max(1))
+
+  private def fits(path: Chunk[String], body: String): Boolean =
+    val rendered = render(path, body)
+    codePoints(rendered) <= config.maxCharacters &&
+    config.maxTokens.forall(limit => config.tokenCounter.count(rendered) <= limit)
 
   private def render(path: Chunk[String], text: String): String =
     val prefix = renderPrefix(path)

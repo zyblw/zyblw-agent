@@ -255,7 +255,14 @@ final class DocumentIngestionService(
           request.ingestionId,
           request.expectation
         )
-      yield DocumentIngestionOutcome.Indexed(document.id, result)
+      yield DocumentIngestionOutcome.Indexed(
+        document.id,
+        result.copy(
+          extraction = Some(ExtractionReport.from(document)),
+          extractedMarkdown = Some(document.text),
+          extractedOutline = ExtractedHeading.from(document)
+        )
+      )
       failureMode match
         case DocumentIngestionFailureMode.FailFast => process
         case DocumentIngestionFailureMode.Continue =>

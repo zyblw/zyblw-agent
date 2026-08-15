@@ -28,11 +28,19 @@ final case class TikaDocumentLoaderConfig(
     maxExtractedCodePoints: Int = 2_000_000,
     parseTimeout: Duration = 30.seconds,
     allowOcr: Boolean = false,
-    requireDetectedTypeMatch: Boolean = true
+    requireDetectedTypeMatch: Boolean = true,
+    /** 允许业务装配把 PDF 交给隔离 Docling，同时继续用 Tika 解析 Markdown/EPUB。 只能选择框架审核过的类型，避免调用方用本参数扩大解析攻击面。
+      */
+    enabledMediaTypes: Set[String] = TikaDocumentLoader.SupportedMediaTypes
 ):
   require(maxInputBytes > 0, "Tika maxInputBytes 必须为正数")
   require(maxExtractedCodePoints > 0, "Tika maxExtractedCodePoints 必须为正数")
   require(parseTimeout > Duration.Zero, "Tika parseTimeout 必须为正数")
+  require(enabledMediaTypes.nonEmpty, "Tika enabledMediaTypes 不能为空")
+  require(
+    enabledMediaTypes.subsetOf(TikaDocumentLoader.SupportedMediaTypes),
+    "Tika enabledMediaTypes 包含未审核的 MIME type"
+  )
 
 /** 使用 Apache Tika 3.x 解析文本、Markdown、HTML、PDF 和 EPUB 的可选 Loader。
   *
@@ -50,14 +58,7 @@ final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLo
     extends DocumentLoader:
   override val id: String = "apache-tika-3.3.1"
 
-  override val supportedMediaTypes: Set[String] = Set(
-    "text/plain",
-    "text/markdown",
-    "text/html",
-    "application/xhtml+xml",
-    "application/pdf",
-    "application/epub+zip"
-  )
+  override val supportedMediaTypes: Set[String] = config.enabledMediaTypes
 
   /** 先有界收集一次输入，再在可中断 blocking Fiber 中解析。
     *
@@ -203,6 +204,15 @@ final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLo
   )
 
 object TikaDocumentLoader:
+  val SupportedMediaTypes: Set[String] = Set(
+    "text/plain",
+    "text/markdown",
+    "text/html",
+    "application/xhtml+xml",
+    "application/pdf",
+    "application/epub+zip"
+  )
+
   /** 使用默认严格配置构造 Loader Layer。 */
   val layer: ULayer[DocumentLoader] = ZLayer.succeed(TikaDocumentLoader(): DocumentLoader)
 

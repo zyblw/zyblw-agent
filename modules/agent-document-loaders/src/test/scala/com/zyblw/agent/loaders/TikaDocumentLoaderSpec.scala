@@ -178,5 +178,24 @@ object TikaDocumentLoaderSpec extends ZIOSpecDefault:
         )
         .exit
         .map(result => assertTrue(result.isFailure))
+    },
+    test("业务只能从已审核 MIME 集合中收窄 loader 路由") {
+      val withoutPdf = TikaDocumentLoader(
+        TikaDocumentLoaderConfig(
+          enabledMediaTypes = TikaDocumentLoader.SupportedMediaTypes - "application/pdf"
+        )
+      )
+      val invalid = ZIO
+        .attempt(
+          TikaDocumentLoaderConfig(enabledMediaTypes = Set("application/x-unreviewed"))
+        )
+        .exit
+      invalid.map(result =>
+        assertTrue(
+          !withoutPdf.supportedMediaTypes.contains("application/pdf"),
+          withoutPdf.supportedMediaTypes.contains("text/markdown"),
+          result.isFailure
+        )
+      )
     }
   )

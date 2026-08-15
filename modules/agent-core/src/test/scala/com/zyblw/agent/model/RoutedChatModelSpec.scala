@@ -39,5 +39,30 @@ object RoutedChatModelSpec extends ZIOSpecDefault:
         case Exit.Failure(cause) =>
           assertTrue(cause.failureOption.contains(AgentError.ProviderNotFound("unknown")))
         case Exit.Success(_) => assertTrue(false)
+    },
+    test("rejects image parts when the selected model does not declare vision") {
+      for
+        router <- RoutedChatModel.make("deepseek", List(StubModel("deepseek")))
+        exit   <- router
+          .complete(
+            ChatRequest(
+              Chunk(
+                AgentMessage(
+                  MessageRole.User,
+                  Chunk(ContentPart.ImageUrl("https://example.invalid/page.jpg"))
+                )
+              )
+            )
+          )
+          .exit
+      yield exit match
+        case Exit.Failure(cause) =>
+          assertTrue(
+            cause.failureOption.exists {
+              case AgentError.UnsupportedModelCapability(_, capability, _) => capability == "vision"
+              case _                                                       => false
+            }
+          )
+        case Exit.Success(_) => assertTrue(false)
     }
   )

@@ -46,6 +46,27 @@ Work from the checked-in implementation, not from an imagined framework.
 - For Scala or sbt behavior, prefer the official documentation and the repository's actual build.
 - Do not paste remembered signatures when compilation can prove the contract.
 
+## Design and implement the dashboard
+
+For any change under `modules/agent-dashboard`, read its `package.json`, generated `AGENTS.md`, the
+affected route and components, and the current admin HTTP contract before proposing UI code.
+
+1. For a new page or substantial redesign, use `frontend-design` to define the operator, the page's
+   single job, a compact visual system, and one justified signature interaction. Keep the result an
+   operations console rather than a generic SaaS landing page.
+2. Use `ui-ux-pro-max` to compare data-density, navigation, color, typography, feedback, accessibility,
+   and Next.js guidance. From Codex or Cursor, resolve and run
+   `<repository-root>/.agents/skills/ui-ux-pro-max/scripts/search.py` with `python3`; the upstream
+   `CLAUDE_PLUGIN_ROOT` command examples are only valid for a Claude plugin installation. Do not
+   persist or overwrite a design system without reading any existing design decision first.
+3. Apply `vercel-composition-patterns` to reusable component APIs and
+   `vercel-react-best-practices` to rendering, data loading, and bundle work.
+4. Apply `vercel-react-view-transitions` only when motion explains spatial continuity, loading, or a
+   state change. Preserve focus, provide a non-animated fallback, respect reduced-motion preferences,
+   and verify the repository's installed Next.js documentation before enabling experimental config.
+5. Finish with `web-design-guidelines` plus a running-browser check of the complete user path at
+   representative desktop and narrow viewport sizes. Typecheck/build success alone is insufficient.
+
 ## Run sbt outside the Cursor sandbox
 
 Cursor's default command sandbox breaks sbt. Do not probe in-sandbox first.
@@ -74,9 +95,9 @@ agent shell, every command below still needs `required_permissions: ["all"]`:
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.5.0-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.6.1-local"; publishM2'
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.5.0-local sbt -batch compile
+ZYBLW_AGENT_VERSION=0.6.1-local sbt -batch compile
 ```
 
 Console changes additionally require, in `modules/agent-dashboard`:

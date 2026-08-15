@@ -123,7 +123,15 @@ object CapabilityValidator:
       ZIO.fail(AgentError.UnsupportedModelCapability(provider, "tool calling", "请求包含工具定义"))
     else if request.settings.toolChoice.isInstanceOf[ToolChoice.Specific] && !capabilities.specificToolChoice
     then ZIO.fail(AgentError.UnsupportedModelCapability(provider, "specific tool choice", "请求指定了工具"))
+    else if hasImageUrl(request) && !capabilities.vision then
+      ZIO.fail(AgentError.UnsupportedModelCapability(provider, "vision", "请求包含图片"))
     else ZIO.unit
+
+  private def hasImageUrl(request: ChatRequest): Boolean =
+    request.messages.exists(_.content.exists {
+      case ContentPart.ImageUrl(_, _) => true
+      case _                          => false
+    })
 
 final class RoutedChatModel private (
     val defaultProvider: String,

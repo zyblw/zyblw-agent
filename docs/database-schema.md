@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-09
+> 最后核验：2026-08-15
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -41,6 +41,10 @@
 | `agent_workflow_node_executions` | 节点 Running/Prepared/Committed 台账、pending outcome 与 owner/token/generation fencing | 与 Workflow checkpoint 同保留窗口；Prepared 需覆盖最长故障恢复期 |
 | `agent_workflow_waits` | 每个 Workflow Run 唯一活动的 signal/timer 条件、绝对 deadline、决议、wake lease 与消费状态 | 与 execution/checkpoint 同保留窗口；Pending/Resolved 由有界 Worker 扫描/领取 |
 | `agent_workflow_signals` | 外部 signal 的稳定 ID、payload hash、接收 disposition 与时间 | 覆盖外部发送方最长重试窗口；payload 按业务敏感数据治理 |
+| `agent_runtime_overrides` | 管理面完整覆盖快照与 CAS 版本；敏感值只能引用外部 secret | 追加式保留，回滚等于重新提交历史版本 |
+| `agent_ingestion_jobs` | RAG 文档摄取任务进度与低敏失败分类，不保存原始文件 | 与知识索引生命周期对齐；Completed/Failed 可归档 |
+
+表和字段的中文数据字典由 `R__zyblw_agent_schema_comments.sql` 每次覆盖写入；新增列必须先补映射，否则核心 migration 失败。
 
 可选 RAG baseline 还包含：
 
@@ -50,7 +54,8 @@
 | `agent_knowledge_chunk_staging` | Building 版本的可重放暂存向量与 parent/neighbor/heading/page/bbox/block 谱系 | Retriever 永远不查询该表 |
 | `agent_knowledge_chunks` | 当前正式发布的文档块快照、FTS、pgvector 和结构谱系 | 复合主键为 tenant/document/chunk；activate 短事务整体替换，谱系扩展再次校验 ACL |
 
-知识 manifest 状态为 Building/Ready/Superseded/Failed/Retired。`retire` 在文档 advisory lock 和 active-version 乐观条件下
+知识 manifest 状态为 Building/Ready/Superseded/Failed/Retired。三张知识表的中文说明由
+`R__agent_knowledge_1024_comments.sql` 覆盖写入。`retire` 在文档 advisory lock 和 active-version 乐观条件下
 原子删除正式块并写 Retired；`purgeInactive` 通过部分索引和 `SKIP LOCKED` 只清理截止时间前的非活动终态，绝不删除
 Building 或 Ready/active。
 
@@ -228,7 +233,7 @@ HNSW 的参数不是通用最优值；应使用自己的中医文档、引用正
 - 正式环境优先让 Flyway 执行 classpath 下的默认 migration。
 - 必需表只有一个可执行事实源：
   [`V001__zyblw_agent_0_3_baseline.sql`](../modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/migration/V001__zyblw_agent_0_3_baseline.sql)。
-  已发布 V001 不改 checksum，后续中文目录说明由 repeatable COMMENT migration 维护。
+  已发布 V001 不改 checksum，后续中文目录说明由 repeatable COMMENT migration 每次覆盖维护；新增列必须先补中文映射。
 - 新建 RAG 库时，确认 extension 权限后调用 `migrateKnowledge1024`；不要复制一份手工 SQL 到业务仓库。
 - 不要把数据库密码写入 SQL、README 或 Git；通过部署平台 Secret 注入 DataSource 配置。
 

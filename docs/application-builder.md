@@ -300,5 +300,6 @@ HTTP 创建仍返回 `202 + runId + commandId`；`AgentApplication` 没有引入
 | 多副本与模型摘要生产       | `durableWithContextCompressor`          | PostgreSQL + lease/fencing | 显式治理、压缩器并完成演练 |
 
 完整可运行代码见 `BasicAgentExample`、`ApprovalAgentExample`、`RagAgentExample`、
-`ContextCompressionExample` 和 `StandaloneHttpAgentExample`；Context 示例会经过真实异步主循环生成耐久摘要 checkpoint，
-最后一个示例会启动真实 ZIO HTTP 端口并由 Host 管理 Worker 生命周期。
+`ContextCompressionExample`、`StandaloneHttpAgentExample` 和 `PostgresQuickstartExample`；Context 示例会经过真实异步主循环
+生成耐久摘要 checkpoint，HTTP 示例会启动真实 ZIO HTTP 端口并由 Host 管理 Worker 生命周期，PostgreSQL 示例则覆盖
+DataSource、migration、durable application、类型化只读工具和 scoped shutdown 的独立宿主路径。
