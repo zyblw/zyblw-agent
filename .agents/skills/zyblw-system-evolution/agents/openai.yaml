@@ -1,0 +1,4 @@
+interface:
+  display_name: "zyblw System Evolution"
+  short_description: "Evidence-led architecture and evolution decisions"
+  default_prompt: "Use $zyblw-system-evolution to evaluate this architecture change and propose the smallest verified migration."

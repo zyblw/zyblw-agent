@@ -19,3 +19,5 @@ target/
 .vscode/*.local
 .idea/
 .DS_Store
+**/__pycache__/
+*.py[cod]

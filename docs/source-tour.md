@@ -155,7 +155,7 @@ sbt 'testkit/testOnly com.zyblw.agent.runtime.AgentRuntimeSpec -- -t "关键词"
 2. 一个现有测试的变体；
 3. 一段对失败恢复语义的解释；
 4. 一个只读工具和对应 policy/eval；
-5. 一个使用 Maven Central 最新正式版或唯一 `0.6.1-local` 候选的独立最小消费者。
+5. 一个使用 Maven Central 最新正式版或唯一 `0.6.3-local` 候选的独立最小消费者。
 
 最后在 `zyblw-platform` 中用两条路径验证同一业务：
 

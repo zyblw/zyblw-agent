@@ -20,6 +20,11 @@ multi-agent decisions. It turns external system-design patterns into evidence ga
 reversible increment, executable verification, and rollback; it does not authorize speculative
 infrastructure. Combine it with `zyblw-agent-development` for implementation.
 
+Project skills live in `.agents/skills/` and are committed with the repository. Third-party sources
+are pinned in `skills-lock.json`. Another machine can clone this repo and use them without running
+`npx skills add`. `zyblw-agent-development` and `zyblw-system-evolution` are first-party and are not
+lock entries.
+
 ## Where things live
 
 | Path | Contents | Published |
@@ -44,20 +49,20 @@ lifecycle, protocol, security, or license boundary plus an ADR.
 
 ## Current state
 
-The version line is `0.6.1`. `0.3.0` froze the core control plane, `0.4.0` established structured
+The version line is `0.6.2`. `0.3.0` froze the core control plane, `0.4.0` established structured
 RAG on a dedicated knowledge schema, `0.5.0` added the optional administration sub-surface, and
-`0.6.0` established the fresh-install 1024-dimensional knowledge baseline. `0.6.1` is a compatible
-patch for host governance and dashboard embedding; it does not change released migrations.
+`0.6.0` established the fresh-install 1024-dimensional knowledge baseline. `0.6.1` added host
+governance and dashboard embedding. `0.6.2` is a compatible patch for quality-gated PDF extraction
+(text → OCR → optional vision) and extraction reports; it does not change released migrations.
 
-Maturity is tracked per capability in `docs/maturity-and-roadmap.md`, not per module. As of `0.6.1`:
+Maturity is tracked per capability in `docs/maturity-and-roadmap.md`, not per module. As of `0.6.2`:
 
 - **Foundation**: runtime loop, typed tools and policy, durable command worker, layered
   instructions, business HTTP v1, run inspection.
 - **Beta**: context and memory, RAG and document loading, providers, admin surface and console,
   model governance, PostgreSQL, OTLP/Langfuse, cost estimation.
 - **Experimental**: workflow graph, artifacts, side-effect tooling, MCP, workspace/sandbox,
-  multimodal, knowledge graph, evaluation trend gating. `multimodal` and `rag/knowledge` currently
-  have no test coverage at all; treat them as unsupported until they do.
+  multimodal, knowledge graph, evaluation trend gating.
 
 Never promote a capability in a document without new test, failure-injection, or production
 evidence. "Implemented" is not "production proven".
@@ -118,9 +123,9 @@ Run the smallest relevant checks during development and the full gates before a 
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.6.1-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.6.3-local"; publishM2'
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.6.1-local sbt -batch compile
+ZYBLW_AGENT_VERSION=0.6.3-local sbt -batch compile
 ```
 
 Console changes additionally require, in `modules/agent-dashboard`:
