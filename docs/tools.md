@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-25
+> 最后核验：2026-08-23
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -14,7 +14,10 @@
 - 未知工具、非法参数、缺少 scope 和越权请求直接拒绝。
 - 写操作和危险操作默认审批。
 - 只有 `SideEffect.None`、经过业务审查的 `IdempotentWrite`，或由专用工厂创建的
-  `TransactionalOutboxWrite` 才允许自动重试。
+  `TransactionalOutboxWrite` 才允许**在线热重试**（部署 `ToolRetryPolicy.IdempotentOnly` 且
+  `onlineRetryable`）。崩溃恢复另看 `ToolRecoveryPolicy`：只读为 `ReplaySafe`，幂等写为
+  `Idempotent`，普通写为 `NeverReplay`，破坏性操作为 `RequiresApproval`。部署 `ToolRetryPolicy.Never`
+  不会禁止 ReplaySafe 工具在进程死后用同一 callId 再执行。
 - 输出超过 `maxResultBytes` 时失败；后续可接对象存储引用策略。
 
 ## 内置示例
@@ -22,7 +25,8 @@
 - `CalculatorTool`：显式四则运算，不执行表达式脚本。
 - `CurrentTimeTool`：基于 ZIO Clock 和 IANA 时区。
 - `DangerousActionTool`：演示审批，不执行真实危险操作。
-- RAG 示例中的 `knowledge_lookup`：先按 tenant/scope 过滤再检索。
+- `knowledge_search` / `knowledge_fetch`：`agent-rag` 的 `KnowledgeTools`。tenant/permissions 由运行时注入，模型不得覆盖。
+  `knowledge_search` 支持 `hybrid|vector|lexical|phrase` 与结构化过滤。需要 `knowledge:read`。
 
 生产工具应实现业务级幂等键；支付、删除、发布和外部消息不能仅靠 callId 或普通 Runtime 工具账本默认重试。
 PostgreSQL 业务写应使用 `PostgresReliableWriteTool.make`，它强制经同事务执行器运行，不能用普通 `Tool.json` 后只修改
@@ -47,10 +51,10 @@ ToolMetadata(
 顺序、批次内有界并行，收集全部 typed failure，最后仍按原 ordinal 返回。
 
 主 `AgentRuntimeLive` 已接入这套规划与执行语义，但并行不是全局开关：Runtime 会把需要审批、缺 scope、未知、
-非自动重试或没有完整冲突声明的工具强制降级为单调用批次。只有同时满足以下条件才真正进入批内并行：
+崩溃后不可自动重放（`NeverReplay` / `RequiresApproval`）或没有完整冲突声明的工具强制降级为单调用批次。只有同时满足以下条件才真正进入批内并行：
 
 1. `parallelism = ConflictAware` 且至少声明一个冲突组；
-2. `sideEffect` 是 `None`、`IdempotentWrite` 或由专用工厂产生的 `TransactionalOutboxWrite`；
+2. `mayReplayAfterCrash`（`ReplaySafe` 或 `Idempotent`，对应 `None` / `IdempotentWrite` / `TransactionalOutboxWrite`）；
 3. 当前策略不要求审批；
 4. 调用者已具备工具要求的全部 scope；
 5. 与同批其他调用不存在读写冲突。
@@ -59,7 +63,20 @@ ToolMetadata(
 只有整批结果齐备后，才把 Tool 消息、步骤、用量和 `nextBatchIndex` 通过一次 `RunStore.commit` 写入 `AgentState`。
 因此模型永远看不到半批结果，Fiber 完成顺序也不会改变 Provider 原始 ordinal。
 
-恢复时，`Succeeded` 直接复用，仍处于 `Running/Failed/Prepared` 的可重试工具继续执行。`callId` 只允许在同一个
+`DurableToolPlan` 还为每个实际调用的工具保存 `ToolContractFingerprint`。它对 definition JSON 做对象字段规范化，
+对 scope/敏感字段/冲突集合排序，然后摘要工具说明、输入/输出 Schema、strict、risk、side effect、权限、脱敏和并行声明；
+状态不保存这些正文。恢复先比较摘要，再产生审批事件或执行副作用。同名工具换 Schema/风险，或规划时未知工具在恢复时
+突然出现，都会返回 `CompositionIncompatible`。
+
+v6 计划另以 `approvalSubjects` 冻结每个需要审批调用的 `ApprovalSubject`：capability、callId、工具契约指纹、规范化输入
+摘要、`ExecutionEnvironmentId`、权限剖面、授权上下文摘要、生效审批策略摘要与 risk/sideEffect。批准只授权这一个主体，副作用发生前
+Runtime 会重算现场主体并逐字段比较；不一致时带新主体重新请求授权，并刷新 `approvalId` 使旧页面提交的决定失效。当前
+策略变严可追加审批，变松不能撤销历史要求（`frozenApprovalCallIds` 是唯一判定入口）。`None` 只代表 v5 及更早快照，v6
+若缺少完整摘要/审批主体会 fail-closed。主体只保存摘要，工具参数正文不会因审批链路二次落盘。
+
+恢复时，`Succeeded` 直接复用。`ReplaySafe` / `Idempotent` 工具在 `Running/Failed/Prepared` 时继续执行；
+`NeverReplay` / `RequiresApproval` 在 `Running` 会先转为 `Unknown` 并暂停，即使历史上已经批准过也不得自动重放。
+在线 `ToolRetryPolicy` 不参与这次判断。`callId` 只允许在同一个
 `planId + batchIndex + ordinal + toolName` 身份下幂等重放；若 Provider 在同一 Run 复用了 callId，Store 会拒绝
 把旧结果嫁接给新调用。
 

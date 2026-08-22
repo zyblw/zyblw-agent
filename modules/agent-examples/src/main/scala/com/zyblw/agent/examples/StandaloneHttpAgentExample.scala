@@ -11,10 +11,10 @@ import com.zyblw.agent.tools.{RegisteredToolRegistry, ToolPolicyConfig}
 import zio.*
 import zio.http.Server
 
-/** 可直接启动的独立 Agent HTTP 服务示例。
+/** 仅用于理解 ZLayer 与 HTTP 生命周期的装配示意，不是用户入口。
   *
-  * 这个示例刻意使用内存 Store、匿名身份和本地固定模型，因此只用于理解 ZLayer 装配与 HTTP 生命周期，不能作为生产配置。 生产接入必须分别替换为
-  * `AgentApplication.durable`、PostgreSQL、真实 Provider、已验签身份解析器以及 JDBC readiness。
+  * 生产接入请使用 `com.zyblw.agent.examples.production.ProductionSupportHost`：PostgreSQL、真实 Provider、 可信身份头、审批写工具和
+  * JDBC readiness。本示例使用内存 Store、匿名身份和固定模型，进程退出即丢失状态。
   *
   * 启动后可以先访问：
   *

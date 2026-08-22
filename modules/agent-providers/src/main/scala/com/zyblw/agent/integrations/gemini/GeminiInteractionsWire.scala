@@ -1,5 +1,6 @@
 package com.zyblw.agent.integrations.gemini
 
+import com.zyblw.agent.artifacts.ProviderImagePolicy
 import com.zyblw.agent.core.*
 import zio.*
 import zio.json.*
@@ -52,34 +53,36 @@ private[gemini] object GeminiInteractionsWire:
     val options  = config.defaultOptions ++ request.settings.providerOptions
     val reserved = options.keySet.intersect(reservedOptions)
     val unknown  = options.keySet.diff(allowedOptions).diff(reservedOptions)
-    if reserved.nonEmpty then
-      Left(
-        AgentError.InvalidConfiguration(
-          s"providerOptions cannot override reserved Gemini fields: ${reserved.toList.sorted.mkString(", ")}"
+    ProviderImagePolicy.requireBound(request).flatMap { _ =>
+      if reserved.nonEmpty then
+        Left(
+          AgentError.InvalidConfiguration(
+            s"providerOptions cannot override reserved Gemini fields: ${reserved.toList.sorted.mkString(", ")}"
+          )
         )
-      )
-    else if unknown.nonEmpty then
-      Left(
-        AgentError.InvalidConfiguration(
-          s"Gemini providerOptions are not allow-listed: ${unknown.toList.sorted.mkString(", ")}"
+      else if unknown.nonEmpty then
+        Left(
+          AgentError.InvalidConfiguration(
+            s"Gemini providerOptions are not allow-listed: ${unknown.toList.sorted.mkString(", ")}"
+          )
         )
-      )
-    else if request.settings.toolChoice.isInstanceOf[ToolChoice.Specific] then
-      Left(AgentError.UnsupportedModelCapability("gemini", "specific tool choice", "当前原生适配器尚未承诺该契约"))
-    else
-      sequence(request.messages.filterNot(isInstruction).map(encodeMessage)).map { encoded =>
-        val steps    = encoded.flatten
-        val required = List(
-          "model"  -> Json.Str(request.settings.model.getOrElse(config.defaultModel)),
-          "input"  -> Json.Arr(steps),
-          "stream" -> Json.Bool(streaming),
-          "store"  -> Json.Bool(false)
-        )
-        val system = instructionText(request.messages).map(value => "system_instruction" -> Json.Str(value))
-        val tools  = Option.when(request.tools.nonEmpty)("tools" -> Json.Arr(request.tools.map(encodeTool)))
-        val generation = generationConfig(request).map(value => "generation_config" -> value)
-        obj(required ++ List(system, tools, generation).flatten ++ options.toList.sortBy(_._1)*)
-      }
+      else if request.settings.toolChoice.isInstanceOf[ToolChoice.Specific] then
+        Left(AgentError.UnsupportedModelCapability("gemini", "specific tool choice", "当前原生适配器尚未承诺该契约"))
+      else
+        sequence(request.messages.filterNot(isInstruction).map(encodeMessage)).map { encoded =>
+          val steps    = encoded.flatten
+          val required = List(
+            "model"  -> Json.Str(request.settings.model.getOrElse(config.defaultModel)),
+            "input"  -> Json.Arr(steps),
+            "stream" -> Json.Bool(streaming),
+            "store"  -> Json.Bool(false)
+          )
+          val system = instructionText(request.messages).map(value => "system_instruction" -> Json.Str(value))
+          val tools  = Option.when(request.tools.nonEmpty)("tools" -> Json.Arr(request.tools.map(encodeTool)))
+          val generation = generationConfig(request).map(value => "generation_config" -> value)
+          obj(required ++ List(system, tools, generation).flatten ++ options.toList.sortBy(_._1)*)
+        }
+    }
 
   /** 解码一个完整 interaction 响应。
     *
@@ -181,6 +184,8 @@ private[gemini] object GeminiInteractionsWire:
         Right(obj("type" -> Json.Str("text"), "text" -> Json.Str(value.toJson)))
       case ContentPart.ImageUrl(_, _) =>
         Left(AgentError.UnsupportedModelCapability("gemini", "vision", "Interactions 图片输入尚未实现统一契约"))
+      case ContentPart.ImageArtifact(_, _, _) =>
+        Left(AgentError.UnsupportedModelCapability("gemini", "vision", "Interactions 图片输入尚未实现统一契约"))
     })
 
   /** 合并 System 和 Developer 指令；标签让不具备原生 Developer role 的降级可审计。 */
@@ -276,9 +281,10 @@ private[gemini] object GeminiInteractionsWire:
   /** 工具结果优先保持单个 JSON 值；多内容块退化为按顺序排列的 JSON 数组。 */
   private def toolResultValue(message: AgentMessage): Json =
     val values = message.content.map {
-      case ContentPart.Text(value)      => Json.Str(value)
-      case ContentPart.JsonValue(value) => value
-      case ContentPart.ImageUrl(url, _) => Json.Str(url)
+      case ContentPart.Text(value)                  => Json.Str(value)
+      case ContentPart.JsonValue(value)             => value
+      case ContentPart.ImageUrl(url, _)             => Json.Str(url)
+      case ContentPart.ImageArtifact(sha, media, _) => Json.Str(s"artifact:$media:$sha")
     }
     values.headOption.filter(_ => values.size == 1).getOrElse(Json.Arr(values))
 

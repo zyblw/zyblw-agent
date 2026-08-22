@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "releaseLine": "0.8.0",
+  "mechanisms": [
+    {
+      "id": "dataset-content-binding",
+      "status": "verified_ci",
+      "evidence": [
+        "modules/agent-evals/src/main/scala/com/zyblw/agent/evals/AgentEvalDataset.scala",
+        "modules/agent-evals/src/test/scala/com/zyblw/agent/evals/AgentEvalDatasetSpec.scala"
+      ]
+    },
+    {
+      "id": "dual-review-and-adjudication-declaration",
+      "status": "verified_ci",
+      "evidence": ["modules/agent-evals/src/test/scala/com/zyblw/agent/evals/AgentEvalDatasetSpec.scala"]
+    },
+    {
+      "id": "pinned-public-dataset-import",
+      "status": "verified_local",
+      "evidence": [
+        "evaluation-datasets/public-sources.lock.json",
+        "evaluation-datasets/prepare-public-eval-dataset.py",
+        "evaluation-datasets/README.md"
+      ]
+    },
+    {
+      "id": "harness-paired-four-axis-wilson-resource-gate",
+      "status": "verified_ci",
+      "evidence": [
+        "modules/agent-evals/src/main/scala/com/zyblw/agent/evals/HarnessEvaluation.scala",
+        "modules/agent-evals/src/test/scala/com/zyblw/agent/evals/HarnessEvaluationSpec.scala"
+      ]
+    },
+    {
+      "id": "public-closed-loop-maintainer-review",
+      "status": "verified_ci",
+      "evidence": [
+        "modules/agent-evals/src/test/scala/com/zyblw/agent/evals/PublicEvalClosedLoopSpec.scala",
+        "integration-tests/eval-release-gate-smoke.sh"
+      ]
+    },
+    {
+      "id": "rag-low-evidence-refusal-gate",
+      "status": "verified_ci",
+      "evidence": [
+        "modules/agent-evals/src/main/scala/com/zyblw/agent/evals/RagEvaluation.scala",
+        "modules/agent-evals/src/test/scala/com/zyblw/agent/evals/RagEvaluationSpec.scala"
+      ]
+    },
+    {
+      "id": "book-corpus-retrieval-modes",
+      "status": "verified_ci",
+      "evidence": [
+        "modules/agent-evals/src/main/scala/com/zyblw/agent/evals/BookCorpusRagEval.scala",
+        "modules/agent-evals/src/test/scala/com/zyblw/agent/evals/BookCorpusRagEvalSpec.scala"
+      ]
+    }
+  ],
+  "hostEvidence": [
+    {
+      "id": "real-domain-dataset",
+      "status": "verified_ci",
+      "owner": "zyblw-agent",
+      "datasetId": "book-corpus-public",
+      "datasetVersion": "2026-08-23",
+      "contentSha256": null,
+      "reviewerIds": [],
+      "adjudicatorId": null
+    },
+    {
+      "id": "grader-human-calibration",
+      "status": "pending_host",
+      "owner": null,
+      "sampleSize": null,
+      "agreement": null,
+      "disagreementsResolved": null
+    },
+    {
+      "id": "release-trend-baseline",
+      "status": "pending_host",
+      "owner": null,
+      "modelFingerprint": null,
+      "instructionFingerprint": null,
+      "indexFingerprint": null,
+      "costBaseline": null
+    },
+    {
+      "id": "harness-business-benefit",
+      "status": "pending_host",
+      "owner": null,
+      "pairedTrialsPerCase": null,
+      "outcomeDelta": null,
+      "trajectoryDelta": null,
+      "costRatio": null
+    }
+  ]
+}

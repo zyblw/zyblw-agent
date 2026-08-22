@@ -58,6 +58,29 @@ jobs:
           git fetch --no-tags origin main:refs/remotes/origin/main
           bash .github/scripts/verify-release.sh "$RELEASE_TAG" origin/main
 
+      - name: Validate release version and audit binary compatibility
+        shell: bash
+        env:
+          COMPAT_BASELINE_VERSION: "0.6.2"
+        run: |
+          set -euo pipefail
+          release_version="${RELEASE_TAG#v}"
+          sbt -batch \
+            "set ThisBuild / version := \"$release_version\";" \
+            "set ThisBuild / versionPolicyIntention := sbtversionpolicy.Compatibility.None;" \
+            "versionCheck; show versionPolicyAssessCompatibility"
+
+      - name: Verify process-death and database-restart recovery
+        run: |
+          timeout 10m ./integration-tests/command-worker-kill-recovery.sh --restart-postgres
+          timeout 10m ./integration-tests/workflow-wake-worker-kill-recovery.sh --restart-postgres
+
+      - name: Verify bounded durable-worker soak
+        run: timeout 10m ./integration-tests/durable-worker-soak.sh
+
+      - name: Verify bounded Workflow wake-worker soak
+        run: timeout 10m ./integration-tests/workflow-wake-worker-soak.sh
+
       - name: Validate and normalize release secrets
         shell: bash
         env:

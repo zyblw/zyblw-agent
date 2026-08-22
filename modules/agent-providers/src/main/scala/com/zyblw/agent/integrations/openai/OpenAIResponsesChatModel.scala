@@ -1,5 +1,6 @@
 package com.zyblw.agent.integrations.openai
 
+import com.zyblw.agent.artifacts.ProviderImagePolicy
 import com.zyblw.agent.core.*
 import com.zyblw.agent.model.*
 import zio.*
@@ -173,33 +174,37 @@ private[openai] object OpenAIResponsesWire:
   ): Either[AgentError, Json.Obj] =
     val options  = config.defaultOptions ++ request.settings.providerOptions
     val reserved = options.keySet.intersect(reservedOptions)
-    if reserved.nonEmpty then
-      Left(
-        AgentError.InvalidConfiguration(
-          s"providerOptions cannot override reserved Responses fields: ${reserved.toList.sorted.mkString(", ")}"
+    ProviderImagePolicy.requireBound(request).flatMap { _ =>
+      if reserved.nonEmpty then
+        Left(
+          AgentError.InvalidConfiguration(
+            s"providerOptions cannot override reserved Responses fields: ${reserved.toList.sorted.mkString(", ")}"
+          )
         )
-      )
-    else
-      sequence(request.messages.map(encodeMessage)).map { encodedMessages =>
-        val required = List(
-          "model"               -> Json.Str(request.settings.model.getOrElse(config.defaultModel)),
-          "input"               -> Json.Arr(encodedMessages.flatten),
-          "store"               -> Json.Bool(config.store),
-          "stream"              -> Json.Bool(streaming),
-          "parallel_tool_calls" -> Json.Bool(config.parallelToolCalls)
-        )
-        val tools = Option.when(request.tools.nonEmpty)(
-          "tools" -> Json.Arr(request.tools.map(encodeTool))
-        )
-        val toolChoice = Option.when(request.tools.nonEmpty)(
-          "tool_choice" -> encodeToolChoice(request.settings.toolChoice)
-        )
-        val temperature = request.settings.temperature.map(value => "temperature" -> Json.Num(value))
-        val maxTokens = request.settings.maxOutputTokens.map(value => "max_output_tokens" -> Json.Num(value))
-        obj(
-          required ++ List(tools, toolChoice, temperature, maxTokens).flatten ++ options.toList.sortBy(_._1)*
-        )
-      }
+      else
+        sequence(request.messages.map(encodeMessage)).map { encodedMessages =>
+          val required = List(
+            "model"               -> Json.Str(request.settings.model.getOrElse(config.defaultModel)),
+            "input"               -> Json.Arr(encodedMessages.flatten),
+            "store"               -> Json.Bool(config.store),
+            "stream"              -> Json.Bool(streaming),
+            "parallel_tool_calls" -> Json.Bool(config.parallelToolCalls)
+          )
+          val tools = Option.when(request.tools.nonEmpty)(
+            "tools" -> Json.Arr(request.tools.map(encodeTool))
+          )
+          val toolChoice = Option.when(request.tools.nonEmpty)(
+            "tool_choice" -> encodeToolChoice(request.settings.toolChoice)
+          )
+          val temperature = request.settings.temperature.map(value => "temperature" -> Json.Num(value))
+          val maxTokens   =
+            request.settings.maxOutputTokens.map(value => "max_output_tokens" -> Json.Num(value))
+          obj(
+            required ++ List(tools, toolChoice, temperature, maxTokens).flatten ++ options.toList
+              .sortBy(_._1)*
+          )
+        }
+    }
 
   /** 解码非流式 Response JSON。
     *
@@ -335,6 +340,11 @@ private[openai] object OpenAIResponsesWire:
             "image_url" -> Json.Str(url)
           ) ++ detail.map(value => "detail" -> Json.Str(value)).toList*
         )
+      case ContentPart.ImageArtifact(sha, media, size) =>
+        obj(
+          "type" -> Json.Str("input_text"),
+          "text" -> Json.Str(s"[unbound-artifact-image $media $sha $size]")
+        )
     }
     obj("type" -> Json.Str("message"), "role" -> Json.Str(role), "content" -> Json.Arr(content))
 
@@ -396,9 +406,10 @@ private[openai] object OpenAIResponsesWire:
   /** 工具结果通常是单个 JSON 块；多块时保持原顺序拼接为模型可读字符串。 */
   private def toolOutput(message: AgentMessage): String =
     message.content.map {
-      case ContentPart.Text(value)      => value
-      case ContentPart.JsonValue(value) => value.toJson
-      case ContentPart.ImageUrl(url, _) => url
+      case ContentPart.Text(value)                  => value
+      case ContentPart.JsonValue(value)             => value.toJson
+      case ContentPart.ImageUrl(url, _)             => url
+      case ContentPart.ImageArtifact(sha, media, _) => s"artifact:$media:$sha"
     }.mkString
 
   /** 从 JSON object 读取必需字符串，并生成带位置的协议错误。 */

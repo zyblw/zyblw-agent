@@ -1,8 +1,8 @@
 # Context、Memory 与 RAG 接入指南
 
-> 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
+> 状态：0.8.0 当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-02
+> 最后核验：2026-08-23
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -13,6 +13,7 @@
 - `ArtifactStore` 保存版本化二进制对象与不含正文的描述符；它不进入 `AgentState`、模型 Context 或 SSE。
 - `Retriever` 从外部知识索引返回带 tenant、permission、source 和 score 的资料。
 - `ContextSourceResolver` 负责“本回合选择哪些来源”。
+- `ContextContributor` 是一类来源的插件；Kernel 不认识 Memory/RAG/Skill。用 `ContextContributor.resolver(...)` 组成 Resolver。Goal/Plan/Skill 使用 `HarnessContextContributor`，经同一插件接入。
 - `ContextManager` 最后执行 token 分区、稳定前缀排序、历史裁剪与压缩。
 
 因此，业务不应直接把数据库查询结果拼成 System Prompt，也不应让向量相似度绕过权限过滤。
@@ -25,7 +26,7 @@
 AgentApplication.inMemoryDefaults(WorkerId("local-worker"), appConfig)
 ```
 
-知识 Agent 必须显式选择动态来源层：
+知识 Agent 必须显式选择动态来源层。`MemoryRagContextSourceResolver` 声明 `memory-rag@2`，创建 Run 时写入组合指纹；换用来源或版本会在恢复时 fail-closed：
 
 ```scala
 val sourceLayer = MemoryRagContextSourceResolver.configured(
@@ -34,7 +35,8 @@ val sourceLayer = MemoryRagContextSourceResolver.configured(
     retrievalLimit = 6,
     includeSessionMemory = true,
     includeUserMemory = true,
-    minimumRetrievalScore = 0.35
+    minimumRetrievalScore = 0.35,
+    lowEvidenceResponse = LowEvidenceResponse.RequireExplicitRefusal
   )
 )
 
@@ -69,10 +71,29 @@ val applicationLayer = ZLayer.make[AgentApplication.Services](
 4. 删除已经过期的记忆，以 importance 降序、key 升序形成确定性结果，并按 key 去重。
 5. 只有存在 tenant 时才调用 Retriever；缺 tenant 直接返回空 RAG，禁止全局搜索降级。
 6. 将 RetrievalHit 与 Citation 一一配对，低于最低分数的块不进入上下文。
-7. `ContextManager` 以“Agent 指令→安全约束→记忆→检索资料→历史摘要→最近消息”构建最终请求。
+7. Retriever 明确返回 `NoCandidates`/`BelowMinimumScore` 等不足状态且策略为 `RequireExplicitRefusal` 时，加入固定、
+   不含 query/正文的 trusted safety instruction；模型必须说明证据不足，而不是用参数知识补写“有依据”的答案。
+8. `ContextManager` 以“Agent 指令→安全约束→记忆→检索资料→历史摘要→最近消息”构建最终请求。
 
 任何 Memory/Retriever 错误都会转换为 `ContextBuildFailed` 并终止本回合，而不是悄悄省略依据后让模型自由回答。
 业务如果希望“检索降级为纯模型”必须实现一个显式、有遥测记录的 resolver 策略。
+
+0.8.0 把检索结果同时写入 `AgentState.citations` / `retrievalEvidence`（schema v7），并投影到
+`RunView` 与 `GET /api/v1/runs/{runId}/citations`。模型侧应使用 `knowledge_search` / `knowledge_fetch`，
+而不是自行拼 tenant。稳定知识 HTTP 是 `/api/v1/knowledge/search`，支持 `hybrid|vector|lexical|phrase`
+与 document/page/heading/metadata/chunk 过滤；过滤发生在 ACL 之后。
+
+## 3.1 查询模式
+
+| 模式 | 用途 |
+|---|---|
+| `Hybrid` | 默认。向量 + 词法融合，适合开放式问题 |
+| `VectorOnly` | 只比较 embedding，适合语义改写后的查询 |
+| `LexicalOnly` | 只用 `search_text` / FTS，适合关键词与药名 |
+| `Phrase` | pg_trgm 整句/短语再识别，适合原句核对 |
+
+索引 ACL 只应写入读者 scope（`knowledge:read`）。运营 write/admin 不能写进 chunk，否则只读检索会被
+`permissions.subsetOf` 挡成 0 条。
 
 ## 4. Context 分区预算、压缩与 Debug View
 

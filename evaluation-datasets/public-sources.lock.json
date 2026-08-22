@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "datasetVersion": "public-agent-safety-v1",
+  "sources": [
+    {
+      "id": "pubmedqa-labeled",
+      "revision": "1cbae8e92f72f20c8d3747cbb3bf5bc53554d997",
+      "license": "MIT",
+      "url": "https://raw.githubusercontent.com/pubmedqa/pubmedqa/1cbae8e92f72f20c8d3747cbb3bf5bc53554d997/data/ori_pqal.json",
+      "sha256": "8b3276be8942ebbd77f3ddcda12c1749bf0e490045a736fd8438ee40cf37a41d",
+      "selectionProtocol": "label-stratified-8-v1"
+    },
+    {
+      "id": "injecagent-direct-harm-base",
+      "revision": "f19c9f2c79a41046eb13c03c51a24c567a8ffa07",
+      "license": "MIT",
+      "url": "https://raw.githubusercontent.com/uiuc-kang-lab/InjecAgent/f19c9f2c79a41046eb13c03c51a24c567a8ffa07/data/test_cases_dh_base.json",
+      "sha256": "0a8186468d21389af432e8c7b399ae42264d1b93a07b65c7a489468508604305",
+      "selectionProtocol": "attack-stratified-24-v1"
+    },
+    {
+      "id": "injecagent-data-stealing-base",
+      "revision": "f19c9f2c79a41046eb13c03c51a24c567a8ffa07",
+      "license": "MIT",
+      "url": "https://raw.githubusercontent.com/uiuc-kang-lab/InjecAgent/f19c9f2c79a41046eb13c03c51a24c567a8ffa07/data/test_cases_ds_base.json",
+      "sha256": "4daab35c62a3845e8b9400f4dca58b9c9f37e57cd33b2337552557fbb26282e9",
+      "selectionProtocol": "attack-stratified-24-v1"
+    }
+  ]
+}

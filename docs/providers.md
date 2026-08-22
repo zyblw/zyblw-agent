@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-22
+> 最后核验：2026-08-22
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -75,6 +75,39 @@ GLM、OpenAI Chat/Responses、Anthropic、Gemini 的统一 CLI，并提供 Memor
 
 模型、base URL、协议版本和 timeout 的完整默认值见 `.env.example`。厂商模型 ID 会变化，因此示例默认值只代表部署配置
 占位，不是框架对“最新模型”的永久承诺。
+
+## 中转站与多端点
+
+一个 URL + 一个 Key + 按任务切换模型名时，使用配置驱动的 OpenAI-compatible 端点，而不是再写一个 Adapter。
+
+环境变量 `ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON` 声明多个端点：
+
+```json
+{
+  "defaultProvider": "relay",
+  "endpoints": [
+    {
+      "providerId": "relay",
+      "baseUrl": "https://gateway.example/v1",
+      "apiKeyEnv": "RELAY_API_KEY",
+      "defaultModel": "deepseek-v4",
+      "protocol": "relay",
+      "models": [{ "name": "deepseek-v4", "capabilities": { "toolCalls": true, "streaming": true } }]
+    }
+  ]
+}
+```
+
+约束：
+
+- `baseUrl` 必须是 `https://` 或本机 `http://127.0.0.1`；
+- 密钥只通过 `apiKeyEnv` 指向环境变量，配置对象的 `toString` 不含值；
+- `OpenAICompatibility.relay(id)` 把任意 provider id / 模型名直发网关；
+- `ProviderEndpoints.assemble` 产出 `RoutedChatModel` + `ProviderRegistry`，模型清单写入 `ProviderDescriptor.models`；
+- `ModelRoleCatalog` 把 Agent 声明的角色（planner / summarizer / extraction）映射到已注册 provider/model。Agent 已显式写 provider/model 时角色只作审计元数据。`AgentApplicationConfig.roleCatalog` 在 `submitStart`、同步 `run` 和 Harness Start 创建 Run 时解析并冻结进 definition 与组合指纹；未声明角色 fail-closed。宿主仍可预先 `applyTo`，但不再是唯一接线方式；
+- `FallbackChatModel` 只对 typed 可重试错误换下一个候选。能力不匹配、配置错误和安全拒绝 fail-closed。降级事实写入 `ModelSettings.metadata` 的 `fallback-chain` / `fallback-from`，不进 prompt。
+
+`CapabilityMatrix.requireConsistent` 把声明能力与 `ProviderContract` 探测结果对齐；未覆盖的模型不会被猜测成“全支持”。OpenAI Chat 与 Responses 的 HTTP stub 都走 `verifySuite`。
 
 ## 运行时切换与凭据边界
 

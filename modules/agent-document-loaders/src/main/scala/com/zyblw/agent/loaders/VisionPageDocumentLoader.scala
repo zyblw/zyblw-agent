@@ -1,12 +1,12 @@
 package com.zyblw.agent.loaders
 
+import com.zyblw.agent.artifacts.{ArtifactBlobStore, ArtifactBoundMedia}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.model.*
 import com.zyblw.agent.rag.*
 import java.awt.{Color, RenderingHints}
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
-import java.util.Base64
 import javax.imageio.{IIOImage, ImageIO, ImageWriteParam}
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.rendering.PDFRenderer
@@ -28,7 +28,7 @@ import zio.*
 final case class VisionPageDocumentLoaderConfig(
     model: String,
     maxInputBytes: Int = 32 * 1024 * 1024,
-    maxPages: Int = 40,
+    maxPages: Int = 200,
     dpi: Float = 110.0f,
     maxPixels: Int = 1280,
     jpegQuality: Float = 0.72f,
@@ -40,7 +40,7 @@ final case class VisionPageDocumentLoaderConfig(
 ):
   require(model.trim.nonEmpty && model.length <= 200, "Vision model 无效")
   require(maxInputBytes > 0, "Vision maxInputBytes 必须为正数")
-  require(maxPages > 0 && maxPages <= 500, "Vision maxPages 必须位于 1..500")
+  require(maxPages > 0 && maxPages <= 2000, "Vision maxPages 必须位于 1..2000")
   require(dpi >= 72.0f && dpi <= 300.0f, "Vision dpi 必须位于 72..300")
   require(maxPixels >= 256 && maxPixels <= 4096, "Vision maxPixels 必须位于 256..4096")
   require(jpegQuality > 0.0f && jpegQuality <= 1.0f, "Vision jpegQuality 必须位于 (0, 1]")
@@ -139,36 +139,45 @@ final class VisionPageDocumentLoader(model: ChatModel, config: VisionPageDocumen
       }
 
   private def transcribePage(pageNumber: Int, jpeg: Array[Byte]): IO[RetrievalError, (Int, String)] =
-    val dataUrl = "data:image/jpeg;base64," + Base64.getEncoder.encodeToString(jpeg)
-    val request = ChatRequest(
-      Chunk(
-        AgentMessage.system(VisionPageDocumentLoader.SystemPrompt),
-        AgentMessage(
-          MessageRole.User,
+    val bytes  = Chunk.fromArray(jpeg)
+    val digest = ArtifactBlobStore.digest(bytes)
+    val bound  = ArtifactBoundMedia.bind(
+      ContentPart.ImageArtifact(digest, "image/jpeg", bytes.length.toLong),
+      Map(digest -> bytes)
+    )
+    ZIO.fromEither(bound).mapError(_ => AgentError.RetrievalFailed("视觉页未能通过 Artifact 媒体边界")).flatMap {
+      case ContentPart.ImageUrl(url, _) =>
+        val request = ChatRequest(
           Chunk(
-            ContentPart.Text(VisionPageDocumentLoader.userPrompt(pageNumber)),
-            ContentPart.ImageUrl(dataUrl, Some(config.imageDetail))
+            AgentMessage.system(VisionPageDocumentLoader.SystemPrompt),
+            AgentMessage(
+              MessageRole.User,
+              Chunk(
+                ContentPart.Text(VisionPageDocumentLoader.userPrompt(pageNumber)),
+                ContentPart.ImageUrl(url, Some(config.imageDetail))
+              )
+            )
+          ),
+          settings = ModelSettings(
+            model = Some(config.model),
+            temperature = Some(0.0),
+            maxOutputTokens = Some(config.maxOutputTokens)
           )
         )
-      ),
-      settings = ModelSettings(
-        model = Some(config.model),
-        temperature = Some(0.0),
-        maxOutputTokens = Some(config.maxOutputTokens)
-      )
-    )
-    model
-      .complete(request)
-      .mapError {
-        case error: RetrievalError => error
-        case error                 =>
-          AgentError.RetrievalFailed("视觉页面转录失败", retryable = error.retryable)
-      }
-      .timeoutFail(AgentError.RetrievalFailed("视觉页面转录超时", retryable = true))(config.pageTimeout)
-      .flatMap { response =>
-        val text = VisionPageDocumentLoader.unwrapMarkdown(response.message.text)
-        ZIO.succeed(pageNumber -> text)
-      }
+        model
+          .complete(request)
+          .mapError {
+            case error: RetrievalError => error
+            case error                 =>
+              AgentError.RetrievalFailed("视觉页面转录失败", retryable = error.retryable)
+          }
+          .timeoutFail(AgentError.RetrievalFailed("视觉页面转录超时", retryable = true))(config.pageTimeout)
+          .map { response =>
+            pageNumber -> VisionPageDocumentLoader.unwrapMarkdown(response.message.text)
+          }
+      case _ =>
+        ZIO.fail(AgentError.RetrievalFailed("视觉页绑定结果不是 data URI"))
+    }
 
 object VisionPageDocumentLoader:
   private[loaders] val SystemPrompt: String =

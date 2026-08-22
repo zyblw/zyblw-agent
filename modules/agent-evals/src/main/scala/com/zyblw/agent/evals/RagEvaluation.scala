@@ -66,7 +66,9 @@ final case class RagEvalCase(
     forbiddenChunkIds: Set[String] = Set.empty,
     requiredCitationSourceUris: Set[String] = Set.empty,
     limit: Int = 5,
-    thresholds: RagEvalThresholds = RagEvalThresholds()
+    thresholds: RagEvalThresholds = RagEvalThresholds(),
+    mode: RetrievalMode = RetrievalMode.Hybrid,
+    filter: RetrievalFilter = RetrievalFilter.empty
 ):
   require(id.trim.nonEmpty && datasetVersion.trim.nonEmpty, "RAG 评测 id 和 datasetVersion 不能为空")
   require(query.trim.nonEmpty, "RAG 评测 query 不能为空")
@@ -88,6 +90,9 @@ final case class RagEvalObservation(result: RetrievalResult, latencyMillis: Long
 final case class RagEvalReport(caseId: String, datasetVersion: String, grades: Chunk[EvalGrade]):
   /** 排名、引用、安全和延迟全部通过才允许发布。 */
   def passed: Boolean = grades.forall(_.passed)
+
+  /** outcome、safety 与 resource 的独立解释视图。 */
+  def axisSummaries: Chunk[EvalAxisSummary] = EvalAxisSummary.from(grades)
 
 /** 一次数据集回归报告。 */
 final case class RagEvalSuiteReport(reports: Chunk[RagEvalReport]):
@@ -188,6 +193,23 @@ object RagEvalGrader:
       s"unauthorized=$unauthorized;forbidden=$forbidden;duplicates=$duplicates;invalidScores=$invalidScores"
     )
 
+  /** Retriever 明确报告证据不足时，不得把弱相关命中注入模型上下文。
+    *
+    * `NotEvaluated` 保持对旧自定义 Retriever 的兼容，不把“没写证据字段”当成拒答成功。
+    */
+  def lowEvidenceRefusal(observation: RagEvalObservation, refusalInjected: Boolean): EvalGrade =
+    val evidence     = observation.result.evidence
+    val insufficient = !evidence.supportsGroundedAnswer &&
+      evidence.status != RetrievalEvidenceStatus.NotEvaluated
+    val leaked = insufficient && observation.result.hits.nonEmpty
+    val passed = insufficient && !leaked && refusalInjected
+    EvalGrade(
+      "rag-low-evidence-refusal",
+      passed,
+      if passed then 1.0 else 0.0,
+      s"insufficient=$insufficient;leakedHits=${observation.result.hits.length};refusalInjected=$refusalInjected"
+    )
+
   /** 延迟使用独立硬门禁，避免通过降低检索质量来隐藏尾延迟问题。 */
   private def latencyGrade(evalCase: RagEvalCase, observation: RagEvalObservation): EvalGrade =
     val passed = observation.latencyMillis <= evalCase.thresholds.maxLatencyMillis
@@ -233,7 +255,9 @@ final class RagEvalRunner(maxParallelism: Int):
     run(cases) { evalCase =>
       for
         started <- Clock.nanoTime
-        result  <- retriever.retrieve(evalCase.query, evalCase.scope, evalCase.limit)
-        ended   <- Clock.nanoTime
+        result  <- retriever.retrieve(
+          RetrievalRequest(evalCase.query, evalCase.scope, evalCase.limit, evalCase.mode, evalCase.filter)
+        )
+        ended <- Clock.nanoTime
       yield RagEvalObservation(result, math.max(0L, (ended - started) / 1_000_000L))
     }

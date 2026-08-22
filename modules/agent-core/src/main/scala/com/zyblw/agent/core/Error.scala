@@ -163,10 +163,86 @@ object AgentError:
     val category              = ErrorCategory.Conflict
     override val safeToExpose = true
 
+  /** 冻结的运行组合与当前进程不兼容；禁止 silent capability drift。 */
+  final case class CompositionIncompatible(runId: RunId, reason: String) extends AgentError:
+    val message               = s"运行 ${runId.asString} 的组合已不兼容: $reason"
+    val category              = ErrorCategory.Conflict
+    override val safeToExpose = true
+    override val diagnostic   = Map("reason" -> reason)
+
   final case class OptimisticLock(expected: Version, actual: Version) extends StoreError:
     val message            = s"Optimistic lock conflict: expected=${expected.value}, actual=${actual.value}"
     val category           = ErrorCategory.Conflict
     override val retryable = true
+
+  /** Harness Goal/Plan 的 revision CAS 失败；不得覆盖较新的任务状态。 */
+  final case class HarnessRevisionConflict(entity: String, expected: Long, actual: Long) extends StoreError:
+    val message             = s"Harness $entity revision conflict: expected=$expected, actual=$actual"
+    val category            = ErrorCategory.Conflict
+    override val retryable  = true
+    override val diagnostic =
+      Map("entity" -> entity, "expected" -> expected.toString, "actual" -> actual.toString)
+
+  /** Harness 实体不存在。 */
+  final case class HarnessNotFound(entity: String, id: String) extends StoreError:
+    val message             = s"Harness $entity not found: $id"
+    val category            = ErrorCategory.Persistence
+    override val diagnostic = Map("entity" -> entity, "id" -> id)
+
+  /** Goal 尚未配置任务级预算。预留必须 fail-closed，不能退化为无限额度。 */
+  final case class HarnessBudgetNotConfigured(goalId: String) extends StoreError:
+    val message               = s"Harness goal budget not configured: $goalId"
+    val category              = ErrorCategory.Configuration
+    override val safeToExpose = true
+    override val diagnostic   = Map("goalId" -> goalId)
+
+  /** Goal 预算策略一旦配置即不可原地改写；变更必须创建新 Goal 或显式迁移账本。 */
+  final case class HarnessBudgetPolicyConflict(goalId: String) extends StoreError:
+    val message               = s"Harness goal budget policy conflict: $goalId"
+    val category              = ErrorCategory.Conflict
+    override val safeToExpose = true
+    override val diagnostic   = Map("goalId" -> goalId)
+
+  /** Goal 级预算没有足够的未占用额度。 */
+  final case class HarnessBudgetExceeded(
+      goalId: String,
+      dimension: String,
+      requested: String,
+      remaining: String
+  ) extends StoreError:
+    val message =
+      s"Harness goal budget exceeded: goal=$goalId, dimension=$dimension, requested=$requested, remaining=$remaining"
+    val category              = ErrorCategory.ContextLimit
+    override val safeToExpose = true
+    override val diagnostic   = Map(
+      "goalId"    -> goalId,
+      "dimension" -> dimension,
+      "requested" -> requested,
+      "remaining" -> remaining
+    )
+
+  /** 同一 Goal/Run 的预算事实已存在但请求内容或状态不兼容。 */
+  final case class HarnessBudgetConflict(goalId: String, runId: String, state: String, reason: String)
+      extends StoreError:
+    val message  = s"Harness goal budget conflict: goal=$goalId, run=$runId, state=$state, reason=$reason"
+    val category = ErrorCategory.Conflict
+    override val safeToExpose = true
+    override val diagnostic   =
+      Map("goalId" -> goalId, "runId" -> runId, "state" -> state, "reason" -> reason)
+
+  /** Runtime usage 不满足非负与 token 明细约束，拒绝把损坏数据写入预算账本。 */
+  final case class HarnessBudgetUsageInvalid(goalId: String, runId: String, reason: String)
+      extends StoreError:
+    val message               = s"Harness goal budget usage invalid: goal=$goalId, run=$runId, reason=$reason"
+    val category              = ErrorCategory.Validation
+    override val safeToExpose = true
+    override val diagnostic   = Map("goalId" -> goalId, "runId" -> runId, "reason" -> reason)
+
+  /** Skill 同一 id@version 已存在且指纹不同；Skill 正文不可原地改写。 */
+  final case class SkillFingerprintConflict(id: String, version: String) extends StoreError:
+    val message             = s"Skill $id@$version 指纹冲突，拒绝覆盖"
+    val category            = ErrorCategory.Conflict
+    override val diagnostic = Map("id" -> id, "version" -> version)
 
   /** 工具执行账本的 compare-and-set 失败，说明另一个 Fiber/worker 已推进同一调用。 Runtime 应重新读取账本并决定复用结果、等待或按幂等策略恢复，不能覆盖较新的状态。
     */
@@ -180,6 +256,27 @@ object AgentError:
       s"Tool execution conflict: run=${runId.asString}, call=$callId, expected=$expectedStatus/$expectedAttempt"
     val category           = ErrorCategory.Conflict
     override val retryable = true
+
+  /** 主模型调用账本的 compare-and-set 失败。 */
+  final case class ModelCallConflict(
+      runId: RunId,
+      requestId: String,
+      expectedStatus: String,
+      expectedAttempt: Int
+  ) extends StoreError:
+    val message =
+      s"Model call conflict: run=${runId.asString}, request=$requestId, expected=$expectedStatus/$expectedAttempt"
+    val category           = ErrorCategory.Conflict
+    override val retryable = true
+
+  /** Intent 已提交但 Provider 结算未知；不得自动重放以免重复计费。 */
+  final case class ModelCallUncertain(runId: RunId, requestId: String) extends ModelError:
+    val message =
+      s"模型调用 $requestId 在 Provider 结算前中断，结果未知，未自动重放"
+    val category              = ErrorCategory.Conflict
+    override val retryable    = false
+    override val safeToExpose = true
+    override val diagnostic   = Map("requestId" -> requestId)
 
   /** Worker 持有的租约已经失效。
     *

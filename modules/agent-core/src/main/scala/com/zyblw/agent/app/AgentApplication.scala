@@ -1,7 +1,9 @@
 package com.zyblw.agent.app
 
+import com.zyblw.agent.composition.RuntimeProfile
 import com.zyblw.agent.context.*
 import com.zyblw.agent.core.*
+import com.zyblw.agent.extension.RuntimeExtensions
 import com.zyblw.agent.guardrails.*
 import com.zyblw.agent.memory.*
 import com.zyblw.agent.model.*
@@ -19,10 +21,17 @@ import zio.*
   *   工具白名单、调用次数、并行度、超时、结果大小、重试和审批策略；Runtime 与异步创建控制面共享同一实例
   * @param worker
   *   跨 Worker claim、lease、heartbeat、轮询和自动尝试参数
+  * @param profile
+  *   运行组合与 CapturePolicy；生产默认 MetadataOnly，不授予工具权限
+  * @param roleCatalog
+  *   部署侧 ModelRole → provider/model 映射。`submitStart` 与同步 `run` 在创建 Run 时解析并冻结， 结果写入
+  *   `AgentDefinition.modelSettings` 与组合指纹；本配置本身不会热改已冻结的 Run
   */
 final case class AgentApplicationConfig(
     toolPolicy: ToolPolicyConfig = ToolPolicyConfig.secureDefault,
-    worker: WorkerHostConfig = WorkerHostConfig()
+    worker: WorkerHostConfig = WorkerHostConfig(),
+    profile: RuntimeProfile = RuntimeProfile.default,
+    roleCatalog: ModelRoleCatalog = ModelRoleCatalog.empty
 )
 
 /** 业务代码使用耐久 Agent 的小型门面。
@@ -104,14 +113,16 @@ final private class AgentApplicationLive(
     runtime: AgentRuntime,
     commands: AgentCommandService,
     worker: WorkerHost,
-    commandStore: RunCommandStore
+    commandStore: RunCommandStore,
+    tools: RegisteredToolRegistry
 ) extends AgentApplication:
   def submit(
       agent: AgentDefinition,
       request: RunRequest,
       idempotencyKey: String
   ): IO[AgentError, RunCommandRecord] =
-    commands.submitStart(agent, request, idempotencyKey)
+    tools.requireRegistered(agent.allowedTools) *>
+      commands.submitStart(agent, request, idempotencyKey)
 
   def decide(runId: RunId, decision: ApprovalDecision, actor: RunContext): IO[AgentError, RunCommandRecord] =
     commands.submitApproval(runId, decision, actor)
@@ -201,8 +212,10 @@ object AgentApplication:
     ZIO.serviceWithZIO[AgentApplication](_.startWorkerScoped)
 
   /** 从 Runtime、控制面和 WorkerHost 构造无额外状态的业务门面。 */
-  private val live
-      : URLayer[AgentRuntime & AgentCommandService & WorkerHost & RunCommandStore, AgentApplication] =
+  private val live: URLayer[
+    AgentRuntime & AgentCommandService & WorkerHost & RunCommandStore & RegisteredToolRegistry,
+    AgentApplication
+  ] =
     ZLayer.fromFunction(AgentApplicationLive.apply)
 
   /** 生产耐久装配。
@@ -223,8 +236,9 @@ object AgentApplication:
       TokenCounter.approximate,
       ContextCompressor.deterministic,
       DefaultContextManager.layer,
-      AgentRuntimeLive.layerWithContextSources,
-      AgentCommandServiceLive.layer,
+      RuntimeExtensions.emptyLayer,
+      AgentRuntimeLive.layerWithProfile(config.profile, config.roleCatalog),
+      AgentCommandServiceLive.configured(config.profile, config.roleCatalog),
       WorkerHost.layer(owner, config.worker),
       live
     )
@@ -244,8 +258,9 @@ object AgentApplication:
       TokenCounter.approximate,
       ContextCompressor.deterministic,
       DefaultContextManager.layer,
-      AgentRuntimeLive.layerWithContextSources,
-      AgentCommandServiceLive.layer,
+      RuntimeExtensions.emptyLayer,
+      AgentRuntimeLive.layerWithProfile(config.profile, config.roleCatalog),
+      AgentCommandServiceLive.configured(config.profile, config.roleCatalog),
       WorkerHost.layer(owner, config.worker),
       live
     )
@@ -273,8 +288,9 @@ object AgentApplication:
       ModelPolicySource.defaultLayer,
       TokenCounter.approximate,
       DefaultContextManager.layer,
-      AgentRuntimeLive.layerWithContextSources,
-      AgentCommandServiceLive.layer,
+      RuntimeExtensions.emptyLayer,
+      AgentRuntimeLive.layerWithProfile(config.profile, config.roleCatalog),
+      AgentCommandServiceLive.configured(config.profile, config.roleCatalog),
       WorkerHost.layer(owner, config.worker),
       live
     )
@@ -292,8 +308,9 @@ object AgentApplication:
       TokenCounter.approximate,
       ContextCompressor.deterministic,
       DefaultContextManager.layer,
-      AgentRuntimeLive.layerWithContextSources,
-      AgentCommandServiceLive.layer,
+      RuntimeExtensions.emptyLayer,
+      AgentRuntimeLive.layerWithProfile(config.profile, config.roleCatalog),
+      AgentCommandServiceLive.configured(config.profile, config.roleCatalog),
       WorkerHost.layer(owner, config.worker),
       live
     )
@@ -313,8 +330,9 @@ object AgentApplication:
       ModelPolicySource.defaultLayer,
       TokenCounter.approximate,
       DefaultContextManager.layer,
-      AgentRuntimeLive.layerWithContextSources,
-      AgentCommandServiceLive.layer,
+      RuntimeExtensions.emptyLayer,
+      AgentRuntimeLive.layerWithProfile(config.profile, config.roleCatalog),
+      AgentCommandServiceLive.configured(config.profile, config.roleCatalog),
       WorkerHost.layer(owner, config.worker),
       live
     )
@@ -339,8 +357,9 @@ object AgentApplication:
       TokenCounter.approximate,
       ContextCompressor.deterministic,
       DefaultContextManager.layer,
-      AgentRuntimeLive.layerWithContextSources,
-      AgentCommandServiceLive.layer,
+      RuntimeExtensions.emptyLayer,
+      AgentRuntimeLive.layerWithProfile(config.profile, config.roleCatalog),
+      AgentCommandServiceLive.configured(config.profile, config.roleCatalog),
       WorkerHost.layer(owner, config.worker),
       live
     )
@@ -365,8 +384,9 @@ object AgentApplication:
       ModelPolicySource.defaultLayer,
       TokenCounter.approximate,
       DefaultContextManager.layer,
-      AgentRuntimeLive.layerWithContextSources,
-      AgentCommandServiceLive.layer,
+      RuntimeExtensions.emptyLayer,
+      AgentRuntimeLive.layerWithProfile(config.profile, config.roleCatalog),
+      AgentCommandServiceLive.configured(config.profile, config.roleCatalog),
       WorkerHost.layer(owner, config.worker),
       live
     )

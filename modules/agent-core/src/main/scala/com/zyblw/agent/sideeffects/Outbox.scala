@@ -221,3 +221,13 @@ object OutboxPublisher:
     ZLayer.fromFunction((store: OutboxStore, transport: OutboxTransport) =>
       OutboxPublisher(store, transport, owner, config)
     )
+
+/** 低敏日志 transport：只记录 eventId/类型/目的地，不写 payload。生产可替换为 Kafka/HTTP inbox。 */
+object LoggingOutboxTransport:
+  val layer: ULayer[OutboxTransport] = ZLayer.succeed(
+    new OutboxTransport:
+      def publish(event: OutboxEventRecord): UIO[Unit] =
+        ZIO.logInfo(
+          s"outbox published event=${event.eventId} type=${event.draft.eventType} dest=${event.draft.destination} aggregate=${event.draft.aggregateType}"
+        )
+  )

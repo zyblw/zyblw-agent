@@ -46,6 +46,12 @@ final case class MemoryView(
 /** 删除 API 的稳定幂等结果。 */
 final case class MemoryDeleteResult(affectedCount: Long) derives JsonCodec
 
+/** 有界导出请求；afterKey 是上一页最后一个 key。 */
+final case class MemoryExportRequest(afterKey: Option[String] = None, limit: Int = 50) derives JsonCodec
+
+/** 有界导出响应；不含审计或他人 scope。 */
+final case class MemoryExportView(items: List[MemoryView], nextCursor: Option[String]) derives JsonCodec
+
 /** 用户长期记忆治理的 ZIO HTTP Adapter。
   *
   * 所有路由都先通过 `AgentRequestContextResolver` 取得可信身份，再由 tenantId/userId 推导唯一 User scope；客户端没有 scope 参数，因此无法靠
@@ -59,6 +65,7 @@ final case class MemoryDeleteResult(affectedCount: Long) derives JsonCodec
   *   - `GET /api/v1/memory/{key}`：精确读取；
   *   - `PUT /api/v1/memory/{key}`：使用 expectedVersion 纠正；
   *   - `DELETE /api/v1/memory/{key}`：幂等删除单条；
+  *   - `POST /api/v1/memory/export`：有界导出自己的记忆，审计动作是 Export；
   *   - `DELETE /api/v1/memory`：删除自己的全部长期记忆。
   *
   * Memory DTO 仍标记为 Beta：路径已经带主版本，避免无版本历史负担，但在纳入 `AgentHttpContract` 的稳定 OpenAPI 前，
@@ -79,6 +86,16 @@ final class MemoryHttpApi(
           body  <- decodeOrDefault[MemoryListRequest](request, MemoryListRequest())
           items <- governance.list(actor, scope, body.limit)
         yield Response.json(items.map(toView).toList.toJson)
+      }
+    },
+    Method.POST / "api" / "v1" / "memory" / "export" -> handler { (request: Request) =>
+      respond {
+        for
+          actor <- contexts.resolve(request)
+          scope <- ownScope(actor)
+          body  <- decodeOrDefault[MemoryExportRequest](request, MemoryExportRequest())
+          page  <- governance.exportPage(actor, scope, body.afterKey, body.limit)
+        yield Response.json(MemoryExportView(page.items.map(toView).toList, page.nextCursor).toJson)
       }
     },
     Method.POST / "api" / "v1" / "memory" / "search" -> handler { (request: Request) =>

@@ -1,5 +1,6 @@
 package com.zyblw.agent.app
 
+import com.zyblw.agent.composition.RuntimeProfile
 import com.zyblw.agent.context.*
 import com.zyblw.agent.core.*
 import com.zyblw.agent.guardrails.*
@@ -65,6 +66,63 @@ object AgentApplicationSpec extends ZIOSpecDefault:
         after.status == RunStatus.Completed,
         after.messages.lastOption.exists(_.text == "done"),
         receipt.status == RunCommandStatus.Completed
+      )).provide(
+        ScriptedChatModel.layer(Chunk(finalResponse())),
+        RegisteredToolRegistry.fromTools(Nil),
+        layer
+      )
+    },
+    test("Run 创建时解析 ModelRole 并冻结进 definition 与组合指纹") {
+      val catalog = ModelRoleCatalog(
+        Map("planner" -> ModelRoleBinding(ModelRole.Planner, "scripted", "planner-model"))
+      )
+      val layer = AgentApplication.inMemoryDefaults(
+        WorkerId("role-worker"),
+        AgentApplicationConfig(worker = workerConfig, roleCatalog = catalog)
+      )
+      val roleAgent = simpleAgent.copy(modelSettings = ModelSettings(role = Some(ModelRole.Planner)))
+      (for
+        app     <- ZIO.service[AgentApplication]
+        command <- app.submit(
+          roleAgent,
+          RunRequest(ThreadId("app-role-thread"), AgentMessage.user("hello")),
+          "app-role-request"
+        )
+        created <- app.inspect(command.runId)
+        _       <- app.claimOnce
+        done    <- app.inspect(command.runId)
+      yield assertTrue(
+        created.definition.exists(_.modelSettings.provider.contains("scripted")),
+        created.definition.exists(_.modelSettings.model.contains("planner-model")),
+        created.definition.exists(_.modelSettings.metadata.get("model-role").contains("planner")),
+        created.composition.exists(_.modelRef.nonEmpty),
+        done.status == RunStatus.Completed
+      )).provide(
+        ScriptedChatModel.layer(Chunk(finalResponse())),
+        RegisteredToolRegistry.fromTools(Nil),
+        layer
+      )
+    },
+    test("Application 配置的 Replayable Profile 会冻结进 Created 状态") {
+      val layer = AgentApplication.inMemoryDefaults(
+        WorkerId("replayable-worker"),
+        AgentApplicationConfig(
+          worker = workerConfig,
+          profile = RuntimeProfile(capturePolicy = CapturePolicy.Replayable)
+        )
+      )
+      (for
+        app     <- ZIO.service[AgentApplication]
+        command <- app.submit(
+          simpleAgent,
+          RunRequest(ThreadId("app-replayable-thread"), AgentMessage.user("hello")),
+          "app-replayable-request"
+        )
+        before <- app.inspect(command.runId)
+      yield assertTrue(
+        command.status == RunCommandStatus.Queued,
+        before.status == RunStatus.Created,
+        before.composition.exists(_.capturePolicy == CapturePolicy.Replayable)
       )).provide(
         ScriptedChatModel.layer(Chunk(finalResponse())),
         RegisteredToolRegistry.fromTools(Nil),
@@ -383,6 +441,38 @@ object AgentApplicationSpec extends ZIOSpecDefault:
         cancelState.status == RunCommandStatus.Completed
       )
     } @@ TestAspect.withLiveClock,
+    test("提交前拒绝 Agent 白名单中尚未注册的工具，避免浪费一次模型调用") {
+      val layer = AgentApplication.inMemoryDefaults(
+        WorkerId("unregistered-tool-worker"),
+        AgentApplicationConfig(
+          toolPolicy = ToolPolicyConfig(allowedTools = Set(ToolName("missing_tool"))),
+          worker = workerConfig
+        )
+      )
+      (for
+        app   <- ZIO.service[AgentApplication]
+        agent <- AgentDefinitionBuilder(AgentId("unregistered-tool"), "未注册工具")
+          .withInstructions("调用缺失工具。")
+          .allowTool(ToolName("missing_tool"))
+          .buildFor(ToolPolicyConfig(allowedTools = Set(ToolName("missing_tool"))))
+        result <- app
+          .submit(
+            agent,
+            RunRequest(ThreadId("unregistered-thread"), AgentMessage.user("hello")),
+            "unregistered-tool-request"
+          )
+          .either
+      yield assertTrue(
+        result.left.exists {
+          case AgentError.InvalidConfiguration(message) => message.contains("missing_tool")
+          case _                                        => false
+        }
+      )).provide(
+        ScriptedChatModel.layer(Chunk.empty),
+        RegisteredToolRegistry.fromTools(Nil),
+        layer
+      )
+    },
     test("scoped Worker 在宿主 Scope 关闭时被结构化中断") {
       val layer = AgentApplication.inMemoryDefaults(
         WorkerId("scoped-worker"),

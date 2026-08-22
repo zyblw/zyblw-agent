@@ -62,6 +62,80 @@ object DefaultMcpClientSpec extends ZIOSpecDefault:
         closed
       )
     },
+    test("协商到 2026-07-28 无状态修订时 fail-closed，不发送 initialized") {
+      for
+        transport <- ScriptedMcpTransport.successful(
+          Map("initialize" -> Chunk(initializeResult(Json.Obj("tools" -> Json.Obj()), "2026-07-28")))
+        )
+        exit          <- ZIO.scoped(DefaultMcpClient.scoped(transport, config).exit)
+        notifications <- transport.notificationsSent
+        version       <- transport.version
+        closed        <- transport.isClosed
+      yield assertTrue(
+        exit.causeOption.flatMap(_.failureOption).exists {
+          case AgentError.ExternalProtocolFailure(
+                _,
+                "initialize",
+                message,
+                Some("unsupported_stateless_revision"),
+                _,
+                _
+              ) =>
+            message.contains("2026-07-28") && message.contains("stateless")
+          case _ => false
+        },
+        notifications.isEmpty,
+        version.isEmpty,
+        closed
+      )
+    },
+    test("协商到未知协议版本时 fail-closed，不静默降级") {
+      for
+        transport <- ScriptedMcpTransport.successful(
+          Map("initialize" -> Chunk(initializeResult(Json.Obj(), "2027-01-01")))
+        )
+        exit          <- ZIO.scoped(DefaultMcpClient.scoped(transport, config).exit)
+        notifications <- transport.notificationsSent
+      yield assertTrue(
+        exit.causeOption.flatMap(_.failureOption).exists {
+          case AgentError
+                .ExternalProtocolFailure(_, "initialize", message, Some("unsupported_version"), _, _) =>
+            message.contains("2027-01-01")
+          case _ => false
+        },
+        notifications.isEmpty
+      )
+    },
+    test("客户端配置不能主动请求尚未通过契约的协议版本") {
+      val invalid = config.copy(protocolVersion = McpProtocolVersion.Known2026_07_28)
+      assertTrue(invalid.validate.isLeft)
+    },
+    test("宿主固定 server identity 时初始化不匹配 fail-closed") {
+      for
+        transport <- ScriptedMcpTransport.successful(
+          Map("initialize" -> Chunk(initializeResult(Json.Obj())))
+        )
+        exit <- ZIO.scoped {
+          DefaultMcpClient
+            .scoped(
+              transport,
+              config.copy(expectedServerIdentity = Some(McpServerIdentity("contract-server", "2.0.0")))
+            )
+            .exit
+        }
+        requests <- transport.requests
+        closed   <- transport.isClosed
+      yield assertTrue(
+        exit.causeOption.flatMap(_.failureOption).exists {
+          case AgentError
+                .ExternalProtocolFailure(_, "initialize", _, Some("server_identity_mismatch"), _, _) =>
+            true
+          case _ => false
+        },
+        requests.map(_.method) == Chunk("initialize"),
+        closed
+      )
+    },
     test("工具目录分页、结构化结果和 cursor 参数保持确定性") {
       val firstPage = Json.Obj(
         "tools" -> Json.Arr(
@@ -180,6 +254,43 @@ object DefaultMcpClientSpec extends ZIOSpecDefault:
       yield assertTrue(
         calls == 0,
         responses.headOption.exists(_._2.left.exists(_.code == -32601))
+      )
+    },
+    test("Roots provider 只按本地 serverId 返回显式 file URI 且不开放其它反向能力") {
+      val root = McpRoot
+        .file("file:///srv/knowledge", "knowledge")
+        .fold(error => throw IllegalArgumentException(error.message), identity)
+      for
+        transport <- ScriptedMcpTransport.successful(
+          Map("initialize" -> Chunk(initializeResult(Json.Obj())))
+        )
+        handler = McpClientRequestHandler.withRoots(
+          McpRootsProvider.fixed(Map(config.serverId -> Chunk(root)))
+        )
+        _ <- ZIO.scoped {
+          for
+            _ <- DefaultMcpClient.scoped(
+              transport,
+              config.copy(capabilities = McpClientCapabilities(roots = true)),
+              handler
+            )
+            _ <- transport.offerInbound(
+              McpInbound.Request(McpRequestId.numeric(100L), "roots/list", Json.Obj())
+            )
+            _ <- transport.responsesSent.repeatUntil(_.nonEmpty).unit
+          yield ()
+        }
+        responses <- transport.responsesSent
+        roots = responses.headOption.flatMap(_._2.toOption).flatMap {
+          case obj: Json.Obj => McpJson.field(obj, "roots")
+          case _             => None
+        }
+      yield assertTrue(
+        McpRoot.file("file://remote-host/srv/knowledge", "remote").isLeft,
+        roots.exists {
+          case Json.Arr(values) => values.toString.contains("file:///srv/knowledge")
+          case _                => false
+        }
       )
     }
   )

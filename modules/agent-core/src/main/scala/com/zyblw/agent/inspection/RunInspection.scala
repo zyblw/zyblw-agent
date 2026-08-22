@@ -289,6 +289,23 @@ object RunTimeline:
         )
       case AgentEvent.ModelCallStarted(_, provider, model, _) =>
         base.copy(category = Some(s"$provider:$model"))
+      case AgentEvent.ModelCallPrepared(
+            _,
+            requestId,
+            provider,
+            model,
+            fingerprint,
+            policy,
+            messages,
+            tools,
+            _
+          ) =>
+        base.copy(
+          callId = Some(requestId),
+          category = Some(s"$provider:$model:$policy:$messages:$tools:${fingerprint.take(12)}")
+        )
+      case AgentEvent.ModelCallUnknown(_, requestId, _) =>
+        base.copy(callId = Some(requestId), category = Some("unknown"))
       case AgentEvent.ModelCallCompleted(_, usage, _) =>
         base.copy(
           usage = Some(
@@ -323,6 +340,8 @@ object RunTimeline:
     case _: AgentEvent.ContextPrepared        => "ContextPrepared"
     case _: AgentEvent.ContextCompacted       => "ContextCompacted"
     case _: AgentEvent.ModelCallStarted       => "ModelCallStarted"
+    case _: AgentEvent.ModelCallPrepared      => "ModelCallPrepared"
+    case _: AgentEvent.ModelCallUnknown       => "ModelCallUnknown"
     case _: AgentEvent.ModelTextDelta         => "ModelTextDelta"
     case _: AgentEvent.ModelToolCallDelta     => "ModelToolCallDelta"
     case _: AgentEvent.ModelCallCompleted     => "ModelCallCompleted"
@@ -341,16 +360,18 @@ object RunTimeline:
     case _: AgentEvent.RunCompleted           => "RunCompleted"
     case _: AgentEvent.RunFailed              => "RunFailed"
     case _: AgentEvent.RunCancelled           => "RunCancelled"
+    case _: AgentEvent.RetrievalCited         => "RetrievalCited"
 
   private def phase(event: AgentEvent): RunTimelinePhase = event match
     case _: AgentEvent.RunCreated | _: AgentEvent.RunStarted | _: AgentEvent.RunResumed |
         _: AgentEvent.StepStarted | _: AgentEvent.RunSuspended | _: AgentEvent.RunCompleted |
         _: AgentEvent.RunFailed | _: AgentEvent.RunCancelled =>
       RunTimelinePhase.Lifecycle
-    case _: AgentEvent.ContextPrepared | _: AgentEvent.ContextCompacted =>
+    case _: AgentEvent.ContextPrepared | _: AgentEvent.ContextCompacted | _: AgentEvent.RetrievalCited =>
       RunTimelinePhase.Context
-    case _: AgentEvent.ModelCallStarted | _: AgentEvent.ModelTextDelta | _: AgentEvent.ModelToolCallDelta |
-        _: AgentEvent.ModelCallCompleted =>
+    case _: AgentEvent.ModelCallStarted | _: AgentEvent.ModelCallPrepared | _: AgentEvent.ModelTextDelta |
+        _: AgentEvent.ModelToolCallDelta | _: AgentEvent.ModelCallCompleted |
+        _: AgentEvent.ModelCallUnknown =>
       RunTimelinePhase.Model
     case _: AgentEvent.ToolCallRequested | _: AgentEvent.ToolBatchPlanned | _: AgentEvent.ToolBatchStarted |
         _: AgentEvent.ToolBatchCommitted | _: AgentEvent.ToolExecutionStarted |
@@ -363,12 +384,12 @@ object RunTimeline:
 
   private def outcome(event: AgentEvent): RunTimelineOutcome = event match
     case _: AgentEvent.RunCreated | _: AgentEvent.RunStarted | _: AgentEvent.RunResumed |
-        _: AgentEvent.StepStarted | _: AgentEvent.ModelCallStarted | _: AgentEvent.ToolBatchStarted |
-        _: AgentEvent.ToolExecutionStarted =>
+        _: AgentEvent.StepStarted | _: AgentEvent.ModelCallStarted | _: AgentEvent.ModelCallPrepared |
+        _: AgentEvent.ToolBatchStarted | _: AgentEvent.ToolExecutionStarted =>
       RunTimelineOutcome.Started
     case _: AgentEvent.ContextPrepared | _: AgentEvent.ModelTextDelta | _: AgentEvent.ModelToolCallDelta |
         _: AgentEvent.ToolCallRequested | _: AgentEvent.ToolBatchPlanned | _: AgentEvent.GuardrailEvaluated |
-        _: AgentEvent.UsageUpdated | _: AgentEvent.CheckpointSaved =>
+        _: AgentEvent.UsageUpdated | _: AgentEvent.CheckpointSaved | _: AgentEvent.RetrievalCited =>
       RunTimelineOutcome.Progress
     case _: AgentEvent.ContextCompacted | _: AgentEvent.ModelCallCompleted |
         _: AgentEvent.ToolBatchCommitted | _: AgentEvent.ToolExecutionCompleted |
@@ -376,6 +397,6 @@ object RunTimeline:
       RunTimelineOutcome.Succeeded
     case _: AgentEvent.ToolApprovalRequired | _: AgentEvent.RunSuspended =>
       RunTimelineOutcome.Waiting
-    case _: AgentEvent.ToolExecutionFailed | _: AgentEvent.RunFailed =>
+    case _: AgentEvent.ToolExecutionFailed | _: AgentEvent.RunFailed | _: AgentEvent.ModelCallUnknown =>
       RunTimelineOutcome.Failed
     case _: AgentEvent.RunCancelled => RunTimelineOutcome.Cancelled

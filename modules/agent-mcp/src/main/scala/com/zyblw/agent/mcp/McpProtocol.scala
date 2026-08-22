@@ -12,15 +12,53 @@ final case class McpServerId(value: String):
 /** 初始化阶段协商出的 MCP 协议日期版本。 */
 final case class McpProtocolVersion(value: String)
 
+/** 客户端对某个 MCP 日期版本的支持分类。
+  *
+  * 已知但不支持的版本必须和未知版本分开：前者给出可执行的升级说明，后者保持通用 fail-closed。两者都不能静默降级成 `2025-11-25` 继续握手。
+  */
+enum McpProtocolSupport:
+  case Supported
+  case KnownUnsupported(code: String, reason: String)
+  case Unknown
+
 object McpProtocolVersion:
-  /** 当前实现锁定的稳定规范版本。
-    *
-    * 这里故意不自动接受未知的新版本。MCP 版本会改变 transport/session 语义；静默接受意味着编译通过但 运行时可能违反安全要求。升级时应新增契约测试，再显式加入 `supported`。
-    */
+  /** 当前实现锁定、且已有完整契约测试的稳定规范版本。 */
   val Stable2025_11_25: McpProtocolVersion = McpProtocolVersion("2025-11-25")
+
+  /** 官方 2026-07-28 无状态核心修订。本客户端识别它，但尚未实现其 transport/lifecycle。
+    *
+    * 该修订删除 `initialize`/`initialized`、`Mcp-Session-Id`、`ping` 和 SSE 可恢复流；请求改为在 `_meta`
+    * 自描述。在专用契约落地前，任何协商到该版本的会话都必须 fail-closed。
+    */
+  val Known2026_07_28: McpProtocolVersion = McpProtocolVersion("2026-07-28")
 
   /** 当前客户端真正通过契约测试的版本集合。 */
   val supported: Set[McpProtocolVersion] = Set(Stable2025_11_25)
+
+  /** 将远端或配置中的版本分成 Supported / KnownUnsupported / Unknown。 */
+  def classify(version: McpProtocolVersion): McpProtocolSupport =
+    if supported.contains(version) then McpProtocolSupport.Supported
+    else if version == Known2026_07_28 then
+      McpProtocolSupport.KnownUnsupported(
+        code = "unsupported_stateless_revision",
+        reason =
+          "MCP 2026-07-28 is a stateless-core revision: initialize/initialized, Mcp-Session-Id, ping and SSE resumability were removed. This client remains locked to 2025-11-25 until dedicated transport tests land."
+      )
+    else McpProtocolSupport.Unknown
+
+  /** 协商到不支持版本时的确定性协议错误；不携带远端 payload。 */
+  def rejection(operation: String, version: McpProtocolVersion): AgentError =
+    classify(version) match
+      case McpProtocolSupport.Supported =>
+        McpJson.protocolError(operation, s"internal: supported version was rejected: ${version.value}")
+      case McpProtocolSupport.KnownUnsupported(code, reason) =>
+        McpJson.protocolError(operation, reason, Some(code))
+      case McpProtocolSupport.Unknown =>
+        McpJson.protocolError(
+          operation,
+          s"unsupported negotiated protocol version: ${version.value}",
+          Some("unsupported_version")
+        )
 
 /** MCP 实现自描述信息。名称与版本用于互操作诊断，不应当被当成可信身份。 */
 final case class McpImplementation(

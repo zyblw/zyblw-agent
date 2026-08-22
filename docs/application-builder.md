@@ -101,6 +101,8 @@ ZYBLW_AGENT_WORKER_LEASE_DURATION=30s
 ZYBLW_AGENT_WORKER_HEARTBEAT_EVERY=10s
 ZYBLW_AGENT_WORKER_POLL_EVERY=500ms
 ZYBLW_AGENT_WORKER_PARALLELISM=4
+ZYBLW_AGENT_RUNTIME_PROFILE_ID=default
+ZYBLW_AGENT_RUNTIME_CAPTURE_POLICY=metadata-only
 ```
 
 加载阶段会拒绝：
@@ -109,10 +111,14 @@ ZYBLW_AGENT_WORKER_PARALLELISM=4
 - 非正调用次数、并行度、结果上限和超时；
 - `heartbeatEvery >= leaseDuration`；
 - 非法审批/重试模式、重试退避或 jitter；
-- 超长或含控制字符的工具名称。
+- 超长或含控制字符的工具名称；
+- 未知 `runtime.capture-policy`（仅 `disabled` / `metadata-only` / `replayable`）。
 
-空 `allowed-tools` 仍表示拒绝全部工具。`idempotent-only` 也不会把普通写工具自动变成幂等工具：只有工具元数据明确声明
-可安全重试，并且真实副作用遵守业务幂等键/outbox 契约，Runtime 才会自动重试。
+空 `allowed-tools` 仍表示拒绝全部工具。`idempotent-only` 也不会把普通写工具自动变成幂等工具：只有工具元数据
+`onlineRetryable`，并且真实副作用遵守业务幂等键/outbox 契约，Runtime 才会在同一次调用内热重试。进程死后是否重放
+由 `ToolRecoveryPolicy` 决定，与这项部署开关正交。
+
+`runtime.capture-policy` 默认 `metadata-only`：生产账本只保存指纹与计数。`replayable` 才写入可重建请求，只应用于授权评测，不是权限开关。`RuntimeProfile` 描述装配，不能绕过 ToolPolicy / Guardrail / 审批。新增 Memory/RAG/Skill 来源应实现 `ContextContributor` 并组成 `ContextSourceResolver`，不必修改 Runtime 循环；`id@version` 会写入组合指纹。
 
 模型 API Key、数据库密码、OTLP/Langfuse 认证头不属于 `AgentApplicationConfig`。这些值必须留在各 Adapter 的 Secret
 配置与部署平台 Secret Manager 中，避免整个应用配置被调试打印时泄漏凭据。ZIO Core 配置前端和可替换
@@ -241,7 +247,8 @@ val queueHealth: ZIO[AgentApplication, AgentError, RunCommandQueueSnapshot] =
   AgentApplication.queueSnapshot
 ```
 
-建议对 `dispatchableRuns`、`oldestDispatchableAgeMillis`、`expiredLeases` 和 `deadLetterCommands` 分别建立阈值与 runbook。
+建议对 `dispatchableRuns`、`oldestDispatchableAgeMillis`、`expiredLeases` 和 `deadLetterCommands` 分别建立阈值与
+[值班 runbook](operations-runbook.md)。
 快照是采样值，不替代 `RunStore`、命令审计或 Prometheus 的历史时间序列。
 
 如果同一个进程还运行自定义 ZIO HTTP Server，可使用 Scope 管理后台 Fiber：
@@ -299,7 +306,6 @@ HTTP 创建仍返回 `202 + runId + commandId`；`AgentApplication` 没有引入
 | 单实例试运行但要求重启恢复 | `durable`                               | PostgreSQL                 | 显式治理，确定性压缩       |
 | 多副本与模型摘要生产       | `durableWithContextCompressor`          | PostgreSQL + lease/fencing | 显式治理、压缩器并完成演练 |
 
-完整可运行代码见 `BasicAgentExample`、`ApprovalAgentExample`、`RagAgentExample`、
-`ContextCompressionExample`、`StandaloneHttpAgentExample` 和 `PostgresQuickstartExample`；Context 示例会经过真实异步主循环
-生成耐久摘要 checkpoint，HTTP 示例会启动真实 ZIO HTTP 端口并由 Host 管理 Worker 生命周期，PostgreSQL 示例则覆盖
-DataSource、migration、durable application、类型化只读工具和 scoped shutdown 的独立宿主路径。
+完整可运行代码见 `ProductionSupportHost`（生产参考）、`ApprovalAgentExample`、`RagAgentExample` 与
+`ContextCompressionExample`。`StandaloneHttpAgentExample` 只演示 Host 生命周期，不是接入入口。
+`AgentQuickstart` 与 `PostgresQuickstartExample` 已删除。

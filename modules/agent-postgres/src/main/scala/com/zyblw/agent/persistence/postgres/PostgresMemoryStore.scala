@@ -385,6 +385,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
     case MemoryAuditAction.Delete         => "delete"
     case MemoryAuditAction.DeleteScope    => "delete_scope"
     case MemoryAuditAction.RetentionPurge => "retention_purge"
+    case MemoryAuditAction.Export         => "export"
 
   /** 首次 CAS 创建；冲突返回 None，由调用方查询实际版本。 */
   private def insertFirst(

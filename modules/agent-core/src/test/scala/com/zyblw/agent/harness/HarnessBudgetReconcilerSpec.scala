@@ -1,0 +1,133 @@
+package com.zyblw.agent.harness
+
+import com.zyblw.agent.core.*
+import com.zyblw.agent.memory.RunStore
+import java.time.Instant
+import zio.*
+import zio.test.*
+
+object HarnessBudgetReconcilerSpec extends ZIOSpecDefault:
+  private val limits = RunLimits(
+    maxSteps = 4,
+    maxModelCalls = 2,
+    maxToolCalls = 2,
+    maxRepeatedActions = 2,
+    maxInputTokens = 100,
+    maxOutputTokens = 50,
+    maxTotalTokens = 120,
+    maxEstimatedCost = Some(BigDecimal("2.00")),
+    maxDuration = 1.minute
+  )
+
+  private val usage = UsageSummary(
+    modelCalls = 1,
+    toolCalls = 1,
+    inputTokens = 60,
+    outputTokens = 20,
+    estimatedCost = BigDecimal("0.75")
+  )
+
+  private val layer = ZLayer.make[RunStore & HarnessStore](RunStore.inMemory, HarnessStore.inMemory)
+
+  def spec: Spec[TestEnvironment & Scope, Any] = suite("HarnessBudgetReconciler")(
+    test("只结算终态，缺失/非终态保持 Reserved，游标到末尾后安全回绕") {
+      (for
+        runs       <- ZIO.service[RunStore]
+        harness    <- ZIO.service[HarnessStore]
+        goalId     <- GoalId.random
+        terminal   <- createRun(runs, RunStatus.Completed)
+        running    <- createRun(runs, RunStatus.Running)
+        missingRun <- RunId.random
+        _          <- harness.saveGoal(0L, Goal(goalId, ThreadId("reconcile"), "预算恢复对账"))
+        _          <- harness.configureGoalBudget(
+          goalId,
+          GoalBudgetPolicy(3, 6, 6, 300, 150, 360, Some(BigDecimal("6.00")))
+        )
+        _                   <- harness.reserveGoalBudget(goalId, terminal, limits)
+        _                   <- harness.reserveGoalBudget(goalId, running, limits)
+        _                   <- harness.reserveGoalBudget(goalId, missingRun, limits)
+        reconciler          <- HarnessBudgetReconciler.make(harness, runs)
+        first               <- reconciler.reconcileNext(10)
+        terminalReservation <- harness.getGoalBudgetReservation(goalId, terminal)
+        runningReservation  <- harness.getGoalBudgetReservation(goalId, running)
+        missingReservation  <- harness.getGoalBudgetReservation(goalId, missingRun)
+        _                   <- completeRun(runs, running)
+        second              <- reconciler.reconcileNext(10)
+        runningSettled      <- harness.getGoalBudgetReservation(goalId, running)
+        snapshot            <- harness.getGoalBudget(goalId)
+      yield assertTrue(
+        first.scanned == 3,
+        first.settled == 1,
+        first.pending == 1,
+        first.failedRunIds == Chunk(missingRun),
+        terminalReservation.exists(_.status == GoalBudgetReservationStatus.Settled),
+        runningReservation.exists(_.status == GoalBudgetReservationStatus.Reserved),
+        missingReservation.exists(_.status == GoalBudgetReservationStatus.Reserved),
+        second.wrapped,
+        second.scanned == 2,
+        second.settled == 1,
+        second.failedRunIds == Chunk(missingRun),
+        runningSettled.exists(_.status == GoalBudgetReservationStatus.Settled),
+        snapshot.exists(_.consumed.runs == 2L),
+        snapshot.exists(_.reserved.runs == 1L)
+      )).provideLayer(layer)
+    }
+  )
+
+  private def createRun(store: RunStore, status: RunStatus): UIO[RunId] =
+    (for
+      runId   <- RunId.random
+      session <- SessionId.random
+      eventId <- EventId.random
+      now     <- Clock.instant
+      state = AgentState(
+        runId,
+        session,
+        AgentId("budget-reconciler"),
+        RunStatus.Created,
+        Chunk(AgentMessage.user("test")),
+        Chunk.empty,
+        UsageSummary(),
+        BudgetState(limits, UsageSummary(), 0),
+        None,
+        now,
+        now,
+        Version.initial,
+        lastEventSequence = 0L
+      )
+      created = PersistedAgentEvent(
+        eventId,
+        runId,
+        0L,
+        AgentEvent.RunCreated(runId, session, now.toEpochMilli),
+        now.toEpochMilli
+      )
+      _ <- store.createWithEvents(state, NonEmptyChunk(created))
+      _ <-
+        if RunStatus.isTerminal(status) then completeRun(store, runId)
+        else store.save(Version.initial, state.copy(status = status)).unit
+    yield runId).orDie
+
+  private def completeRun(store: RunStore, runId: RunId): IO[StoreError, Unit] =
+    for
+      current <- store.load(runId)
+      eventId <- EventId.random
+      now     <- Clock.instant
+      answer = AgentMessage.assistant("done")
+      event  = PersistedAgentEvent(
+        eventId,
+        runId,
+        current.lastEventSequence + 1L,
+        AgentEvent.RunCompleted(runId, answer, usage, now.toEpochMilli),
+        now.toEpochMilli
+      )
+      completed = current.copy(
+        status = RunStatus.Completed,
+        messages = current.messages :+ answer,
+        usage = usage,
+        budget = current.budget.copy(consumed = usage),
+        lastEventSequence = event.sequence,
+        updatedAt = Instant.ofEpochMilli(now.toEpochMilli)
+      )
+      _ <- store.commit(current.version, completed, NonEmptyChunk(event))
+    yield ()

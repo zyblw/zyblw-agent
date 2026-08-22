@@ -38,6 +38,15 @@ groups:
           summary: 模型调用持续超时
           description: 按 gen_ai_provider_name 检查 Provider、出口网络、限流和客户端 timeout，不记录或展示 prompt 正文。
 
+      - alert: ZyblwAgentCompositionDrift
+        expr: sum(rate(zyblw_agent_composition_drift_count_total[10m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: zyblw-agent 组合漂移持续出现
+          description: 冻结组合与现场进程不一致。先对齐部署/模型覆盖再恢复 Run，不要改 JSON 放行。
+
       - alert: ZyblwAgentToolFailureRateHigh
         expr: |
           (

@@ -28,12 +28,50 @@ object LexicalProcessor:
     */
   val chinese: ULayer[LexicalProcessor] = ZLayer.succeed(SimpleChineseLexicalProcessor)
 
-/** 纯函数、确定性且无词典依赖的中文 lexical baseline。 */
+/** 纯函数、确定性且无外部词典的中文 lexical baseline。
+  *
+  * v2 在 v1 bigram 之上增加 NFKC、有界繁简归一和停用词过滤。不引入 zhparser/pg_jieba，以保证 Testcontainers 与业务部署可复现；短语再识别走
+  * `RetrievalMode.Phrase`。
+  */
 object SimpleChineseLexicalProcessor extends LexicalProcessor:
-  override val strategyId: String = "simple-cjk-bigram-v1"
+  override val strategyId: String = "simple-cjk-bigram-v2"
 
   override def document(text: String): String = tokenize(text)
   override def query(text: String): String    = tokenize(text)
+
+  private val Stopwords: Set[String] =
+    Set("的", "了", "是", "在", "和", "与", "或", "也", "就", "都", "而", "及", "其", "这", "那", "之", "为", "以")
+
+  private val TraditionalToSimplified: Map[Int, Int] =
+    Map(
+      '證'.toInt -> '证'.toInt,
+      '發'.toInt -> '发'.toInt,
+      '熱'.toInt -> '热'.toInt,
+      '風'.toInt -> '风'.toInt,
+      '脈'.toInt -> '脉'.toInt,
+      '陽'.toInt -> '阳'.toInt,
+      '陰'.toInt -> '阴'.toInt,
+      '為'.toInt -> '为'.toInt,
+      '與'.toInt -> '与'.toInt,
+      '無'.toInt -> '无'.toInt,
+      '對'.toInt -> '对'.toInt,
+      '經'.toInt -> '经'.toInt,
+      '條'.toInt -> '条'.toInt,
+      '論'.toInt -> '论'.toInt,
+      '傷'.toInt -> '伤'.toInt,
+      '漢'.toInt -> '汉'.toInt
+    )
+
+  private def normalize(text: String): String =
+    val nfkc = java.text.Normalizer.normalize(Option(text).getOrElse(""), java.text.Normalizer.Form.NFKC)
+    val out  = new java.lang.StringBuilder(nfkc.length)
+    var i    = 0
+    while i < nfkc.length do
+      val cp     = nfkc.codePointAt(i)
+      val mapped = TraditionalToSimplified.getOrElse(cp, cp)
+      out.appendCodePoint(mapped)
+      i += Character.charCount(cp)
+    out.toString
 
   private def tokenize(text: String): String =
     val tokens      = Vector.newBuilder[String]
@@ -57,7 +95,7 @@ object SimpleChineseLexicalProcessor extends LexicalProcessor:
         tokens += currentWord.toString.toLowerCase(java.util.Locale.ROOT)
         currentWord.clear()
 
-    Option(text).getOrElse("").codePoints().forEach { point =>
+    normalize(text).codePoints().forEach { point =>
       if isHan(point) then
         flushWord()
         currentHan.appendAll(Character.toChars(point))
@@ -70,7 +108,7 @@ object SimpleChineseLexicalProcessor extends LexicalProcessor:
     }
     flushHan()
     flushWord()
-    tokens.result().mkString(" ")
+    tokens.result().filterNot(Stopwords.contains).mkString(" ")
 
   private def isHan(codePoint: Int): Boolean =
     Character.UnicodeScript.of(codePoint) == Character.UnicodeScript.HAN

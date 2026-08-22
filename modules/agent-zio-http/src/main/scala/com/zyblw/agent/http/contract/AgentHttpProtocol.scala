@@ -18,7 +18,7 @@ object AgentHttpProtocol:
   val MajorVersion: Int = 1
 
   /** OpenAPI `info.version`，与 URL 主版本分开表达契约修订。 */
-  val ContractVersion: String = "1.1.0"
+  val ContractVersion: String = "1.2.0"
 
   /** 所有 Agent API 响应都携带的低敏版本头。 */
   val ApiVersionHeader: String = "X-Zyblw-Agent-Api-Version"
@@ -28,6 +28,16 @@ object AgentHttpProtocol:
 
   /** 公开 JSON API 的路径前缀，健康检查仍保留在 `/health`。 */
   val BasePath: String = s"/api/v$MajorVersion"
+
+  /** 未毕业能力的实验面前缀。experimental 路径不进入稳定 OpenAPI 承诺，毕业需要显式决定。 */
+  val ExperimentalBasePath: String = s"$BasePath/experimental"
+
+  def stability(path: String): AgentProtocolStability =
+    if path.startsWith(ExperimentalBasePath) then AgentProtocolStability.Experimental
+    else AgentProtocolStability.Stable
+
+enum AgentProtocolStability derives JsonCodec:
+  case Stable, Experimental
 
 /** v1 wire 输入的稳定资源上限。
   *
@@ -231,10 +241,112 @@ final case class RunView(
     pendingApproval: Option[ApprovalView],
     createdAtEpochMilli: Long,
     updatedAtEpochMilli: Long,
-    stateVersion: Long
+    stateVersion: Long,
+    citations: List[CitationView] = Nil,
+    evidence: Option[RetrievalEvidenceView] = None
 ) derives JsonCodec
 object RunView:
   given Schema[RunView] = DeriveSchema.gen[RunView]
+
+final case class CitationView(
+    id: String,
+    sourceUri: String,
+    excerpt: String,
+    score: Double,
+    pageNumbers: List[Int] = Nil,
+    chunkId: Option[String] = None,
+    documentId: Option[String] = None
+) derives JsonCodec
+object CitationView:
+  given Schema[CitationView] = DeriveSchema.gen[CitationView]
+
+final case class RetrievalEvidenceView(
+    status: String,
+    candidateCount: Int,
+    acceptedCount: Int,
+    topAcceptedScore: Option[Double] = None
+) derives JsonCodec
+object RetrievalEvidenceView:
+  given Schema[RetrievalEvidenceView] = DeriveSchema.gen[RetrievalEvidenceView]
+
+/** 稳定知识检索请求；tenant 与 permissions 不出现在正文。 */
+final case class KnowledgeSearchBody(
+    query: String,
+    mode: Option[String] = None,
+    documentIds: List[String] = Nil,
+    chunkIds: List[String] = Nil,
+    pages: List[Int] = Nil,
+    headingPrefix: List[String] = Nil,
+    metadataEquals: Map[String, String] = Map.empty,
+    limit: Option[Int] = None
+) derives JsonCodec
+object KnowledgeSearchBody:
+  given Schema[KnowledgeSearchBody] = DeriveSchema.gen[KnowledgeSearchBody]
+
+final case class KnowledgeSearchResponse(
+    citations: List[CitationView],
+    evidence: RetrievalEvidenceView
+) derives JsonCodec
+object KnowledgeSearchResponse:
+  given Schema[KnowledgeSearchResponse] = DeriveSchema.gen[KnowledgeSearchResponse]
+
+final case class KnowledgeDocumentSummary(
+    documentId: String,
+    indexVersion: Long,
+    sourceUri: String,
+    status: String,
+    active: Boolean,
+    chunkCount: Int,
+    permissions: List[String],
+    indexingStrategy: String,
+    updatedAtEpochMilli: Long
+) derives JsonCodec
+object KnowledgeDocumentSummary:
+  given Schema[KnowledgeDocumentSummary] = DeriveSchema.gen[KnowledgeDocumentSummary]
+
+final case class KnowledgeDocumentPageView(
+    items: List[KnowledgeDocumentSummary],
+    nextCursor: Option[String],
+    hasMore: Boolean
+) derives JsonCodec
+object KnowledgeDocumentPageView:
+  given Schema[KnowledgeDocumentPageView] = DeriveSchema.gen[KnowledgeDocumentPageView]
+
+final case class KnowledgeIngestionAccepted(
+    jobId: String,
+    status: String,
+    progressPercent: Int,
+    documentId: Option[String] = None
+) derives JsonCodec
+object KnowledgeIngestionAccepted:
+  given Schema[KnowledgeIngestionAccepted] = DeriveSchema.gen[KnowledgeIngestionAccepted]
+
+final case class KnowledgeRetireBody(expectedActiveVersion: Long) derives JsonCodec
+object KnowledgeRetireBody:
+  given Schema[KnowledgeRetireBody] = DeriveSchema.gen[KnowledgeRetireBody]
+
+final case class KnowledgeReindexBody(
+    afterDocumentId: Option[String] = None,
+    limit: Int = 32
+) derives JsonCodec
+object KnowledgeReindexBody:
+  given Schema[KnowledgeReindexBody] = DeriveSchema.gen[KnowledgeReindexBody]
+
+final case class KnowledgeReindexItemHttp(
+    documentId: String,
+    status: String,
+    detail: Option[String] = None
+) derives JsonCodec
+object KnowledgeReindexItemHttp:
+  given Schema[KnowledgeReindexItemHttp] = DeriveSchema.gen[KnowledgeReindexItemHttp]
+
+final case class KnowledgeReindexResponse(
+    items: List[KnowledgeReindexItemHttp],
+    nextDocumentId: Option[String],
+    hasMore: Boolean
+) derives JsonCodec
+object KnowledgeReindexResponse:
+  given Schema[KnowledgeReindexResponse] = DeriveSchema.gen[KnowledgeReindexResponse]
 
 /** 公开事件中的工具进度；只提供稳定标识，不返回 arguments 或 ToolResult 正文。
   *
@@ -423,6 +535,7 @@ object AgentHttpContract:
 
   val createRunPattern       = Method.POST / "api" / "v1" / "agents" / string("agentId") / "runs"
   val getRunPattern          = Method.GET / "api" / "v1" / "runs" / string("runId")
+  val getRunCitationsPattern = Method.GET / "api" / "v1" / "runs" / string("runId") / "citations"
   val cancelRunPattern       = Method.DELETE / "api" / "v1" / "runs" / string("runId")
   val approveRunPattern      = Method.POST / "api" / "v1" / "runs" / string("runId") / "approval"
   val recoverRunPattern      = Method.POST / "api" / "v1" / "runs" / string("runId") / "recover"
@@ -433,6 +546,15 @@ object AgentHttpContract:
   val inspectRunPattern      = Method.GET / "api" / "v1" / "runs" / string("runId") / "inspection"
   val listRunEventsPattern   = Method.GET / "api" / "v1" / "runs" / string("runId") / "events"
   val streamRunEventsPattern = Method.GET / "api" / "v1" / "runs" / string("runId") / "events" / "stream"
+  val postKnowledgeDocumentsPattern = Method.POST / "api" / "v1" / "knowledge" / "documents"
+  val getKnowledgeDocumentsPattern  = Method.GET / "api" / "v1" / "knowledge" / "documents"
+  val getKnowledgeDocumentPattern   =
+    Method.GET / "api" / "v1" / "knowledge" / "documents" / string("documentId")
+  val deleteKnowledgeDocumentPattern =
+    Method.DELETE / "api" / "v1" / "knowledge" / "documents" / string("documentId")
+  val postKnowledgeSearchPattern   = Method.POST / "api" / "v1" / "knowledge" / "search"
+  val getKnowledgeIngestionPattern = Method.GET / "api" / "v1" / "knowledge" / "ingestions" / string("jobId")
+  val postKnowledgeReindexPattern  = Method.POST / "api" / "v1" / "knowledge" / "reindex"
 
   private val errorDoc = Doc.p("稳定错误分类与可安全展示的消息；不会返回内部异常或 Provider 正文。")
 
@@ -446,7 +568,12 @@ object AgentHttpContract:
   val getRun = Endpoint(getRunPattern)
     .out[RunView](Doc.p("授权后的稳定 Run 投影。"))
     .outError[ErrorResponse](Status.NotFound, errorDoc)
-    .tag("Runs") ?? Doc.p("读取 Run 状态、用量、输出与待审批摘要。")
+    .tag("Runs") ?? Doc.p("读取 Run 状态、用量、输出、引用与待审批摘要。")
+
+  val getRunCitations = Endpoint(getRunCitationsPattern)
+    .out[RunView](Doc.p("只返回该 Run 已接受的有界引用与证据状态。"))
+    .outError[ErrorResponse](Status.NotFound, errorDoc)
+    .tag("Runs") ?? Doc.p("读取 Run 结构化引用。")
 
   val cancelRun = Endpoint(cancelRunPattern)
     .in[CancelCommand](Doc.p("取消原因；允许 reason 为空，存在时最大 2,048 字符。"))
@@ -504,10 +631,49 @@ object AgentHttpContract:
     .outError[ErrorResponse](Status.BadRequest, errorDoc)
     .tag("Events") ?? Doc.p("跨 Worker 可恢复的耐久 SSE；SSE data 是 RunEventView JSON。")
 
-  /** OpenAPI 只包含稳定 Agent 控制面；Memory 用户治理仍处于独立 Beta 协议，不在 v1 稳定承诺中。 */
+  val postKnowledgeDocuments = Endpoint(postKnowledgeDocumentsPattern)
+    .out[KnowledgeIngestionAccepted](Status.Accepted, Doc.p("摄入任务已接受；tenant 来自认证上下文。"))
+    .outError[ErrorResponse](Status.BadRequest, errorDoc)
+    .tag("Knowledge") ?? Doc.p("上传文档字节并创建异步摄入任务；需要 knowledge:write。")
+
+  val getKnowledgeDocuments = Endpoint(getKnowledgeDocumentsPattern)
+    .out[KnowledgeDocumentPageView](Doc.p("当前租户的有界知识文档页。"))
+    .outError[ErrorResponse](Status.Forbidden, errorDoc)
+    .tag("Knowledge") ?? Doc.p("列出当前租户知识文档；需要 knowledge:read。")
+
+  val getKnowledgeDocument = Endpoint(getKnowledgeDocumentPattern)
+    .out[KnowledgeDocumentSummary]
+    .outError[ErrorResponse](Status.NotFound, errorDoc)
+    .tag("Knowledge") ?? Doc.p("读取当前租户一份知识文档。")
+
+  val deleteKnowledgeDocument = Endpoint(deleteKnowledgeDocumentPattern)
+    .in[KnowledgeRetireBody](Doc.p("乐观退役当前 active 版本。"))
+    .out[Unit](Status.NoContent)
+    .outError[ErrorResponse](Status.Conflict, errorDoc)
+    .tag("Knowledge") ?? Doc.p("退役知识文档；需要 knowledge:write。")
+
+  val postKnowledgeSearch = Endpoint(postKnowledgeSearchPattern)
+    .in[KnowledgeSearchBody](Doc.p("检索 query、mode 与 filter；不得包含 tenant。"))
+    .out[KnowledgeSearchResponse]
+    .outError[ErrorResponse](Status.BadRequest, errorDoc)
+    .tag("Knowledge") ?? Doc.p("在当前租户授权范围内检索；需要 knowledge:read。")
+
+  val getKnowledgeIngestion = Endpoint(getKnowledgeIngestionPattern)
+    .out[KnowledgeIngestionAccepted]
+    .outError[ErrorResponse](Status.NotFound, errorDoc)
+    .tag("Knowledge") ?? Doc.p("查询本租户摄入任务。")
+
+  val postKnowledgeReindex = Endpoint(postKnowledgeReindexPattern)
+    .in[KnowledgeReindexBody](Doc.p("按 keyset 续跑的有界重建页。"))
+    .out[KnowledgeReindexResponse]
+    .outError[ErrorResponse](Status.Forbidden, errorDoc)
+    .tag("Knowledge") ?? Doc.p("按新 indexing_strategy 重建；需要 knowledge:admin。")
+
+  /** OpenAPI 包含稳定 Agent 控制面与知识面；Memory 用户治理仍处于独立 Beta 协议。 */
   val endpoints: List[Endpoint[?, ?, ?, ?, ?]] = List(
     createRun,
     getRun,
+    getRunCitations,
     cancelRun,
     approveRun,
     recoverRun,
@@ -517,7 +683,14 @@ object AgentHttpContract:
     listRunCommands,
     inspectRun,
     listRunEvents,
-    streamRunEvents
+    streamRunEvents,
+    postKnowledgeDocuments,
+    getKnowledgeDocuments,
+    getKnowledgeDocument,
+    deleteKnowledgeDocument,
+    postKnowledgeSearch,
+    getKnowledgeIngestion,
+    postKnowledgeReindex
   )
 
   /** 由 Endpoint 单一事实源生成的 OpenAPI 3 文档。 */

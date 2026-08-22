@@ -18,9 +18,9 @@ final case class DocumentStructureChunkerConfig(
     overlapCharacters: Int = 120,
     mergePeers: Boolean = true,
     strategyVersion: String = "document-structure-v1",
-    /** 可选 token 装箱预算。未设置时保持历史 code point 行为，不改变 `strategyId`。 */
-    maxTokens: Option[Int] = None,
-    tokenCounter: TokenCounter = TokenCounter.CodePoints
+    /** token 装箱预算。默认对齐 cl100k Embedding tokenizer；`maxCharacters` 只作硬性安全上限。 */
+    maxTokens: Option[Int] = Some(512),
+    tokenCounter: TokenCounter = TokenCounter.Cl100k
 ):
   require(maxCharacters >= 128, "structure chunk maxCharacters 必须至少为 128")
   require(overlapCharacters >= 0 && overlapCharacters < maxCharacters, "structure chunk overlap 无效")

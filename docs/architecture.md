@@ -2,9 +2,11 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-02
+> 最后核验：2026-08-23
 >
 > 事实来源：对应模块源码、测试与构建定义
+
+> **下一阶段：** [ADR-0018](architecture/0018-next-generation-runtime-kernel.md)、[ADR-0019](architecture/0019-typed-extensions-and-constrained-execution.md) 与 [下一代 Runtime 开发手册](architecture/next-generation-runtime.md)。P0 Kernel、P1 Composition 与 P2 Harness 已落地；Wave 1 与 Wave 2 第一刀已在 `0.8.0` 落地。后续：Wave 3 Tree/Fork/Replay 与编排（仍为 Proposed，需 Eval 门禁）。Wave 0 的宿主环境 soak/主备切换仍待。下面正文描述含已落地切片的现行架构。
 
 ## 设计边界
 
@@ -45,7 +47,7 @@ Schema 不再等于外部 wire Schema。首次公开版本不再为这个很小�
 - `agent-core`：provider-neutral ADT、Agent Runtime、Tool/权限/Guardrail、耐久命令 SPI、Workflow/Harness 与应用装配；
 - `agent-rag`：文档、结构谱系、切分、Embedding、Retriever、Reranker 和知识发布 SPI，不依赖 Docling/JDBC；
 - `agent-document-loaders`：本地目录边界与 Docling HTTP Adapter，把外部 JSON/Markdown 投影为 `agent-rag` 类型；
-- `agent-postgres`：Run/Command/Workflow/Memory/RAG JDBC Adapter、Flyway 和数据库结构探针；
+- `agent-postgres`：Run/Command/Workflow/Memory/RAG/Harness JDBC Adapter、Flyway 和数据库结构探针；
 - `agent-zio-http`：Endpoint/OpenAPI/Routes/SSE 和可选 Host 生命周期；
 - Provider、OpenTelemetry、MCP 分别留在独立协议/安全/依赖边界，不进入 core。
 
@@ -186,3 +188,7 @@ sequenceDiagram
 - [0015 独立公共仓库](architecture/0015-independent-public-repository.md)
 - [0016 Agent Application Runtime 与三层边界](architecture/0016-agent-application-runtime.md)
 - [0017 agent-dashboard 前端控制台架构与管理 API 边界](architecture/0017-agent-dashboard-architecture.md)
+- [0018 下一代 Runtime Kernel（Proposed）](architecture/0018-next-generation-runtime-kernel.md)
+- [0019 Typed Extensions 与 Constrained Execution](architecture/0019-typed-extensions-and-constrained-execution.md)
+- [0020 现代化基线、死合同清理与无损迁移](architecture/0020-modernization-baseline.md)
+- [下一代 Runtime 开发手册（Proposed）](architecture/next-generation-runtime.md)

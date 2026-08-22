@@ -1,6 +1,6 @@
 # PDF RAG 生产流水线
 
-> 状态：0.4 开发主线契约
+> 状态：0.8.0 书籍问答基线；tokenizer 对齐切分 + Hybrid/Vector/Lexical/Phrase
 > 事实来源：`agent-rag`、`agent-document-loaders`、`agent-postgres`、optional pgvector migrations 与真实 PostgreSQL Testcontainers
 
 本指南回答一个具体问题：一批 PDF 从目录/对象存储进入框架后，如何变成可撤回、可授权、可追溯、可评测的
@@ -17,7 +17,7 @@
   -> GovernedEmbeddingService(cache/quota/model identity)
   -> KnowledgeIndexer(Building -> stage -> activate)
   -> PostgreSQL FTS + pgvector + lineage
-  -> ACL 前置的 hybrid weighted RRF
+  -> ACL 前置的 Hybrid / VectorOnly / LexicalOnly / Phrase + 结构化过滤
   -> model/cross-encoder rerank
   -> 有界 parent/neighbor expansion
   -> citation(page/bbox/source) + Context budget
@@ -25,6 +25,8 @@
 ```
 
 不要把它简化为“PDF 转文本后全部塞进向量库”。原文身份、版本、权限、页面几何、切分策略、Embedding 模型和 active 发布都是一等事实。
+
+中文 lexical 使用 `simple` tsvector + unigram/bigram 处理器，**不**引入 `zhparser` / `pg_jieba`：它们不在标准 pgvector 镜像内，会破坏 Testcontainers 与业务部署的可复现性。需要整句再识别时用 `Phrase`（pg_trgm）。自建扩展可替换 `LexicalProcessor`，但必须换 `indexing_strategy` 并走 `KnowledgeReindexService`。
 
 ## 2. 框架与业务的责任边界
 
@@ -57,7 +59,8 @@ PDF 二进制或整份 Markdown。
 
 ## 4. 切分和 Embedding
 
-`DocumentStructureChunker` 优先按 block/章节切分，合并同父级相邻小块，只对超大单 block 使用 overlap。默认按 Unicode code point 装箱。可选 `maxTokens` 使用近似 CJK 计数器，不是 Embedding tokenizer；变更必须提升 `strategyId` 并新建索引版本。表格不应从行中间切开。
+`DocumentStructureChunker` 优先按 block/章节切分，合并同父级相邻小块，只对超大单 block 使用 overlap。默认
+`maxTokens=512`、`TokenCounter.Cl100k`（jtokkit BPE）。变更必须提升 `strategyId` 并新建索引版本。表格不应从行中间切开。
 
 Embedding 不只是“调一个 API”：
 
@@ -68,7 +71,7 @@ Embedding 不只是“调一个 API”：
 
 ## 5. PostgreSQL / pgvector 设计
 
-0.4 optional location 只有一份 fresh-install V001，固定在 `zyblw_agent_knowledge` schema 一次建立 manifest、staging、
+0.8 知识 baseline 只有一份 fresh-install V001，固定在 `zyblw_agent_knowledge` schema 一次建立 manifest、staging、
 active chunks、FTS/HNSW 和 parent/ordinal/previous/next/heading/page/origin/block 谱系，vector 类型显式来自 `public`。
 staging/active 字段对称，因此 `activate` 可在同一短事务内发布向量和谱系；
 正式 chunk 使用 tenant/document/chunk 复合身份，局部 ID 在另一文档复用不会覆盖或串联。

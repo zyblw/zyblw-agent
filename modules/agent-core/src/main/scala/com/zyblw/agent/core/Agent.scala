@@ -1,5 +1,6 @@
 package com.zyblw.agent.core
 
+import com.zyblw.agent.composition.{ApprovalSubject, ToolContractFingerprint}
 import zio.*
 import zio.json.*
 
@@ -66,13 +67,20 @@ enum ApprovalDecision derives JsonCodec:
   case Approve
   case Reject(reason: String)
 
+/** 一次待人工决定的副作用授权请求。
+  *
+  * @param subject
+  *   本次请求所授权的具体副作用。批准只对该主体生效：工具契约、参数、执行环境、授权上下文或审批策略任一变化，都会让这条 批准记录不再匹配后续调用。`None` 仅表示 v5 及更早快照，此时回落到按
+  *   `toolCall.id` 判定。
+  */
 final case class ApprovalRequest(
     id: String,
     runId: RunId,
     toolCall: ToolCall,
     risk: ToolRisk,
     reason: String,
-    requestedAtEpochMilli: Long
+    requestedAtEpochMilli: Long,
+    subject: Option[ApprovalSubject] = None
 ) derives JsonCodec
 
 enum RunOutcome derives JsonCodec:
@@ -91,6 +99,14 @@ final case class ToolExecutionContext(
 
 enum RunStatus derives JsonCodec:
   case Created, Running, WaitingForApproval, Suspended, Completed, Failed, Cancelled, TimedOut, BudgetExceeded
+
+object RunStatus:
+  /** 终态不会再由 Recover/Resume 推进；Harness 预算对账只能在这些状态结算。 */
+  def isTerminal(status: RunStatus): Boolean = status match
+    case RunStatus.Completed | RunStatus.Failed | RunStatus.Cancelled | RunStatus.TimedOut |
+        RunStatus.BudgetExceeded =>
+      true
+    case _ => false
 
 /** 一次模型响应中某个工具调用的确定性位置。
   *
@@ -124,12 +140,50 @@ final case class DurableToolBatch(index: Int, items: Chunk[DurableToolPlanItem])
   *   按 Provider 顺序形成的连续批次
   * @param nextBatchIndex
   *   下一个尚未提交到 AgentState 的批次位置
+  * @param toolContractFingerprints
+  *   新计划按工具名冻结的低敏 Schema/安全元数据摘要；空 Map 仅表示升级前旧快照
+  * @param approvalRequiredCallIds
+  *   v5 快照冻结的必须审批调用集合。v6 起不再写入，只用于读取历史状态
+  * @param approvalSubjects
+  *   v6 按 callId 冻结的审批主体，只包含规划时判定需要人工授权的调用。Some(empty) 表示已明确冻结且无需审批， None 仅表示 v5 及更早快照
   */
-final case class DurableToolPlan(id: String, batches: Chunk[DurableToolBatch], nextBatchIndex: Int = 0)
-    derives JsonCodec:
+final case class DurableToolPlan(
+    id: String,
+    batches: Chunk[DurableToolBatch],
+    nextBatchIndex: Int = 0,
+    toolContractFingerprints: Map[String, ToolContractFingerprint] = Map.empty,
+    approvalRequiredCallIds: Option[Set[String]] = None,
+    approvalSubjects: Option[Map[String, ApprovalSubject]] = None
+) derives JsonCodec:
+  private val plannedCallIds: Set[String] = batches.flatMap(_.items.map(_.call.id)).toSet
+
   require(id.trim.nonEmpty, "工具计划 ID 不能为空")
   require(batches.nonEmpty, "工具计划至少包含一个批次")
   require(nextBatchIndex >= 0 && nextBatchIndex <= batches.length, "nextBatchIndex 超出工具计划范围")
+  require(
+    toolContractFingerprints.keySet.subsetOf(batches.flatMap(_.items.map(_.call.name)).toSet),
+    "工具契约指纹只能引用当前计划中的工具"
+  )
+  require(approvalRequiredCallIds.forall(_.subsetOf(plannedCallIds)), "审批要求只能引用当前计划中的调用")
+  require(
+    approvalSubjects.forall(_.keySet.subsetOf(plannedCallIds)),
+    "审批主体只能引用当前计划中的调用"
+  )
+  require(
+    approvalSubjects.forall(_.forall { case (callId, subject) => subject.callId == callId }),
+    "审批主体必须与其 callId 键一致"
+  )
+  require(
+    !(approvalRequiredCallIds.isDefined && approvalSubjects.isDefined),
+    "审批要求只能由 v6 主体或 v5 callId 之一冻结，不能同时存在两份事实"
+  )
+
+  /** 规划时冻结为必须人工授权的调用；v6 主体优先，v5 快照回落到 callId 集合。
+    *
+    * `None` 表示该计划早于审批冻结机制，此时只能依赖执行前重新读取的生效策略。
+    */
+  def frozenApprovalCallIds: Option[Set[String]] =
+    approvalSubjects.map(_.keySet).orElse(approvalRequiredCallIds)
 
   /** 返回当前待执行批次；全部提交完成后返回 None。 */
   def currentBatch: Option[DurableToolBatch] = batches.lift(nextBatchIndex)

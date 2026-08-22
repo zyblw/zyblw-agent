@@ -209,7 +209,7 @@ object CohereRerankHttpSpec extends ZIOSpecDefault:
         observed._2.length == 3,
         observed._2.distinct.length == 1
       )
-    } @@ TestAspect.withLiveClock @@ TestAspect.sequential,
+    } @@ TestAspect.withLiveClock @@ TestAspect.timeout(20.seconds) @@ TestAspect.sequential,
     test("401 不重试且错误不包含 Provider 正文或 API Key") {
       for
         bodies        <- Ref.make(Chunk.empty[String])

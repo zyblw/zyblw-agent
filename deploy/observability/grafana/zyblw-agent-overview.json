@@ -107,13 +107,63 @@
       "type": "timeseries",
       "title": "Evaluation pass rate",
       "id": 9,
-      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 24 },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 24 },
       "targets": [{
         "refId": "A",
         "expr": "sum by (agent_evaluation_name) (rate(zyblw_agent_evaluation_count_total{agent_evaluation_passed=\"true\"}[15m])) / clamp_min(sum by (agent_evaluation_name) (rate(zyblw_agent_evaluation_count_total[15m])), 0.001)",
         "legendFormat": "{{agent_evaluation_name}}"
       }],
       "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Composition drift",
+      "id": 10,
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 24 },
+      "targets": [{
+        "refId": "A",
+        "expr": "sum by (agent_composition_drift_kind) (rate(zyblw_agent_composition_drift_count_total[10m]))",
+        "legendFormat": "{{agent_composition_drift_kind}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Token cache and reasoning",
+      "id": 11,
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 33 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(zyblw_agent_model_cached_input_token_count_sum[10m]))",
+          "legendFormat": "cached input tokens"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(zyblw_agent_model_reasoning_output_token_count_sum[10m]))",
+          "legendFormat": "reasoning output tokens"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Context build and rot",
+      "id": 12,
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 33 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(zyblw_agent_context_build_count_total[10m]))",
+          "legendFormat": "context builds"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(zyblw_agent_context_rot_signal_count_total[10m]))",
+          "legendFormat": "rot signals"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
     }
   ],
   "refresh": "15s",

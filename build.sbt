@@ -38,7 +38,8 @@ ThisBuild / scalacOptions ++= Seq(
   "-Xkind-projector"
 )
 ThisBuild / testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework")
-ThisBuild / Test / parallelExecution := true
+ThisBuild / Test / parallelExecution                       := true
+ThisBuild / versionPolicyIgnoredInternalDependencyVersions := Some("^\\d+\\.\\d+\\.\\d+.*$".r)
 
 /** Provider、OTLP、MCP 等测试会创建真实 Netty stub server。限制跨项目 Test 并发可以避免 CI 因 native thread 上限产生与断言无关的随机失败；单项目内部仍由
   * ZIO Test 并行。
@@ -58,6 +59,8 @@ lazy val openTelemetryVersion  = "1.63.0"
 lazy val testContainersVersion = "0.44.1"
 lazy val flywayVersion         = "13.0.0"
 lazy val tikaVersion           = "3.3.1"
+lazy val compatibilityBaseline =
+  sys.env.get("COMPAT_BASELINE_VERSION").map(_.trim).filter(_.nonEmpty).getOrElse("0.6.2")
 
 lazy val commonSettings = Seq(
   description := s"Provider-neutral Scala 3 and ZIO 2 agent framework module: ${name.value}",
@@ -72,6 +75,9 @@ lazy val commonSettings = Seq(
   Compile / packageSrc / publishArtifact := true,
   Compile / packageDoc / publishArtifact := true,
   Test / publishArtifact                 := false,
+  versionPolicyPreviousVersions          := Seq(compatibilityBaseline),
+  mimaPreviousArtifacts                  := Set(organization.value %% name.value % compatibilityBaseline),
+  mimaFailOnNoPrevious                   := false,
   libraryDependencies ++= Seq(
     "dev.zio" %% "zio"          % zioVersion,
     "dev.zio" %% "zio-json"     % zioJsonVersion,
@@ -111,8 +117,11 @@ lazy val rag = project
   .dependsOn(core)
   .settings(commonSettings)
   .settings(
-    name                             := "zyblw-agent-rag",
-    libraryDependencies += "dev.zio" %% "zio-streams" % zioVersion
+    name := "zyblw-agent-rag",
+    libraryDependencies ++= Seq(
+      "dev.zio"     %% "zio-streams" % zioVersion,
+      "com.knuddels" % "jtokkit"     % "1.1.0"
+    )
   )
 
 /** Tika/PDF/EPUB 依赖较重，不能污染只做结构化知识检索的 RAG 用户。 */
@@ -269,7 +278,12 @@ lazy val examples = project
     testkit
   )
   .settings(commonSettings)
-  .settings(name := "zyblw-agent-examples", publish / skip := true)
+  .settings(
+    name                               := "zyblw-agent-examples",
+    publish / skip                     := true,
+    Compile / run / mainClass          := Some("com.zyblw.agent.examples.production.ProductionSupportHost"),
+    libraryDependencies += "com.zaxxer" % "HikariCP" % "6.3.2"
+  )
 
 lazy val root = project
   .in(file("."))

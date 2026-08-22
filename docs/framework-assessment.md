@@ -1,8 +1,9 @@
 # zyblw-agent 能力审计、框架对照与演进判断
 
 > 状态：当前审计
-> 最后核验：2026-08-02
+> 最后核验：2026-08-22
 > 事实来源：当前源码、测试、构建、迁移、发布工作流，以及文末列出的官方框架资料
+> 演进排序的权威来源：[ADR-0019](architecture/0019-typed-extensions-and-constrained-execution.md) 的 Wave 0–3；本文用于能力现状与竞品对照，不另立路线
 
 本文回答四个问题：
 
@@ -19,7 +20,7 @@
 
 但它也还不是经过大规模生产证明的通用平台。完成度最高的是“正确、安全、可恢复地执行一次 Agent Run”；完成度较弱的是：
 
-- 陌生开发者的五分钟成功体验；
+- 完整生产参考宿主，而不是无数据库五分钟路径；
 - 真实长会话下的 Context 质量与 Prompt Cache 成本证据；
 - 一等的计划、目标、任务清单与按需 Skill；Artifact 现有实验性的隔离/版本化 SPI，但尚无耐久 Adapter；
 - 跨版本数据库/JSON/API 兼容演练；
@@ -77,7 +78,9 @@
 | LangGraph | checkpoint、interrupt/resume、pending writes、time travel、fork | snapshot+event、审批恢复、工具批次账本、worker 恢复 | 在没有复杂确定性流程需求时强制所有业务画图 |
 | Google ADK | session/memory/artifact、context filter、workflow/multi-agent、action confirmation、eval | session/memory、Context 分区、审批、eval；Artifact 具备内存版本化/隔离 SPI | 因示例丰富就提前构建多 Agent 平台 |
 | Pydantic AI | 类型化开发体验、toolset/deferred tool、compaction、durable execution 适配、test/eval | Scala 类型化 Tool、Context 压缩、原生耐久 Runtime、testkit/evals | 追逐 Python 生态每个集成或 workflow backend |
+| Microsoft Agent Framework / Semantic Kernel | function-first、Agent/Workflow 分层、类型化路由、superstep checkpoint、session/context provider | `AgentApplication` 与 Workflow 分层；ZIO typed effect/Scope；checkpoint/ledger 与持久化信封校验 | 把 Kernel 变成 Service Locator；反序列化不可信 checkpoint；追随实验性多 Agent API |
 | Anthropic 工程实践 | 最简单可行架构、区分 workflow/agent、重视工具说明和测试、最小高信号 Context | 单 Agent 优先、Workflow 实验化、工具契约、分区 Context | 用自动反思或角色数量掩盖工具/数据质量 |
+| OpenAI Codex | typed extension contributors、审批绑定具体副作用、ExecutionEnvironment/PermissionProfile、world-state Context section、skill catalog 按需加载、stable/experimental 协议分级、bounded queue | v5 契约冻结与单调审批已是前身；ApprovalSubject/Typed Extension/ExecutionEnvironment 进入 Wave 1，ContextSection/SkillCatalog/AgentProtocol 进入 Wave 2（见 [ADR-0019](architecture/0019-typed-extensions-and-constrained-execution.md)） | shell/apply_patch 核心化、Rust ExtensionData 动态容器、本地桌面信任模型、动态 Plugin 树 |
 | ZIO / ZIO HTTP | typed effect、Scope、Fiber、Queue/Stream 背压、ZLayer 资源图、声明式 Endpoint | 是项目最有辨识度的执行语义 | 在 Builder 中藏全局可变单例或绕开 Scope 启 daemon |
 
 ### 图工程讨论的判断
@@ -97,8 +100,11 @@ durable wait/signal 的原子注册/消费、稳定 signal ID 去重与 deadline
 没有子图命名空间、kill/restart 和多节点 soak 前假装拥有完整图平台。0.3 进一步以 wait 行作为 durable wake command，
 补齐 Scoped `WorkflowWakeWorker`、heartbeat、延迟释放和 PostgreSQL `SKIP LOCKED` fencing。
 
-内存/PostgreSQL 共享低敏 execution timeline、wait 状态机与 wake lease 契约；下一步不是堆 Agent，而是进程 kill、
-数据库重启、多 Worker soak、SLO 和完整 Graph Inspector。完整契约与边界见
+内存/PostgreSQL 共享低敏 execution timeline、wait 状态机与 wake lease 契约；通用 command Worker 与 Workflow wake
+Worker 都已完成独立 JVM `SIGKILL` 后跨进程 generation 接管，后者还同时验证 node execution generation、wait 消费与
+终态 checkpoint；两条路径还都跨过同实例 PostgreSQL restart。通用 command Worker 另有正式 Start/Runtime 路径下
+3 Worker/6 lane、120 Run 的本机有界 soak 回归基线；Workflow wake 也以 3 个独立 Store/Worker 完成 126 Run，wake/
+execution claim 与完成 cycle 一一对应。下一步是部署节点丢失、数据库主备切换、长期 soak、生产 SLO 和完整 Graph Inspector。完整契约与边界见
 [声明式 Workflow Graph](workflow.md)。
 
 ### zyblw-agent 的差异化优势
@@ -115,8 +121,9 @@ durable wait/signal 的原子注册/消费、稳定 signal ID 去重与 deadline
 1. **易用性仍落后**：主流 Python/TypeScript 框架通常能用更少代码完成第一个结果；本项目生产装配更安全，但学习曲线更陡。
 2. **文档示例密度不足**：需要按“最小内存 → 真实 Provider → 工具 → PostgreSQL → HTTP → RAG”逐步递进。
 3. **Context 工程仍缺线上闭环**：已有预算和压缩机制，但缓存命中率、上下文丢弃与答案质量的关联还没有长期数据。
-4. **计划/目标/Skill 不是一等状态**：长任务仍主要依靠消息和 Workflow 状态，缺少统一持久化协议；Artifact 已有实验性 SPI，
-   但生产耐久、治理和 Tool 接入仍待真实需求验证。
+4. **Harness 有基础设施、缺业务证据**：Goal/Plan/Todo/Skill ADT、CAS Store、PostgreSQL Adapter、Steering/FollowUp、
+   ArtifactReference 与跨 Run 任务预算已落地，但真实脱敏长任务数据、人工校准与 on-demand SkillCatalog（Wave 2）仍缺；
+   Artifact 生产耐久 Adapter、治理和 Tool 接入仍待真实需求验证。
 5. **开发工具仍处早期**：已有安全 Run Inspector、分页 Timeline 和机械一致性诊断，但尚无成熟 CLI/UI、筛选导出和
    checkpoint fork/time-travel。
 6. **生态小**：没有独立下游、第三方 Provider/Tool 插件和真实公开发布反馈。
@@ -151,10 +158,11 @@ fail-closed。框架仍不会保存隐藏推理正文。
 同名工具现在在 `RegisteredToolRegistry.make/fromTools` 阶段返回
 `AgentError.InvalidConfiguration`。这消除了“最后一个实现悄悄获胜”的装配不确定性。
 
-### 4. 五分钟入口与安全 Run Inspector
+### 4. 生产参考入口与安全 Run Inspector
 
-`AgentQuickstart.run` 用隔离内存控制面完整走过提交、claim、Runtime 和读取，不维护第二套演示循环；仓库示例无需 API Key
-或数据库即可运行。`RunInspection` 则把权威状态和事件投影为低敏 Timeline，检查 sequence、审批、usage 与终态一致性，
+`ProductionSupportHost` 是官方入口：PostgreSQL、真实 Provider、可信身份、审批写工具和 ZIO HTTP。
+`AgentQuickstart` 已删除；未注册工具仍在正式 Application 路径上于模型调用前失败。`RunInspection`
+把权威状态和事件投影为低敏 Timeline，检查 sequence、审批、usage 与终态一致性，
 OpenAPI `1.1.0` 已提供授权后的 `/api/v1/runs/{runId}/inspection`。
 
 这只是调试基础，不是成熟 Run Studio，也不是可执行 time-travel。详细边界见
@@ -177,6 +185,12 @@ OpenAPI `1.1.0` 已提供授权后的 `/api/v1/runs/{runId}/inspection`。
 这些内容已经通过 [ADR 0016](architecture/0016-agent-application-runtime.md) 和
 [成熟度路线](maturity-and-roadmap.md) 进入正式决策。八个能力平面用于发现缺口，不会机械拆成八个模块。
 
+2026-08-21 的复核进一步确认：LangGraph 与 Microsoft Agent Framework 都把 checkpoint 作为恢复、暂停和跨进程执行的
+核心边界，且 Microsoft 明确要求把 checkpoint storage 视为信任边界；PydanticAI 的价值仍在 typed state/output 和可验证
+序列化，而不是 Python API 本身。本项目据此没有新增 Graph 或序列化依赖，而是在 `PostgresRunStore` 读取边界对 State、
+Event、Tool ledger 和 ModelCall ledger 交叉验证关系列与 Scala typed JSON，使用 `ZIO.attemptBlocking`、`Scope` 和 typed
+`StoreError` fail-closed。这是“吸收设计语义、保持 Scala/ZIO 形态”的具体例子。
+
 需要收敛或延后的部分也很明确：不是所有任务都需要 Graph；A2A 和多 Agent 不能早于单 Agent、Harness 和 durable
 execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替代真实数据、恢复与发布证据。
 
@@ -187,12 +201,12 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 | Function → Workflow → Agent 的最小复杂度原则 | 采纳 | 由业务用例确定性选型；不让模型默认决定执行模式 |
 | Agent / Harness / Workflow 分工 | 采纳 | 作为 `agent-core` 内可组合概念，复用唯一 Runtime |
 | model proposer / runtime enforcer | 已是核心不变量 | 继续覆盖 capability、权限、审批、预算、fencing 与审计 |
-| execution ledger、pending writes、lease/fencing | 已落地并继续加深 | 0.3 基线 + `WorkflowExecutionStore`；下一步补 kill/restart/multi-worker soak |
-| timer、signal | 状态机、wait-as-command 与 Scoped Worker 已实现 | 下一步做 kill/restart/multi-worker soak 与 backlog/恢复时延 SLO |
+| execution ledger、pending writes、lease/fencing | 已落地并继续加深 | `WorkflowExecutionStore` 已有本机进程 kill 双租约接管及 3 Worker/126 Run 有界 soak；下一步补部署节点丢失与长期/failover 证据 |
+| timer、signal | 状态机、wait-as-command、Scoped Worker、真库故障恢复、独立 JVM 接管与有界多 Worker soak 已实现 | 下一步做部署节点丢失、数据库主备 failover、长期 soak 与生产 backlog/恢复 SLO |
 | human task | 采纳但尚未实现 | 在 timer/signal 之上补可信主体、权限、撤销、升级与审计，不用 Prompt 约定冒充人工任务 |
-| 低敏 execution timeline | 本轮落地 | 复合游标分页；不泄露状态、outcome 或 lease token |
+| 低敏 execution timeline / wake queue | 已落地 | 复合游标分页与按定义聚合 backlog；不泄露状态、signal、outcome 或 lease token |
 | Goal/Plan/Todo/Completion/Verification | 采纳为 Harness H1 | 先做小型 ADT/Store SPI 和 eval，不一次构造通用项目管理平台 |
-| 定义版本/指纹冻结 | 部分采纳 | Workflow version、Instruction fingerprint 已有；Skill/Policy/Tool schema snapshot 后续补齐 |
+| 定义版本/指纹冻结 | 继续采纳 | Workflow version、Instruction/Skill fingerprint 已有；v5 durable tool plan 已冻结 Schema/安全元数据摘要与单调审批要求，完整应用级 Definition manifest 仍按真实消费者推进 |
 | Context pipeline、RAG/Memory 分治 | 已有 lineage、parent/neighbor、ACL 前置与原子发布 | 真实 OCR/敌对 PDF、token-aware、长期质量与保留治理 |
 | Artifact 与 Message 分离 | 采纳 | 现有实验 SPI；下一步 durable metadata/object-store、ACL 与 retention |
 | Provider-neutral + native capability | 采纳 | 公共最小契约加 capability/受控扩展，不伪装 Provider 完全等价 |
@@ -221,7 +235,7 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 
 - Maven Central `0.1.0`、`0.2.0`、`0.2.1` 与新的生产基线 `0.3.0` 均有不可变发布记录；`0.3.0` 用一次明确的
   fresh schema 重建收敛 durable command 与 Workflow wait/wakeup，后续 `0.3.x` 恢复 minor 内兼容；
-- 维持已经可运行的五分钟纯内存 sample，并补一个独立 PostgreSQL sample；
+- 维持 `ProductionSupportHost` 作为唯一用户可见生产参考，并保持 contract 测试不依赖付费密钥；
 - 以真实 `0.3.0` 制品持续检查 Scala API、JSON 快照、HTTP schema 和追加式数据库 migration，并以
   [兼容性契约](compatibility.md)分开记录各兼容表面；
 - 用发布制品而不是源码完整验证 `zyblw-server`；
@@ -243,8 +257,8 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 不是先新增四个 artifact，而是先设计四个小型 Provider-neutral ADT：
 
 - Plan/Goal/Todo 是可恢复任务状态，不只是 Prompt；
-- Artifact 已完成最小 core SPI：独立二进制、session/user 隔离、不可变版本、名称/容量/metadata 边界；下一步必须由真实需求
-  决定 durable Adapter、保留期、删除审计和经过审查的 Tool 接入；
+- 跨 Run 任务预算已采用 DeepSeek/Pi Harness 值得吸收的“显式任务边界 + 可重建事实”思想，但实现保持 ZIO/Scala 原生：`RunLimits` 是唯一 Run 额度，Goal 账本只做幂等 reserve/settle/release；PostgreSQL 行锁防并发透支，Start 五事实同事务，终态 Reconciler 修复崩溃窗口；没有第二套模型循环；
+- Artifact 已完成 core SPI 与 PostgreSQL durable Adapter（V011）：独立二进制、session/user 隔离、不可变版本、名称/容量/metadata 边界，以及保存/读取/删除/过期审计。Goal/Plan/Todo 已通过有界 typed reference 关联且不加载正文。下一步由真实需求决定 Tool 接入、多模态正文和线上保留期演练；
 - Skill 是版本化说明与能力清单，按需加载，不在每轮塞入完整正文；
 - approval 和外部副作用继续由现有 Runtime/Store 承担。
 
@@ -294,9 +308,9 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 - [OpenAI Agents SDK tracing](https://openai.github.io/openai-agents-python/tracing/)
 - [LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence)
 - [Google Agent Development Kit](https://adk.dev/)
-- [Pydantic AI](https://pydantic.dev/docs/ai/overview/)
-- [Pydantic AI toolsets 与按需工具](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/)
-- [Pydantic AI deferred tools](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/)
+- [Pydantic AI](https://ai.pydantic.dev/)
+- [Microsoft Agent Framework](https://learn.microsoft.com/en-us/agent-framework/overview/)
+- [Microsoft Agent Framework checkpoints](https://learn.microsoft.com/en-us/agent-framework/workflows/checkpoints)
 - [Anthropic：Building effective agents](https://www.anthropic.com/engineering/building-effective-agents)
 - [Anthropic：Demystifying evals for AI agents](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents)
 - [Anthropic：Effective context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)

@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-16
+> 最后核验：2026-08-23
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -241,7 +241,10 @@ val outcomes = ingestion.ingest(requests)
 ```
 
 扫描不跟随符号链接，限制深度/文件数/单文件大小，不把真实绝对路径放进 citation；每个文件的内容仍是惰性
-`ZStream[Byte]`。该 Adapter 面向单机/离线 worker；多实例生产部署应使用对象存储/Queue Source，但继续产出同一
+`ZStream[Byte]`。`loadById(documentId)` 按稳定 ID 回读原文，供 `KnowledgeReindexService` 重建；`list` 会返回同一
+document 的全部版本，重建必须 `distinctBy(_.build.key.documentId)` 以免重复处理已 superseded 的版本。
+`RagApplication` 没有 `ingestDirectory`：宿主用本 Source 得到 `DocumentInput` 流后再 `ingestInputs`，避免 rag 反向依赖
+loaders。该 Adapter 面向单机/离线 worker；多实例生产部署应使用对象存储/Queue Source，但继续产出同一
 `DocumentInput` 契约。
 
 ## 8. 端到端使用示例

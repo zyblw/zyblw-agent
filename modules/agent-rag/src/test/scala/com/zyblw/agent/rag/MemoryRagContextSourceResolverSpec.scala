@@ -48,21 +48,17 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
           MemoryEntry("阴阳旧记录", Json.Str("过期资料"), 1.0, Some(runId), now - 10_000L, Some(now - 1L))
         )
         retriever = new Retriever:
-          def retrieve(
-              query: String,
-              scope: RetrievalScope,
-              limit: Int
-          ): IO[RetrievalError, RetrievalResult] =
+          def retrieve(request: RetrievalRequest): IO[RetrievalError, RetrievalResult] =
             val chunk = DocumentChunk(
               "chunk-1",
               "doc-1",
               "阴阳是描述相反相成关系的范畴。",
               "book://basic/yinyang",
-              scope.tenantId,
+              request.scope.tenantId,
               Set("knowledge:read")
             )
             captured
-              .set(Some((query, scope, limit)))
+              .set(Some((request.text, request.scope, request.limit)))
               .as(
                 RetrievalResult(
                   Chunk(RetrievalHit(chunk, 0.88)),
@@ -86,7 +82,8 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
         invocation.exists(_._1 == "阴阳是什么"),
         invocation.exists(_._2.tenantId == TenantId("tenant-a")),
         invocation.exists(_._2.permissions == Set("knowledge:read")),
-        invocation.exists(_._3 == 3)
+        invocation.exists(_._3 == 3),
+        resolver.sourceIds == Chunk("memory-rag@2")
       )
     }.provide(MemoryStore.inMemory),
     test("没有 tenant 时不调用 Retriever，防止退化为跨租户搜索") {
@@ -96,11 +93,7 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
         sessionId <- SessionId.random
         calls     <- Ref.make(0)
         retriever = new Retriever:
-          def retrieve(
-              query: String,
-              scope: RetrievalScope,
-              limit: Int
-          ): IO[RetrievalError, RetrievalResult] =
+          def retrieve(request: RetrievalRequest): IO[RetrievalError, RetrievalResult] =
             calls.update(_ + 1).as(RetrievalResult(Chunk.empty, Chunk.empty))
         resolver = MemoryRagContextSourceResolver(store, retriever, MemoryRagContextPolicy())
         sources <- resolver.resolve(state(runId, sessionId, None), AgentDefinition(AgentId("a"), "a", "i"))
@@ -113,11 +106,7 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
         runId     <- RunId.random
         sessionId <- SessionId.random
         retriever = new Retriever:
-          def retrieve(
-              query: String,
-              scope: RetrievalScope,
-              limit: Int
-          ): IO[RetrievalError, RetrievalResult] =
+          def retrieve(request: RetrievalRequest): IO[RetrievalError, RetrievalResult] =
             ZIO.succeed(
               RetrievalResult(
                 Chunk.empty,
@@ -130,12 +119,21 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
                 )
               )
             )
-        resolver = MemoryRagContextSourceResolver(store, retriever, MemoryRagContextPolicy())
+        resolver = MemoryRagContextSourceResolver(
+          store,
+          retriever,
+          MemoryRagContextPolicy(lowEvidenceResponse = LowEvidenceResponse.RequireExplicitRefusal)
+        )
         sources <- resolver.resolve(
           state(runId, sessionId, Some("tenant-a")),
           AgentDefinition(AgentId("a"), "a", "i")
         )
-      yield assertTrue(sources.retrieval.isEmpty)
+      yield assertTrue(
+        sources.retrieval.isEmpty,
+        sources.safetyInstructions.length == 1,
+        sources.safetyInstructions.head.contains("insufficient evidence"),
+        !sources.safetyInstructions.head.contains("阴阳是什么")
+      )
     }.provide(MemoryStore.inMemory),
     test("observed resolver 把真实 Memory/RAG 来源接入统一观测但不记录 query 和正文") {
       for
@@ -146,18 +144,14 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
         sessionId  <- SessionId.random
         observer  = AgentOperationTelemetry(traceSink, metricSink)
         retriever = new Retriever:
-          def retrieve(
-              query: String,
-              scope: RetrievalScope,
-              limit: Int
-          ): IO[RetrievalError, RetrievalResult] =
+          def retrieve(request: RetrievalRequest): IO[RetrievalError, RetrievalResult] =
             val chunk = DocumentChunk(
               "observed-chunk",
               "doc",
               "中医私密正文",
               "book://observed",
-              scope.tenantId,
-              scope.permissions
+              request.scope.tenantId,
+              request.scope.permissions
             )
             ZIO.succeed(
               RetrievalResult(

@@ -63,6 +63,10 @@ final case class MemoryGovernancePolicy(
   require(minimumModelConfidence >= 0.0 && minimumModelConfidence <= 1.0, "minimumModelConfidence 必须位于 [0,1]")
   require(maxValueCharacters > 0, "maxValueCharacters 必须为正数")
 
+object MemoryGovernancePolicy:
+  val default: MemoryGovernancePolicy       = MemoryGovernancePolicy()
+  val layer: ULayer[MemoryGovernancePolicy] = ZLayer.succeed(default)
+
 /** 一次治理批次的可审计摘要，不包含记忆正文。 */
 final case class MemoryApplyReport(
     received: Int,

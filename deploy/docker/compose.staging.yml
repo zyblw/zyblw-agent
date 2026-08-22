@@ -1,0 +1,92 @@
+# Staging 演练拓扑。内置 PostgreSQL 不是生产 HA 数据库。
+name: zyblw-agent-staging
+
+services:
+  postgres:
+    image: postgres:16.14
+    environment:
+      POSTGRES_DB: zyblw_agent
+      POSTGRES_USER: zyblw_migrate
+      POSTGRES_PASSWORD: ${ZYBLW_AGENT_MIGRATION_PASSWORD:?set ZYBLW_AGENT_MIGRATION_PASSWORD}
+      ZYBLW_AGENT_DB_PASSWORD: ${ZYBLW_AGENT_DB_PASSWORD:?set ZYBLW_AGENT_DB_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - staging-pg:/var/lib/postgresql/data
+      - ./init/01-roles.sh:/docker-entrypoint-initdb.d/01-roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zyblw_migrate -d zyblw_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - statement_timeout=30s
+      - -c
+      - lock_timeout=10s
+      - -c
+      - idle_in_transaction_session_timeout=30s
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ZYBLW_AGENT_RUNTIME_MODE: live
+      ZYBLW_AGENT_JDBC_URL: jdbc:postgresql://postgres:5432/zyblw_agent
+      ZYBLW_AGENT_DB_USER: zyblw_migrate
+      ZYBLW_AGENT_DB_PASSWORD_ENV: ZYBLW_AGENT_DB_PASSWORD
+      ZYBLW_AGENT_DB_PASSWORD: ${ZYBLW_AGENT_MIGRATION_PASSWORD:?set ZYBLW_AGENT_MIGRATION_PASSWORD}
+    command: ["migrate"]
+    restart: "no"
+
+  support:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      ZYBLW_AGENT_RUNTIME_MODE: live
+      ZYBLW_AGENT_AUTH_MODE: trusted-headers
+      ZYBLW_AGENT_HTTP_PORT: "8080"
+      ZYBLW_AGENT_WORKER_ID: support-staging-1
+      ZYBLW_AGENT_JDBC_URL: jdbc:postgresql://postgres:5432/zyblw_agent
+      ZYBLW_AGENT_DB_USER: zyblw_runtime
+      ZYBLW_AGENT_DB_PASSWORD_ENV: ZYBLW_AGENT_DB_PASSWORD
+      ZYBLW_AGENT_DB_PASSWORD: ${ZYBLW_AGENT_DB_PASSWORD:?set ZYBLW_AGENT_DB_PASSWORD}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:?set OPENAI_BASE_URL}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    ports:
+      - "8080:8080"
+    command: ["serve"]
+    stop_grace_period: 25s
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 1g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 40s
+
+volumes:
+  staging-pg:

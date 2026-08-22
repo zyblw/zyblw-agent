@@ -1,7 +1,7 @@
 # 模块与发布坐标
 
 > 状态：当前
-> 最后核验：2026-08-08
+> 最后核验：2026-08-23
 > 事实来源：`build.sbt`、各模块 `src/main`、`maturity-and-roadmap.md`
 
 ## 先理解两个不同的边界
@@ -18,7 +18,7 @@
 所有发布模块使用统一坐标：
 
 ```scala
-val zyblwAgentVersion = "<已发布版本>"
+val zyblwAgentVersion = "0.8.0"
 "io.github.zyblw" %% "<artifact>" % zyblwAgentVersion
 ```
 
@@ -69,9 +69,8 @@ libraryDependencies ++= Seq(
 RAG 业务还需加入 `zyblw-agent-rag`；PDF/EPUB 再加入 `zyblw-agent-document-loaders`，模型 rerank 再加入
 `zyblw-agent-rerank`。不要因为只想使用结构切分就被迫引入 Tika、Docling 或远程 reranker。
 
-`zyblw-agent-rag` 里除了主线的 `rag` package，还有一个 `knowledge` package（`Entity`/`Relation`/`KnowledgeGraph`
-与一个内存实现）。它是**未经测试的 Experimental 探索性接口**，没有 PostgreSQL Adapter，也没有进入任何 RAG 主线路径；
-不要在业务中依赖它，除非你准备好在它变更时自行承担迁移。
+`KnowledgeGraph` 与 multimodal 空壳已从公开源码删除。RAG 主线只保留知识索引、摄取、检索与引用；不要在文档或业务
+代码中把已删除包当作仍可用的 SPI。
 
 `modules/agent-dashboard` 是浏览器端控制台，**不发布 Maven 制品**。它通过 HTTP 消费 `zyblw-agent-zio-http` 暴露的管理
 子面，因此不构成第 12 个 artifact。
@@ -89,14 +88,13 @@ RAG 业务还需加入 `zyblw-agent-rag`；PDF/EPUB 再加入 `zyblw-agent-docum
 | `guardrails` | 输入、输出和工具调用策略 |
 | `context` | 上下文预算、确定性压缩与可选模型摘要 |
 | `memory` | 短期/长期记忆 SPI、命令队列和租约模型 |
-| `artifacts` | 版本化二进制 Artifact SPI 与开发/测试内存 Adapter；不把正文放入 State 或 Prompt |
+| `artifacts` | 版本化二进制 Artifact SPI、内存 Adapter；PostgreSQL Adapter 在 `zyblw-agent-postgres`（V011，含删除/过期审计）；不把正文放入 State 或 Prompt |
 | `runtime` | 单 Agent loop、预算、重试、审批、恢复 |
 | `scheduler` | Worker 调度与任务领取 |
 | `observability` | 无 exporter 的 trace/metrics SPI |
 | `app` | 面向业务宿主的 Builder 与 ZLayer 装配入口 |
 | `sideeffects` | 有副作用工具的 outbox/idempotency 模型 |
 | `workflow` | 显式确定性图、identity/version、checkpoint 与 execution ledger/fencing SPI；不是多 Agent 编排平台 |
-| `multimodal` | Provider-neutral 内容部件 ADT |
 
 把这些 package 拆成十几个 artifact 的收益很小：它们共享 ZIO 基础依赖、经常共同变更，业务也几乎总是一起使用。过去的拆法
 反而放大了 POM、版本兼容、文档选择和构建图成本。
@@ -126,5 +124,5 @@ RAG 业务还需加入 `zyblw-agent-rag`；PDF/EPUB 再加入 `zyblw-agent-docum
 - 同一 minor 的 patch 应保持源码和二进制兼容；
 - wire schema、数据库 migration 与 Scala API 分别维护兼容性；
 - 所有破坏性变化写入 `CHANGELOG.md` 和迁移指南；
-- patch 发布前必须执行独立 Maven consumer 与下游回归；当前 sbt 2 生态尚未接入可靠 MiMa 基线，因此不能把这些
-  实际消费测试误称为完整二进制兼容证明。
+- patch 发布前必须执行独立 Maven consumer 与下游回归；MiMa / sbt-version-policy 审计二进制与源码兼容，但不验证
+  POM、资源、服务装配和真实宿主启动路径。

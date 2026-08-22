@@ -21,7 +21,9 @@ final case class ModelSettings(
     maxOutputTokens: Option[Int] = None,
     toolChoice: ToolChoice = ToolChoice.Auto,
     providerOptions: Map[String, Json] = Map.empty,
-    metadata: Map[String, String] = Map.empty
+    metadata: Map[String, String] = Map.empty,
+    /** 部署角色；由 `ModelRoleCatalog` 在 Run 创建时解析为 provider/model。 */
+    role: Option[com.zyblw.agent.model.ModelRole] = None
 ) derives JsonCodec
 
 enum ToolChoice derives JsonCodec:

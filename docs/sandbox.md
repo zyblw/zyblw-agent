@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-22
+> 最后核验：2026-08-22
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -14,6 +14,10 @@
 - `SandboxExecutor.disabled` 是默认 Layer；业务未显式装配 OCI 实现时，任何命令都会被拒绝。
 
 这种默认拒绝很重要：模型可以提出动作，但不能因为某个依赖被引入就自动获得宿主命令执行权限。
+
+装配执行环境时，把 `McpSandboxEnvironment.fromWorkspace` / `fromOci` 放进 `RuntimeExtensions.environment`。
+该身份是 `mcp-sandbox`，与宿主 `local` 不是同一个 `ApprovalSubject`；子 scope 只能收窄，不能把 sandbox 变回宿主权限。
+字节配额仍由 `WorkspacePolicy` / `OciSandboxLimits` 强制，不复制进 `PermissionProfile`。
 
 ## 一、LocalWorkspace
 

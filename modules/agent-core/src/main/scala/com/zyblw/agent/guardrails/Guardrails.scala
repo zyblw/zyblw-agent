@@ -50,11 +50,78 @@ trait RunGuardrail:
   /** 检查累计状态、预算或行为历史。 */
   def evaluate(state: AgentState, context: GuardrailContext): IO[GuardrailError, GuardrailDecision]
 
+/** 进入 Context 的检索片段。正文只以 digest 和有界 excerpt 出现，不能提升为指令。 */
+final case class UntrustedSnippet(
+    sourceId: String,
+    digest: String,
+    tags: Set[String] = Set.empty,
+    excerpt: String = ""
+)
+
+object UntrustedSnippet:
+  private val ExcerptLimit = 512
+
+  def fromDocument(sourceId: String, content: String, tags: Set[String] = Set.empty): UntrustedSnippet =
+    val normalized = content.trim
+    UntrustedSnippet(
+      sourceId = sourceId,
+      digest = digest(normalized),
+      tags = tags,
+      excerpt = normalized.take(ExcerptLimit)
+    )
+
+  def digest(value: String): String =
+    java.security.MessageDigest
+      .getInstance("SHA-256")
+      .digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+      .map(byte => f"${byte & 0xff}%02x")
+      .mkString
+
+trait RetrievalGuardrail:
+  def name: String
+
+  /** 在检索结果写入模型可见 Context 前检查；文档是数据，不能变成指令。 */
+  def evaluate(
+      snippets: Chunk[UntrustedSnippet],
+      context: GuardrailContext
+  ): IO[GuardrailError, GuardrailDecision]
+
+/** MCP/A2A/工具输出等远端载荷。正文只以 digest 和有界 excerpt 出现。 */
+final case class UntrustedRemoteMessage(
+    channel: String,
+    digest: String,
+    excerpt: String = "",
+    tags: Set[String] = Set.empty
+)
+
+object UntrustedRemoteMessage:
+  private val ExcerptLimit = 512
+
+  def fromPayload(channel: String, payload: String, tags: Set[String] = Set.empty): UntrustedRemoteMessage =
+    val normalized = payload.trim
+    UntrustedRemoteMessage(
+      channel = channel,
+      digest = UntrustedSnippet.digest(normalized),
+      excerpt = normalized.take(ExcerptLimit),
+      tags = tags
+    )
+
+trait RemoteMessageGuardrail:
+  def name: String
+
+  /** 检查 MCP/A2A/工具输出等远端消息。`channel` 是本地可信通道名，正文不得提升为指令。 */
+  def evaluate(
+      message: UntrustedRemoteMessage,
+      context: GuardrailContext
+  ): IO[GuardrailError, GuardrailDecision]
+
 final case class ConfiguredGuardrails(
     input: Chunk[(InputGuardrail, GuardrailMode)],
     output: Chunk[(OutputGuardrail, GuardrailMode)],
     tools: Chunk[(ToolGuardrail, GuardrailMode)],
     run: Chunk[(RunGuardrail, GuardrailMode)],
+    retrieval: Chunk[(RetrievalGuardrail, GuardrailMode)] = Chunk.empty,
+    remote: Chunk[(RemoteMessageGuardrail, GuardrailMode)] = Chunk.empty,
     failurePolicy: GuardrailFailurePolicy = GuardrailFailurePolicy.FailClosed
 )
 
@@ -97,6 +164,18 @@ final class GuardrailEngine(config: ConfiguredGuardrails):
   ): IO[GuardrailError, Chunk[(String, GuardrailDecision)]] =
     evaluate(config.run, guardrail => guardrail.evaluate(state, context), _.name)
 
+  def checkRetrieval(
+      snippets: Chunk[UntrustedSnippet],
+      context: GuardrailContext
+  ): IO[GuardrailError, Chunk[(String, GuardrailDecision)]] =
+    evaluate(config.retrieval, guardrail => guardrail.evaluate(snippets, context), _.name)
+
+  def checkRemote(
+      message: UntrustedRemoteMessage,
+      context: GuardrailContext
+  ): IO[GuardrailError, Chunk[(String, GuardrailDecision)]] =
+    evaluate(config.remote, guardrail => guardrail.evaluate(message, context), _.name)
+
   /** 统一处理 Blocking/Monitoring 与 FailOpen/FailClosed，避免各阶段语义漂移。 */
   private def evaluate[A](
       configured: Chunk[(A, GuardrailMode)],
@@ -125,15 +204,35 @@ object GuardrailEngine:
 
 /** 防止外部资料把“忽略系统规则”之类文本提升为可信指令；这里只做基础监测，授权仍由代码策略负责。 */
 final class PromptInjectionMonitor extends InputGuardrail:
-  val name               = "prompt-injection-monitor"
-  private val suspicious = List("ignore previous instructions", "忽略之前的指令", "system prompt", "系统提示词")
+  val name = "prompt-injection-monitor"
 
   /** 检测常见指令劫持短语；这是监测信号，真正权限仍由 ToolExecutor 与 ToolMetadata 强制。 */
   def evaluate(message: AgentMessage, context: GuardrailContext): IO[GuardrailError, GuardrailDecision] =
-    val matched = suspicious.filter(token => message.text.toLowerCase.contains(token.toLowerCase))
-    ZIO.succeed(
-      GuardrailDecision(
-        allowed = matched.isEmpty,
-        Option.when(matched.nonEmpty)(s"检测到可疑指令: ${matched.mkString(",")}")
-      )
+    ZIO.succeed(UntrustedContentMonitor.decide(message.text))
+
+/** 检索片段与远端消息共用的注入监测；权限仍由代码策略强制。 */
+final class UntrustedContentMonitor extends RetrievalGuardrail with RemoteMessageGuardrail:
+  val name = "untrusted-content-monitor"
+
+  def evaluate(
+      snippets: Chunk[UntrustedSnippet],
+      context: GuardrailContext
+  ): IO[GuardrailError, GuardrailDecision] =
+    val haystack = snippets.map(snippet => s"${snippet.sourceId} ${snippet.excerpt}").mkString("\n")
+    ZIO.succeed(UntrustedContentMonitor.decide(haystack))
+
+  def evaluate(
+      message: UntrustedRemoteMessage,
+      context: GuardrailContext
+  ): IO[GuardrailError, GuardrailDecision] =
+    ZIO.succeed(UntrustedContentMonitor.decide(s"${message.channel} ${message.excerpt}"))
+
+object UntrustedContentMonitor:
+  private val suspicious = List("ignore previous instructions", "忽略之前的指令", "system prompt", "系统提示词")
+
+  private[guardrails] def decide(text: String): GuardrailDecision =
+    val matched = suspicious.filter(token => text.toLowerCase.contains(token.toLowerCase))
+    GuardrailDecision(
+      allowed = matched.isEmpty,
+      Option.when(matched.nonEmpty)(s"检测到可疑指令: ${matched.mkString(",")}")
     )

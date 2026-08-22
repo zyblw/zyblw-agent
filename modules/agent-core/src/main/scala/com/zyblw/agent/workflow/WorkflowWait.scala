@@ -77,6 +77,32 @@ object WorkflowWaitRequest:
 enum WorkflowWaitStatus:
   case Pending, Signaled, TimedOut, Consumed
 
+/** Durable wake 控制面的低敏只读快照。
+  *
+  * 快照按 Workflow identity/version 聚合，不包含 Run、Session、signal payload、owner 或 fencing token。读取不得领取、 回收或修改任何
+  * wait/lease；`dueWaits` 仍处于 Pending，`expiredWakeLeases` 是 dispatchableWakeups 的子集。
+  */
+final case class WorkflowWakeQueueSnapshot(
+    capturedAt: Instant,
+    pendingWaits: Long,
+    dueWaits: Long,
+    dispatchableWakeups: Long,
+    leasedWakeups: Long,
+    expiredWakeLeases: Long,
+    oldestDispatchableAgeMillis: Option[Long]
+):
+  require(
+    List(pendingWaits, dueWaits, dispatchableWakeups, leasedWakeups, expiredWakeLeases).forall(_ >= 0L),
+    "Workflow wake queue 计数不能为负数"
+  )
+  require(dueWaits <= pendingWaits, "dueWaits 不能超过 pendingWaits")
+  require(expiredWakeLeases <= dispatchableWakeups, "过期 wake lease 必须可重新领取")
+  require(oldestDispatchableAgeMillis.forall(_ >= 0L), "最早可领取 wakeup 年龄不能为负数")
+  require(
+    dispatchableWakeups > 0L == oldestDispatchableAgeMillis.nonEmpty,
+    "可领取 wakeup 与最早年龄必须同时存在或同时为空"
+  )
+
 /** signal 胜出后保存的有界结果。payload 可能包含业务数据，不能进入日志、timeline 或通用指标。 */
 final case class WorkflowSignalValue(
     id: WorkflowSignalId,

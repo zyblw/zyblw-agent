@@ -1,17 +1,46 @@
 # 兼容性契约与版本边界
 
-> 状态：0.6.0 发布契约
-> 最后核验：2026-08-09
+> 状态：0.8.0 全新安装基线；0.6.x 已发布制品冻结；0.7.0 候选作废
+> 最后核验：2026-08-23
 > 事实来源：`build.sbt`、公共源码、HTTP Schema、数据库 baseline、测试与发布工作流
+
+## 0.8.0 边界
+
+`0.8.0` 是破坏性全新安装。核心 Flyway 折叠为单个 `V001__zyblw_agent_0_8_baseline.sql`，知识 schema 折叠为
+`optional/pgvector_1024/V001__agent_knowledge_0_8_baseline.sql`。不提供从 0.6.x 或未发布 0.7.0 候选的原地升级。
+`AgentState` schemaVersion 为 7（有界 citations / retrievalEvidence）。稳定 HTTP OpenAPI 为 `1.2.0`，含
+`GET /api/v1/runs/{runId}/citations` 与 `/api/v1/knowledge/**`。管理面不再挂载知识路由。
+
+已发布的 `0.6.2` Maven 坐标与 tag 仍冻结；它们不是本版本的升级起点。见 [升级到 0.8.0](upgrading-to-0.8.0.md)。
 
 ## 当前结论
 
-`0.6.0` 是全新部署基线：RAG 固定使用独立 `zyblw_agent_knowledge` schema 中的 `vector(1024)`，Embedding 缓存键固定包含
-`purpose`，并由核心 `V003__embedding_cache_purpose.sql` 落库。业务部署从空库开始，所有 `zyblw-agent-*` artifact 必须使用精确
-`0.6.0` 坐标。框架不提供旧知识 schema、旧向量维度或其迁移入口。
+`0.8.0` 是全新部署基线：核心与 1024 知识各一份折叠 V001，RAG 固定 `zyblw_agent_knowledge.vector(1024)`。
+业务部署从空库开始，使用精确 `0.8.0` 坐标。框架不提供从 0.6.x / 0.7.0 候选库的原地升级，也不提供旧知识
+schema 或旧向量维度入口。
+
+下面保留已发布 `0.6.x` / 作废 `0.7.0` 候选的历史边界，便于对照冻结制品，不是当前安装路径。
 
 已发布 Maven 制品、tag 和 migration 永远不可变。`0.6.x` patch 必须保持本页定义的公共 Scala API、HTTP/schema、状态 JSON、
 Maven 坐标与 1024 RAG 物理契约；任何删除 API、改变 wire/state 语义、向量维度或数据库基线的变化都必须进入新的 minor。
+
+`0.7.0` 删除公共 `AgentQuickstart` 与无消费者的 `ConversationStore`，这是已记录的 early-semver minor 破坏。
+官方接入改为 `ProductionSupportHost` / `AgentApplication.durable`。`ContentPart` 增加 `ImageArtifact`（digest/MIME/大小，
+不含字节）；这是对穷尽匹配的源码破坏，旧 JSON 无该 case 仍可解码。Provider 出站图片必须先
+`ArtifactBoundMedia.bind`，远程 `ImageUrl` fail-closed。
+
+`0.7.0` 候选已扩展 `RunStore`/`HarnessStore`/`RunSubmissionStore` SPI，为 Goal/Plan/Todo JSON 增加具有空集合读取默认值的 ArtifactReference，并通过追加式 V008 扩展 PostgreSQL；H3-C 又以 V009 增加 `HarnessComparison` 评测 kind，H3-D 以 V010 增加 Goal 预算计数器与 Run reservation。`RunStartSubmission` 新增具有 `None` 默认值的可选 `GoalBudgetAdmission`；普通 Start wire/state 不变，Harness Start 则要求 Adapter 在同一事务预留预算。不支持该 admission 的自定义 Adapter 必须 fail-closed，不能忽略字段。同时收紧 `RunStore.save`、`appendEvents` 与跨批事件连续性语义，
+并为 Experimental `WorkflowExecutionStore` 增加具有 typed-failure 默认实现的低敏 `wakeQueueSnapshot`。因此这些变化只能随下一
+minor 发布，不能回填为 `0.6.x` patch。`AgentState` 当前 schemaVersion 从 4 依次提升到 5 和 6：v5 让新建 `DurableToolPlan`
+冻结工具契约 SHA-256 与规划时审批要求；v6 进一步把审批要求从 callId 集合升级为 `ApprovalSubject`，并为 `ApprovalRequest`
+增加 `subject`。v6 缺失完整契约指纹或审批主体时拒绝恢复，v5 及更早计划继续使用旧门禁。`RuntimeCompositionFingerprint`
+新增具有空集合读取默认值的 `extensionIds`：旧 JSON 缺该字段仍可解码，并与空扩展组合判定 Compatible；非空扩展身份变化
+为 Incompatible。新增 `executionEnvironmentId`（缺省 `local`）与 `permissionProfileFingerprint`（缺省视为宿主权限）：旧 JSON
+缺字段仍与 Local 宿主组合 Compatible；换成 `mcp-sandbox` 或变宽权限为 Incompatible。`ApprovalSubject` 新增具有宿主缺省的
+`permissions` 字段。新增字段有 JSON
+默认值只为读取旧状态，不代表把 v6 损坏状态降级成旧状态。`ApprovalRequest.id` 现在包含主体摘要前缀，因此主体刷新后
+控制面必须重新读取待审批请求，不能复用旧 `approvalId`。`AgentState` 新增具有空集合默认值的 `worldSectionCursors`：
+旧 JSON 缺该字段仍可解码；游标只有 section 身份与指纹，不含正文。第三方 Store Adapter 必须通过共享 conformance 后再声明兼容。
 
 ## 0.6.0 发布边界
 

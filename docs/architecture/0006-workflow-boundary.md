@@ -41,7 +41,8 @@
 ## 风险与演化
 
 当前实现有意限定 fan-out 分支为单步 `Complete` 节点。durable timer/signal、wait-as-command 与受监督 Worker 已实现；人工任务、
-子图和 quorum/race join 尚未实现。下一阶段先补进程 kill/数据库重启、多 Worker soak 与恢复 SLO，再由真实业务和 eval
+本机独立 JVM `SIGKILL` + 同实例 PostgreSQL restart 后 wake/execution 双 generation 接管及 3 Worker/126 Run 有界 soak
+已经验证。子图和 quorum/race join 尚未实现。下一阶段先补部署节点丢失/数据库主备切换、长时 soak 与生产恢复 SLO，再由真实业务和 eval
 决定是否增加更复杂图语义。
 保留 Temporal/zio-temporal Adapter 边界，不让 core 依赖具体工作流引擎。
 

@@ -82,6 +82,9 @@ async function installAdminRoutes(
           knowledge: false,
           evalTrends: false,
           models: false,
+          runInspection: false,
+          harness: false,
+          memoryGovernance: false,
           observability: {},
         },
       });

@@ -1,0 +1,79 @@
+# 本地 PostgreSQL 16 流复制对，只证明库在主库丢失后能提升备库并继续写入。
+# 这不是云厂商托管 HA、不是自动故障转移器，也不是生产 SLO。
+name: zyblw-agent-local-ha
+
+services:
+  postgres-primary:
+    image: postgres:16-alpine
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=8
+      - -c
+      - max_replication_slots=8
+      - -c
+      - hot_standby=on
+      - -c
+      - wal_keep_size=128MB
+      - -c
+      - max_connections=40
+    environment:
+      POSTGRES_USER: zyblw
+      POSTGRES_PASSWORD: local-ha-only
+      POSTGRES_DB: zyblw
+    ports:
+      - "127.0.0.1:${ZYBLW_HA_PRIMARY_PORT:-55433}:5432"
+    volumes:
+      - primary-data:/var/lib/postgresql/data
+      - ./ha/primary-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zyblw -d zyblw"]
+      interval: 1s
+      timeout: 3s
+      retries: 40
+
+  postgres-standby:
+    image: postgres:16-alpine
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: local-ha-only
+    ports:
+      - "127.0.0.1:${ZYBLW_HA_STANDBY_PORT:-55434}:5432"
+    volumes:
+      - standby-data:/var/lib/postgresql/data
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eux
+        until pg_isready -h postgres-primary -U zyblw -d zyblw; do sleep 1; done
+        mkdir -p /var/lib/postgresql/data
+        chown -R postgres:postgres /var/lib/postgresql/data
+        if [ ! -f /var/lib/postgresql/data/PG_VERSION ]; then
+          find /var/lib/postgresql/data -mindepth 1 -delete || true
+          su-exec postgres pg_basebackup \
+            -h postgres-primary \
+            -U replicator \
+            -D /var/lib/postgresql/data \
+            -Fp \
+            -Xs \
+            -P \
+            -R \
+            -v
+        fi
+        # Docker volume 默认 0755，PostgreSQL 16 要求数据目录 0700 或 0750。
+        chmod 0750 /var/lib/postgresql/data
+        chown postgres:postgres /var/lib/postgresql/data
+        exec su-exec postgres postgres -c hot_standby=on -c max_connections=40
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zyblw -d zyblw"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
+volumes:
+  primary-data:
+  standby-data:

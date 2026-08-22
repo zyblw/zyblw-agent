@@ -27,9 +27,18 @@ if ! git merge-base --is-ancestor "$tag_commit" "$main_ref"; then
   exit 1
 fi
 
-changelog_version="$(
-  awk '/^## [0-9]+\.[0-9]+\.[0-9]+/ { print $2; exit }' CHANGELOG.md
+changelog_heading="$(
+  awk '/^## [0-9]+\.[0-9]+\.[0-9]+/ { print; exit }' CHANGELOG.md
 )"
+if [[ "$changelog_heading" == *Unreleased* ]]; then
+  echo "CHANGELOG latest heading is still Unreleased: ${changelog_heading}" >&2
+  exit 1
+fi
+if [[ ! "$changelog_heading" =~ ^##\ [0-9]+\.[0-9]+\.[0-9]+\ -\ [0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+  echo "CHANGELOG latest heading must be '## X.Y.Z - YYYY-MM-DD': ${changelog_heading:-<missing>}" >&2
+  exit 1
+fi
+changelog_version="$(awk '{ print $2 }' <<<"$changelog_heading")"
 if [[ "$changelog_version" != "$version" ]]; then
   echo "CHANGELOG latest version ${changelog_version:-<missing>} does not match ${version}." >&2
   exit 1

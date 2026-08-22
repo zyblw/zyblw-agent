@@ -70,13 +70,19 @@ object ContextBudget:
 enum CompressionMode derives JsonCodec:
   case Deterministic, ModelAssisted, Disabled
 
+/** world-state section 的传递语义。普通 ChatModel 请求是无状态的，必须每次发送完整快照；只有宿主证明 Provider continuation 会保留上一请求上下文时才可启用差量。
+  */
+enum WorldStateDelivery derives JsonCodec:
+  case FullSnapshot, TrustedStatefulDelta
+
 /** 控制历史、工具输出和摘要的压缩方式。 */
 final case class ContextPolicy(
     budget: ContextBudget = ContextBudget.default,
     preserveImportantMessages: Boolean = true,
     maxToolResultCharacters: Int = 16_000,
     historyCompression: CompressionMode = CompressionMode.Deterministic,
-    toolOutputCompression: CompressionMode = CompressionMode.Deterministic
+    toolOutputCompression: CompressionMode = CompressionMode.Deterministic,
+    worldStateDelivery: WorldStateDelivery = WorldStateDelivery.FullSnapshot
 ):
   require(maxToolResultCharacters > 0, "工具结果上限必须为正数")
 

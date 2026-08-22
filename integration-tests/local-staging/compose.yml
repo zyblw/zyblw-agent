@@ -1,0 +1,49 @@
+name: zyblw-agent-local-staging
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    command:
+      - postgres
+      - -c
+      - max_connections=24
+      - -c
+      - log_connections=on
+    environment:
+      POSTGRES_USER: zyblw
+      POSTGRES_PASSWORD: local-staging-only
+      POSTGRES_DB: zyblw
+    ports:
+      - "127.0.0.1:${ZYBLW_LOCAL_POSTGRES_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zyblw -d zyblw"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.1-p0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://zyblw:local-staging-only@postgres:5432/zyblw
+      AUTH_TYPE: plain
+      POOL_MODE: transaction
+      DEFAULT_POOL_SIZE: 4
+      MIN_POOL_SIZE: 1
+      RESERVE_POOL_SIZE: 1
+      MAX_CLIENT_CONN: 256
+      LISTEN_PORT: 6432
+    ports:
+      - "127.0.0.1:${ZYBLW_LOCAL_PGBOUNCER_PORT:-56432}:6432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U zyblw -d zyblw"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres-data:

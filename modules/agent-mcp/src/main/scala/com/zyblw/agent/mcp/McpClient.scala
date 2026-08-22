@@ -2,6 +2,7 @@ package com.zyblw.agent.mcp
 
 import com.zyblw.agent.core.*
 import com.zyblw.agent.tools.*
+import java.net.URI
 import zio.*
 import zio.json.ast.Json
 import zio.stream.*
@@ -32,6 +33,7 @@ import zio.stream.*
 final case class McpClientConfig(
     serverId: McpServerId,
     clientInfo: McpImplementation,
+    expectedServerIdentity: Option[McpServerIdentity] = None,
     capabilities: McpClientCapabilities = McpClientCapabilities(),
     protocolVersion: McpProtocolVersion = McpProtocolVersion.Stable2025_11_25,
     initializeTimeout: Duration = 20.seconds,
@@ -46,11 +48,17 @@ final case class McpClientConfig(
     Either.cond(
       McpProtocolVersion.supported.contains(protocolVersion) &&
         clientInfo.name.trim.nonEmpty && clientInfo.version.trim.nonEmpty &&
+        expectedServerIdentity.forall(_.isValid) &&
         initializeTimeout > Duration.Zero && requestTimeout > Duration.Zero &&
         maxListPages > 0 && maxListItems > 0 && notificationBuffer > 0 && maxInboundConcurrency > 0,
       (),
       AgentError.InvalidConfiguration("Invalid MCP client configuration")
     )
+
+/** 由宿主配置固定的远端 MCP 实现身份；授权主体仍是本地 `McpServerId`。 */
+final case class McpServerIdentity(name: String, version: String):
+  private[mcp] def isValid: Boolean =
+    name.matches("[A-Za-z0-9._-]{1,160}") && version.matches("[A-Za-z0-9._+-]{1,160}")
 
 /** 服务端反向请求处理器。
   *
@@ -80,6 +88,65 @@ object McpClientRequestHandler:
         if method == "ping" then Right(Json.Obj())
         else Left(McpRpcError(-32601, s"Client method is not enabled: $method"))
       }
+
+  /** 只额外开放 roots/list；sampling、elicitation 和其它反向方法继续 fail-closed。 */
+  def withRoots(provider: McpRootsProvider): McpClientRequestHandler = new McpClientRequestHandler:
+    def handle(
+        serverId: McpServerId,
+        method: String,
+        params: Json.Obj
+    ): UIO[Either[McpRpcError, Json]] =
+      val _ = params
+      method match
+        case "ping"       => ZIO.succeed(Right(Json.Obj()))
+        case "roots/list" =>
+          provider
+            .roots(serverId)
+            .map(roots =>
+              Json.Obj(
+                "roots" -> Json.Arr(
+                  roots.map(root =>
+                    McpJson.obj(
+                      "uri"  -> Json.Str(root.uri),
+                      "name" -> Json.Str(root.name)
+                    )
+                  )
+                )
+              )
+            )
+            .mapError(_ => McpRpcError(-32603, "Configured roots are unavailable"))
+            .either
+        case _ => ZIO.succeed(Left(McpRpcError(-32601, s"Client method is not enabled: $method")))
+
+/** 宿主显式授权给一个 MCP server 的只读根；不会扫描当前目录或自动扩大范围。 */
+final case class McpRoot private (uri: String, name: String)
+
+object McpRoot:
+  def file(uri: String, name: String): Either[AgentError.InvalidConfiguration, McpRoot] =
+    val parsed = scala.util.Try(URI.create(uri)).toOption
+    Either.cond(
+      parsed.exists(value =>
+        value.isAbsolute && value.getScheme == "file" && value.getPath != null &&
+          value.getPath.startsWith("/") && value.getRawAuthority == null && value.getUserInfo == null &&
+          value.getRawQuery == null && value.getRawFragment == null
+      ) &&
+        name.matches("[A-Za-z0-9._ -]{1,160}"),
+      McpRoot(uri, name),
+      AgentError.InvalidConfiguration("MCP root must be an absolute file URI with a safe display name")
+    )
+
+/** 动态 Roots provider；必须按本地可信 `serverId` 返回已经授权的最小集合。 */
+trait McpRootsProvider:
+  def roots(serverId: McpServerId): IO[AgentError, Chunk[McpRoot]]
+
+object McpRootsProvider:
+  val none: McpRootsProvider = new McpRootsProvider:
+    def roots(serverId: McpServerId): IO[AgentError, Chunk[McpRoot]] =
+      ZIO.succeed(Chunk.empty)
+
+  def fixed(values: Map[McpServerId, Chunk[McpRoot]]): McpRootsProvider = new McpRootsProvider:
+    def roots(serverId: McpServerId): IO[AgentError, Chunk[McpRoot]] =
+      ZIO.succeed(values.getOrElse(serverId, Chunk.empty))
 
 /** 已完成 initialize/initialized 生命周期的 MCP 客户端。 */
 trait McpClient:
@@ -545,10 +612,17 @@ object DefaultMcpClient:
         .fail(
           McpJson.protocolError(
             "initialize",
-            s"unsupported negotiated protocol version: ${session.protocolVersion.value}",
-            Some("unsupported_version")
+            "server identity does not match the pinned host configuration",
+            Some("server_identity_mismatch")
           )
         )
+        .unless(
+          config.expectedServerIdentity.forall(expected =>
+            session.serverInfo.name == expected.name && session.serverInfo.version == expected.version
+          )
+        )
+      _ <- ZIO
+        .fail(McpProtocolVersion.rejection("initialize", session.protocolVersion))
         .unless(McpProtocolVersion.supported.contains(session.protocolVersion))
       _ <- transport.negotiated(session.protocolVersion)
       _ <- transport.notify("notifications/initialized")

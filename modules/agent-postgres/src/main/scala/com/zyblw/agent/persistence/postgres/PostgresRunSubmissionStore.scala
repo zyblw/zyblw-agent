@@ -17,6 +17,8 @@ import zio.json.*
   *   由宿主应用配置连接池的 DataSource；本类不自行创建或泄漏 JDBC 连接
   */
 final class PostgresRunSubmissionStore(dataSource: DataSource) extends RunSubmissionStore:
+  private val harnessBudgets = PostgresHarnessStore(dataSource)
+
   /** 内部异常：同一作用域/键已绑定另一请求指纹。 */
   final private case class StartConflict(key: String) extends RuntimeException
 
@@ -36,24 +38,47 @@ final class PostgresRunSubmissionStore(dataSource: DataSource) extends RunSubmis
     ) *>
       CommandId.random.flatMap { commandId =>
         withTransaction { connection =>
-          ZIO
-            .attemptBlocking {
-              val inserted = insertRun(connection, submission)
+          for
+            inserted <- ZIO.attemptBlocking(insertRun(connection, submission))
+            command  <-
               if inserted then
-                insertCreatedEvent(connection, submission.createdEvent)
-                val command = insertStartCommand(connection, commandId, submission.state.runId)
-                insertDispatch(connection, submission.state.runId)
-                command
+                val reserve = submission.goalBudgetAdmission match
+                  case Some(admission) =>
+                    harnessBudgets
+                      .reserveGoalBudgetInTransaction(
+                        connection,
+                        admission.goalId,
+                        submission.state.runId,
+                        submission.state.budget.limits,
+                        submission.state.createdAt
+                      )
+                      .unit
+                  case None => ZIO.unit
+                reserve *> ZIO.attemptBlocking {
+                  insertCreatedEvent(connection, submission.createdEvent)
+                  val created = insertStartCommand(connection, commandId, submission.state.runId)
+                  insertDispatch(connection, submission.state.runId)
+                  created
+                }
               else
-                val (knownRunId, knownHash) = loadSubmission(connection, submission)
-                if knownHash != submission.requestHash then throw StartConflict(submission.idempotencyKey)
-                loadStartCommand(connection, knownRunId)
-            }
-            .mapError {
-              case StartConflict(key)      => AgentError.RunSubmissionConflict(key)
-              case MissingStartCommand(id) => AgentError.PersistenceFailure(s"Run ${id.asString} 缺少 Start 命令")
-              case error                   => databaseError("原子提交 Agent Run 与 Start 命令失败", error)
-            }
+                for
+                  existing <- ZIO.attemptBlocking(loadSubmission(connection, submission))
+                  (knownRunId, knownHash) = existing
+                  _ <- ZIO
+                    .fail(StartConflict(submission.idempotencyKey))
+                    .unless(knownHash == submission.requestHash)
+                  _ <- submission.goalBudgetAdmission match
+                    case Some(admission) =>
+                      harnessBudgets.verifyGoalBudgetAdmission(
+                        connection,
+                        admission.goalId,
+                        knownRunId,
+                        submission.state.budget.limits
+                      )
+                    case None => ZIO.unit
+                  known <- ZIO.attemptBlocking(loadStartCommand(connection, knownRunId))
+                yield known
+          yield command
         }
       }
 
@@ -212,8 +237,10 @@ final class PostgresRunSubmissionStore(dataSource: DataSource) extends RunSubmis
 
   /** 保留 SQLSTATE 与可重试分类，但不把 SQL 或参数暴露给调用方。 */
   private def databaseError(operation: String, error: Throwable): StoreError = error match
-    case known: StoreError => known
-    case sql: SQLException =>
+    case known: StoreError       => known
+    case StartConflict(key)      => AgentError.RunSubmissionConflict(key)
+    case MissingStartCommand(id) => AgentError.PersistenceFailure(s"Run ${id.asString} 缺少 Start 命令")
+    case sql: SQLException       =>
       val state     = Option(sql.getSQLState).getOrElse("unknown")
       val retryable = state.startsWith("08") || state == "40001" || state == "40P01" || state == "53300"
       AgentError.DatabaseFailure(operation, state, retryable, Some(sql))

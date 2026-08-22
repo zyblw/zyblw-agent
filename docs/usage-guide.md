@@ -1,8 +1,8 @@
 # zyblw-agent 总体使用手册
 
-> 状态：0.6.2 当前使用契约
+> 状态：0.8.0 使用契约
 >
-> 最后核验：2026-08-13
+> 最后核验：2026-08-23
 >
 > 事实来源：公开源码、可运行示例、独立 Maven consumer、数据库 migration 与测试
 
@@ -18,16 +18,16 @@
 | 可确定编排、规则、数据库查询 | 普通 ZIO Service | 业务代码和业务数据库 |
 | 开放式分析、动态选择工具 | `AgentApplication` | Run/Event/Command/Tool ledger |
 | 显式分支、等待、并行汇合、崩溃恢复 | `WorkflowEngine` | Checkpoint/Execution/Wait/Signal |
-| 长任务的 Goal/Plan/Workspace | Agent + Harness 能力 | 当前仍在演进，不应假装已通用生产化 |
+| 长任务的 Goal/Plan/Workspace | Agent + `HarnessStore` | Goal/Plan/Skill/Steering/Artifact/跨 Run 预算已有内存与 PostgreSQL；真实业务成对 Eval 仍需宿主数据 |
 
 Agent 的核心边界始终是：模型提出文本、结构化结果或工具调用；Runtime 校验能力、权限、预算和状态，执行工具并决定何时停止。
 
 ## 2. 环境与依赖
 
-框架 0.6.2 的开发基线是 JDK 21、Scala 3.8.4、sbt 2.0.1、ZIO 2.1.26。业务只引入实际需要的模块：
+框架 0.8.0 的开发基线是 JDK 21、Scala 3.8.4、sbt 2.0.1、ZIO 2.1.26。业务只引入实际需要的模块：
 
 ```scala
-val zyblwAgentVersion = "0.6.2"
+val zyblwAgentVersion = "0.8.0"
 
 libraryDependencies ++= Seq(
   "io.github.zyblw" %% "zyblw-agent-core"      % zyblwAgentVersion,
@@ -50,27 +50,41 @@ libraryDependencies ++= Seq(
 所有模块必须使用同一精确版本。`%%` 会选择 Scala 3 的 `_3` 制品，不要手写后缀、版本范围或
 `latest.release`。完整选择矩阵见[模块与发布坐标](modules.md)。
 
-## 3. 从可运行的最小路径开始
+## 3. 从生产参考宿主开始
 
-在框架仓库中运行：
+书籍问答入口是 `KnowledgeQaHost`：
 
 ```bash
-sbt "examples/runMain com.zyblw.agent.examples.QuickstartAgentExample"
+sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost status"
+sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost migrate"
+sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost ingest data/books"
+sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost serve"
 ```
 
-它使用确定性 `ScriptedChatModel` 和内存控制面，但仍经过：
+Live 摄入 / 重建 / serve 需要 `EMBEDDING_API_KEY`、`EMBEDDING_MODEL` 与 `EMBEDDING_DIMENSION=1024`，不会回退到哈希向量。
+重建从 `ZYBLW_AGENT_BOOKS_DIR` 或 `data/books` 按 documentId 回读原文。详见 [升级到 0.8.0](upgrading-to-0.8.0.md)。
+
+客户支持与审批写工具仍走 `ProductionSupportHost`：
+
+```bash
+sbt "examples/runMain com.zyblw.agent.examples.production.ProductionSupportHost status"
+sbt "examples/runMain com.zyblw.agent.examples.production.ProductionSupportHost migrate"
+sbt "examples/runMain com.zyblw.agent.examples.production.ProductionSupportHost serve"
+```
+
+它经过：
 
 ```text
-AgentDefinition
-  -> submit(Start command)
-  -> Worker claim
-  -> AgentRuntime
-  -> Model response
-  -> AgentState/Event commit
-  -> inspect
+Hikari DataSource
+  -> Flyway / 结构探针 / 业务表
+  -> AgentApplication.durable
+  -> 真实或脚本化 ChatModel
+  -> lookup_order / issue_refund
+  -> ZIO HTTP + Worker + JDBC readiness
 ```
 
-因此它适合验证依赖、主循环和取消语义；进程退出后数据丢失，不能用于生产。
+`ZYBLW_AGENT_RUNTIME_MODE=contract` 只供自动化验证。内存 `inMemory` 装配留给测试，不再作为用户入口。
+`AgentQuickstart` 已删除；未注册但被白名单引用的工具仍会在模型调用前被正式路径拒绝。
 
 ## 4. 定义 Agent 与工具
 
@@ -171,6 +185,44 @@ PostgresAgentPersistence.migratedKnowledge1024()
 `zyblw_agent_knowledge`，vector 类型来自 `public`。不能把两个 V001 放入同一 Flyway 实例或让两套 history 管理同一 schema。
 正式生产通常推荐独立 migration Job 和最小权限运行账号，详细说明见[数据库迁移](database-migrations.md)。
 
+### 6.1 长任务按 Goal 约束多个 Run
+
+任务预算不是 `Goal` 上的展示数字，而是先预留、后结算的耐久账本。先创建 Goal 并配置一次不可变策略：
+
+```scala
+for
+  goalId <- GoalId.random
+  goal   <- harness.saveGoal(0L, Goal(goalId, ThreadId("research-1"), "完成带引用的研究报告"))
+  _      <- harness.configureGoalBudget(
+    goal.id,
+    GoalBudgetPolicy(
+      maxRuns = 4,
+      maxModelCalls = 32,
+      maxToolCalls = 64,
+      maxInputTokens = 400_000,
+      maxOutputTokens = 80_000,
+      maxTotalTokens = 450_000,
+      maxEstimatedCost = Some(BigDecimal("20.00"))
+    )
+  )
+yield goal
+```
+
+随后必须通过 `HarnessCommandService.submitStart(goalId, agent, request, idempotencyKey)` 启动受约束 Run；直接调用普通
+`AgentApplication.submit` 不会凭空知道它属于哪个 Goal。费用总限启用时，`request.limits.maxEstimatedCost` 必须为 `Some`。
+生产 PostgreSQL 会把预算预留与 Created State、RunCreated、Start command、dispatcher 同事务提交；相同客户端键重放只占用一次。
+
+宿主还应把以下操作纳入受监督的周期任务：
+
+```scala
+reconciler.reconcileNext(limit = 128)
+```
+
+它只把已经处于 Completed/Failed/Cancelled/TimedOut/BudgetExceeded 的 Run 按耐久 `UsageSummary` 结算。报告中的
+`failedRunIds` 需要告警和人工核对；活跃、暂停或缺失 Run 不会被 TTL 自动释放。确认某个 Reserved Run 从未产生外部副作用后，
+操作者才可显式调用 `releaseGoalBudget`。本地测试可用 `AgentPersistence.inMemoryWithHarness`；生产使用同一 DataSource 下的
+`PostgresAgentPersistence.layer` 与 `PostgresAgentPersistence.harness`。
+
 ## 7. HTTP 服务
 
 `zyblw-agent-zio-http` 提供 `/api/v1` Endpoint、OpenAPI、异步命令 API、耐久 SSE 与健康检查。身份必须由业务从已验签
@@ -185,13 +237,18 @@ JWT/session/mTLS 转换成 `RunContext`，不能采信请求正文里的 tenant�
 POST /api/v1/agents/{agentId}/runs + Idempotency-Key
   -> 202 { runId, commandId }
 GET  /api/v1/commands/{commandId}
-GET  /api/v1/runs/{runId}
+GET  /api/v1/runs/{runId}                    # 含加法 citations / evidence
+GET  /api/v1/runs/{runId}/citations
 GET  /api/v1/runs/{runId}/events/stream + Last-Event-ID
 GET  /api/v1/runs/{runId}/inspection
+POST /api/v1/knowledge/search                # hybrid|vector|lexical|phrase
+GET  /api/v1/knowledge/documents
+POST /api/v1/knowledge/ingestions
+POST /api/v1/knowledge/reindex
 ```
 
 SSE 读取耐久 Event sequence，可以跨节点续传；模型 token delta 仍是进程内实时信号，不能替代耐久事件。OpenAPI 位于
-`/api/v1/openapi.json`。完整配置和 Kubernetes 探针见 [ZIO HTTP 生产宿主](http-host.md)。
+`/api/v1/openapi.json`。管理面不再挂载知识路由。完整配置和 Kubernetes 探针见 [ZIO HTTP 生产宿主](http-host.md)。
 
 ## 8. PDF/Markdown RAG
 
@@ -232,13 +289,16 @@ val result = rag.retrieve(
   RagQuery(
     "问题文本",
     RetrievalScope(TenantId("tenant-a"), Set("knowledge:read")),
-    limit = Some(5)
+    limit = Some(5),
+    mode = RetrievalMode.Hybrid
   )
 )
 ```
 
-模型可以决定检索什么，但 tenant/permissions 必须由运行时注入。向量、FTS、rerank 和相邻块扩展都不能扩大已经授权的
-候选集合。完整路径见 [PDF RAG 生产流水线](pdf-rag-pipeline.md)。
+`RetrievalMode` 还有 `VectorOnly`、`LexicalOnly`、`Phrase`。`RagQuery.filter`（document/page/heading/metadata/chunk）发生在 ACL
+之后、打分之前。默认切分按 cl100k `maxTokens=512`。模型侧使用 `knowledge_search` / `knowledge_fetch`，不得覆盖
+tenant/permissions。向量、FTS、rerank 和相邻块扩展都不能扩大已经授权的候选集合。完整路径见
+[PDF RAG 生产流水线](pdf-rag-pipeline.md) 与 [Context、Memory 与 RAG](context-memory-rag.md)。
 
 ## 9. 代码架构与扩展位置
 
@@ -277,10 +337,10 @@ artifact。Provider 类型不能进入 core，数据库 DTO 不能成为 HTTP wi
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.6.3-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.8.0-local"; publishM2'
 
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.6.3-local sbt -batch 'clean; compile'
+ZYBLW_AGENT_VERSION=0.8.0-local sbt -batch 'clean; compile'
 ```
 
 业务还必须补充自己的权限、质量、成本、容量、数据库重启、Worker kill、Provider 断流、备份恢复和数据删除验证。框架测试

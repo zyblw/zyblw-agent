@@ -38,6 +38,21 @@ object LocalDocumentDirectorySourceSpec extends ZIOSpecDefault:
           )
         }
     },
+    test("按稳定 documentId 回读单个文件") {
+      ZIO
+        .acquireRelease(ZIO.attemptBlocking(Files.createTempDirectory("zyblw-rag-source-id")))(deleteTree)
+        .flatMap { root =>
+          val source = LocalDocumentDirectorySource(LocalDocumentDirectoryConfig(root))
+          for
+            _ <- ZIO.attemptBlocking {
+              Files.writeString(root.resolve("guide.md"), "# Guide", StandardCharsets.UTF_8)
+            }
+            inputs <- source.inputs.runCollect
+            loaded <- source.loadById(inputs.head.id)
+            missed <- source.loadById("local-missing")
+          yield assertTrue(loaded.map(_.fileName).contains("guide.md"), missed.isEmpty)
+        }
+    },
     test("文件数超限时整体 fail-closed，不返回截断目录") {
       ZIO
         .acquireRelease(ZIO.attemptBlocking(Files.createTempDirectory("zyblw-rag-source-limit")))(deleteTree)

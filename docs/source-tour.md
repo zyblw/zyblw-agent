@@ -21,19 +21,18 @@ getter、局部变量和 Scala 语法不会机械逐行翻译。
 先执行：
 
 ```bash
-sbt "examples/runMain com.zyblw.agent.examples.QuickstartAgentExample"
+sbt "examples/testOnly com.zyblw.agent.examples.production.ProductionSupportHostContractSpec"
 sbt "testkit/testOnly com.zyblw.agent.app.AgentApplicationSpec"
 ```
 
 然后阅读：
 
-1. `modules/agent-examples/.../QuickstartAgentExample.scala`
-2. `modules/agent-core/.../app/AgentQuickstart.scala`
+1. `modules/agent-examples/.../production/ProductionSupportHost.scala`
+2. `modules/agent-examples/.../production/ProductionSupportLayers.scala`
 3. `modules/agent-core/.../app/AgentApplication.scala`
 4. `modules/agent-testkit/.../app/AgentApplicationSpec.scala`
 
-完成标准：能用自己的话解释为什么示例没有 API Key 和数据库仍能走真实 Runtime，以及
-`inMemoryDefaults` 为什么只能用于学习、测试和单进程开发。
+完成标准：能解释 migrate 与 serve 为何分离、`durable` 为何不能回退内存，以及白名单引用未注册工具为何必须在模型调用前失败。
 
 ## 第 1 阶段：掌握领域语言
 
@@ -155,7 +154,7 @@ sbt 'testkit/testOnly com.zyblw.agent.runtime.AgentRuntimeSpec -- -t "关键词"
 2. 一个现有测试的变体；
 3. 一段对失败恢复语义的解释；
 4. 一个只读工具和对应 policy/eval；
-5. 一个使用 Maven Central 最新正式版或唯一 `0.6.3-local` 候选的独立最小消费者。
+5. 一个使用 Maven Central 最新正式版或唯一 `0.8.0-local` 候选的独立最小消费者。
 
 最后在 `zyblw-platform` 中用两条路径验证同一业务：
 

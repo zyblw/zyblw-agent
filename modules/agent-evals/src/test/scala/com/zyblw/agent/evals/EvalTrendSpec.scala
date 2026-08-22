@@ -1,5 +1,6 @@
 package com.zyblw.agent.evals
 
+import com.zyblw.agent.core.*
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -151,6 +152,56 @@ object EvalTrendSpec extends ZIOSpecDefault:
           !json.contains(secret),
           !json.contains("sk-secret"),
           !json.contains("details")
+        )
+    },
+    test("多试验可靠性以独立 kind 投影，并由最小样本、成功率和 Wilson 下界共同门禁") {
+      val evalCase = AgentEvalCase("reliability-case", "dataset-v1", "不得进入长期趋势的输入")
+      val passed   = AgentEvalGrader.grade(
+        evalCase,
+        AgentEvalObservation(
+          Chunk.empty,
+          Set.empty,
+          recovered = false,
+          duplicateSideEffects = 0,
+          RunStatus.Completed,
+          latencyMillis = 1L,
+          TokenUsage(1L, 1L),
+          BigDecimal(0)
+        )
+      )
+      def reliability(attempts: Int) = AgentEvalReliabilityReport(
+        Chunk(
+          AgentEvalCaseReliability(
+            evalCase.id,
+            evalCase.datasetVersion,
+            Chunk.fromIterable(1 to attempts).map(AgentEvalTrialReport(_, passed))
+          )
+        )
+      )
+      for
+        strong <- EvalSuiteSnapshot.fromAgentReliability(
+          metadata("eval-reliability-strong", 1),
+          reliability(5)
+        )
+        weak <- EvalSuiteSnapshot.fromAgentReliability(metadata("eval-reliability-weak", 2), reliability(1))
+      yield
+        val strongDimensions =
+          strong.cases.head.dimensions.map(dimension => dimension.name -> dimension).toMap
+        val weakDimensions = weak.cases.head.dimensions.map(dimension => dimension.name -> dimension).toMap
+        val bootstrap      = EvalRegressionPolicy(allowFirstPassingBaseline = true)
+        assertTrue(
+          strong.kind == EvalSuiteKind.AgentReliability,
+          strong.passed,
+          strongDimensions("reliability-minimum-trials").passed,
+          strongDimensions("reliability-wilson-lower-95").score > 0.5,
+          !weak.passed,
+          !weakDimensions("reliability-minimum-trials").passed,
+          !weakDimensions("reliability-wilson-lower-95").passed,
+          EvalReleaseGate.evaluate(None, strong, bootstrap).passed,
+          !EvalReleaseGate.evaluate(None, weak, bootstrap).passed,
+          !strong.toJson.contains(evalCase.input),
+          !strong.toJson.contains("\"trials\":"),
+          !strong.toJson.contains("details")
         )
     },
     test("默认发布策略拒绝硬门禁失败、删除基线用例/维度和分数下降") {
@@ -388,23 +439,38 @@ object EvalTrendSpec extends ZIOSpecDefault:
         )
       }
     },
-    test("完整身份包含 kind，RAG 快照不会被同名 Agent 套件选为基线") {
+    test("完整身份包含 kind，RAG、可靠性与 Harness 比较不会被同名 Agent 套件选为基线") {
       withStore { (store, _) =>
         val agent       = snapshot("eval-agent-kind", 1)
         val rag         = snapshot("eval-rag-kind", 2).copy(kind = EvalSuiteKind.Rag)
-        val ragIdentity = agentIdentity.copy(kind = EvalSuiteKind.Rag)
+        val reliability = snapshot("eval-reliability-kind", 3).copy(kind = EvalSuiteKind.AgentReliability)
+        val comparison  =
+          snapshot("eval-harness-comparison-kind", 4).copy(kind = EvalSuiteKind.HarnessComparison)
+        val ragIdentity         = agentIdentity.copy(kind = EvalSuiteKind.Rag)
+        val reliabilityIdentity = agentIdentity.copy(kind = EvalSuiteKind.AgentReliability)
+        val comparisonIdentity  = agentIdentity.copy(kind = EvalSuiteKind.HarnessComparison)
         for
-          _             <- store.append(agent)
-          _             <- store.append(rag)
-          agentHistory  <- store.history(agentIdentity, 10)
-          ragHistory    <- store.history(ragIdentity, 10)
-          agentBaseline <- store.latestPassing(agentIdentity)
-          ragBaseline   <- store.latestPassing(ragIdentity)
+          _                   <- store.append(agent)
+          _                   <- store.append(rag)
+          _                   <- store.append(reliability)
+          _                   <- store.append(comparison)
+          agentHistory        <- store.history(agentIdentity, 10)
+          ragHistory          <- store.history(ragIdentity, 10)
+          reliabilityHistory  <- store.history(reliabilityIdentity, 10)
+          comparisonHistory   <- store.history(comparisonIdentity, 10)
+          agentBaseline       <- store.latestPassing(agentIdentity)
+          ragBaseline         <- store.latestPassing(ragIdentity)
+          reliabilityBaseline <- store.latestPassing(reliabilityIdentity)
+          comparisonBaseline  <- store.latestPassing(comparisonIdentity)
         yield assertTrue(
           agentHistory == Chunk(agent),
           ragHistory == Chunk(rag),
+          reliabilityHistory == Chunk(reliability),
+          comparisonHistory == Chunk(comparison),
           agentBaseline.contains(agent),
-          ragBaseline.contains(rag)
+          ragBaseline.contains(rag),
+          reliabilityBaseline.contains(reliability),
+          comparisonBaseline.contains(comparison)
         )
       }
     }

@@ -299,5 +299,5 @@ Trace 事件为 `agent.context.compacted`；Langfuse 会把它作为 span，而�
 - 当前摘要是抽取式，不追求文学化或高度抽象；只有事实保真 eval 证明安全后，才考虑受约束的生成式二级摘要；
 - 默认 `AgentApplication.durable/inMemory/inMemoryDefaults` 只装配确定性压缩；模型辅助必须使用名称明确的
   `*WithContextCompressor` 入口；
-- AgentState schemaVersion 已提升为 4。首次正式发布前没有历史兼容负担；已有旧持久化 Run 的环境必须明确迁移或清理，
+- Context 摘要切片曾把 AgentState schemaVersion 提升为 4；后续因工具契约快照提升为 5、因审批主体提升为 6、因引用证据提升为 7。`0.8.0` 是全新安装基线，没有从旧 schema 的原地兼容负担；已有旧持久化 Run 的环境必须明确迁移或清理，
   不能把缺字段解码失败当作普通重试。

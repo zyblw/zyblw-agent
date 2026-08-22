@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-22
+> 最后核验：2026-08-22
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -29,7 +29,8 @@
 - `McpClient.scala`：生命周期、分页和高层 API。
 - `McpJsonRpcPeer.scala`：并发 request id、Promise、取消和入站路由。
 - `StdioMcpTransport.scala`：受 Scope 管理的进程 transport。
-- `StreamableHttpMcpTransport.scala`：Streamable HTTP、SSE 和 session 恢复。
+- `StreamableHttpMcpTransport.scala`：2025-11-25 Streamable HTTP、SSE 和 session 恢复。
+- `Mcp2026Client.scala` / `Mcp2026HttpTransport.scala`：2026-07-28 无状态客户端与 POST-only HTTP。
 - `McpInteractiveRequests.scala`：sampling/elicitation 的审批治理。
 
 ## 为什么锁定 2025-11-25
@@ -43,6 +44,21 @@ MCP 使用日期版本，transport 和 session 语义会随版本改变。框架
 
 这比“收到什么版本都继续跑”更符合 Scala 的类型安全与生产 fail-closed 原则。
 
+官方 `2026-07-28` 已被识别为**已知但不支持**的无状态核心修订：`DefaultMcpClient` 协商到该版本时返回
+`unsupported_stateless_revision` 并关闭连接，不会发送 `notifications/initialized`。专用
+`Mcp2026Client` 才讲无状态契约：`server/discover`、每请求 `_meta`、`Mcp-Method`/`Mcp-Name`，并拒绝
+`initialize`/`ping`/`Mcp-Session-Id`/`Last-Event-ID`。HTTPS endpoint 默认拒绝私网与云 metadata 地址。
+`Mcp2026HttpTransport` 是独立的 POST-only Streamable HTTP：不打开 GET listener、不发送
+`Last-Event-ID`、关闭时不 DELETE。2025 `StreamableHttpMcpTransport` 继续服务默认客户端。
+`input_required` 必须由宿主提供 `inputResponses` 后重试原方法，并原样回传 `requestState`；客户端不会
+自动完成 elicitation/sampling。`subscriptions/listen` 只接受声明的变更类型，长连接 SSE 仍未实现。
+`Mcp2026Auth` 校验 issuer/CIMD HTTPS 与 `iss` 匹配，凭据按 issuer 分钥。完整 OAuth 交换和官方 SDK
+互操作仍然缺席。
+在官方 SDK 互操作与攻击矩阵完成前，不要把 `2026-07-28` 写进 `McpClientConfig.protocolVersion`，也不要
+删除 2025-11-25 transport。
+
+权威说明：[MCP 2026-07-28 changelog](https://modelcontextprotocol.io/specification/2026-07-28/changelog)。
+
 ## stdio 使用
 
 ```scala
@@ -51,7 +67,14 @@ import zio.*
 
 val clientConfig = McpClientConfig(
   serverId = McpServerId("local-knowledge"),
-  clientInfo = McpImplementation("zyblw-server", "1.0.0")
+  clientInfo = McpImplementation("zyblw-server", "1.0.0"),
+  expectedServerIdentity = Some(McpServerIdentity("knowledge-mcp", "2.3.1")),
+  capabilities = McpClientCapabilities(roots = true)
+)
+
+val root = McpRoot.file("file:///srv/knowledge", "knowledge").toOption.get
+val requestHandler = McpClientRequestHandler.withRoots(
+  McpRootsProvider.fixed(Map(clientConfig.serverId -> Chunk(root)))
 )
 
 val program = ZIO.scoped {
@@ -221,6 +244,7 @@ Task status 被解析成 `McpTaskStatus`，时间必须为 ISO-8601，TTL 和 po
 - 初始化顺序、能力协商与 Scope 关闭。
 - 工具分页、结果、cursor 环和未协商能力拒绝。
 - 真实 JDK 子进程 stdio 调用、超时、Fiber 中断、非法 stdout、超长行和进程回收。
+- `StdioMcpTransportConfig.commandDigestAllowlist`：非空时 `sha256(command 用 NUL 连接)` 必须命中允许集合，未固定命令 fail-closed。
 - scoped Sandbox session 路径的初始化、工具调用、同一 framing 与 Scope 进程回收。
 - 真实 ZIO HTTP stub 的 JSON/SSE、双 Accept、Bearer、session/version header、DELETE。
 - SSE 断流与 Last-Event-ID 恢复。
@@ -233,8 +257,11 @@ Task status 被解析成 `McpTaskStatus`，时间必须为 ISO-8601，TTL 和 po
 以下能力仍不能宣称生产完成：
 
 - OAuth 2.1 protected-resource metadata、authorization-server discovery、PKCE 和动态 token 获取；当前提供的是可轮换 bearer token SPI。
+- 初次 initialize 可用 `expectedServerIdentity` 固定远端 `serverInfo.name/version`，恢复握手也会继续比较；这只防止
+  配置串线和同 endpoint 静默换实现，密码学服务身份仍必须由 HTTPS/mTLS/OAuth issuer 与部署供应链保证。
 - MCP server 端实现和 `Origin` 校验；当前模块是客户端。服务端实现必须对非法 Origin 返回 403。
-- Roots provider、completion、logging level 设置、资源模板和资源订阅后的业务缓存失效器。
+- completion、logging level 设置、资源模板和资源订阅后的业务缓存失效器。Roots 已有显式 file URI provider，但不会
+  扫描 cwd、接受远程 authority 或自动授权；宿主仍必须把 `capabilities.roots=true` 与 handler 同时配置。
 - sampling/elicitation task augmentation 的完整创建与结果恢复。
 - MCP Registry/供应链签名、server package provenance 和版本锁定策略。
 - 真实 Docker/Podman rootless+cgroup、镜像签名/SBOM、容器逃逸与恶意 MCP package 混沌门禁；当前确定性契约使用

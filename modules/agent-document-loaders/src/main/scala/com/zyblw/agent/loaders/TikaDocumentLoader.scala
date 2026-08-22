@@ -210,7 +210,10 @@ object TikaDocumentLoader:
     "text/html",
     "application/xhtml+xml",
     "application/pdf",
-    "application/epub+zip"
+    "application/epub+zip",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
   )
 
   /** 使用默认严格配置构造 Loader Layer。 */

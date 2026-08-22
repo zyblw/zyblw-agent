@@ -8,6 +8,10 @@ import zio.*
 import zio.json.*
 import zio.json.ast.Json
 
+/** Retriever 明确判定证据不足时的模型约束。 */
+enum LowEvidenceResponse derives JsonCodec:
+  case OmitEvidence, RequireExplicitRefusal
+
 /** Memory/RAG 动态来源的选择策略。
   *
   * @param memoryLimit
@@ -26,7 +30,8 @@ final case class MemoryRagContextPolicy(
     retrievalLimit: Int = 6,
     includeSessionMemory: Boolean = true,
     includeUserMemory: Boolean = true,
-    minimumRetrievalScore: Double = 0.0
+    minimumRetrievalScore: Double = 0.0,
+    lowEvidenceResponse: LowEvidenceResponse = LowEvidenceResponse.OmitEvidence
 ):
   require(memoryLimit >= 0, "memoryLimit 不能为负数")
   require(retrievalLimit >= 0, "retrievalLimit 不能为负数")
@@ -52,6 +57,7 @@ final class MemoryRagContextSourceResolver(
     policy: MemoryRagContextPolicy,
     operationTelemetry: Option[AgentOperationTelemetry] = None
 ) extends ContextSourceResolver:
+  override val sourceIds: Chunk[String] = Chunk("memory-rag@2")
 
   /** 为当前回合解析来源。检索 query 使用最近一条非空 User 消息，避免把工具输出误当用户意图。
     */
@@ -67,9 +73,32 @@ final class MemoryRagContextSourceResolver(
       result   <- resolveRetrieval(state, query)
     yield ContextSources(
       memories = selected,
-      retrieval = result.map { case (hit, citation) =>
+      retrieval = result.hits.map { case (hit, citation) =>
         ContextDocument(citation.id, hit.chunk.text, citation.sourceUri, Some(hit.score))
-      }
+      },
+      safetyInstructions =
+        if result.insufficient && policy.lowEvidenceResponse == LowEvidenceResponse.RequireExplicitRefusal
+        then Chunk(MemoryRagContextSourceResolver.LowEvidenceInstruction)
+        else Chunk.empty,
+      citations = result.hits.map { case (hit, citation) =>
+        RunCitation(
+          citation.id,
+          citation.sourceUri,
+          citation.excerpt.take(500),
+          citation.score,
+          citation.pageNumbers,
+          Some(hit.chunk.id),
+          Some(hit.chunk.documentId)
+        )
+      },
+      retrievalEvidence = Some(
+        RunRetrievalEvidence(
+          result.evidenceStatus,
+          result.candidateCount,
+          result.acceptedCount,
+          result.topScore
+        )
+      )
     )
 
   /** 依次读取 session 与 user scope，过滤过期项，再按 importance/key 稳定排序去重。 */
@@ -111,7 +140,7 @@ final class MemoryRagContextSourceResolver(
   private def resolveRetrieval(
       state: AgentState,
       query: String
-  ): IO[ContextError, Chunk[(RetrievalHit, Citation)]] =
+  ): IO[ContextError, ResolvedRetrieval] =
     (state.runContext.tenantId, query.nonEmpty, policy.retrievalLimit > 0) match
       case (Some(tenant), true, true) =>
         val retrieval = retriever
@@ -120,11 +149,29 @@ final class MemoryRagContextSourceResolver(
           .fold(retrieval)(_.retrieval(state.runId, "retrieve")(retrieval)(_.hits.length.toLong))
           .mapError(retrievalError)
           .map { result =>
-            if result.evidence.supportsGroundedAnswer then
-              result.hits.zip(result.citations).filter(_._1.score >= policy.minimumRetrievalScore)
-            else Chunk.empty
+            val accepted =
+              if result.evidence.supportsGroundedAnswer then
+                result.hits.zip(result.citations).filter(_._1.score >= policy.minimumRetrievalScore)
+              else Chunk.empty
+            ResolvedRetrieval(
+              accepted,
+              insufficient = !result.evidence.supportsGroundedAnswer,
+              evidenceStatus = result.evidence.status.toString,
+              candidateCount = result.evidence.candidateCount.max(result.hits.length).max(accepted.length),
+              acceptedCount = accepted.length,
+              topScore = accepted.map(_._1.score).maxOption
+            )
           }
-      case _ => ZIO.succeed(Chunk.empty)
+      case _ => ZIO.succeed(ResolvedRetrieval(Chunk.empty, insufficient = false))
+
+  final private case class ResolvedRetrieval(
+      hits: Chunk[(RetrievalHit, Citation)],
+      insufficient: Boolean,
+      evidenceStatus: String = "NotEvaluated",
+      candidateCount: Int = 0,
+      acceptedCount: Int = 0,
+      topScore: Option[Double] = None
+  )
 
   /** JSON string 记忆展示其值；对象/数组保留 JSON 结构，避免 Scala AST 调试表示进入 prompt。 */
   private def renderMemory(value: Json): String = value match
@@ -140,6 +187,10 @@ final class MemoryRagContextSourceResolver(
     AgentError.ContextBuildFailed(s"知识检索失败: ${error.message}")
 
 object MemoryRagContextSourceResolver:
+  private val LowEvidenceInstruction =
+    "Knowledge retrieval explicitly reported insufficient evidence. Do not infer a grounded answer from memory or " +
+      "general knowledge; state that the available evidence is insufficient and request a safer next step."
+
   /** 从 MemoryStore、Retriever 和策略装配生产 resolver。 */
   val layer: URLayer[MemoryStore & Retriever & MemoryRagContextPolicy, ContextSourceResolver] =
     ZLayer.fromFunction((memories: MemoryStore, retriever: Retriever, policy: MemoryRagContextPolicy) =>

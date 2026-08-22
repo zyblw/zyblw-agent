@@ -205,6 +205,56 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
           )
       }
 
+  final private class RecordingInspection(val calls: Ref[Chunk[String]]) extends RunInspectionAdmin:
+    def composition(runId: RunId): IO[StoreError, Option[AdminCompositionView]] =
+      calls
+        .update(_ :+ s"composition:${runId.asString}")
+        .as(
+          Some(
+            AdminCompositionView(
+              runId.asString,
+              "abcd1234abcd1234",
+              "default",
+              "model-ref-prefix",
+              "MetadataOnly",
+              List("memory-rag@2"),
+              "local",
+              "perm-prefix"
+            )
+          )
+        )
+
+    def modelCalls(runId: RunId, limit: Int): IO[StoreError, Chunk[AdminModelCallView]] =
+      calls.update(_ :+ s"model-calls:${runId.asString}:$limit").as(Chunk.empty)
+
+    def approval(runId: RunId): IO[StoreError, Option[AdminApprovalSubjectView]] =
+      calls.update(_ :+ s"approval:${runId.asString}").as(None)
+
+  final private class RecordingHarness(val calls: Ref[Chunk[String]]) extends HarnessInspectionAdmin:
+    def goal(goalId: com.zyblw.agent.harness.GoalId): IO[StoreError, Option[AdminHarnessView]] =
+      calls
+        .update(_ :+ s"harness-goal:${goalId.asString}")
+        .as(
+          Some(
+            AdminHarnessView(
+              goalId.asString,
+              "Active",
+              "学习伤寒论",
+              None,
+              1L,
+              Some(3L),
+              Some(10L),
+              Some(8L),
+              Some(4000L),
+              None,
+              List.empty
+            )
+          )
+        )
+
+    def plan(planId: com.zyblw.agent.harness.PlanId): IO[StoreError, Option[AdminHarnessView]] =
+      calls.update(_ :+ s"harness-plan:${planId.asString}").as(None)
+
   /** 全部能力都装配的 API，附带知识与模型适配器的调用记录。 */
   private def fullApi: UIO[(AdminHttpApi, Ref[Chunk[String]])] =
     for
@@ -224,6 +274,9 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
           knowledge = Some(knowledge),
           evals = None,
           models = Some(new RecordingModels(calls)),
+          inspection = Some(new RecordingInspection(calls)),
+          harness = Some(new RecordingHarness(calls)),
+          memoryGovernance = true,
           observability = ObservabilityLinks(langfuseBaseUrl = Some("https://langfuse.example.com"))
         ),
         contexts
@@ -236,9 +289,6 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
 
   private def configUpdate(expectedVersion: Long, overrides: RuntimeOverrides, reason: String = "测试"): Body =
     Body.fromString(RuntimeConfigUpdateRequest(expectedVersion, overrides, reason).toJson)
-
-  private val retrieveBody: Body =
-    Body.fromString(KnowledgeRetrieveRequest(query = "问诊要点", tenantId = "acme").toJson)
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("AdminHttpApi")(
     suite("授权")(
@@ -275,57 +325,25 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
           view  <- ZIO.fromEither(body.fromJson[RuntimeConfigView]).mapError(new RuntimeException(_))
         yield assertTrue(rejected.status == Status.Forbidden, view.overrideVersion == 0L)
       },
-      test("写权限不蕴含付费调试权限：检索沙盒对纯写 scope 返回 403 且不调用适配器") {
+      test("管理面不再挂载知识路由，即使装配了知识后端") {
         for
           tuple <- fullApi
           (api, calls) = tuple
-          response <- api.routes.runZIO(
+          retrieve <- api.routes.runZIO(
             withScopes(
-              Request.post(admin / "knowledge" / "retrieve", retrieveBody),
-              AdminAuthorization.WriteScope,
-              AdminAuthorization.ReadScope
-            )
-          )
-          recorded <- calls.get
-        yield assertTrue(response.status == Status.Forbidden, recorded.isEmpty)
-      },
-      test("写权限不蕴含付费调试权限：文档摄入对纯写 scope 返回 403 且不读取正文") {
-        for
-          tuple <- fullApi
-          (api, calls) = tuple
-          response <- api.routes.runZIO(
-            withScopes(
-              Request.post(
-                (admin / "knowledge" / "ingestions").addQueryParams("fileName=a.md&tenantId=acme"),
-                Body.fromString("# 标题")
-              ),
-              AdminAuthorization.WriteScope
-            )
-          )
-          recorded <- calls.get
-        yield assertTrue(response.status == Status.Forbidden, recorded.isEmpty)
-      },
-      test("持有调试权限时检索沙盒放行，并以请求给出的租户视角执行") {
-        for
-          tuple <- fullApi
-          (api, calls) = tuple
-          response <- api.routes.runZIO(
-            withScopes(
-              Request.post(admin / "knowledge" / "retrieve", retrieveBody),
+              Request.post(admin / "knowledge" / "retrieve", Body.fromString("{}")),
               AdminAuthorization.DebugScope
             )
           )
-          recorded <- calls.get
-        yield assertTrue(response.status == Status.Ok, recorded == Chunk("retrieve"))
-      },
-      test("调试权限不蕴含读权限：只持有 debug 时列出索引清单返回 403") {
-        for
-          tuple <- fullApi
-          (api, _) = tuple
-          response <- api.routes.runZIO(
-            withScopes(Request.get(admin / "knowledge" / "documents"), AdminAuthorization.DebugScope)
+          documents <- api.routes.runZIO(
+            withScopes(Request.get(admin / "knowledge" / "documents"), AdminAuthorization.ReadScope)
           )
-        yield assertTrue(response.status == Status.Forbidden)
+          recorded <- calls.get
+        yield assertTrue(
+          retrieve.status == Status.NotFound,
+          documents.status == Status.NotFound,
+          recorded.isEmpty
+        )
       },
       test("业务侧 scope 不会被误认为管理 scope") {
         for
@@ -486,6 +504,9 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
           view.runtimeConfig,
           view.knowledge,
           view.models,
+          view.runInspection,
+          view.harness,
+          view.memoryGovernance,
           !view.queueOps,
           !view.evalTrends,
           view.observability.langfuseBaseUrl.contains("https://langfuse.example.com")
@@ -534,7 +555,10 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
           !view.evalTrends,
           !view.knowledge,
           !view.runtimeConfig,
-          !view.models
+          !view.models,
+          !view.runInspection,
+          !view.harness,
+          !view.memoryGovernance
         )
       },
       test("所有管理响应都带上 API 版本响应头") {
@@ -696,36 +720,7 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
           )
         yield assertTrue(response.status == Status.Ok)
       },
-      test("摄入缺少必填元数据或正文为空时返回 400") {
-        for
-          tuple <- fullApi
-          (api, calls) = tuple
-          missing <- api.routes.runZIO(
-            withScopes(
-              Request.post(
-                (admin / "knowledge" / "ingestions").addQueryParams("tenantId=acme"),
-                Body.fromString("x")
-              ),
-              AdminAuthorization.DebugScope
-            )
-          )
-          blank <- api.routes.runZIO(
-            withScopes(
-              Request.post(
-                (admin / "knowledge" / "ingestions").addQueryParams("fileName=a.md&tenantId=acme"),
-                Body.empty
-              ),
-              AdminAuthorization.DebugScope
-            )
-          )
-          recorded <- calls.get
-        yield assertTrue(
-          missing.status == Status.BadRequest,
-          blank.status == Status.BadRequest,
-          recorded.isEmpty
-        )
-      },
-      test("摄入以原始字节提交并返回 202 与任务 ID，供管理台轮询进度") {
+      test("管理知识摄入路径已移除") {
         for
           tuple <- fullApi
           (api, calls) = tuple
@@ -738,45 +733,39 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
               AdminAuthorization.DebugScope
             )
           )
-          body     <- response.body.asString
-          job      <- ZIO.fromEither(body.fromJson[IngestionJobView]).mapError(new RuntimeException(_))
           recorded <- calls.get
-        yield assertTrue(
-          response.status == Status.Accepted,
-          job.jobId == "job-1",
-          job.status == IngestionJobStatus.Queued,
-          recorded.exists(_.startsWith("ingest:guide.md:")),
-          recorded.exists(_.endsWith(":acme/operator-1"))
-        )
-      },
-      test("非法 extractionMode 在解析阶段拒绝，不进入摄入") {
+        yield assertTrue(response.status == Status.NotFound, recorded.isEmpty)
+      }
+    ),
+    suite("检查投影")(
+      test("组合指纹与 Harness 只在读权限下返回低敏字段") {
+        val goalId = java.util.UUID.randomUUID().toString
         for
           tuple <- fullApi
           (api, calls) = tuple
-          response <- api.routes.runZIO(
+          denied      <- api.routes.runZIO(Request.get(admin / "runs" / streamRunId.asString / "composition"))
+          composition <- api.routes.runZIO(
             withScopes(
-              Request.post(
-                (admin / "knowledge" / "ingestions")
-                  .addQueryParams("fileName=guide.md&tenantId=acme&extractionMode=magic"),
-                Body.fromString("# 标题")
-              ),
-              AdminAuthorization.DebugScope
-            )
-          )
-          recorded <- calls.get
-        yield assertTrue(response.status == Status.BadRequest, recorded.isEmpty)
-      },
-      test("不存在的摄入任务返回 404 而不是 200 加空正文") {
-        for
-          tuple <- fullApi
-          (api, _) = tuple
-          response <- api.routes.runZIO(
-            withScopes(
-              Request.get(admin / "knowledge" / "ingestions" / "missing"),
+              Request.get(admin / "runs" / streamRunId.asString / "composition"),
               AdminAuthorization.ReadScope
             )
           )
-        yield assertTrue(response.status == Status.NotFound)
+          body    <- composition.body.asString
+          harness <- api.routes.runZIO(
+            withScopes(Request.get(admin / "harness" / "goals" / goalId), AdminAuthorization.ReadScope)
+          )
+          harnessBody <- harness.body.asString
+          recorded    <- calls.get
+        yield assertTrue(
+          denied.status == Status.Forbidden,
+          composition.status == Status.Ok,
+          body.contains("abcd1234abcd1234"),
+          !body.contains(streamSecret),
+          harness.status == Status.Ok,
+          harnessBody.contains("学习伤寒论"),
+          recorded.exists(_.startsWith("composition:")),
+          recorded.exists(_.startsWith("harness-goal:"))
+        )
       }
     )
   )

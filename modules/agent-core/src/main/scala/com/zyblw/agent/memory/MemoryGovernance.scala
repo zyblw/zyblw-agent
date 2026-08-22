@@ -36,6 +36,9 @@ enum MemoryAuditAction:
   /** 后台保留期任务清理过期记忆。 */
   case RetentionPurge
 
+  /** 用户导出自己的记忆；审计不保存正文。 */
+  case Export
+
 /** 发起记忆操作的可信主体。
   *
   * `Authenticated` 必须由宿主认证中间件构造，不能从请求 JSON 或模型输出反序列化。`System` 只供框架自己的 retention worker
@@ -112,6 +115,9 @@ trait MemoryGovernanceRepository:
 
   /** 在同一原子边界中 tombstone 整个作用域并记录实际数量。 */
   def deleteScope(scope: MemoryScope, audit: MemoryAuditRecord): IO[StoreError, Long]
+
+/** 有界记忆导出页；nextCursor 是上一页最后一个 key，不是偏移量。 */
+final case class MemoryExportPage(items: Chunk[MemoryEntry], nextCursor: Option[String])
 
 /** 用户纠正记忆时允许提交的最小字段集合。
   *
@@ -200,6 +206,31 @@ final class MemoryGovernanceService(
       result  <- store.list(scope, bounded)
       _       <- auditRead(actor, scope, MemoryAuditAction.List, None, result.length.toLong)
     yield result
+
+  /** 有界导出自己的记忆；游标是上一页最后一个 key，避免无界 dump。
+    *
+    * 审计只记录条数，不记录 key 明文或 JSON 正文。
+    */
+  def exportPage(
+      actor: RunContext,
+      scope: MemoryScope,
+      afterKey: Option[String],
+      limit: Int
+  ): IO[AgentError, MemoryExportPage] =
+    for
+      bounded <- validateLimit(limit)
+      _       <- authorize(actor, scope, write = false)
+      listed  <- store.list(scope, MemoryGovernanceService.MaxPageSize)
+      filtered = listed
+        .sortBy(_.key)
+        .dropWhile(entry => afterKey.exists(key => entry.key <= key))
+        .take(bounded)
+      page = MemoryExportPage(
+        filtered,
+        filtered.lastOption.map(_.key).filter(_ => filtered.length == bounded)
+      )
+      _ <- auditRead(actor, scope, MemoryAuditAction.Export, None, page.items.length.toLong)
+    yield page
 
   /** 有界搜索自己的记忆。搜索词只用于 Store 查询，永不进入审计记录、错误 diagnostic 或日志。
     */
@@ -460,3 +491,6 @@ object InMemoryMemoryGovernanceRepository:
       audits <- Ref.make(Chunk.empty[MemoryAuditRecord])
       gate   <- Semaphore.make(1L)
     yield InMemoryMemoryGovernanceRepository(store, audits, gate)
+
+  val layer: URLayer[MemoryStore, MemoryGovernanceRepository] =
+    ZLayer.fromZIO(ZIO.serviceWithZIO[MemoryStore](make))

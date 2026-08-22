@@ -485,6 +485,8 @@ object WorkflowSpec extends ZIOSpecDefault:
             baseStore.heartbeatWakeup(lease, leaseDuration)
           def abandonWakeup(lease: WorkflowWakeupLease, availableAt: java.time.Instant) =
             baseStore.abandonWakeup(lease, availableAt)
+          override def wakeQueueSnapshot(workflowId: WorkflowId, definitionVersion: WorkflowVersion) =
+            baseStore.wakeQueueSnapshot(workflowId, definitionVersion)
           override def timeline(runId: RunId, after: Option[WorkflowTimelineCursor], limit: Int) =
             baseStore.timeline(runId, after, limit)
         policy = WorkflowExecutionPolicy(
@@ -580,6 +582,7 @@ object WorkflowSpec extends ZIOSpecDefault:
         )
         first         <- engine.run(10, context(runId, sessionId)).runCollect
         wait          <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
+        pendingQueue  <- store.wakeQueueSnapshot(testWorkflowId, testWorkflowVersion)
         pendingResume <- engine.resume(context(runId, sessionId)).runCollect.either
         accepted      <- store.signal(
           wait.key,
@@ -596,7 +599,8 @@ object WorkflowSpec extends ZIOSpecDefault:
         conflicting <- store
           .signal(wait.key, WorkflowSignalId("signal-1"), signalName, "different")
           .either
-        wakeLease <- store
+        dispatchableQueue <- store.wakeQueueSnapshot(testWorkflowId, testWorkflowVersion)
+        wakeLease         <- store
           .claimWakeups(
             testWorkflowId,
             testWorkflowVersion,
@@ -606,8 +610,10 @@ object WorkflowSpec extends ZIOSpecDefault:
           .flatMap(value =>
             ZIO.fromOption(value.headOption).orElseFail(AgentError.PersistenceFailure("wakeup missing"))
           )
-        resumed       <- engine.resumeClaimed(context(runId, sessionId), wakeLease).runCollect
-        remainingWait <- store.currentWait(runId)
+        leasedQueue    <- store.wakeQueueSnapshot(testWorkflowId, testWorkflowVersion)
+        resumed        <- engine.resumeClaimed(context(runId, sessionId), wakeLease).runCollect
+        remainingWait  <- store.currentWait(runId)
+        completedQueue <- store.wakeQueueSnapshot(testWorkflowId, testWorkflowVersion)
       yield assertTrue(
         first.exists {
           case WorkflowEvent.Waiting(`approval`, key, WorkflowWaitCondition.Signal(`signalName`), _, 10) =>
@@ -619,8 +625,19 @@ object WorkflowSpec extends ZIOSpecDefault:
         accepted.disposition == WorkflowSignalDisposition.Accepted,
         duplicate.disposition == WorkflowSignalDisposition.Duplicate,
         conflicting.left.exists(_.category == ErrorCategory.Conflict),
+        pendingQueue.pendingWaits == 1L,
+        pendingQueue.dueWaits == 0L,
+        pendingQueue.dispatchableWakeups == 0L,
+        dispatchableQueue.pendingWaits == 0L,
+        dispatchableQueue.dispatchableWakeups == 1L,
+        dispatchableQueue.oldestDispatchableAgeMillis.nonEmpty,
+        leasedQueue.dispatchableWakeups == 0L,
+        leasedQueue.leasedWakeups == 1L,
         resumed.lastOption.contains(WorkflowEvent.Completed(11)),
-        remainingWait.isEmpty
+        remainingWait.isEmpty,
+        completedQueue.pendingWaits == 0L,
+        completedQueue.dispatchableWakeups == 0L,
+        completedQueue.leasedWakeups == 0L
       )
     }.provide(WorkflowExecutionStore.inMemory[Int]),
     test("恢复会拒绝 Store 注入另一节点身份的 wait") {
@@ -686,6 +703,8 @@ object WorkflowSpec extends ZIOSpecDefault:
             baseStore.heartbeatWakeup(lease, leaseDuration)
           def abandonWakeup(lease: WorkflowWakeupLease, availableAt: java.time.Instant) =
             baseStore.abandonWakeup(lease, availableAt)
+          override def wakeQueueSnapshot(workflowId: WorkflowId, definitionVersion: WorkflowVersion) =
+            baseStore.wakeQueueSnapshot(workflowId, definitionVersion)
           override def timeline(runId: RunId, after: Option[WorkflowTimelineCursor], limit: Int) =
             baseStore.timeline(runId, after, limit)
         resumed <- WorkflowEngine

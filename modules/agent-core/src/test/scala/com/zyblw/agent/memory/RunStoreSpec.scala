@@ -73,8 +73,15 @@ object RunStoreSpec extends ZIOSpecDefault:
     },
     test("批量 Prepared 可幂等恢复，但拒绝把重复 callId 嫁接到其他批次") {
       (for
-        store <- ZIO.service[RunStore]
-        runId <- RunId.random
+        store     <- ZIO.service[RunStore]
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        eventId   <- EventId.random
+        created = PersistedAgentEvent(eventId, runId, 0L, AgentEvent.RunCreated(runId, sessionId, 0L), 0L)
+        _ <- store.createWithEvents(
+          state(runId, sessionId).copy(lastEventSequence = 0L),
+          NonEmptyChunk(created)
+        )
         first = ToolExecutionRecord(
           runId,
           "plan-a:0",
@@ -98,6 +105,111 @@ object RunStoreSpec extends ZIOSpecDefault:
         preserved.contains(first),
         conflict.isFailure,
         after.contains(first)
+      )).provide(RunStore.inMemory)
+    },
+    test("模型调用账本与状态同一 commit 写入，CAS 拒绝错误身份") {
+      (for
+        store      <- ZIO.service[RunStore]
+        runId      <- RunId.random
+        sessionId  <- SessionId.random
+        requestId  <- ModelRequestId.random
+        eventId    <- EventId.random
+        preparedId <- EventId.random
+        settledId  <- EventId.random
+        created = PersistedAgentEvent(eventId, runId, 0L, AgentEvent.RunCreated(runId, sessionId, 0L), 0L)
+        initial = state(runId, sessionId).copy(lastEventSequence = 0L)
+        _ <- store.createWithEvents(initial, NonEmptyChunk(created))
+        fingerprint = "a" * 64
+        record      = ModelCallExecutionRecord(
+          runId,
+          requestId,
+          1,
+          ModelCallStatus.Dispatched,
+          "scripted",
+          "default",
+          CapturePolicy.MetadataOnly,
+          fingerprint,
+          1,
+          0,
+          ModelCallContextLineage(1, 0, 0, 0, 0),
+          None,
+          None,
+          updatedAtEpochMilli = 1L
+        )
+        preparedEvent = PersistedAgentEvent(
+          preparedId,
+          runId,
+          1L,
+          AgentEvent.ModelCallPrepared(
+            runId,
+            requestId.asString,
+            "scripted",
+            "default",
+            fingerprint,
+            "MetadataOnly",
+            1,
+            0,
+            1L
+          ),
+          1L
+        )
+        nextState = initial.copy(
+          status = RunStatus.Running,
+          lastEventSequence = 1L,
+          pendingModelCall = Some(
+            PendingModelCall(requestId, 1, fingerprint, CapturePolicy.MetadataOnly, "scripted", "default")
+          )
+        )
+        _ <- store.commit(
+          Version.initial,
+          nextState,
+          NonEmptyChunk(preparedEvent),
+          Some(ModelCallWrite.Insert(record))
+        )
+        loaded      <- store.getModelCall(runId, requestId)
+        afterInsert <- store.load(runId)
+        conflict    <- store
+          .commit(
+            afterInsert.version,
+            afterInsert,
+            NonEmptyChunk(preparedEvent),
+            Some(ModelCallWrite.Insert(record.copy(provider = "other")))
+          )
+          .exit
+        current             <- store.load(runId)
+        eventsAfterConflict <- store.events(runId)
+        ledgerAfterConflict <- store.getModelCall(runId, requestId)
+        settled             <- store.commit(
+          current.version,
+          current.copy(
+            lastEventSequence = current.lastEventSequence + 1L,
+            pendingModelCall = None,
+            status = RunStatus.Completed
+          ),
+          NonEmptyChunk(
+            PersistedAgentEvent(
+              settledId,
+              runId,
+              current.lastEventSequence + 1L,
+              AgentEvent.ModelCallCompleted(runId, TokenUsage(), 2L),
+              2L
+            )
+          ),
+          Some(
+            ModelCallWrite.Transition(
+              ModelCallStatus.Dispatched,
+              1,
+              record.copy(status = ModelCallStatus.Succeeded, updatedAtEpochMilli = 2L)
+            )
+          )
+        )
+      yield assertTrue(
+        loaded.contains(record),
+        conflict.isFailure,
+        current == afterInsert,
+        eventsAfterConflict.map(_.sequence) == Chunk(0L, 1L),
+        ledgerAfterConflict.contains(record),
+        settled.value == current.version.value + 1L
       )).provide(RunStore.inMemory)
     }
   )

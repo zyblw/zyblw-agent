@@ -22,7 +22,8 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
       coreReplayMigrations: Int,
       firstMigrations: Int,
       replayMigrations: Int,
-      vectorExtensionVersion: Option[String]
+      vectorExtensionVersion: Option[String],
+      knowledgeVersion: Option[String]
   )
 
   /** 启动 `pgvector/pgvector:pg16`，依次执行 public 核心基线和专属 schema 中的知识库基线。 */
@@ -61,6 +62,7 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
       firstMigration  <- AgentPostgresMigrations.migrateKnowledge1024(dataSource)
       replayMigration <- AgentPostgresMigrations.migrateKnowledge1024(dataSource)
       verification    <- AgentPostgresMigrations.verifyKnowledge1024(dataSource)
+      knowledgeStatus <- AgentPostgresMigrations.inspectKnowledge1024(dataSource)
       knowledge       <- PostgresAgentPersistence
         .knowledge(
           1024,
@@ -74,7 +76,8 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
       coreReplay.migrationsExecuted,
       firstMigration.migrationsExecuted,
       replayMigration.migrationsExecuted,
-      verification.extensionVersion
+      verification.extensionVersion,
+      knowledgeStatus.currentVersion
     )
   }
 
@@ -233,6 +236,7 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         harness.firstMigrations == 2,
         harness.replayMigrations == 0,
         harness.vectorExtensionVersion.exists(_.startsWith("0.8.")),
+        harness.knowledgeVersion.contains("001"),
         firstReady.active,
         firstReady.chunkCount == 2,
         after.map(_.chunk.id) == Chunk("doc-1-0"),

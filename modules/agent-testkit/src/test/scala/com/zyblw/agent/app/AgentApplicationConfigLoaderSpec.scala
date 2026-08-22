@@ -63,7 +63,9 @@ object AgentApplicationConfigLoaderSpec extends ZIOSpecDefault:
           config.toolPolicy.approvalPolicy == ApprovalPolicy.RiskBased,
           config.toolPolicy.retryPolicy == ToolRetryPolicy.Never,
           config.worker.maxAttempts == 8,
-          config.worker.parallelism == 4
+          config.worker.parallelism == 4,
+          config.profile.id == "default",
+          config.profile.capturePolicy == CapturePolicy.MetadataOnly
         )
       }
     },
@@ -115,6 +117,50 @@ object AgentApplicationConfigLoaderSpec extends ZIOSpecDefault:
         .load("research")
         .provide(configProvider(values))
         .map(config => assertTrue(config.worker.maxAttempts == 13))
+    },
+    test("解析 runtime profile 与 Replayable CapturePolicy") {
+      val values = Map(
+        "zyblw.agent.runtime.profile_id"     -> "eval",
+        "zyblw.agent.runtime.capture_policy" -> "replayable"
+      )
+      AgentApplicationConfigLoader.load().provide(configProvider(values)).map { config =>
+        assertTrue(
+          config.profile.id == "eval",
+          config.profile.capturePolicy == CapturePolicy.Replayable
+        )
+      }
+    },
+    test("解析 ModelRole 目录且不把密钥写入配置") {
+      val values = Map(
+        "zyblw.agent.role.bindings" -> "planner=openai/gpt-4.1, summarizer=openai/gpt-4.1-mini"
+      )
+      AgentApplicationConfigLoader.load().provide(configProvider(values)).map { config =>
+        assertTrue(
+          config.roleCatalog.bindings.keySet == Set("planner", "summarizer"),
+          config.roleCatalog.bindings.get("planner").exists(_.model == "gpt-4.1"),
+          !config.toString.contains("sk-")
+        )
+      }
+    },
+    test("拒绝重复或格式错误的角色绑定") {
+      val duplicate = Map("zyblw.agent.role.bindings" -> "planner=openai/a,planner=openai/b")
+      val malformed = Map("zyblw.agent.role.bindings" -> "planner-without-target")
+      for
+        duplicateExit <- AgentApplicationConfigLoader.load().provide(configProvider(duplicate)).exit
+        malformedExit <- AgentApplicationConfigLoader.load().provide(configProvider(malformed)).exit
+      yield assertTrue(duplicateExit.isFailure, malformedExit.isFailure)
+    },
+    test("拒绝未知 CapturePolicy") {
+      AgentApplicationConfigLoader
+        .load()
+        .provide(configProvider(Map("zyblw.agent.runtime.capture_policy" -> "full-prompt")))
+        .exit
+        .map { exit =>
+          val message = exit match
+            case Exit.Failure(cause) => cause.failureOption.map(_.message).getOrElse("")
+            case Exit.Success(_)     => ""
+          assertTrue(exit.isFailure, message.contains("capture-policy"))
+        }
     }
   )
 

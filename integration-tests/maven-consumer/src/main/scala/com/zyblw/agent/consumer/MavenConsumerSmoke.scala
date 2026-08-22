@@ -9,6 +9,7 @@ import com.zyblw.agent.scheduler.*
 import com.zyblw.agent.tools.*
 import javax.sql.DataSource
 import zio.*
+import zio.Unsafe
 
 /** 只依赖 Maven 制品编译的外部消费者契约。
   *
@@ -50,3 +51,10 @@ object MavenConsumerSmoke:
     require(message.text == "consumer contract")
     require(applicationConfig.worker.parallelism == 4)
     require(providerUnauthorized.category == ErrorCategory.Authentication)
+    Unsafe.unsafe { implicit unsafe =>
+      val embeddings = Runtime.default.unsafe
+        .run(HashEmbedding(8).embed(Chunk("consumer-contract")))
+        .getOrThrowFiberFailure()
+      require(embeddings.length == 1)
+      require(embeddings.head.values.length == 8)
+    }

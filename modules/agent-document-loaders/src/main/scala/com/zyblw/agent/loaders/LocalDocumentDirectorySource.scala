@@ -64,6 +64,25 @@ final class LocalDocumentDirectorySource(config: LocalDocumentDirectoryConfig):
   def inputs: ZStream[Any, RetrievalError, DocumentInput] =
     ZStream.unwrap(scan.map(paths => ZStream.fromIterable(paths).mapZIO(toInput)))
 
+  /** 按摄入时的稳定 documentId 回读单个文件，供重建使用。 */
+  def loadById(documentId: String): IO[RetrievalError, Option[DocumentInput]] =
+    directoryExists.flatMap {
+      case false => ZIO.succeed(None)
+      case true  =>
+        scan.flatMap { paths =>
+          ZIO
+            .foreach(paths) { path =>
+              identityOf(path).map(identity => path -> s"local-$identity")
+            }
+            .flatMap { pairs =>
+              ZIO.foreach(pairs.collectFirst { case (path, id) if id == documentId => path })(toInput)
+            }
+        }
+    }
+
+  private def directoryExists: UIO[Boolean] =
+    ZIO.attemptBlocking(Files.isDirectory(config.root, LinkOption.NOFOLLOW_LINKS)).orElseSucceed(false)
+
   private def scan: IO[RetrievalError, Vector[Path]] =
     ZIO
       .attemptBlocking {
@@ -100,7 +119,7 @@ final class LocalDocumentDirectorySource(config: LocalDocumentDirectoryConfig):
           .split("/", -1)
           .map(segment => URLEncoder.encode(segment, StandardCharsets.UTF_8))
           .mkString("/")
-        val identity = KnowledgeIndexer.sha256(relative).take(32)
+        val identity = contentIdentity(relative)
         val media    = mediaType(resolved).getOrElse(throw IllegalArgumentException("文件类型不受支持"))
         DocumentInput(
           id = s"local-$identity",
@@ -118,6 +137,19 @@ final class LocalDocumentDirectorySource(config: LocalDocumentDirectoryConfig):
         case known: RetrievalError => known
         case other                 => lowSensitiveError("directory input")(other)
       }
+
+  private def identityOf(path: Path): IO[RetrievalError, String] =
+    ZIO
+      .attemptBlocking {
+        val root     = config.root.toRealPath(LinkOption.NOFOLLOW_LINKS)
+        val resolved = path.toRealPath(LinkOption.NOFOLLOW_LINKS)
+        val relative = root.relativize(resolved).iterator().asScala.map(_.toString).mkString("/")
+        contentIdentity(relative)
+      }
+      .mapError(lowSensitiveError("directory identity"))
+
+  private def contentIdentity(relative: String): String =
+    KnowledgeIndexer.sha256(relative).take(32)
 
   private def mediaType(path: Path): Option[String] =
     val name  = path.getFileName.toString.toLowerCase(java.util.Locale.ROOT)

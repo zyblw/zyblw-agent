@@ -1,5 +1,6 @@
 package com.zyblw.agent.runtime
 
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
 import com.zyblw.agent.tools.{ToolPolicyConfig, ToolPolicySource}
@@ -152,6 +153,9 @@ object AgentCommandServiceSpec extends ZIOSpecDefault:
         first.payload == RunCommandPayload.Start,
         initial.status == RunStatus.Created,
         initial.definition.contains(agent),
+        initial.composition.contains(
+          RuntimeComposition.freeze(RuntimeProfile.default, agent, ModelPolicySource.default)
+        ),
         events.map(_.sequence) == Chunk(0L),
         conflict.isFailure
       )

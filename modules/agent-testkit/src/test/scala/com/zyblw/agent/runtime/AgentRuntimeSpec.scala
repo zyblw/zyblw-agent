@@ -25,9 +25,10 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
   private val agent = AgentDefinition(
     AgentId("durable-test-agent"),
     "Durable Test Agent",
-    "按需使用工具，并根据工具结果回答。",
-    allowedTools = Set("echo")
+    "按需使用工具，并根据工具结果回答。"
   )
+
+  private val echoAgent = agent.copy(allowedTools = Set("echo"))
 
   /** 构造一次模型工具调用响应。
     * @param callId
@@ -68,7 +69,7 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
     * @param risk
     *   工具风险等级，决定是否进入人工审批
     * @param sideEffect
-    *   副作用语义，决定崩溃恢复时是否允许自动重放
+    *   副作用语义，决定崩溃恢复时的 [[ToolRecoveryPolicy]]，与部署侧在线 [[ToolRetryPolicy]] 正交
     * @param executions
     *   每次真正进入业务执行时递增，用于验证特定恢复路径没有重复进入工具。 这只证明框架账本在该测试边界内的结果复用，不表示跨第三方副作用具有 exactly-once 语义。
     */
@@ -101,18 +102,12 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
       toolPolicy: ToolPolicyConfig = ToolPolicyConfig.secureDefault,
       modelPolicies: ModelPolicySource = ModelPolicySource.default
   ) =
-    ZLayer.make[AgentRuntime & RunStore](
-      ZLayer.succeed[ChatModel](model),
-      RegisteredToolRegistry.fromTools(tools),
-      RunStore.inMemory,
-      TokenCounter.approximate,
-      ContextCompressor.deterministic,
-      DefaultContextManager.layer,
-      ZLayer.succeed(guardrailEngine),
-      ZLayer.succeed(ToolPolicySource.static(toolPolicy)),
-      ZLayer.succeed(modelPolicies),
-      RunObserver.noop,
-      AgentRuntimeLive.layer
+    TestAgentRuntime.inMemory(
+      model,
+      tools,
+      guardrailEngine = guardrailEngine,
+      toolPolicy = toolPolicy,
+      modelPolicies = modelPolicies
     )
 
   /** 用显式 ContextManager 与 Observer 组装 Runtime。
@@ -128,34 +123,15 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
     *   捕获 Runtime 低敏事件的观察者
     */
   private def layersWithContextManager(model: ChatModel, manager: ContextManager, observer: RunObserver) =
-    ZLayer.make[AgentRuntime & RunStore](
-      ZLayer.succeed[ChatModel](model),
-      RegisteredToolRegistry.fromTools(Nil),
-      RunStore.inMemory,
-      ZLayer.succeed[ContextManager](manager),
-      GuardrailEngine.empty,
-      ZLayer.succeed(ToolPolicySource.static(ToolPolicyConfig.secureDefault)),
-      ModelPolicySource.defaultLayer,
-      ZLayer.succeed[RunObserver](observer),
-      AgentRuntimeLive.layer
+    TestAgentRuntime.inMemory(
+      model,
+      contextManager = Some(manager),
+      observer = ZLayer.succeed[RunObserver](observer)
     )
 
   /** 组装显式动态上下文来源的生产路径，验证 Runtime 不再硬编码空 ContextSources。 */
   private def layersWithContextSources(model: ChatModel, resolver: ContextSourceResolver) =
-    ZLayer.make[AgentRuntime & RunStore](
-      ZLayer.succeed[ChatModel](model),
-      RegisteredToolRegistry.fromTools(Nil),
-      RunStore.inMemory,
-      TokenCounter.approximate,
-      ContextCompressor.deterministic,
-      DefaultContextManager.layer,
-      ZLayer.succeed[ContextSourceResolver](resolver),
-      GuardrailEngine.empty,
-      ZLayer.succeed(ToolPolicySource.static(ToolPolicyConfig.secureDefault)),
-      ModelPolicySource.defaultLayer,
-      RunObserver.noop,
-      AgentRuntimeLive.layerWithContextSources
-    )
+    TestAgentRuntime.inMemory(model, contextSources = resolver)
 
   /** 在同一 ZLayer 图中共享 RunStore、命令队列和原子提交 Adapter，用于验证 HTTP 之外的真实异步启动主路径。
     */
@@ -300,17 +276,23 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
           command   <- commands.get(record.commandId)
           events    <- runs.events(record.runId)
           callCount <- calls.get
-        yield (running, reclaimed, completed, command, events, callCount))
+          ledger    <- runs.getModelCalls(record.runId)
+        yield (running, reclaimed, completed, command, events, callCount, ledger))
           .provideLayer(durableControlLayers(crashOnceModel))
       yield assertTrue(
         result._1.status == RunStatus.Running,
+        result._1.pendingModelCall.isDefined,
         result._2,
-        result._3.status == RunStatus.Completed,
+        result._3.status == RunStatus.Failed,
+        result._3.pendingModelCall.isEmpty,
         result._4.status == RunCommandStatus.Completed,
         result._4.attempt == 2,
         result._5.count(_.event.isInstanceOf[AgentEvent.RunCreated]) == 1,
         result._5.count(_.event.isInstanceOf[AgentEvent.RunStarted]) == 1,
-        result._6 == 2
+        result._5.exists(_.event.isInstanceOf[AgentEvent.ModelCallUnknown]),
+        result._6 == 1,
+        result._7.length == 1,
+        result._7.head.status == ModelCallStatus.Unknown
       )
     },
     test("直接使用 AgentState/RunStore 完成运行且不产生旧 metadata checkpoint 投影") {
@@ -328,8 +310,9 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
         outcome._1.isInstanceOf[RunOutcome.Completed],
         outcome._2.status == RunStatus.Completed,
         outcome._2.metadata.isEmpty,
-        outcome._2.lastEventSequence == 3L,
-        outcome._3.length == 4,
+        outcome._2.lastEventSequence == 4L,
+        outcome._3.length == 5,
+        outcome._3.exists(_.event.isInstanceOf[AgentEvent.ModelCallPrepared]),
         outcome._3.head.event.isInstanceOf[AgentEvent.RunCreated]
       )
     },
@@ -446,7 +429,7 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
         result._1.usage.modelCalls == 2,
         result._1.usage.inputTokens == 12L,
         result._1.usage.outputTokens == 6L,
-        result._1.lastEventSequence == 5L,
+        result._1.lastEventSequence == 6L,
         compacted.nonEmpty,
         result._3.exists(_.isInstanceOf[AgentEvent.ContextCompacted])
       )
@@ -459,7 +442,8 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
         result     <- (for
           runtime   <- ZIO.service[AgentRuntime]
           store     <- ZIO.service[RunStore]
-          suspended <- runtime.run(agent, RunRequest(ThreadId("durable-approval"), AgentMessage.user("写入草稿")))
+          suspended <- runtime
+            .run(echoAgent, RunRequest(ThreadId("durable-approval"), AgentMessage.user("写入草稿")))
           runId = runIdOf(suspended)
           recovered <- runtime.recover(runId)
           before    <- executions.get
@@ -488,7 +472,7 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
           runtime   <- ZIO.service[AgentRuntime]
           store     <- ZIO.service[RunStore]
           suspended <- runtime
-            .run(agent, RunRequest(ThreadId("durable-recovery"), AgentMessage.user("执行副作用")))
+            .run(echoAgent, RunRequest(ThreadId("durable-recovery"), AgentMessage.user("执行副作用")))
           runId = runIdOf(suspended)
           now   <- Clock.currentTime(java.util.concurrent.TimeUnit.MILLISECONDS)
           state <- store.load(runId)
@@ -542,7 +526,8 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
         result <- (for
           runtime   <- ZIO.service[AgentRuntime]
           store     <- ZIO.service[RunStore]
-          suspended <- runtime.run(agent, RunRequest(ThreadId("approved-unknown"), AgentMessage.user("执行写入")))
+          suspended <- runtime
+            .run(echoAgent, RunRequest(ThreadId("approved-unknown"), AgentMessage.user("执行写入")))
           runId = runIdOf(suspended)
           resumeFiber <- runtime.resume(runId, ApprovalDecision.Approve).fork
           _           <- started.await
@@ -555,6 +540,92 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
       yield assertTrue(
         result._1.exists(_.status == ToolExecutionStatus.Running),
         result._2.isInstanceOf[RunOutcome.Suspended],
+        result._3.exists(_.status == ToolExecutionStatus.Unknown),
+        result._4 == 1
+      )
+    },
+    test("部署 Never 在线重试时，ReplaySafe 只读工具 Running 崩溃后仍可恢复再执行") {
+      for
+        executions <- Ref.make(0)
+        runSeen    <- Promise.make[Nothing, RunId]
+        started    <- Promise.make[Nothing, Unit]
+        tool       <- {
+          val typed = Tool.json[Any, EchoInput, AgentError.ToolExecutionFailed, EchoOutput](
+            ToolName("echo"),
+            "只读查询",
+            TestSchemas.stringObject("value", "查询输入"),
+            None,
+            ToolMetadata(ToolRisk.ReadOnly, SideEffect.None)
+          ) { (input, context) =>
+            runSeen.succeed(context.runId).unit *>
+              executions.updateAndGet(_ + 1).flatMap { count =>
+                if count == 1 then started.succeed(()).unit *> ZIO.never
+                else ZIO.succeed(EchoOutput(input.value))
+              }
+          }
+          RegisteredTool.make(typed)
+        }
+        model <- ScriptedChatModel.make(
+          Chunk(toolResponse("read-crash", "lookup"), finalResponse("recovered"))
+        )
+        result <- (for
+          runtime <- ZIO.service[AgentRuntime]
+          store   <- ZIO.service[RunStore]
+          fiber   <- runtime
+            .run(echoAgent, RunRequest(ThreadId("replay-safe-crash"), AgentMessage.user("查询")))
+            .fork
+          runId <- runSeen.await
+          _     <- started.await
+          _     <- (ZIO.yieldNow *> store.getToolExecution(runId, "read-crash"))
+            .repeatUntil(_.exists(_.status == ToolExecutionStatus.Running))
+          _         <- fiber.interrupt
+          recovered <- runtime.recover(runId)
+          ledger    <- store.getToolExecution(runId, "read-crash")
+          count     <- executions.get
+        yield (recovered, ledger, count)).provideLayer(
+          layers(model, List(tool), toolPolicy = ToolPolicyConfig.secureDefault)
+        )
+      yield assertTrue(
+        result._1.isInstanceOf[RunOutcome.Completed],
+        result._2.exists(_.status == ToolExecutionStatus.Succeeded),
+        result._3 == 2
+      )
+    },
+    test("Destructive 工具 Running 崩溃后按 RequiresApproval 暂停，不把历史批准当权重放") {
+      for
+        executions <- Ref.make(0)
+        started    <- Promise.make[Nothing, Unit]
+        tool       <- {
+          val typed = Tool.json[Any, EchoInput, AgentError.ToolExecutionFailed, EchoOutput](
+            ToolName("echo"),
+            "破坏性操作",
+            TestSchemas.stringObject("value", "副作用输入"),
+            None,
+            ToolMetadata(ToolRisk.AdminApproval, SideEffect.Destructive)
+          ) { (_, _) =>
+            executions.update(_ + 1) *> started.succeed(()).unit *> ZIO.never
+          }
+          RegisteredTool.make(typed)
+        }
+        model  <- ScriptedChatModel.make(Chunk(toolResponse("destroy-1", "wipe"), finalResponse()))
+        result <- (for
+          runtime   <- ZIO.service[AgentRuntime]
+          store     <- ZIO.service[RunStore]
+          suspended <- runtime
+            .run(echoAgent, RunRequest(ThreadId("destructive-crash"), AgentMessage.user("删除")))
+          runId = runIdOf(suspended)
+          resumeFiber <- runtime.resume(runId, ApprovalDecision.Approve).fork
+          _           <- started.await
+          _           <- resumeFiber.interrupt
+          recovered   <- runtime.recover(runId)
+          ledger      <- store.getToolExecution(runId, "destroy-1")
+          count       <- executions.get
+        yield (suspended, recovered, ledger, count)).provideLayer(layers(model, List(tool)))
+        recovered = result._2
+      yield assertTrue(
+        result._1.isInstanceOf[RunOutcome.Suspended],
+        recovered.isInstanceOf[RunOutcome.Suspended],
+        recovered.asInstanceOf[RunOutcome.Suspended].approval.reason.contains("破坏性"),
         result._3.exists(_.status == ToolExecutionStatus.Unknown),
         result._4 == 1
       )
@@ -596,7 +667,7 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
           runtime <- ZIO.service[AgentRuntime]
           store   <- ZIO.service[RunStore]
           fiber   <- runtime
-            .run(agent, RunRequest(ThreadId("durable-partial-batch"), AgentMessage.user("并行执行")))
+            .run(echoAgent, RunRequest(ThreadId("durable-partial-batch"), AgentMessage.user("并行执行")))
             .fork
           runId <- runSeen.await
           _     <- fastDone.await
@@ -640,7 +711,7 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
         model      <- ScriptedChatModel.make(Chunk(parallelToolResponse("budget-1", "budget-2")))
         exit       <- ZIO
           .serviceWithZIO[AgentRuntime](
-            _.run(agent, RunRequest(ThreadId("tool-budget-preflight"), AgentMessage.user("超出工具预算")))
+            _.run(echoAgent, RunRequest(ThreadId("tool-budget-preflight"), AgentMessage.user("超出工具预算")))
           )
           .exit
           .provideLayer(
@@ -699,6 +770,34 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
         text.contains("偏好引用经典原文"),
         text.contains("[cite-1] 阴阳者，天地之道也。"),
         text.contains("来源: book://huangdi")
+      )
+    },
+    test("ContextContributor 不改 Kernel 即可注入来源，并冻结 sourceIds") {
+      val contributor = new ContextContributor:
+        val id                                                                              = "classic-book"
+        def contribute(state: AgentState, definition: AgentDefinition): UIO[ContextSources] =
+          val _ = (state, definition)
+          ZIO.succeed(
+            ContextSources(retrieval =
+              Chunk(ContextDocument("cite-2", "贡献者注入的资料", "book://contributor", Some(0.9)))
+            )
+          )
+      val resolver = ContextContributor.resolver(contributor)
+      for
+        model  <- ScriptedChatModel.make(Chunk(finalResponse("引用贡献者")))
+        result <- (for
+          runtime <- ZIO.service[AgentRuntime]
+          store   <- ZIO.service[RunStore]
+          outcome <- runtime.run(agent, RunRequest(ThreadId("contributor-runtime"), AgentMessage.user("解释")))
+          runId = runIdOf(outcome)
+          state    <- store.load(runId)
+          requests <- model.recordedRequests
+        yield (state, requests)).provideLayer(layersWithContextSources(model, resolver))
+        (state, requests) = result
+        text              = requests.head.messages.map(_.text).mkString("\n")
+      yield assertTrue(
+        text.contains("[cite-2] 贡献者注入的资料"),
+        state.composition.exists(_.sourceIds == Chunk("classic-book@1"))
       )
     },
     test("显式取消中断活动模型 Fiber，并把同一 AgentState 持久化为 Cancelled") {

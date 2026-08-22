@@ -10,12 +10,19 @@ object SimpleChineseLexicalProcessorSpec extends ZIOSpecDefault:
       val lexical = SimpleChineseLexicalProcessor.document("桂枝汤 2026 Qwen3")
       assertTrue(
         lexical == "桂 枝 汤 桂枝 枝汤 2026 qwen3",
-        SimpleChineseLexicalProcessor.query("桂枝汤") == "桂 枝 汤 桂枝 枝汤"
+        SimpleChineseLexicalProcessor.query("桂枝汤") == "桂 枝 汤 桂枝 枝汤",
+        SimpleChineseLexicalProcessor.strategyId == "simple-cjk-bigram-v2"
       )
     },
-    test("标点与空白不进入 FTS token，结果不依赖系统默认 Locale") {
+    test("标点、停用词与繁简归一不进入 FTS token") {
+      val tokens = SimpleChineseLexicalProcessor.document("这是太阳").split(" ").toSet
       assertTrue(
         SimpleChineseLexicalProcessor.document("阴阳，ABC！") == "阴 阳 阴阳 abc",
+        SimpleChineseLexicalProcessor.document("太陽中風") == "太 阳 中 风 太阳 阳中 中风",
+        !tokens.contains("这"),
+        !tokens.contains("是"),
+        tokens.contains("太阳"),
+        tokens.contains("这是"),
         SimpleChineseLexicalProcessor.document("  ").isEmpty
       )
     }

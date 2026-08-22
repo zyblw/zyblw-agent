@@ -36,7 +36,7 @@ object PostgresEvalTrendStoreIntegrationSpec extends ZIOSpecDefault:
       dataSource: DataSource
   )
 
-  /** 启动干净 PostgreSQL 并执行正式 V001；迁移中的语法、CHECK 或索引错误都会使 Layer 构造失败。 */
+  /** 启动干净 PostgreSQL 并执行全部正式迁移；迁移中的语法、CHECK 或索引错误都会使 Layer 构造失败。 */
   private val harnessLayer: ZLayer[Any, Throwable, Harness] = ZLayer.scoped {
     for
       container <- ZIO.acquireRelease(
@@ -111,22 +111,36 @@ object PostgresEvalTrendStoreIntegrationSpec extends ZIOSpecDefault:
     test("跨 Store 并发追加、kind 隔离、有界历史和最近成功基线保持确定") {
       (for
         harness <- ZIO.service[Harness]
-        passing = Chunk.fromIterable((1 to 24).map(index => snapshot(f"eval-$index%02d", index)))
-        failed  = snapshot("eval-25-failed", 25, passed = false, score = 0.0)
-        rag     = snapshot("eval-26-rag", 26, kind = EvalSuiteKind.Rag)
+        passing     = Chunk.fromIterable((1 to 24).map(index => snapshot(f"eval-$index%02d", index)))
+        failed      = snapshot("eval-25-failed", 25, passed = false, score = 0.0)
+        rag         = snapshot("eval-26-rag", 26, kind = EvalSuiteKind.Rag)
+        reliability = snapshot("eval-27-reliability", 27, kind = EvalSuiteKind.AgentReliability)
+        comparison  = snapshot("eval-28-harness-comparison", 28, kind = EvalSuiteKind.HarnessComparison)
         _ <- ZIO.foreachParDiscard(passing.zipWithIndex) { case (value, index) =>
           if index % 2 == 0 then harness.storeA.append(value) else harness.storeB.append(value)
         }
-        _             <- harness.storeA.append(failed)
-        _             <- harness.storeB.append(rag)
-        history       <- harness.storeB.history(agentIdentity, 5)
-        latestPassing <- harness.storeA.latestPassing(agentIdentity)
-        ragHistory    <- harness.storeA.history(agentIdentity.copy(kind = EvalSuiteKind.Rag), 10)
+        _                  <- harness.storeA.append(failed)
+        _                  <- harness.storeB.append(rag)
+        _                  <- harness.storeA.append(reliability)
+        _                  <- harness.storeB.append(comparison)
+        history            <- harness.storeB.history(agentIdentity, 5)
+        latestPassing      <- harness.storeA.latestPassing(agentIdentity)
+        ragHistory         <- harness.storeA.history(agentIdentity.copy(kind = EvalSuiteKind.Rag), 10)
+        reliabilityHistory <- harness.storeB.history(
+          agentIdentity.copy(kind = EvalSuiteKind.AgentReliability),
+          10
+        )
+        comparisonHistory <- harness.storeA.history(
+          agentIdentity.copy(kind = EvalSuiteKind.HarnessComparison),
+          10
+        )
       yield assertTrue(
         history.map(_.metadata.evaluationId) ==
           Chunk("eval-21", "eval-22", "eval-23", "eval-24", "eval-25-failed"),
         latestPassing.map(_.metadata.evaluationId).contains("eval-24"),
-        ragHistory == Chunk(rag)
+        ragHistory == Chunk(rag),
+        reliabilityHistory == Chunk(reliability),
+        comparisonHistory == Chunk(comparison)
       )).provideLayer(harnessLayer)
     },
     test("相同 evaluationId 同内容幂等，不同内容并发竞争只能留下一个不可变事实") {

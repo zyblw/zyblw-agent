@@ -91,5 +91,53 @@ object ToolRegistrySpec extends ZIOSpecDefault:
         unsafeExit.isFailure,
         unsafeCount == 1
       )
+    } @@ TestAspect.withLiveClock,
+    test("部署 Never 时即使 ReplaySafe 工具也不会在线热重试") {
+      for
+        calls    <- Ref.make(0)
+        tool     <- RegisteredTool.make(flaky(SideEffect.None, calls))
+        executor <- ToolExecutor.make(
+          ToolPolicyConfig(
+            allowedTools = Set(ToolName("flaky")),
+            retryPolicy = ToolRetryPolicy.Never
+          )
+        )
+        context = ToolExecutionContext(
+          RunId(java.util.UUID.randomUUID()),
+          ThreadId("tool-never-retry"),
+          "call-1",
+          RunContext()
+        )
+        exit  <- executor.execute(tool, ToolCall("call-1", "flaky", Json.Obj()), context).exit
+        count <- calls.get
+      yield assertTrue(exit.isFailure, count == 1)
+    },
+    test("IdempotentOnly 也不会在线重试 RequiresApproval 工具") {
+      for
+        calls    <- Ref.make(0)
+        tool     <- RegisteredTool.make(flaky(SideEffect.Destructive, calls))
+        executor <- ToolExecutor.make(
+          ToolPolicyConfig(
+            allowedTools = Set(ToolName("flaky")),
+            retryPolicy = ToolRetryPolicy.IdempotentOnly(
+              RetryPolicy(
+                maxAttempts = 3,
+                initialDelay = 1.millis,
+                maxDelay = 2.millis,
+                jitter = 0.0,
+                maxElapsed = 1.second
+              )
+            )
+          )
+        )
+        context = ToolExecutionContext(
+          RunId(java.util.UUID.randomUUID()),
+          ThreadId("tool-destructive"),
+          "call-1",
+          RunContext()
+        )
+        exit  <- executor.execute(tool, ToolCall("call-1", "flaky", Json.Obj()), context).exit
+        count <- calls.get
+      yield assertTrue(exit.isFailure, count == 1)
     } @@ TestAspect.withLiveClock
   )

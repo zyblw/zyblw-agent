@@ -29,7 +29,9 @@ private[http] object AgentHttpProjection:
       pendingApproval = state.pendingApproval.map(approval),
       createdAtEpochMilli = state.createdAt.toEpochMilli,
       updatedAtEpochMilli = state.updatedAt.toEpochMilli,
-      stateVersion = state.version.value
+      stateVersion = state.version.value,
+      citations = state.citations.map(citation).toList,
+      evidence = state.retrievalEvidence.map(evidence)
     )
 
   /** 将数据库事件信封转换成不依赖内部 ADT JSON 表示的公共事件。
@@ -75,6 +77,29 @@ private[http] object AgentHttpProjection:
         )
       case AgentEvent.ModelCallStarted(_, provider, model, _) =>
         base.copy(stage = Some("model"), category = Some(s"${bounded(provider)}:${bounded(model)}"))
+      case AgentEvent.ModelCallPrepared(
+            _,
+            requestId,
+            provider,
+            model,
+            fingerprint,
+            policy,
+            messages,
+            tools,
+            _
+          ) =>
+        base.copy(
+          stage = Some("model"),
+          category = Some(s"${bounded(provider)}:${bounded(model)}:${bounded(policy)}"),
+          tool = Some(ToolProgressView(Some(bounded(requestId)), None, None)),
+          message = Some(s"messages=$messages tools=$tools fingerprint=${fingerprint.take(12)}")
+        )
+      case AgentEvent.ModelCallUnknown(_, requestId, _) =>
+        base.copy(
+          stage = Some("model"),
+          category = Some("unknown"),
+          tool = Some(ToolProgressView(Some(bounded(requestId)), None, None))
+        )
       case AgentEvent.ModelTextDelta(_, value, _)         => base.copy(output = Some(value))
       case AgentEvent.ModelToolCallDelta(_, callId, _, _) =>
         base.copy(tool = Some(ToolProgressView(Some(callId), None, None)))
@@ -130,6 +155,10 @@ private[http] object AgentHttpProjection:
           message = Some(bounded(safeMessage, 512))
         )
       case AgentEvent.RunCancelled(_, _) => base.copy(status = Some(RunStatus.Cancelled.toString))
+      case AgentEvent.RetrievalCited(_, citations, evidence, _) =>
+        base.copy(
+          message = Some(s"citations=${citations.length} evidence=${evidence.status}")
+        )
 
   /** 从已经授权的状态和耐久事件页构造低敏 Inspector 视图。
     *
@@ -215,6 +244,20 @@ private[http] object AgentHttpProjection:
       message = bounded(value.message, 512),
       sequence = value.sequence
     )
+
+  private def citation(value: RunCitation): CitationView =
+    CitationView(
+      id = value.id,
+      sourceUri = bounded(value.sourceUri, 256),
+      excerpt = bounded(value.excerpt, 500),
+      score = value.score,
+      pageNumbers = value.pageNumbers.toList,
+      chunkId = value.chunkId.map(bounded(_)),
+      documentId = value.documentId.map(bounded(_))
+    )
+
+  private def evidence(value: RunRetrievalEvidence): RetrievalEvidenceView =
+    RetrievalEvidenceView(value.status, value.candidateCount, value.acceptedCount, value.topAcceptedScore)
 
   /** 审批视图只包含工具名和人工可理解摘要，不包含 arguments。 */
   private def approval(value: ApprovalRequest): ApprovalView = ApprovalView(

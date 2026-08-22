@@ -21,6 +21,9 @@ import { ModelGovernance } from '@/components/ModelGovernance';
 import { ConfigStudio } from '@/components/ConfigStudio';
 import { SecurityArtifacts } from '@/components/SecurityArtifacts';
 import { EvalAnalytics } from '@/components/EvalAnalytics';
+import { InspectPanel } from '@/components/InspectPanel';
+import { HarnessPanel } from '@/components/HarnessPanel';
+import { MemoryPanel } from '@/components/MemoryPanel';
 import { useCapabilities } from '@/lib/queries';
 import { useConnection } from '@/lib/connection';
 import { useUrlState } from '@/lib/urlState';
@@ -112,6 +115,9 @@ function Console() {
             className={`flex-1 outline-none ${FOCUS_RING}`}
           >
             {activeTab === 'runs' && <RunInspector capabilities={capabilities.data} />}
+            {activeTab === 'inspect' && <InspectPanel />}
+            {activeTab === 'harness' && <HarnessPanel />}
+            {activeTab === 'memory' && <MemoryPanel />}
             {activeTab === 'rag' && <RagInspector />}
             {activeTab === 'queue' && <QueueOps />}
             {activeTab === 'models' && <ModelGovernance capabilities={capabilities.data} />}

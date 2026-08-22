@@ -5,7 +5,7 @@ import zio.*
 import zio.json.*
 import zio.json.ast.Json
 
-enum SideEffect:
+enum SideEffect derives JsonCodec:
   /** 不修改任何业务状态。 */
   case None
 
@@ -20,6 +20,20 @@ enum SideEffect:
 
   /** 删除、覆盖或其他难以恢复的操作；除审批外还必须由业务定义恢复或补偿路径。 */
   case Destructive
+
+/** 进程死后对未结算工具账本的恢复策略。与部署侧 [[ToolRetryPolicy]]（同一次在线执行的 429/timeout）正交。 */
+enum ToolRecoveryPolicy:
+  /** 只读；崩溃后可用同一 callId 再执行。 */
+  case ReplaySafe
+
+  /** 业务已保证幂等；恢复可重放同一意图。 */
+  case Idempotent
+
+  /** 崩溃后不得自动重放；Running 转为 Unknown 并暂停。人工 `forceRetry` 仍可显式重放。 */
+  case NeverReplay
+
+  /** 破坏性操作；即使历史上批准过，恢复仍须再次人工确认。 */
+  case RequiresApproval
 
 /** 工具对某一业务资源冲突组的访问方式。读取之间可并行，任一写入都会与同组访问冲突。 */
 enum ToolAccessMode:
@@ -47,7 +61,7 @@ enum ToolParallelism:
   * @param risk
   *   权限和审批使用的风险等级
   * @param sideEffect
-  *   副作用类型，决定是否允许自动重试
+  *   副作用类型；同时推导在线可重试性与崩溃恢复策略，二者不可互相替代
   * @param requiredScopes
   *   调用者必须同时拥有的业务 scope
   * @param sensitiveInputFields
@@ -68,11 +82,28 @@ final case class ToolMetadata(
     parallelism: ToolParallelism = ToolParallelism.SequentialOnly,
     conflictAccesses: Set[ToolConflictAccess] = Set.empty
 ):
-  /** 只有纯读取、显式业务幂等写入或经过事务 outbox 包装的写入可自动重试。 `TransactionalOutboxWrite` 的可重试性来自业务幂等记录，而不是 outbox
-    * 本身；普通工具不得只修改枚举值来冒充可靠写入。
+  /** 同一次在线执行是否允许 `ToolRetryPolicy.IdempotentOnly` 对 429/timeout 热重试，不决定进程死后能否重放。
+    *
+    * `TransactionalOutboxWrite` 的可重试性来自业务幂等记录，而不是 outbox 本身；普通工具不得只修改枚举值来冒充可靠写入。
     */
-  def automaticallyRetryable: Boolean =
+  def onlineRetryable: Boolean =
     Set(SideEffect.None, SideEffect.IdempotentWrite, SideEffect.TransactionalOutboxWrite).contains(sideEffect)
+
+  /** 兼容旧调用点：含义与 [[onlineRetryable]] 相同，不再用于崩溃恢复。 */
+  def automaticallyRetryable: Boolean = onlineRetryable
+
+  /** 进程死后对 Running/Unknown 账本的恢复策略，由 [[sideEffect]] 推导，不受部署 `ToolRetryPolicy` 影响。 */
+  def recoveryPolicy: ToolRecoveryPolicy = sideEffect match
+    case SideEffect.None                                                  => ToolRecoveryPolicy.ReplaySafe
+    case SideEffect.IdempotentWrite | SideEffect.TransactionalOutboxWrite => ToolRecoveryPolicy.Idempotent
+    case SideEffect.NonIdempotentWrite                                    => ToolRecoveryPolicy.NeverReplay
+    case SideEffect.Destructive => ToolRecoveryPolicy.RequiresApproval
+
+  /** ReplaySafe / Idempotent 才允许恢复时自动再执行；NeverReplay / RequiresApproval 必须暂停。 */
+  def mayReplayAfterCrash: Boolean = recoveryPolicy match
+    case ToolRecoveryPolicy.ReplaySafe | ToolRecoveryPolicy.Idempotent        => true
+    case ToolRecoveryPolicy.NeverReplay | ToolRecoveryPolicy.RequiresApproval =>
+      false
 
   /** 只有显式声明 ConflictAware 且至少给出一个冲突组的工具才可进入并行批次。 空冲突组不能理解为“与任何资源都不冲突”，因为那会把漏声明静默升级成并发安全承诺。
     */
@@ -186,6 +217,24 @@ trait RegisteredToolRegistry:
 
   /** 按类型化名称查找工具；未知名称返回稳定 ToolNotFound。 */
   def get(name: ToolName): IO[AgentError.ToolNotFound, RegisteredTool]
+
+  /** 在任何模型调用或命令落库前，确认 Agent 白名单中的每个工具都已注册。
+    *
+    * 全局 `ToolPolicyConfig` 只能证明策略允许该名称；未注册的名称会让模型提出调用后才失败，并浪费一次付费请求。
+    */
+  def requireRegistered(allowed: Iterable[String]): IO[AgentError.InvalidConfiguration, Unit] =
+    val names = allowed.iterator.map(ToolName(_)).toSet
+    definitions(names).flatMap { visible =>
+      val missing = names.map(_.value) -- visible.map(_.name).toSet
+      ZIO
+        .fail(
+          AgentError.InvalidConfiguration(
+            s"Agent 白名单包含未注册工具: ${missing.toList.sorted.mkString(",")}"
+          )
+        )
+        .when(missing.nonEmpty)
+        .unit
+    }
 
 object RegisteredToolRegistry:
   /** 从已捕获环境的工具构建只读注册表。

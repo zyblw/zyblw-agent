@@ -82,13 +82,14 @@ object DocumentStructureChunkerSpec extends ZIOSpecDefault:
       for chunks <- DocumentStructureChunker().split(document, tenant, scope)
       yield assertTrue(chunks.nonEmpty, chunks.forall(_.lineage.exists(_.origins.isEmpty)))
     },
-    test("默认 strategyId 不含 token 计数器；启用后才进入身份") {
+    test("默认 strategyId 带 cl100k token 预算；更换计数器必须改身份") {
       val defaultId = DocumentStructureChunker().strategyId
       val tokenId   = DocumentStructureChunker(
         DocumentStructureChunkerConfig(maxTokens = Some(256), tokenCounter = TokenCounter.CjkApproximate)
       ).strategyId
       assertTrue(
-        !defaultId.contains("tokens="),
+        defaultId.contains("tokens=512"),
+        defaultId.contains("counter=cl100k-base"),
         tokenId.contains("tokens=256"),
         tokenId.contains("counter=cjk-approx-v1")
       )

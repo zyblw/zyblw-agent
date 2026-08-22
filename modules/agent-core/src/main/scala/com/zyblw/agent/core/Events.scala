@@ -46,6 +46,22 @@ enum AgentEvent derives JsonCodec:
       atEpochMilli: Long
   )
   case ModelCallStarted(runId: RunId, provider: String, model: String, atEpochMilli: Long)
+
+  /** 主模型 Intent 已与账本同一事务提交。只含指纹、CapturePolicy 和计数，不含 prompt。 */
+  case ModelCallPrepared(
+      runId: RunId,
+      requestId: String,
+      provider: String,
+      model: String,
+      fingerprint: String,
+      capturePolicy: String,
+      messageCount: Int,
+      toolCount: Int,
+      atEpochMilli: Long
+  )
+
+  /** Provider 窗口结果未知；禁止把该事件当成可以自动重放的许可。 */
+  case ModelCallUnknown(runId: RunId, requestId: String, atEpochMilli: Long)
   case ModelTextDelta(runId: RunId, value: String, atEpochMilli: Long)
   case ModelToolCallDelta(runId: RunId, callId: String, fragment: String, atEpochMilli: Long)
   case ModelCallCompleted(runId: RunId, usage: TokenUsage, atEpochMilli: Long)
@@ -64,6 +80,12 @@ enum AgentEvent derives JsonCodec:
   case RunCompleted(runId: RunId, answer: AgentMessage, usage: UsageSummary, atEpochMilli: Long)
   case RunFailed(runId: RunId, category: String, safeMessage: String, atEpochMilli: Long)
   case RunCancelled(runId: RunId, atEpochMilli: Long)
+  case RetrievalCited(
+      runId: RunId,
+      citations: Chunk[RunCitation],
+      evidence: RunRetrievalEvidence,
+      atEpochMilli: Long
+  )
 
 /** 需要永久保存的精选领域事件，使用唯一 ID 和单调序号支持幂等追加。 */
 final case class PersistedAgentEvent(
