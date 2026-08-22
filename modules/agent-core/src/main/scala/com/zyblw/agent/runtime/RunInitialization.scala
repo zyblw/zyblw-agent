@@ -1,7 +1,10 @@
 package com.zyblw.agent.runtime
 
+import com.zyblw.agent.composition.RuntimeCompositionFingerprint
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.RunStartSubmission
+import com.zyblw.agent.memory.GoalBudgetAdmission
+import com.zyblw.agent.harness.GoalId
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.UUID
@@ -32,7 +35,8 @@ object RunInitialization:
       agent: AgentDefinition,
       request: RunRequest,
       idempotencyKey: String,
-      maxToolCalls: Int
+      maxToolCalls: Int,
+      composition: Option[RuntimeCompositionFingerprint] = None
   ): IO[AgentError, RunStartSubmission] =
     for
       normalizedKey <- validateIdempotencyKey(idempotencyKey)
@@ -41,7 +45,7 @@ object RunInitialization:
       now           <- Clock.instant
       scopeHash     <- sha256(canonicalScope(agent.id, request.context))
       requestHash   <- requestFingerprint(agent, request)
-      state = initialState(runId, agent, request, maxToolCalls, now)
+      state = initialState(runId, agent, request, maxToolCalls, now, composition)
       event = PersistedAgentEvent(
         eventId,
         runId,
@@ -50,6 +54,26 @@ object RunInitialization:
         now.toEpochMilli
       )
     yield RunStartSubmission(state, event, scopeHash, normalizedKey, requestHash)
+
+  /** 为 Harness Goal 准备异步 Start，并把 GoalId 绑定进请求指纹。
+    *
+    * Adapter 必须把预算预留与 Run/事件/命令/dispatcher 放在同一事务；不支持该能力的 Adapter 应 fail-closed。
+    */
+  def prepareForGoal(
+      goalId: GoalId,
+      agent: AgentDefinition,
+      request: RunRequest,
+      idempotencyKey: String,
+      maxToolCalls: Int,
+      composition: Option[RuntimeCompositionFingerprint] = None
+  ): IO[AgentError, RunStartSubmission] =
+    for
+      submission <- prepare(agent, request, idempotencyKey, maxToolCalls, composition)
+      boundHash  <- sha256(s"harness-goal:v1:${goalId.asString}:${submission.requestHash}")
+    yield submission.copy(
+      requestHash = boundHash,
+      goalBudgetAdmission = Some(GoalBudgetAdmission(goalId))
+    )
 
   /** 创建状态为 Created、事件游标为 0 的初始快照。
     *
@@ -69,7 +93,8 @@ object RunInitialization:
       agent: AgentDefinition,
       request: RunRequest,
       maxToolCalls: Int,
-      now: java.time.Instant
+      now: java.time.Instant,
+      composition: Option[RuntimeCompositionFingerprint] = None
   ): AgentState =
     val usage = UsageSummary()
     AgentState(
@@ -88,7 +113,8 @@ object RunInitialization:
       threadId = Some(request.threadId),
       definition = Some(agent),
       runContext = request.context,
-      lastEventSequence = 0L
+      lastEventSequence = 0L,
+      composition = composition
     )
 
   /** 从业务 ThreadId 确定性派生 SessionId，使跨重启会话关联不依赖进程内缓存。 */

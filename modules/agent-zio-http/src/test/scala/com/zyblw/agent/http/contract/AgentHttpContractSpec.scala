@@ -1,5 +1,6 @@
 package com.zyblw.agent.http.contract
 
+import scala.io.Source
 import zio.json.*
 import zio.test.*
 
@@ -8,10 +9,16 @@ import zio.test.*
   * 这些断言不是普通实现测试，而是首次发布基线：删除路径、修改主版本、泄漏内部字段或改变关键 JSON 字段名都会直接失败。 有意的不兼容变更必须创建 `/api/v2` 和独立基线，不能顺手更新本测试来伪装兼容。
   */
 object AgentHttpContractSpec extends ZIOSpecDefault:
+  private val releasedOpenApi =
+    val stream = Option(getClass.getResourceAsStream("/openapi/agent-http-v1.2.0.json"))
+      .getOrElse(throw IllegalStateException("缺少已审查的 OpenAPI v1.2.0 快照"))
+    try Source.fromInputStream(stream, "UTF-8").mkString.trim
+    finally stream.close()
 
   private val requiredPaths = Set(
     "/api/v1/agents/{agentId}/runs",
     "/api/v1/runs/{runId}",
+    "/api/v1/runs/{runId}/citations",
     "/api/v1/runs/{runId}/approval",
     "/api/v1/runs/{runId}/recover",
     "/api/v1/runs/{runId}/retry",
@@ -20,7 +27,12 @@ object AgentHttpContractSpec extends ZIOSpecDefault:
     "/api/v1/runs/{runId}/events",
     "/api/v1/runs/{runId}/events/stream",
     "/api/v1/commands/{commandId}",
-    "/api/v1/commands/{commandId}/retry"
+    "/api/v1/commands/{commandId}/retry",
+    "/api/v1/knowledge/documents",
+    "/api/v1/knowledge/documents/{documentId}",
+    "/api/v1/knowledge/search",
+    "/api/v1/knowledge/ingestions/{jobId}",
+    "/api/v1/knowledge/reindex"
   )
 
   /** v1 已承诺的关键 wire 字段。这里不复制完整 OpenAPI 快照，而是先对最容易被内部重构误删的字段建立硬门禁；发布流水线 后续仍应保存完整规范并执行结构化 compatibility diff。
@@ -58,12 +70,19 @@ object AgentHttpContractSpec extends ZIOSpecDefault:
   )
 
   def spec = suite("Agent HTTP v1 contract")(
+    test("Endpoint 生成结果与仓库内已审查快照一致") {
+      assertTrue(AgentHttpContract.openApiJson.trim == releasedOpenApi)
+    },
     test("OpenAPI 版本和全部稳定路径来自 Endpoint 单一事实源") {
       val json = AgentHttpContract.openApiJson
       assertTrue(
         AgentHttpContract.openApi.info.version == AgentHttpProtocol.ContractVersion,
         AgentHttpContract.openApi.info.title == "zyblw-agent API",
         AgentHttpProtocol.BasePath == "/api/v1",
+        AgentHttpProtocol.ExperimentalBasePath == "/api/v1/experimental",
+        AgentHttpProtocol.stability("/api/v1/runs/{runId}") == AgentProtocolStability.Stable,
+        AgentHttpProtocol.stability("/api/v1/experimental/skills") == AgentProtocolStability.Experimental,
+        !json.contains("/api/v1/experimental"),
         requiredPaths.forall(path => json.contains(s"\"$path\"")),
         requiredWireFields.forall(field => json.contains(s"\"$field\"")),
         json.contains("\"202\""),

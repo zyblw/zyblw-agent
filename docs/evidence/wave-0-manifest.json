@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "releaseLine": "0.7.0",
+  "policy": "Local and CI regressions prove mechanisms only. Current supported topology is Docker plus a self-hosted PostgreSQL. Multi-hour soak, node loss, primary/standby failover, PgBouncer saturation, rolling deploy, backup RPO/RTO and SLO owners stay deferred until a dedicated hosted environment exists.",
+  "items": [
+    {
+      "id": "framework-test-full",
+      "status": "verified_ci",
+      "scope": "repository",
+      "evidence": [".github/workflows/ci.yml", "docs/testing.md"]
+    },
+    {
+      "id": "postgres-16-conformance",
+      "status": "verified_ci",
+      "scope": "repository",
+      "evidence": [
+        ".github/workflows/ci.yml",
+        "modules/agent-postgres/src/test/scala/com/zyblw/agent/persistence/postgres/RunStoreConformanceSpec.scala"
+      ]
+    },
+    {
+      "id": "command-worker-sigkill-db-restart",
+      "status": "verified_ci",
+      "scope": "repository",
+      "evidence": ["integration-tests/command-worker-kill-recovery.sh"]
+    },
+    {
+      "id": "workflow-worker-sigkill-db-restart",
+      "status": "verified_ci",
+      "scope": "repository",
+      "evidence": ["integration-tests/workflow-wake-worker-kill-recovery.sh"]
+    },
+    {
+      "id": "bounded-command-soak",
+      "status": "verified_ci",
+      "scope": "repository",
+      "evidence": ["integration-tests/durable-worker-soak.sh"]
+    },
+    {
+      "id": "bounded-workflow-soak",
+      "status": "verified_ci",
+      "scope": "repository",
+      "evidence": ["integration-tests/workflow-wake-worker-soak.sh"]
+    },
+    {
+      "id": "dashboard-contracts",
+      "status": "verified_ci",
+      "scope": "repository",
+      "evidence": [".github/workflows/ci.yml", "modules/agent-dashboard/package.json"]
+    },
+    {
+      "id": "maven-consumer",
+      "status": "verified_ci",
+      "scope": "repository",
+      "evidence": ["integration-tests/maven-consumer/build.sbt"]
+    },
+    {
+      "id": "local-docker-staging-regression",
+      "status": "verified_local",
+      "scope": "local_docker_regression_only",
+      "evidence": [
+        "integration-tests/local-staging/compose.yml",
+        "integration-tests/local-staging-evidence.sh"
+      ]
+    },
+    {
+      "id": "local-docker-primary-standby-failover",
+      "status": "verified_local",
+      "scope": "local_docker_ha_regression_only",
+      "evidence": [
+        "integration-tests/local-staging/compose-ha.yml",
+        "integration-tests/local-staging/ha/primary-init/00-replicator.sh",
+        "integration-tests/failover-drill.sh"
+      ]
+    },
+    {
+      "id": "multi-hour-business-soak",
+      "status": "deferred",
+      "scope": "future_hosted_environment",
+      "owner": null,
+      "measurements": null,
+      "evidence": ["docs/evidence/templates/host-production-evidence.md"]
+    },
+    {
+      "id": "pod-vm-node-loss",
+      "status": "deferred",
+      "scope": "staging",
+      "owner": null,
+      "measurements": null,
+      "evidence": ["docs/evidence/templates/host-production-evidence.md"]
+    },
+    {
+      "id": "postgres-primary-standby-failover",
+      "status": "deferred",
+      "scope": "staging",
+      "owner": null,
+      "measurements": null,
+      "evidence": ["docs/evidence/templates/host-production-evidence.md"]
+    },
+    {
+      "id": "pgbouncer-pool-saturation",
+      "status": "deferred",
+      "scope": "staging",
+      "owner": null,
+      "measurements": null,
+      "evidence": ["docs/evidence/templates/host-production-evidence.md"]
+    },
+    {
+      "id": "rolling-deploy",
+      "status": "deferred",
+      "scope": "staging",
+      "owner": null,
+      "measurements": null,
+      "evidence": ["docs/evidence/templates/host-production-evidence.md"]
+    },
+    {
+      "id": "backup-restore-rpo-rto",
+      "status": "deferred",
+      "scope": "staging",
+      "owner": null,
+      "measurements": null,
+      "evidence": ["docs/evidence/templates/host-production-evidence.md"]
+    },
+    {
+      "id": "production-slo-alert-owner",
+      "status": "deferred",
+      "scope": "operations",
+      "owner": null,
+      "measurements": null,
+      "evidence": ["docs/evidence/templates/host-production-evidence.md"]
+    }
+  ]
+}

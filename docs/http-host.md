@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-25
+> 最后核验：2026-08-23
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -86,6 +86,10 @@ val program: ZIO[Any, Throwable, Nothing] =
 
 这里必须只启动一次 Worker。使用 `AgentHttpHost.fromApplication` 后，不要再调用
 `AgentApplication.startWorkerScoped` 或单独运行 `application.runWorker`，否则同一进程会出现两个 command claim 循环。
+
+知识面通过 `KnowledgeHttpApi` 单独装配，经 `AgentHttpAdditionalRoutes` 合并，不进入 `agent-zio-http` 对 rag 类型的
+依赖。稳定路径是 `/api/v1/knowledge/**`（documents、search、ingestions、reindex）；`GET /api/v1/runs/{runId}/citations`
+是 Run 投影。tenant 只来自 `AgentRequestContextResolver`。管理面不再挂载知识路由。未装配 `KnowledgeService` 的宿主不要挂这些路由。
 
 ## 3. 结构化生命周期为何重要
 

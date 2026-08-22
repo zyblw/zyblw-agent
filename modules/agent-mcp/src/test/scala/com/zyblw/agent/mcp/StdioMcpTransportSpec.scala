@@ -173,5 +173,14 @@ object StdioMcpTransportSpec extends ZIOSpecDefault:
         ),
         !alive
       )
+    },
+    test("非空 command digest allowlist 拒绝未固定的命令") {
+      val command = Chunk("/usr/bin/false")
+      val config  = StdioMcpTransportConfig(command, commandDigestAllowlist = Set("0" * 64))
+      for result <- config.validate.either
+      yield assertTrue(
+        result.left.exists(_.isInstanceOf[AgentError.InvalidConfiguration]),
+        StdioMcpTransport.commandDigest(command).length == 64
+      )
     }
   ) @@ TestAspect.withLiveClock @@ TestAspect.sequential

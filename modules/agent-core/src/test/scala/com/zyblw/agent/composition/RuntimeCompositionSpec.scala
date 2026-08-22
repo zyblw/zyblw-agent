@@ -1,0 +1,303 @@
+package com.zyblw.agent.composition
+
+import com.zyblw.agent.core.*
+import com.zyblw.agent.execution.PermissionProfile
+import com.zyblw.agent.tools.*
+import zio.*
+import zio.json.*
+import zio.json.ast.Json
+import zio.test.*
+
+/** 组合指纹与漂移分类是纯值计算，不读取用户消息，也不授予权限。 */
+object RuntimeCompositionSpec extends ZIOSpecDefault:
+  private val agent = AgentDefinition(
+    AgentId("composition-agent"),
+    "Composition Agent",
+    "按冻结指令回答。",
+    allowedTools = Set("echo", "search"),
+    modelSettings = ModelSettings(provider = Some("primary"), model = Some("defined-model")),
+    instructionSet = Some(
+      InstructionSet(
+        Chunk(InstructionBlock("agent.core", InstructionAuthority.System, "keep answers short", "1"))
+      )
+    )
+  )
+
+  private val profile   = RuntimeProfile.default
+  private val frozen    = RuntimeComposition.fingerprint(profile, agent, agent.modelSettings)
+  private val liveTools = Set("echo", "search")
+
+  private def registeredTool(
+      inputSchema: Json.Obj,
+      toolMetadata: ToolMetadata = ToolMetadata(ToolRisk.ReadOnly, SideEffect.None)
+  ): RegisteredTool = new RegisteredTool:
+    val definition = ToolDefinition("echo", "Echo one value", inputSchema, None)
+    val metadata   = toolMetadata
+    def invoke(arguments: Json, context: ToolExecutionContext): IO[AgentError, ToolResult] =
+      ZIO.succeed(ToolResult(arguments))
+
+  def spec: Spec[TestEnvironment & Scope, Any] = suite("RuntimeComposition")(
+    test("相同组合判定 Compatible") {
+      val live = RuntimeComposition.fingerprint(profile, agent, agent.modelSettings)
+      assertTrue(
+        frozen.value.length == 64,
+        RuntimeComposition.compare(frozen, live, liveTools) == CompositionDrift.Compatible
+      )
+    },
+    test("注册表缺少冻结工具时即使指纹相同也 Incompatible") {
+      assertTrue(
+        RuntimeComposition.compare(
+          frozen,
+          frozen,
+          liveToolNames = Set("echo"),
+          requiredToolNames = Set("echo", "search")
+        ) match
+          case CompositionDrift.Incompatible(reason) => reason.contains("search")
+          case _                                     => false
+      )
+    },
+    test("指令指纹变化判定 Incompatible") {
+      val changed = agent.copy(instructionSet =
+        Some(
+          InstructionSet(
+            Chunk(InstructionBlock("agent.core", InstructionAuthority.System, "be verbose", "2"))
+          )
+        )
+      )
+      val live = RuntimeComposition.fingerprint(profile, changed, changed.modelSettings)
+      assertTrue(
+        RuntimeComposition.compare(frozen, live, liveTools) match
+          case CompositionDrift.Incompatible(reason) => reason.contains("指令")
+          case _                                     => false
+      )
+    },
+    test("生效模型引用变化判定 Incompatible") {
+      val overlay = ModelSettings(provider = Some("primary"), model = Some("cheap-model"))
+      val live    = RuntimeComposition.fingerprint(profile, agent, overlay)
+      assertTrue(
+        RuntimeComposition.compare(frozen, live, liveTools) match
+          case CompositionDrift.Incompatible(reason) => reason.contains("模型")
+          case _                                     => false
+      )
+    },
+    test("模型摘要覆盖完整设置且不受 Map 顺序影响") {
+      val left = agent.modelSettings.copy(
+        maxOutputTokens = Some(1024),
+        providerOptions = Map("region" -> Json.Str("cn"), "tier" -> Json.Str("prod")),
+        metadata = Map("owner" -> "runtime", "purpose" -> "primary")
+      )
+      val reordered = left.copy(
+        providerOptions = List("tier" -> Json.Str("prod"), "region" -> Json.Str("cn")).toMap,
+        metadata = List("purpose" -> "primary", "owner" -> "runtime").toMap
+      )
+      val changed = left.copy(maxOutputTokens = Some(2048))
+      assertTrue(
+        RuntimeComposition.modelSettingsFingerprint(left) ==
+          RuntimeComposition.modelSettingsFingerprint(reordered),
+        RuntimeComposition.modelSettingsFingerprint(left) !=
+          RuntimeComposition.modelSettingsFingerprint(changed),
+        RuntimeComposition
+          .compare(
+            RuntimeComposition.fingerprint(profile, agent, left),
+            RuntimeComposition.fingerprint(profile, agent, changed)
+          )
+          .isInstanceOf[CompositionDrift.Incompatible]
+      )
+    },
+    test("仅 Profile 或 CapturePolicy 变化判定 RequiresRevalidation") {
+      val live = RuntimeComposition.fingerprint(
+        RuntimeProfile("eval", CapturePolicy.Replayable),
+        agent,
+        agent.modelSettings
+      )
+      assertTrue(
+        RuntimeComposition.compare(frozen, live, liveTools) match
+          case CompositionDrift.RequiresRevalidation(reason) =>
+            reason.contains("profile") && reason.contains("capture")
+          case _ => false
+      )
+    },
+    test("扩展身份变化判定 Incompatible") {
+      val live = RuntimeComposition.fingerprint(
+        profile,
+        agent,
+        agent.modelSettings,
+        extensionIds = Chunk("policy-bot@1")
+      )
+      assertTrue(
+        RuntimeComposition.compare(frozen, live, liveTools) match
+          case CompositionDrift.Incompatible(reason) => reason.contains("扩展")
+          case _                                     => false
+      )
+    },
+    test("旧组合指纹缺 extensionIds 仍可解码且与空扩展兼容") {
+      val encoded  = frozen.toJson
+      val stripped = encoded.fromJson[Json].map {
+        case Json.Obj(fields) => Json.Obj(fields.filterNot(_._1 == "extensionIds"))
+        case other            => other
+      }
+      val decoded = stripped.flatMap(_.toJson.fromJson[RuntimeCompositionFingerprint])
+      assertTrue(
+        decoded.exists(_.extensionIds.isEmpty),
+        decoded.exists(value =>
+          RuntimeComposition.compare(value, frozen, liveTools) == CompositionDrift.Compatible
+        )
+      )
+    },
+    test("执行环境身份变化判定 Incompatible") {
+      val live = RuntimeComposition.fingerprint(
+        profile,
+        agent,
+        agent.modelSettings,
+        executionEnvironmentId = "mcp-sandbox"
+      )
+      assertTrue(
+        RuntimeComposition.compare(frozen, live, liveTools) match
+          case CompositionDrift.Incompatible(reason) => reason.contains("执行环境")
+          case _                                     => false
+      )
+    },
+    test("权限剖面变化判定 Incompatible") {
+      val live = RuntimeComposition.fingerprint(
+        profile,
+        agent,
+        agent.modelSettings,
+        permissionProfileFingerprint = PermissionProfile.denyAll.fingerprint
+      )
+      assertTrue(
+        RuntimeComposition.compare(frozen, live, liveTools) match
+          case CompositionDrift.Incompatible(reason) => reason.contains("权限剖面")
+          case _                                     => false
+      )
+    },
+    test("旧组合指纹缺 permissionProfileFingerprint 视为宿主权限") {
+      val encoded  = frozen.toJson
+      val stripped = encoded.fromJson[Json].map {
+        case Json.Obj(fields) => Json.Obj(fields.filterNot(_._1 == "permissionProfileFingerprint"))
+        case other            => other
+      }
+      val decoded = stripped.flatMap(_.toJson.fromJson[RuntimeCompositionFingerprint])
+      assertTrue(
+        decoded.exists(_.permissionProfileFingerprint.isEmpty),
+        decoded.exists(value =>
+          RuntimeComposition.compare(value, frozen, liveTools) == CompositionDrift.Compatible
+        )
+      )
+    },
+    test("旧组合指纹缺 executionEnvironmentId 视为 local") {
+      val encoded  = frozen.toJson
+      val stripped = encoded.fromJson[Json].map {
+        case Json.Obj(fields) => Json.Obj(fields.filterNot(_._1 == "executionEnvironmentId"))
+        case other            => other
+      }
+      val decoded = stripped.flatMap(_.toJson.fromJson[RuntimeCompositionFingerprint])
+      assertTrue(
+        decoded.exists(_.executionEnvironmentId == "local"),
+        decoded.exists(value =>
+          RuntimeComposition.compare(value, frozen, liveTools) == CompositionDrift.Compatible
+        )
+      )
+    },
+    test("上下文来源身份变化判定 Incompatible") {
+      val live = RuntimeComposition.fingerprint(
+        profile,
+        agent,
+        agent.modelSettings,
+        Chunk("memory-rag@1")
+      )
+      assertTrue(
+        RuntimeComposition.compare(frozen, live, liveTools) match
+          case CompositionDrift.Incompatible(reason) => reason.contains("上下文来源")
+          case _                                     => false
+      )
+    },
+    test("工具契约指纹对 JSON/Set 顺序稳定，并检测安全元数据漂移") {
+      val leftSchema = Json.Obj(
+        "type"       -> Json.Str("object"),
+        "properties" -> Json.Obj("value" -> Json.Obj("type" -> Json.Str("string")))
+      )
+      val rightSchema = Json.Obj(
+        "properties" -> Json.Obj("value" -> Json.Obj("type" -> Json.Str("string"))),
+        "type"       -> Json.Str("object")
+      )
+      val baselineMetadata = ToolMetadata(
+        ToolRisk.ReadOnly,
+        SideEffect.None,
+        requiredScopes = Set("profile:read", "tenant:read"),
+        sensitiveInputFields = Set("secret", "token")
+      )
+      val reorderedMetadata = baselineMetadata.copy(
+        requiredScopes = List("tenant:read", "profile:read").toSet,
+        sensitiveInputFields = List("token", "secret").toSet
+      )
+      val changedMetadata = baselineMetadata.copy(
+        risk = ToolRisk.ApprovalWrite,
+        sideEffect = SideEffect.NonIdempotentWrite
+      )
+      val baseline  = ToolContractFingerprint.registered(registeredTool(leftSchema, baselineMetadata))
+      val reordered = ToolContractFingerprint.registered(registeredTool(rightSchema, reorderedMetadata))
+      val changed   = ToolContractFingerprint.registered(registeredTool(leftSchema, changedMetadata))
+      assertTrue(
+        baseline == reordered,
+        baseline != changed,
+        baseline != ToolContractFingerprint.missing("echo")
+      )
+    },
+    test("DurableToolPlan 新指纹可往返，旧 JSON 缺字段保持可读") {
+      val call        = ToolCall("call-echo", "echo", Json.Obj())
+      val fingerprint = ToolContractFingerprint.registered(
+        registeredTool(Json.Obj("type" -> Json.Str("object")))
+      )
+      val plan = DurableToolPlan(
+        "plan-contract",
+        Chunk(DurableToolBatch(0, Chunk(DurableToolPlanItem(0, call)))),
+        toolContractFingerprints = Map("echo" -> fingerprint),
+        approvalRequiredCallIds = Some(Set.empty)
+      )
+      val encoded = plan.toJson
+      val legacy  = encoded.fromJson[Json].map {
+        case Json.Obj(fields) =>
+          Json.Obj(
+            fields.filterNot { case (name, _) =>
+              name == "toolContractFingerprints" || name == "approvalRequiredCallIds"
+            }
+          )
+        case other => other
+      }
+      assertTrue(
+        encoded.fromJson[DurableToolPlan].contains(plan),
+        legacy
+          .flatMap(_.toJson.fromJson[DurableToolPlan])
+          .exists(value => value.toolContractFingerprints.isEmpty && value.approvalRequiredCallIds.isEmpty)
+      )
+    },
+    test("冻结指纹可 JSON 往返，旧状态缺字段仍可解码") {
+      val now   = java.time.Instant.parse("2026-08-20T00:00:00Z")
+      val state = AgentState(
+        RunId(java.util.UUID.fromString("11111111-1111-1111-1111-111111111111")),
+        SessionId(java.util.UUID.fromString("22222222-2222-2222-2222-222222222222")),
+        agent.id,
+        RunStatus.Created,
+        Chunk(AgentMessage.user("hello")),
+        Chunk.empty,
+        UsageSummary(),
+        BudgetState(RunLimits(), UsageSummary(), 0),
+        None,
+        now,
+        now,
+        Version.initial,
+        threadId = Some(ThreadId("composition-thread")),
+        definition = Some(agent),
+        composition = Some(frozen)
+      )
+      val encoded  = state.toJson
+      val stripped = encoded.fromJson[Json].map {
+        case Json.Obj(fields) => Json.Obj(fields.filterNot(_._1 == "composition"))
+        case other            => other
+      }
+      assertTrue(
+        encoded.fromJson[AgentState].exists(_.composition.contains(frozen)),
+        stripped.flatMap(_.toJson.fromJson[AgentState]).exists(_.composition.isEmpty)
+      )
+    }
+  )

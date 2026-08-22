@@ -2,12 +2,13 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-08
+> 最后核验：2026-08-22
 >
 > 事实来源：对应模块源码、测试与构建定义
 
 本文说明 `zyblw-agent` 如何把内部耐久状态与对外 HTTP 协议分离，以及业务后端应该怎样安全接入和升级。当前基线是
-`/api/v1`、OpenAPI `1.1.0`。项目尚未正式发布，因此不保留无版本旧路径，也不为草案协议制造历史负担。
+`/api/v1`、OpenAPI `1.2.0`；框架版本是 `0.8.0`。不保留无版本旧路径，也不为草案协议制造历史负担。加法字段包括
+`RunView.citations` / `evidence`、`GET /api/v1/runs/{runId}/citations` 与稳定 `/api/v1/knowledge/**`。
 
 ## 1. 为什么单独建立 contract package
 
@@ -69,7 +70,18 @@ Unicode code point 计算。生产网关和 ZIO HTTP Server 仍应设置更早�
 ContextEngine 的 token 预算，它们解决的是不同问题。
 
 Memory 用户治理路由也使用 `/api/v1/memory/...`，但 DTO 暂时标记为 Beta，尚未进入稳定 OpenAPI 承诺。业务接入可以试用，
-正式发布 SDK 前应先将其迁入 contract 模块并建立独立契约门禁。
+不能把它们当成 v1 兼容面。正式发布 SDK 前应先将其迁入 contract 模块并建立独立契约门禁。
+
+未毕业能力走 `/api/v1/experimental/**`（`AgentProtocolStability.Experimental`）。该前缀不出现在稳定 OpenAPI，也不在
+`AgentHttpContractSpec` 的必需路径集合中。毕业必须作为单独变更完成以下门禁：
+
+1. 提供至少一个真实消费者和版本化 Eval/安全证据，明确 owner、错误语义、容量和权限边界；
+2. 把 DTO/Endpoint 放入 `http.contract`，改到稳定路径，保持实验路径为有截止版本的兼容转发或明确拒绝；
+3. 更新已审查 OpenAPI 快照、`AgentHttpContractSpec`、oasdiff 结果、CHANGELOG 和升级指南；
+4. 验证认证、限流、幂等、取消、SSE/分页、低敏错误和未知字段行为；
+5. 发布后按 `/api/v1` 规则演进；如果不能承担该承诺，继续保持 Experimental。
+
+只改 `AgentProtocolStability` 枚举或路径前缀不构成毕业。
 
 ### 2.1 `/api/v1/admin/**` 是有意划在稳定承诺之外的管理子面
 

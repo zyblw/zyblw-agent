@@ -243,6 +243,10 @@ private object OciSandboxEnvironment:
     *
     * 业务值通过 `--env KEY` 从 CLI 环境传入容器，因此同名变量会先出现在 CLI 进程环境中；禁止运行时保留前缀可避免 模型借环境变量切换 daemon、认证目录或连接目标。
     */
+  def isInteractiveShell(executable: String): Boolean =
+    val name = executable.substring(executable.lastIndexOf('/') + 1)
+    Set("sh", "bash", "zsh", "fish", "dash", "ksh").contains(name)
+
   def isSafeContainerKey(key: String): Boolean =
     isValidHostKey(key) &&
       !forbiddenExact.contains(key) &&
@@ -325,7 +329,10 @@ final class OciSandboxExecutor(
       arguments: Chunk[String],
       environment: Map[String, String]
   ): IO[AgentError, Unit] =
-    val executableValid  = executable.startsWith("/") && !executable.contains('\u0000')
+    val executableValid =
+      executable.startsWith("/") &&
+        !executable.contains('\u0000') &&
+        !OciSandboxEnvironment.isInteractiveShell(executable)
     val argumentsValid   = arguments.forall(!_.contains('\u0000'))
     val environmentValid = environment.forall { case (key, value) =>
       OciSandboxEnvironment.isSafeContainerKey(key) && !value.contains('\u0000')

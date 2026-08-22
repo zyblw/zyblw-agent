@@ -175,6 +175,18 @@ object CascadingDocumentLoaderSpec extends ZIOSpecDefault:
         document.metadata.get("extractionMode").contains("ocr")
       )
     },
+    test("声明长度超过 registry 级字节上限时 fail-closed 且不收集正文") {
+      val bytes = Chunk.fromArray("%PDF-huge".getBytes)
+      for
+        consumed <- Ref.make(0)
+        cascade = CascadingDocumentLoader(
+          Chunk(stage(ExtractionStageKind.TextLayer, "cheap-tika", "Treatise on Cold Damage. ".repeat(8))),
+          CascadingDocumentLoaderConfig(maxInputBytes = 4)
+        )
+        result <- cascade.load(pdfInput(bytes, consumed)).exit
+        seen   <- consumed.get
+      yield assertTrue(result.isFailure, seen == 0)
+    },
     test("强制视觉但未装配该阶段时 fail-closed") {
       val bytes = Chunk.fromArray("%PDF-novision".getBytes)
       for

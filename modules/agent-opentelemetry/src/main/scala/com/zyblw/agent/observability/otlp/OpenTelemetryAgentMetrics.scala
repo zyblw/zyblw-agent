@@ -243,6 +243,12 @@ final class OpenTelemetryAgentMetrics(
     .setUnit("{call}")
     .build()
 
+  private val compositionDriftCount = meter
+    .counterBuilder("zyblw.agent.composition.drift.count")
+    .setDescription("运行组合漂移被 fail-closed 的次数")
+    .setUnit("{drift}")
+    .build()
+
   private val contextCompressionCoveredMessages = meter
     .histogramBuilder("zyblw.agent.context.compression.covered.message.count")
     .ofLongs()
@@ -347,6 +353,12 @@ final class OpenTelemetryAgentMetrics(
       case AgentMetric.LeaseOperationFinished(action, outcome) =>
         leaseCount.add(1L, operationAttributes("agent.worker.lease.action", action, leaseActions, outcome))
 
+      case AgentMetric.CompositionDriftDetected(kind) =>
+        compositionDriftCount.add(
+          1L,
+          Attributes.builder().put("agent.composition.drift.kind", bounded(kind, driftKinds)).build()
+        )
+
       case AgentMetric.EvaluationRecorded(evaluator, score, passed) =>
         if score.isFinite then
           val attributes = Attributes
@@ -433,6 +445,7 @@ final class OpenTelemetryAgentMetrics(
     Set("capture", "extract", "search", "list", "upsert", "delete", "purge", "other")
   private val workerCommands = Set("submit", "approve", "reject", "cancel", "retry", "resume", "other")
   private val leaseActions   = Set("claim", "heartbeat", "release", "reclaim", "other")
+  private val driftKinds     = Set("incompatible", "requires-revalidation", "other")
 
 object OpenTelemetryAgentMetrics:
   /** 用宿主提供的 Meter 创建 recorder，不管理 MeterProvider 生命周期。 */

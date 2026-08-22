@@ -73,8 +73,22 @@ final class KnowledgeAdminLive private (
     for
       tenant <- tenantOf(request.tenantId)
       limit = request.limit.max(1).min(KnowledgeAdminService.MaxRetrievalLimit)
-      started  <- Clock.nanoTime
-      result   <- sandbox.retrieve(request.query, RetrievalScope(tenant, request.permissions), limit)
+      started <- Clock.nanoTime
+      result  <- sandbox.retrieve(
+        RetrievalRequest(
+          request.query,
+          RetrievalScope(tenant, request.permissions),
+          limit,
+          parseMode(request.mode),
+          RetrievalFilter(
+            documentIds = request.documentIds,
+            chunkIds = request.chunkIds,
+            pages = request.pages,
+            headingPrefix = Chunk.fromIterable(request.headingPrefix),
+            metadataEquals = request.metadataEquals
+          )
+        )
+      )
       finished <- Clock.nanoTime
     yield KnowledgeRetrievalResult(
       elapsedMillis = (finished - started) / 1_000_000L,
@@ -390,6 +404,13 @@ object KnowledgeAdminLive:
 
   /** 把摄入失败映射为稳定、低基数的失败码。 */
   private def failureCode(category: ErrorCategory): String = s"ingestion:${category.toString.toLowerCase}"
+
+  private def parseMode(value: String): RetrievalMode =
+    value.trim.toLowerCase match
+      case "vector" | "vectoronly"   => RetrievalMode.VectorOnly
+      case "lexical" | "lexicalonly" => RetrievalMode.LexicalOnly
+      case "phrase"                  => RetrievalMode.Phrase
+      case _                         => RetrievalMode.Hybrid
 
   /** 解析租户；空白或非法值 fail-closed，不构造出一个越权的空租户。 */
   private def tenantOf(value: String): IO[AgentError, TenantId] =

@@ -2,6 +2,7 @@ package com.zyblw.agent.http
 
 import com.zyblw.agent.admin.*
 import com.zyblw.agent.core.*
+import com.zyblw.agent.harness.{GoalId, PlanId}
 import com.zyblw.agent.http.contract.*
 import zio.*
 import zio.http.*
@@ -17,19 +18,6 @@ final case class RuntimeConfigUpdateRequest(
     expectedVersion: Long,
     overrides: RuntimeOverrides,
     reason: String
-) derives JsonCodec
-
-/** 退役某个知识索引版本的请求体。 */
-final case class KnowledgeRetireRequest(tenantId: String, expectedActiveVersion: Long) derives JsonCodec
-
-/** 检索沙盒请求体。 */
-final case class KnowledgeRetrieveRequest(
-    query: String,
-    tenantId: String,
-    permissions: List[String] = Nil,
-    limit: Int = 5,
-    rerank: Boolean = true,
-    expandContext: Boolean = true
 ) derives JsonCodec
 
 /** 管理台专用的低敏事件信封。
@@ -101,6 +89,9 @@ final case class AdminCapabilitiesView(
     knowledge: Boolean,
     evalTrends: Boolean,
     models: Boolean,
+    runInspection: Boolean = false,
+    harness: Boolean = false,
+    memoryGovernance: Boolean = false,
     observability: ObservabilityLinks
 ) derives JsonCodec
 
@@ -118,7 +109,7 @@ final case class AdminCapabilitiesView(
   * @param ops
   *   队列快照与死信重排
   * @param knowledge
-  *   RAG 文档清单、检索沙盒与异步摄入
+  *   宿主是否装配了知识后端；业务路由已迁到 `/api/v1/knowledge`，管理面不再挂载知识路径
   * @param evals
   *   评测趋势只读
   * @param models
@@ -135,6 +126,9 @@ final case class AdminCapabilities(
     knowledge: Option[KnowledgeAdminService] = None,
     evals: Option[EvalTrendReader] = None,
     models: Option[ModelAdminService] = None,
+    inspection: Option[RunInspectionAdmin] = None,
+    harness: Option[HarnessInspectionAdmin] = None,
+    memoryGovernance: Boolean = false,
     observability: ObservabilityLinks = ObservabilityLinks()
 )
 
@@ -159,7 +153,7 @@ final class AdminHttpApi(
 
   /** 可与 `AgentHttpApi.routes` 使用 `++` 合并的管理面路由。 */
   val routes: Routes[Any, Nothing] =
-    (metaRoutes ++ runRoutes ++ runEventRoutes ++ configRoutes ++ opsRoutes ++ knowledgeRoutes ++ evalRoutes ++
+    (metaRoutes ++ runRoutes ++ runEventRoutes ++ inspectionRoutes ++ harnessRoutes ++ configRoutes ++ opsRoutes ++ evalRoutes ++
       modelRoutes) @@
       HandlerAspect.addHeader(AgentHttpProtocol.ApiVersionHeader, AgentHttpProtocol.ApiVersionHeaderValue)
 
@@ -178,6 +172,9 @@ final class AdminHttpApi(
               knowledge = capabilities.knowledge.isDefined,
               evalTrends = capabilities.evals.isDefined,
               models = capabilities.models.isDefined,
+              runInspection = capabilities.inspection.isDefined,
+              harness = capabilities.harness.isDefined,
+              memoryGovernance = capabilities.memoryGovernance,
               observability = capabilities.observability
             ).toJson
           )
@@ -225,6 +222,72 @@ final class AdminHttpApi(
               cursor <- parseLastEventId(request)
               stream <- eventService.open(parsed, cursor)
             yield durableEventResponse(stream)
+          }
+        }
+    )
+  }
+
+  /** 组合指纹、ModelCall 账本和审批主体的低敏检查面。 */
+  private def inspectionRoutes: Routes[Any, Nothing] =
+    capabilities.inspection.fold(Routes.empty) { inspection =>
+      Routes(
+        Method.GET / "api" / "v1" / "admin" / "runs" / string("runId") / "composition" ->
+          handler { (runId: String, request: Request) =>
+            respond {
+              for
+                _      <- authorizeRead(request)
+                parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+                view   <- inspection.composition(parsed)
+              yield view.fold(Response.status(Status.NotFound))(value => Response.json(value.toJson))
+            }
+          },
+        Method.GET / "api" / "v1" / "admin" / "runs" / string("runId") / "model-calls" ->
+          handler { (runId: String, request: Request) =>
+            respond {
+              for
+                _      <- authorizeRead(request)
+                parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+                limit  <- ZIO.succeed(
+                  request.queryParam("limit").flatMap(_.toIntOption).getOrElse(50).min(200)
+                )
+                views <- inspection.modelCalls(parsed, limit)
+              yield Response.json(views.toList.toJson)
+            }
+          },
+        Method.GET / "api" / "v1" / "admin" / "runs" / string("runId") / "approval" ->
+          handler { (runId: String, request: Request) =>
+            respond {
+              for
+                _      <- authorizeRead(request)
+                parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+                view   <- inspection.approval(parsed)
+              yield view.fold(Response.status(Status.NotFound))(value => Response.json(value.toJson))
+            }
+          }
+      )
+    }
+
+  /** Goal / Plan / 预算的低敏检查面；正文和 Artifact bytes 不会出现。 */
+  private def harnessRoutes: Routes[Any, Nothing] = capabilities.harness.fold(Routes.empty) { inspection =>
+    Routes(
+      Method.GET / "api" / "v1" / "admin" / "harness" / "goals" / string("goalId") ->
+        handler { (goalId: String, request: Request) =>
+          respond {
+            for
+              _      <- authorizeRead(request)
+              parsed <- ZIO.fromEither(GoalId.fromString(goalId)).mapError(AgentError.InvalidConfiguration(_))
+              view   <- inspection.goal(parsed)
+            yield view.fold(Response.status(Status.NotFound))(value => Response.json(value.toJson))
+          }
+        },
+      Method.GET / "api" / "v1" / "admin" / "harness" / "plans" / string("planId") ->
+        handler { (planId: String, request: Request) =>
+          respond {
+            for
+              _      <- authorizeRead(request)
+              parsed <- ZIO.fromEither(PlanId.fromString(planId)).mapError(AgentError.InvalidConfiguration(_))
+              view   <- inspection.plan(parsed)
+            yield view.fold(Response.status(Status.NotFound))(value => Response.json(value.toJson))
           }
         }
     )
@@ -334,87 +397,6 @@ final class AdminHttpApi(
     )
   }
 
-  /** 知识库：索引清单、检索沙盒、退役与异步摄入。 */
-  private def knowledgeRoutes: Routes[Any, Nothing] = capabilities.knowledge.fold(Routes.empty) { knowledge =>
-    Routes(
-      Method.GET / "api" / "v1" / "admin" / "knowledge" / "documents" -> handler { (request: Request) =>
-        respond {
-          for
-            _    <- authorizeRead(request)
-            page <- knowledge.documents(
-              request.queryParam("tenantId").map(_.trim).filter(_.nonEmpty),
-              intParam(request, "limit", 50, 200),
-              request.queryParam("cursor").map(_.trim).filter(_.nonEmpty)
-            )
-          yield Response.json(page.toJson)
-        }
-      },
-      Method.POST / "api" / "v1" / "admin" / "knowledge" / "retrieve" -> handler { (request: Request) =>
-        respond {
-          for
-            _      <- authorizeDebug(request)
-            body   <- decodeJson[KnowledgeRetrieveRequest](request)
-            _      <- validateText("query", body.query, MaxQueryChars)
-            _      <- validateText("tenantId", body.tenantId, MaxTenantChars)
-            result <- knowledge.retrieve(
-              KnowledgeRetrievalRequest(
-                query = body.query,
-                tenantId = body.tenantId,
-                permissions = body.permissions.toSet,
-                limit = body.limit.max(1).min(KnowledgeAdminService.MaxRetrievalLimit),
-                rerank = body.rerank,
-                expandContext = body.expandContext
-              )
-            )
-          yield Response.json(result.toJson)
-        }
-      },
-      Method.POST / "api" / "v1" / "admin" / "knowledge" / "documents" / string("documentId") / "retire" ->
-        handler { (documentId: String, request: Request) =>
-          respond {
-            for
-              _    <- authorizeWrite(request)
-              body <- decodeJson[KnowledgeRetireRequest](request)
-              _    <- validateText("tenantId", body.tenantId, MaxTenantChars)
-              _    <- knowledge.retire(body.tenantId, documentId, body.expectedActiveVersion)
-            yield Response.status(Status.NoContent)
-          }
-        },
-      Method.POST / "api" / "v1" / "admin" / "knowledge" / "ingestions" -> handler { (request: Request) =>
-        respond {
-          for
-            actor      <- authorizeDebug(request)
-            submission <- parseIngestion(request)
-            job        <- knowledge.submitIngestion(submission, actorLabel(actor))
-          yield Response(status = Status.Accepted, body = Body.fromString(job.toJson))
-            .addHeader(Header.ContentType(MediaType.application.json))
-        }
-      },
-      Method.GET / "api" / "v1" / "admin" / "knowledge" / "ingestions" -> handler { (request: Request) =>
-        respond {
-          for
-            _    <- authorizeRead(request)
-            jobs <- knowledge.ingestionJobs(
-              request.queryParam("tenantId").map(_.trim).filter(_.nonEmpty),
-              intParam(request, "limit", 50, IngestionJobStore.MaxLimit)
-            )
-          yield Response.json(jobs.toList.toJson)
-        }
-      },
-      Method.GET / "api" / "v1" / "admin" / "knowledge" / "ingestions" / string("jobId") ->
-        handler { (jobId: String, request: Request) =>
-          respond {
-            for
-              _   <- authorizeRead(request)
-              job <- knowledge
-                .ingestionJob(jobId)
-                .someOrFail(AgentError.PersistenceFailure(s"摄入任务不存在: $jobId"))
-            yield Response.json(job.toJson)
-          }
-        }
-    )
-  }
-
   /** 评测趋势：跟踪的套件与历史数据点。 */
   private def evalRoutes: Routes[Any, Nothing] = capabilities.evals.fold(Routes.empty) { evals =>
     Routes(
@@ -499,38 +481,6 @@ final class AdminHttpApi(
       datasetVersion <- requiredParam(request, "datasetVersion")
     yield EvalSuiteIdentityView(kind, suiteId, datasetId, datasetVersion)
 
-  /** 从原始正文与查询参数解析摄入提交。
-    *
-    * 元数据放在查询参数、文件字节作为原始正文，避免为一次上传引入 multipart 解析或 Base64 膨胀。
-    */
-  private def parseIngestion(request: Request): IO[AgentError, IngestionSubmission] =
-    for
-      fileName <- requiredParam(request, "fileName")
-      tenantId <- requiredParam(request, "tenantId")
-      _        <- validateText("fileName", fileName, MaxFileNameChars)
-      _        <- validateText("tenantId", tenantId, MaxTenantChars)
-      mediaType = request.queryParam("mediaType").map(_.trim).filter(_.nonEmpty)
-      extractionMode <- validatedExtractionMode(request)
-      content        <- HttpRequestBody.readBytes(request, KnowledgeAdminService.MaxUploadBytes.toLong)
-      _              <- ZIO
-        .fail(AgentError.InvalidConfiguration("摄入正文不能为空"))
-        .when(content.isEmpty)
-    yield IngestionSubmission(
-      fileName = fileName,
-      mediaType = mediaType
-        .orElse(request.header(Header.ContentType).map(_.mediaType.fullType))
-        .getOrElse("application/octet-stream"),
-      tenantId = tenantId,
-      permissions = request
-        .queryParams("permissions")
-        .flatMap(_.split(",").toSeq)
-        .map(_.trim)
-        .filter(_.nonEmpty)
-        .toSet,
-      content = content,
-      metadata = extractionMode.fold(Map.empty[String, String])(mode => Map("extractionMode" -> mode))
-    )
-
   /** 校验读权限并返回操作者。 */
   private def authorizeRead(request: Request): IO[AgentError, RunContext] =
     contexts.resolve(request).tap(AdminAuthorization.requireRead)
@@ -554,20 +504,8 @@ final class AdminHttpApi(
     effect.catchAll(error => ZIO.succeed(HttpErrorResponse.from(error)))
 
 object AdminHttpApi:
-  /** 检索沙盒查询的最大字符数。 */
-  private val MaxQueryChars: Int = 4000
-
-  /** 租户标识的最大字符数。 */
-  private val MaxTenantChars: Int = 200
-
   /** Provider 与模型名的最大字符数；两者都是路由标识而不是自由文本。 */
   private val MaxProviderChars: Int = 200
-
-  /** 上传文件名的最大字符数。 */
-  private val MaxFileNameChars: Int = 400
-
-  /** 管理面摄入允许的提取模式。与 RAG `ExtractionMode` 线格式对齐，但不把 RAG 依赖引入 HTTP 模块。 */
-  private val AllowedExtractionModes: Set[String] = Set("auto", "text", "ocr", "vision")
 
   /** 从治理服务与既有认证上下文解析器装配。 */
   val layer: URLayer[AdminCapabilities & AgentRequestContextResolver, AdminHttpApi] =
@@ -596,18 +534,6 @@ object AdminHttpApi:
       .fail(AgentError.InvalidConfiguration(s"$field 不能超过 $maxChars 个字符"))
       .when(value.codePointCount(0, value.length) > maxChars)
       .unit
-
-  /** 解析可选提取模式；缺省表示由级联按质量自动升档。 */
-  private def validatedExtractionMode(request: Request): IO[AgentError, Option[String]] =
-    request.queryParam("extractionMode").map(_.trim).filter(_.nonEmpty) match
-      case None      => ZIO.succeed(None)
-      case Some(raw) =>
-        val normalized = raw.toLowerCase(java.util.Locale.ROOT)
-        if AdminHttpApi.AllowedExtractionModes.contains(normalized) then ZIO.succeed(Some(normalized))
-        else
-          ZIO.fail(
-            AgentError.InvalidConfiguration("extractionMode 无效，允许 auto|text|ocr|vision")
-          )
 
   /** 解析 Run 状态查询值；未知状态 fail-closed。 */
   private def parseRunStatus(value: String): IO[AgentError, RunStatus] =

@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-15
+> 最后核验：2026-08-22
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -15,6 +15,13 @@
 设计成全量 Event Sourcing。`PostgresRunStore.commit` 在一个短事务内完成状态 CAS 和事件追加，事务内绝不调用
 模型、工具或外部网络。
 
+规范化列不是可任意漂移的第二份正文。读取 `agent_runs` 时，Adapter 会把 run/session/agent identity、status、version、
+schema version 与解码后的 `state_json` 逐项核对；读取 `agent_events` 时会核对 event/run identity、sequence、event type
+与解码后的 `payload`；`tool_executions` 和 `model_call_executions` 也会核对 identity、status、attempt 及其
+业务索引字段与 `record_json`。不一致表示存储损坏或迁移缺陷并 fail-closed，不能由“优先相信 JSON”或“优先相信列”
+自动修复。由于 ledger 决定副作用和模型请求能否重放，它们与 Run 快照使用同一严格度。修复必须在离线备份、审计和明确
+migration 下进行。
+
 ## 框架必需表
 
 | 表 | 事实与用途 | 主要保留策略 |
@@ -22,9 +29,9 @@
 | `agent_runs` | Run 当前状态、版本、取消位；异步创建的作用域哈希、客户端幂等键和请求指纹 | 按租户业务合规要求归档/删除 |
 | `agent_events` | 可审计的状态转换事件 | 可冷归档；不能早于 Run 排障窗口删除 |
 | `tool_executions` | Prepared/Running/Unknown/Succeeded/Failed 副作用账本 | 至少覆盖副作用追溯与幂等窗口 |
+| `model_call_executions` | 主模型 Intent/Settlement 账本（Prepared/Dispatched/Succeeded/Failed/Unknown）；Replayable 才保存 CanonicalModelRequest | 与 Run 级联；MetadataOnly 不含 prompt |
 | `approval_requests` | 人工审批请求和决定 | 涉及敏感操作时按审计政策保留 |
-| `agent_messages` / `agent_steps` | 可选规范化查询投影 | 当前状态以 `state_json` 为事实来源 |
-| `model_calls` / `usage_records` | Provider 调用与成本投影 | 用于成本、SLO 与异常排查 |
+| 已删除的 V001 投影（`agent_messages` / `agent_steps` / `model_calls` / `usage_records`） | V012 在确认空表后丢弃 | 权威消息在 `state_json`，权威模型账本在 `model_call_executions` |
 | `agent_run_commands` | Start/Recover/ResumeApproval/Cancel/Retry 正文、幂等键、优先级、尝试与死信审计 | 随 Run 级联；DeadLetter 需先完成排障 |
 | `agent_run_dispatch` | 每 Run 一个串行租约槽、currentCommand、owner/token/generation | 随 Run 级联；Idle 行可长期保留 |
 | `agent_business_operations` | producer 业务幂等键、请求指纹与可重放结果 | 至少覆盖客户端/Agent 最大重试窗口；按业务合规归档 |
@@ -32,17 +39,24 @@
 | `agent_inbox_messages` | consumer/messageId 去重与可重放消费结果 | 覆盖上游最长重试和灾备恢复窗口 |
 | `agent_compensations` | 显式注册、激活、租约执行与死信的 Saga 补偿计划 | Succeeded/Cancelled 可归档；DeadLetter 必须先处理 |
 | `agent_memories` | Session/User/Tenant 长期记忆、证据、敏感级别、CAS 版本与删除 tombstone | active 按过期策略注入；deleted 不保留 value/search 正文 |
-| `agent_memory_audit` | 用户查看/搜索/纠正/删除的低敏不可变事实；只保存 key hash、版本和数量 | 不含正文/query/scopes；按合规审计窗口归档 |
+| `agent_memory_audit` | 用户查看/搜索/纠正/删除/导出的低敏不可变事实；只保存 key hash、版本和数量 | 不含正文/query/scopes；按合规审计窗口归档 |
+| `agent_artifacts` | 租户隔离 Artifact 元数据与最新版本号；授权由宿主 `ArtifactScope` 推导 | 随业务保留策略归档；正文不在本表 |
+| `agent_artifact_versions` | 不可变 Artifact SHA-256 与低敏元数据；`bytes` 可空并外置到内容寻址对象存储 | 随元数据级联；读取受 scope 约束 |
+| `agent_artifact_audit` | Artifact 保存/读取/删除/过期清理的低敏审计 | 只存 name hash 与原因码 |
 | `agent_embedding_cache` | 不含正文的租户/用途/模型/维度/版本/hash 精确向量缓存 | expires_at 有界清理；读取不写 last-access；用途隔离 query/indexing/memory 指令向量 |
 | `agent_embedding_quota_windows` | 租户、窗口长度和窗口起点范围内的请求/文本/字符硬计数 | 行锁保证跨 Worker 原子检查与累加 |
 | `agent_embedding_quota_reservations` | requestId/hash 幂等预留 | 随所属窗口级联清理；同 ID 不同 hash 拒绝 |
-| `agent_eval_snapshots` | Agent/RAG/Context Compression 的低敏不可变评测快照与发布基线 | 不含业务正文；按数据集治理策略归档，不能静默覆盖 |
+| `agent_eval_snapshots` | Agent/Agent Reliability/RAG/Context Compression 的低敏不可变评测快照与发布基线 | 不含业务正文；按数据集治理策略归档，不能静默覆盖 |
 | `agent_workflow_checkpoints` | Workflow identity、Session、游标、应用状态、step 与访问预算的完整恢复快照 | 独立于 `agent_runs`；按 Workflow Run 的保留策略删除 |
 | `agent_workflow_node_executions` | 节点 Running/Prepared/Committed 台账、pending outcome 与 owner/token/generation fencing | 与 Workflow checkpoint 同保留窗口；Prepared 需覆盖最长故障恢复期 |
 | `agent_workflow_waits` | 每个 Workflow Run 唯一活动的 signal/timer 条件、绝对 deadline、决议、wake lease 与消费状态 | 与 execution/checkpoint 同保留窗口；Pending/Resolved 由有界 Worker 扫描/领取 |
 | `agent_workflow_signals` | 外部 signal 的稳定 ID、payload hash、接收 disposition 与时间 | 覆盖外部发送方最长重试窗口；payload 按业务敏感数据治理 |
 | `agent_runtime_overrides` | 管理面完整覆盖快照与 CAS 版本；敏感值只能引用外部 secret | 追加式保留，回滚等于重新提交历史版本 |
 | `agent_ingestion_jobs` | RAG 文档摄取任务进度与低敏失败分类，不保存原始文件 | 与知识索引生命周期对齐；Completed/Failed 可归档 |
+| `harness_goals` | 长任务 Goal、revision CAS 与有界 ArtifactReference JSON。Active 不领取 Worker、不自动调用 Runtime | 按租户任务保留策略归档；引用不授予 Artifact 读取权限 |
+| `harness_plans` | Goal 下的协作计划、Todo 与有界 ArtifactReference JSON；不是权限或 Workflow 图 | 随 Goal 级联删除；制品正文留在 ArtifactStore |
+| `harness_skills` | 按需 Skill；id+version 不可变，指纹冲突拒绝覆盖 | 正文不得升为 System；按 Skill 治理归档 |
+| `harness_interactions` | Goal 上的 Steer/FollowUp/UserMessage；只追加。`(goal_id,sequence)` 唯一键支持最近页倒序游标 | 随 Goal 级联删除；不得升为 System；自动 TTL 由明确的宿主保留策略驱动 |
 
 表和字段的中文数据字典由 `R__zyblw_agent_schema_comments.sql` 每次覆盖写入；新增列必须先补映射，否则核心 migration 失败。
 
@@ -111,6 +125,13 @@ Embedding cache 使用 `REAL[]` 而不是 pgvector，因为它只按完整主键
 `agent_eval_snapshots` 的主键是稳定 `evaluation_id`，查询身份由
 `suite_kind + suite_id + dataset_id + dataset_version` 共同组成。发布门禁通过部分索引读取最近 `passed=true` 快照；
 历史查询先按 `finished_epoch_second + finished_nano + evaluation_id` 降序取最近 N 行，再升序返回，不使用深 OFFSET。
+V007 将 `AgentReliability` 加入 suite kind CHECK，使多试验统计与单次 `Agent` 质量拥有互不混用的基线身份。
+
+V008 以带空数组默认值的 JSONB 列为 Goal/Plan 追加 typed ArtifactReference 持久化。Todo 引用位于 `todos_json`；所有引用只保存 scope/name/version/media type/size/SHA-256，不保存 bytes、私有 metadata 或创建时间。默认值允许滚动升级期间旧 Adapter 继续写入，读取仍由 Scala 领域模型执行结构与数量校验。
+
+V009 将 `HarnessComparison` 加入 suite kind CHECK，使同 case/attempt 的有无 Harness 成对实验拥有独立趋势身份，不会与普通 Agent 或 AgentReliability 互为基线。已有快照行和物理列不变。
+
+V010 增加 Harness 跨 Run 任务预算。`harness_goal_budgets` 以 `goal_id` 为主键，保存不可变总上限以及 reserved/consumed 计数器；并发预留通过 `SELECT ... FOR UPDATE` 串行，检查和计数更新在同一事务。`harness_budget_reservations` 以全局 `run_id` 为主键，保存完整 `RunLimits`、Reserved/Settled/Released/Exceeded 状态与可选 `UsageSummary`。`(status, created_at, run_id)` 支撑有界恢复扫描，`(goal_id, status)` 支撑 Goal 级联与诊断。费用列使用 `NUMERIC`。异步 Harness Start 会在创建 Agent Run 的同一事务写入 reservation；终态 Reconciler 只结算耐久终态，缺失或活跃 Run 不自动释放。
 
 快照同时保存 `snapshot_payload TEXT` 和 `snapshot_json JSONB`：前者保留确定性 UTF-8 字节供 SHA-256 校验，后者用于
 SQL 分析；数据库 CHECK 保证二者解析后的 JSONB 相等。不能使用 `snapshot_json::text` 复算应用 checksum，因为 JSONB
@@ -155,9 +176,9 @@ Runtime 在启动任何批内 Fiber 前，用一个短事务和 `INSERT ... ON C
 | 账本状态 | 恢复动作 |
 |---|---|
 | `Prepared` | 外部调用尚未开始，可执行 |
-| `Running` + 可重试工具 | 允许以相同 callId/idempotency key 重试 |
-| `Running` + 非幂等工具 | 先转 `Unknown`，暂停并人工核对外部系统 |
-| `Unknown` + 非幂等工具 | 禁止自动重放；人工确认后才能继续 |
+| `Running` + ReplaySafe / Idempotent | 允许以相同 callId/idempotency key 崩溃重放 |
+| `Running` + NeverReplay / RequiresApproval | 先转 `Unknown`，暂停并人工核对外部系统 |
+| `Unknown` + NeverReplay / RequiresApproval | 禁止自动重放；人工确认后才能继续 |
 | `Succeeded` | 复用持久化结果，不再次执行 |
 | `Failed` | 依据 typed error、工具副作用和重试策略决定，不假设安全 |
 
@@ -190,9 +211,9 @@ Agent Run 时级联删除仍需投递或审计的业务事实。宿主必须为�
 
 ## pgvector
 
-新库的 0.6 可选 migration 位于：
+新库的 0.8 知识 baseline 位于：
 
-`modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/optional/pgvector_1024_v0_6/V001__agent_knowledge_pgvector_1024_baseline.sql`
+`modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/optional/pgvector_1024/V001__agent_knowledge_0_8_baseline.sql`
 
 三张表的完整名称是 `zyblw_agent_knowledge.agent_knowledge_documents`、
 `zyblw_agent_knowledge.agent_knowledge_chunk_staging` 和 `zyblw_agent_knowledge.agent_knowledge_chunks`。业务 SQL 不应在

@@ -6,13 +6,12 @@
 COMMENT ON TABLE agent_runs IS 'Agent Run 当前耐久快照；version 承担乐观并发控制，state_json 是运行恢复事实';
 COMMENT ON TABLE agent_events IS 'Run 的不可变顺序事件；(run_id, sequence) 保证单调、无重复的耐久时间线';
 COMMENT ON TABLE tool_executions IS '工具调用执行账本；Prepared/Running/Succeeded/Failed/Unknown 支撑崩溃恢复和幂等重放判断';
-COMMENT ON TABLE agent_messages IS 'Agent 消息快照投影；按 run_id/ordinal 保持确定顺序，不替代事件审计';
-COMMENT ON TABLE agent_steps IS 'Agent 推理与执行步骤的耐久投影；按 run_id/ordinal 稳定恢复';
-COMMENT ON TABLE model_calls IS '模型调用低敏记录和 token usage；不应写入 API Key 或原始 Provider 敏感响应';
 COMMENT ON TABLE approval_requests IS '高风险工具的耐久审批请求与决定；相同 approval_id 不允许产生相反事实';
-COMMENT ON TABLE usage_records IS 'Run 的追加式 token/成本记录；精确费用规则由带版本的业务定价策略负责';
 COMMENT ON TABLE agent_memories IS '跨 Run 长期记忆；删除保留版本 tombstone，但清空 value_json 与 search_text 正文';
-COMMENT ON TABLE agent_memory_audit IS '记忆读取、纠正、删除和 retention 的低敏不可变审计，不保存 query、正文或原始 key';
+COMMENT ON TABLE agent_memory_audit IS '记忆读取、纠正、删除、retention 与导出的低敏不可变审计，不保存 query、正文或原始 key';
+COMMENT ON TABLE agent_artifacts IS '租户隔离的 Artifact 元数据；正文在 versions 表，授权由宿主 ArtifactScope 推导';
+COMMENT ON TABLE agent_artifact_versions IS '不可变 Artifact 版本元数据与可选 inline bytes；大对象按 sha256 外置，不保存密钥';
+COMMENT ON TABLE agent_artifact_audit IS 'Artifact 保存、读取、删除与过期清理的低敏审计；只存 name hash 与原因码';
 COMMENT ON TABLE agent_run_commands IS 'Agent 控制命令队列；同 Run 由 dispatcher 串行，失败只保存稳定低敏分类';
 COMMENT ON TABLE agent_run_dispatch IS '每个 Run 的唯一调度租约和 generation fence；陈旧 worker 不能提交新状态';
 COMMENT ON TABLE agent_business_operations IS '可靠写工具的 producer 幂等事实；与业务 mutation、outbox 在同一事务提交';
@@ -22,13 +21,20 @@ COMMENT ON TABLE agent_compensations IS '显式 Saga 补偿计划；Registered �
 COMMENT ON TABLE agent_embedding_cache IS '按 tenant/purpose/provider/model/dimension/version/hash 精确命中的 Embedding 缓存，不保存原文';
 COMMENT ON TABLE agent_embedding_quota_windows IS 'Embedding 租户硬配额窗口；行锁保证并发检查与累加原子完成';
 COMMENT ON TABLE agent_embedding_quota_reservations IS 'Embedding request_id/hash 幂等账本；防止网络或 worker 重试重复计费';
-COMMENT ON TABLE agent_eval_snapshots IS 'Agent/RAG/Context Compression 的低敏不可变评测快照与发布趋势事实';
+COMMENT ON TABLE agent_eval_snapshots IS 'Agent/Agent Reliability/Harness Comparison/RAG/Context Compression 的低敏不可变评测快照与发布趋势事实';
 COMMENT ON TABLE agent_workflow_checkpoints IS '声明式 Workflow 完整恢复快照；只允许同一 identity 的 step 单调推进';
 COMMENT ON TABLE agent_workflow_node_executions IS 'Workflow 节点 execution ledger；Prepared outcome 可跨进程恢复并被 fencing 保护';
 COMMENT ON TABLE agent_workflow_waits IS 'Durable timer/signal 等待及 wake lease；resolve/consume 与 checkpoint 形成唯一推进边界';
 COMMENT ON TABLE agent_workflow_signals IS '外部 Workflow signal 的幂等 receipt；相同 signal_id 不会被重复应用';
 COMMENT ON TABLE agent_runtime_overrides IS '管理面追加式运行配置覆盖；敏感值只能引用外部 secret，不能保存明文';
 COMMENT ON TABLE agent_ingestion_jobs IS 'RAG 文档摄取任务投影；记录有界状态、进度与低敏失败分类，不保存原始文件';
+COMMENT ON TABLE model_call_executions IS '主模型调用执行账本；Prepared/Dispatched 表示 Intent 已提交，Succeeded/Failed/Unknown 为结算；Replayable 才保存 CanonicalModelRequest';
+COMMENT ON TABLE harness_goals IS '长任务 Goal 与低敏 Artifact 引用；revision CAS 防丢失更新。Active 只表示任务状态，不领取 Worker';
+COMMENT ON TABLE harness_plans IS 'Goal 下的协作计划、Todo 与低敏 Artifact 引用；不是权限或 Workflow 图，不能授予工具';
+COMMENT ON TABLE harness_skills IS '按需 Skill；id+version 不可变，指纹冲突拒绝覆盖。正文不得升为 System 指令';
+COMMENT ON TABLE harness_interactions IS 'Goal 上的 Steer/FollowUp/UserMessage；只追加。不是控制命令，不能授予工具';
+COMMENT ON TABLE harness_goal_budgets IS 'Goal 跨 Run 硬预算与原子计数器；策略不可原地覆盖，FOR UPDATE 串行并发预留';
+COMMENT ON TABLE harness_budget_reservations IS '稳定 RunId 的预算预留/结算账本；Reserved 崩溃后保留，只有明确对账才能释放';
 
 DO $comments$
 DECLARE
@@ -43,13 +49,16 @@ BEGIN
     JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     WHERE namespace.nspname = current_schema()
       AND relation.relname IN (
-        'agent_runs', 'agent_events', 'tool_executions', 'agent_messages', 'agent_steps',
-        'model_calls', 'approval_requests', 'usage_records', 'agent_memories', 'agent_memory_audit',
+        'agent_runs', 'agent_events', 'tool_executions', 'approval_requests', 'agent_memories',
+        'agent_memory_audit',
         'agent_run_commands', 'agent_run_dispatch', 'agent_business_operations', 'agent_outbox_events',
         'agent_inbox_messages', 'agent_compensations', 'agent_embedding_cache',
         'agent_embedding_quota_windows', 'agent_embedding_quota_reservations', 'agent_eval_snapshots',
         'agent_workflow_checkpoints', 'agent_workflow_node_executions', 'agent_workflow_waits',
-        'agent_workflow_signals', 'agent_runtime_overrides', 'agent_ingestion_jobs'
+        'agent_workflow_signals', 'agent_runtime_overrides', 'agent_ingestion_jobs',
+        'model_call_executions', 'harness_goals', 'harness_plans', 'harness_skills',
+        'harness_interactions', 'harness_goal_budgets', 'harness_budget_reservations',
+        'agent_artifacts', 'agent_artifact_versions', 'agent_artifact_audit'
       )
       AND relation.relkind = 'r'
       AND attribute.attnum > 0
@@ -57,6 +66,24 @@ BEGIN
     ORDER BY relation.relname, attribute.attnum
   LOOP
     column_comment := CASE
+      WHEN column_record.table_name = 'model_call_executions'
+           AND column_record.column_name = 'request_id' THEN
+        '主模型调用在 effect 前预留的稳定 ID；同一 Run 内唯一。'
+      WHEN column_record.table_name = 'model_call_executions'
+           AND column_record.column_name = 'capture_policy' THEN
+        'Disabled / MetadataOnly / Replayable；生产默认 MetadataOnly，Replayable 才保存请求正文。'
+      WHEN column_record.table_name = 'model_call_executions'
+           AND column_record.column_name = 'fingerprint' THEN
+        'Canonical ChatRequest 的 SHA-256；日志与公共投影只允许使用该指纹。'
+      WHEN column_record.table_name = 'model_call_executions'
+           AND column_record.column_name = 'message_count' THEN
+        '当时发给模型的消息条数，不含正文。'
+      WHEN column_record.table_name = 'model_call_executions'
+           AND column_record.column_name = 'tool_count' THEN
+        '当时暴露给模型的工具定义条数，不含 schema 正文。'
+      WHEN column_record.table_name = 'model_call_executions'
+           AND column_record.column_name = 'record_json' THEN
+        '主模型账本完整记录；MetadataOnly 不含 CanonicalModelRequest，Replayable 含可重建请求。'
       WHEN column_record.table_name = 'agent_runs'
            AND column_record.column_name = 'version' THEN
         'AgentState compare-and-set 版本；任何更新必须匹配调用方读取版本。'
@@ -102,6 +129,45 @@ BEGIN
       WHEN column_record.table_name = 'agent_run_dispatch'
            AND column_record.column_name = 'lease_token' THEN
         '随机租约令牌；日志、指标、公共 API 都不得暴露。'
+      WHEN column_record.table_name = 'harness_skills'
+           AND column_record.column_name = 'body' THEN
+        'Skill 程序性正文；仅供按需注入上下文，不得升为 System 指令，日志不得转储全文。'
+      WHEN column_record.table_name = 'harness_skills'
+           AND column_record.column_name = 'fingerprint' THEN
+        'Skill body 的 SHA-256；同一 id+version 指纹不同则拒绝覆盖。'
+      WHEN column_record.table_name = 'harness_plans'
+           AND column_record.column_name = 'todos_json' THEN
+        'Todo 列表及其 ArtifactReference JSON；标题和引用都不是指令，也不能授予工具。'
+      WHEN column_record.table_name = 'harness_goals'
+           AND column_record.column_name = 'artifacts_json' THEN
+        'Goal 的有界 ArtifactReference JSON；不含二进制、私有 metadata，且不授予读取权限。'
+      WHEN column_record.table_name = 'harness_plans'
+           AND column_record.column_name = 'artifacts_json' THEN
+        'Plan 级有界 ArtifactReference JSON；Todo 引用保留在 todos_json，不含制品正文。'
+      WHEN column_record.table_name = 'harness_interactions'
+           AND column_record.column_name = 'body' THEN
+        'Steer/FollowUp/UserMessage 正文；不是 Cancel/Recover/审批/Retry，也不得升为 System 指令。'
+      WHEN column_record.table_name = 'harness_interactions'
+           AND column_record.column_name = 'sequence' THEN
+        '同一 Goal 内只追加的单调序号；不能改写已有 Interaction。'
+      WHEN column_record.table_name = 'harness_interactions'
+           AND column_record.column_name = 'kind' THEN
+        '交互种类：Steer、FollowUp 或 UserMessage；不是控制命令。'
+      WHEN column_record.table_name = 'harness_budget_reservations'
+           AND column_record.column_name = 'limits_json' THEN
+        '预留时冻结的完整 RunLimits；必须与 Runtime 实际使用的限制相同。'
+      WHEN column_record.table_name = 'harness_budget_reservations'
+           AND column_record.column_name = 'usage_json' THEN
+        '结算时记录的完整 UsageSummary；Reserved/Released 必须为空。'
+      WHEN column_record.table_name = 'harness_goal_budgets'
+           AND column_record.column_name LIKE 'max_%' THEN
+        'Goal 策略中的任务级硬上限；配置后不可原地改写。'
+      WHEN column_record.table_name = 'harness_goal_budgets'
+           AND column_record.column_name LIKE 'reserved_%' THEN
+        '尚未结算 Run 按 RunLimits 占用的最坏额度；释放或结算时原子扣减。'
+      WHEN column_record.table_name = 'harness_goal_budgets'
+           AND column_record.column_name LIKE 'consumed_%' THEN
+        '已结算 Run 的真实 UsageSummary 累计；超额事实也必须保留。'
       ELSE CASE column_record.column_name
       WHEN 'accepted_signal_id' THEN '已被等待条件接受的外部 signal 稳定标识。'
       WHEN 'accepted_signal_payload' THEN '已被等待条件接受的 signal 正文。'
@@ -117,7 +183,14 @@ BEGIN
       WHEN 'aggregate_type' THEN 'outbox 事件所属聚合类型。'
       WHEN 'approval_id' THEN '高风险工具审批请求的稳定标识。'
       WHEN 'attempt' THEN '当前轮次已尝试次数；人工重试会重置本轮但保留历史计数。'
-      WHEN 'audit_id' THEN '记忆治理审计事件唯一标识。'
+      WHEN 'audit_id' THEN '低敏治理审计事件唯一标识。'
+      WHEN 'bytes' THEN '可选 inline 字节；NULL 表示正文在 ArtifactBlobStore，按 sha256 寻址。'
+      WHEN 'byte_size' THEN 'Artifact 版本字节数，用于配额与审计，不是授权。'
+      WHEN 'latest_version' THEN '当前 Artifact 最新不可变版本号，严格递增。'
+      WHEN 'metadata_json' THEN 'Artifact 版本的低敏元数据 JSON；禁止存放密钥或原文路径。'
+      WHEN 'name' THEN '作用域内 Artifact 稳定名称；不是文件路径，也不能穿越租户。'
+      WHEN 'name_hash' THEN 'Artifact 名称的 SHA-256；审计表不保存原始名称。'
+      WHEN 'sha256' THEN 'Artifact 版本字节的 SHA-256；用于完整性核对。'
       WHEN 'available_at' THEN '命令、事件或补偿最早可被领取的时间。'
       WHEN 'awaiting_approval' THEN '由 pendingApproval 对象是否存在生成的待审批标记，供管理台部分索引使用。'
       WHEN 'batch_id' THEN '同一批工具调用的稳定批次标识。'
@@ -168,6 +241,7 @@ BEGIN
       WHEN 'finished_epoch_second' THEN '评测结束时刻的 epoch 秒，用于确定性排序。'
       WHEN 'finished_nano' THEN '评测结束时刻的纳秒，与 epoch 秒一起保证 JVM Instant 排序。'
       WHEN 'generation' THEN '租约换主后递增的 fencing 代数。'
+      WHEN 'goal_id' THEN 'Harness Goal 稳定标识；Active 不表示领取 Worker。'
       WHEN 'handler_name' THEN '补偿处理器稳定名称。'
       WHEN 'harness_version' THEN '执行该评测的 harness 版本。'
       WHEN 'headers' THEN 'outbox 事件的低敏头对象。'
@@ -176,6 +250,7 @@ BEGIN
       WHEN 'importance' THEN '记忆重要性，范围 0 到 1。'
       WHEN 'index_version' THEN '知识索引快照版本。'
       WHEN 'input_tokens' THEN '累计或本条输入令牌数。'
+      WHEN 'interaction_id' THEN 'Harness 交互事实稳定标识；只追加，不能改写成控制命令。'
       WHEN 'job_id' THEN '文档摄取任务唯一标识。'
       WHEN 'key_version' THEN 'Embedding 缓存键版本，用于指令或规范化策略演进。'
       WHEN 'last_failure' THEN '最近一次失败的稳定低敏分类；不得保存原始异常全文。'
@@ -192,6 +267,7 @@ BEGIN
       WHEN 'model' THEN '模型标识。'
       WHEN 'node_id' THEN 'Workflow 节点稳定标识。'
       WHEN 'occurred_at' THEN '审计事实实际发生时间。'
+      WHEN 'objective' THEN 'Goal 目标陈述；不是 System 指令，也不能授予工具。'
       WHEN 'operation_id' THEN '可靠写业务操作标识。'
       WHEN 'operation_name' THEN '可靠写操作名称，与 scope_key、幂等键共同唯一。'
       WHEN 'ordinal' THEN '同一父对象内的稳定顺序。'
@@ -205,6 +281,7 @@ BEGIN
       WHEN 'passed' THEN '该评测快照是否整体通过。'
       WHEN 'payload' THEN '结构化内部载荷；公共 API 返回前必须投影与脱敏。'
       WHEN 'payload_sha256' THEN 'signal 正文 SHA-256，同 ID 不同哈希会 fail-closed。'
+      WHEN 'plan_id' THEN 'Harness Plan 稳定标识；计划不是权限。'
       WHEN 'pricing_version' THEN '估算费用使用的定价策略版本。'
       WHEN 'priority' THEN '命令领取优先级，数值越大越先被 claim。'
       WHEN 'processed_at' THEN 'inbox 消息成功消费时间。'
@@ -222,6 +299,8 @@ BEGIN
       WHEN 'requests' THEN '本窗口或预留已计入的请求次数。'
       WHEN 'resolved_at' THEN 'wait 被 signal 或超时决议的时间。'
       WHEN 'result_json' THEN '业务操作或 inbox 消费的可重放结果。'
+      WHEN 'revision' THEN 'Harness 实体 CAS 版本；更新必须匹配调用方读取值。'
+      WHEN 'retry_count' THEN '自动或人工重试累计次数。'
       WHEN 'resulting_version' THEN '治理操作完成后的记忆版本。'
       WHEN 'role' THEN '消息角色投影。'
       WHEN 'run_id' THEN 'Agent 或 Workflow Run 稳定标识。'
@@ -233,6 +312,8 @@ BEGIN
       WHEN 'sensitivity' THEN '记忆敏感级别：public、personal 或 sensitive。'
       WHEN 'sequence' THEN '同一 Run 内事件单调序号。'
       WHEN 'session_id' THEN '会话或 Workflow session 标识。'
+      WHEN 'skill_id' THEN 'Skill 稳定标识；不能包含 @，也不能授予工具。'
+      WHEN 'skill_version' THEN 'Skill 实现版本；与 skill_id 共同构成不可变主键。'
       WHEN 'signal_id' THEN '外部 signal 稳定标识。'
       WHEN 'signal_name' THEN '等待或投递的 signal 名称。'
       WHEN 'signal_received_at' THEN 'wait 接受 signal 的时间。'
@@ -240,6 +321,7 @@ BEGIN
       WHEN 'snapshot_payload' THEN '评测快照确定性文本。'
       WHEN 'snapshot_sha256' THEN 'snapshot_payload 的 SHA-256。'
       WHEN 'source_run_id' THEN '提炼出该记忆的来源 Run；可为空。'
+      WHEN 'source' THEN 'Skill 来源标识；外部 URL 或 inline，不是授权。'
       WHEN 'source_uri' THEN '宿主提供的稳定来源标识；不得包含临时签名。'
       WHEN 'start_idempotency_key' THEN '异步 StartRun 的客户端幂等键。'
       WHEN 'start_request_hash' THEN '异步 StartRun 请求指纹 SHA-256。'
@@ -251,7 +333,8 @@ BEGIN
       WHEN 'step_type' THEN '推理或执行步骤类型。'
       WHEN 'submitted_by' THEN '提交摄取任务的操作者标签，不保存令牌或 IP。'
       WHEN 'suite_id' THEN '评测套件稳定标识。'
-      WHEN 'suite_kind' THEN '评测套件类别：Agent、Rag 或 ContextCompression。'
+      WHEN 'suite_kind' THEN '评测套件类别：Agent、AgentReliability、HarnessComparison、Rag 或 ContextCompression。'
+      WHEN 'summary' THEN 'Plan 协作摘要；不是权限，也不能授予工具。'
       WHEN 'target_scope_key' THEN '治理目标作用域键。'
       WHEN 'target_scope_kind' THEN '治理目标作用域类型。'
       WHEN 'target_session_id' THEN '治理目标 session；仅 session 作用域时存在。'
@@ -259,8 +342,10 @@ BEGIN
       WHEN 'target_user_id' THEN '治理目标用户。'
       WHEN 'tenant_id' THEN '宿主注入的租户隔离标识。'
       WHEN 'texts' THEN '本窗口或预留已计入的文本条数。'
+      WHEN 'thread_id' THEN '业务线程标识；Goal 按线程归属，不等于 Run 租约。'
       WHEN 'tool_call_id' THEN '产生该业务操作或 outbox 事件的工具调用标识。'
       WHEN 'tool_name' THEN '工具稳定名称。'
+      WHEN 'trust' THEN 'Skill 信任级别：Untrusted、Reviewed 或 Trusted；不是授权。'
       WHEN 'updated_at' THEN '记录最后更新时间（带时区）。'
       WHEN 'updated_by' THEN '写入该覆盖快照的操作者标签。'
       WHEN 'usage_json' THEN '模型调用的低敏 token usage 对象。'

@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-22
+> 最后核验：2026-08-23
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -17,6 +17,10 @@ Embedding 同时用于在线 query、离线知识索引和未来 Memory 提炼�
 框架因此保留原始 `EmbeddingService` 作为 Provider SPI，并增加 `embedScoped` 生产入口。`KnowledgeIndexer` 与
 `DefaultRetriever` 已统一走该入口；`GovernedEmbeddingService` 的裸 `embed/embedDetailed` 会明确失败，防止装配了治理门面后
 又无意绕过 tenant scope。
+
+`0.8.0` 知识 schema 固定 `vector(1024)`。`KnowledgeQaHost` 的 live 摄入 / 重建 / serve 通过
+`OpenAICompatibleEmbeddingConfig.fromEnvironment` 读取 `EMBEDDING_*`，并 `require1024`：维度不是 1024 会启动失败，
+不会回退到 `HashEmbedding`。`contract` 模式才使用确定性哈希向量。
 
 ## 2. 可信请求上下文
 

@@ -2,8 +2,8 @@ package com.zyblw.agent.rag
 
 /** 切分装箱使用的 token 预算计数器。
   *
-  * 默认仍按 Unicode code point，以保持已发布 `strategyId`。近似 CJK 计数器不是 Embedding tokenizer 的对齐实现；启用后必须出现在 `strategyId`
-  * 中并新建索引版本。
+  * 生产默认对齐 Embedding 模型 tokenizer（jtokkit BPE）。`CodePoints` 与 `CjkApproximate` 只供测试或显式回退；计数器 `id` 必须进入
+  * `strategyId`，更换后只能通过新知识索引版本生效。
   */
 trait TokenCounter:
   def id: String
@@ -11,10 +11,34 @@ trait TokenCounter:
 
 object TokenCounter:
 
-  /** 与历史 `DocumentStructureChunker` 行为一致：一个 code point 计 1。 */
+  /** 仅测试或显式回退：一个 Unicode code point 计 1。 */
   val CodePoints: TokenCounter = new TokenCounter:
     val id: String               = "codepoints"
     def count(text: String): Int = text.codePointCount(0, text.length)
+
+  /** OpenAI-compatible BPE。`cl100k_base` 覆盖 text-embedding-3；`o200k_base` 覆盖更新的 4o 系列。 */
+  def Bpe(encodingName: String): TokenCounter =
+    val encoding = encodingName match
+      case "cl100k_base" =>
+        com.knuddels.jtokkit.Encodings
+          .newDefaultEncodingRegistry()
+          .getEncoding(
+            com.knuddels.jtokkit.api.EncodingType.CL100K_BASE
+          )
+      case "o200k_base" =>
+        com.knuddels.jtokkit.Encodings
+          .newDefaultEncodingRegistry()
+          .getEncoding(
+            com.knuddels.jtokkit.api.EncodingType.O200K_BASE
+          )
+      case other =>
+        throw IllegalArgumentException(s"不支持的 BPE encoding: $other")
+    new TokenCounter:
+      val id: String               = encodingName.replace('_', '-')
+      def count(text: String): Int = encoding.countTokens(text)
+
+  val Cl100k: TokenCounter = Bpe("cl100k_base")
+  val O200k: TokenCounter  = Bpe("o200k_base")
 
   /** 汉字/假名/谚文约 1 token，拉丁字母约 4 字符 1 token。只用于装箱预算，不是模型 tokenizer。 */
   val CjkApproximate: TokenCounter = new TokenCounter:

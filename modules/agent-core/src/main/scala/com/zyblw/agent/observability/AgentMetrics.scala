@@ -143,6 +143,9 @@ enum AgentMetric:
   /** Lease 动作结果；action 是 claim/heartbeat/release/reclaim 等有限集合。 */
   case LeaseOperationFinished(action: String, outcome: MetricOutcome)
 
+  /** 一次组合漂移被 fail-closed。kind 只能是 incompatible 或 requires-revalidation。 */
+  case CompositionDriftDetected(kind: String)
+
   /** 一条数值评测结果。
     *
     * @param evaluator

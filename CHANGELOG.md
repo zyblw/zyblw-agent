@@ -3,6 +3,271 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
+## 0.8.0 - 2026-08-23
+
+0.8.0 is a fresh-install baseline. There is no in-place upgrade from 0.6.x / 0.7.0-candidate
+databases: hosts must create a new PostgreSQL database and rebuild knowledge indexes. Core Flyway
+history collapses V001–V013 into `V001__zyblw_agent_0_8_baseline.sql`; the 1024 knowledge history
+is `optional/pgvector_1024/V001__agent_knowledge_0_8_baseline.sql` with pg_trgm, metadata/heading
+GIN indexes, and phrase re-identification. `AgentPostgresMigrations.resetAll` rebuilds both
+histories. Retrieval now has `Hybrid` / `VectorOnly` / `LexicalOnly` / `Phrase` modes plus
+document/page/heading/metadata/chunk filters applied after ACL and before ranking. Chunking
+defaults to cl100k BPE token packing. `knowledge_search` / `knowledge_fetch` are shipped tools.
+Run state v7 stores bounded citations; HTTP OpenAPI is 1.2.0 with additive `citations` /
+`evidence` on `RunView`, `GET /api/v1/runs/{runId}/citations`, and stable `/api/v1/knowledge/**`
+(documents, search, ingestions, reindex). Admin knowledge routes are removed. `KnowledgeQaHost`
+is the book Q&A composition root: JDBC `serve` uses the durable application and 1024 knowledge
+schema, `status` reports both Flyway histories, and reindex is atomic per document. Indexed ACL
+is the reader scope (`knowledge:read`); operator write/admin scopes are not written into chunks.
+Live ingest/serve/reindex require `EMBEDDING_DIMENSION=1024` and do not fall back to hash
+embeddings. See [the 0.8.0 upgrade guide](docs/upgrading-to-0.8.0.md).
+
+## 0.7.0 - Superseded candidate
+
+Removes the public `AgentQuickstart` / in-memory five-minute onboarding path and the unused
+`ConversationStore` SPI. The official entry is `ProductionSupportHost`: PostgreSQL, a real
+OpenAI-compatible provider, trusted identity headers, typed read/approval-write tools, ZIO HTTP,
+and separate `migrate` / `serve` commands. Unregistered but allowlisted tools still fail before any
+model call on the formal `AgentApplication` / `AgentRuntime` path. PostgreSQL persistence now
+exposes `artifacts` / `layerWithArtifacts`; `AgentApplicationConfigLoader` can load
+`zyblw.agent.role.bindings`. Docker/VM packaging lives in `deploy/docker/` and is the first
+supported deployment shape; Kubernetes remains Preview until a real cluster is evidenced. Wave 0
+host evidence items stay `deferred` until a dedicated hosted environment exists. The supported
+business path is Docker talking directly to a self-hosted PostgreSQL; `scripts/verify-business-ready.sh`
+is the adoption gate. The 0.7.0 candidate was superseded; do not tag `v0.7.0`. See
+[the 0.8.0 upgrade guide](docs/upgrading-to-0.8.0.md).
+`ProductionSupportHost status` reports Flyway version and in-flight Run/command counts so hosts can
+drain before switching processes.
+
+MCP remains locked to the tested `2025-11-25` revision. The official `2026-07-28` stateless-core
+revision is recognized and rejected with `unsupported_stateless_revision`; the client does not
+silently downgrade or speak the new handshake. Artifact metadata already has a PostgreSQL adapter,
+delete/expiry audit, and V011 tables; maturity docs no longer claim a missing durable store.
+Removed multimodal and knowledge-graph shells stay deleted. Guardrails now have retrieval and
+remote-message checkpoints; model-call lineage records the dispatched tool-definition fingerprint,
+and Replayable reconstruction refuses a ledger whose frozen tool fingerprint does not match the
+saved `CanonicalModelRequest`. Runtime checks retrieval snippets, non-metadata Context sections and Memory
+before Context assembly, and remote tool-output excerpts after each tool batch.
+Skill activation now honors a host allowlist and accepted trust set. `ProductionSupportHost` mounts Memory list/search/get/
+correct/delete/export routes, a Memory retention worker, and a logging Outbox publisher on the
+durable path. `AgentSchemaCensus` classifies dead projection tables (`model_calls`, `agent_messages`,
+`agent_steps`, `usage_records`); `AgentSchemaManifest` is the checksum/row-count export used before a
+fresh baseline switch. Flyway `V012` drops those tables when empty and fail-closes if they still
+hold rows. Inspector can export a low-sensitivity `IncidentPack`. Artifact bytes can go to a
+content-addressed `ArtifactBlobStore`. Workflow human tasks are `human.<taskType>` signals.
+Skill catalogs expose a body-free catalog signature. Flyway `V013` lets artifact `bytes` be
+NULL so PostgreSQL keeps metadata while `ArtifactBlobStore` holds content-addressed payloads.
+`IncidentPackExporter` pages a Run timeline into a leak-checked incident pack.
+Dedicated `Mcp2026Client` speaks the stateless `2026-07-28` contract (`server/discover`,
+per-request `_meta`, `Mcp-Method`/`Mcp-Name`) without initialize/session; the 2025 client still
+fail-closes that revision. `Mcp2026HttpTransport` is a separate POST-only Streamable HTTP
+implementation: it sends `Mcp-Method`/`Mcp-Name`, rejects session/resume headers, and never
+issues GET listener or DELETE. The 2026 client now has typed MRTR `input_required` retry
+(echo `requestState`, never auto-complete), `subscriptions/listen` opt-in types, and
+issuer/CIMD SSRF isolation. `IncidentPackCliApp` reads a pack from file or stdin.
+Vision page transcription binds JPEG pages through `ArtifactBoundMedia` before the model. `ContentPart.ImageArtifact` is the durable image form;
+`ArtifactBoundMedia.bind` produces only `data:` URIs, and Provider encoders reject remote
+`ImageUrl`s. `ArtifactAccessGrant` keeps object-store reads tenant-scoped. A2A `1.0` Agent Card
+parsing is fail-closed (HTTPS, securitySchemes, no private network) and does not grant local
+tools. OTLP spans merge `GenAiSemanticMap` attributes and drop prompt keys. Workspace edits are inspect → validate → apply → rollback; OCI
+sandbox rejects interactive shells. Handoff and agent-as-tool grants can only shrink tools,
+budgets, and permissions. Workflow subgraphs use an isolated checkpoint store.
+`IncidentPackCli` re-encodes leak-checked packs. Internal telemetry maps to versioned OpenTelemetry
+GenAI operation names without prompts. Capability matrix fields now include prompt cache,
+reasoning tokens, and server continuation.
+`HumanTask.node` registers durable `human.<taskType>` waits; `WorkflowPromotionGate` refuses
+to promote a workflow/multi-agent suite that does not beat a passing single-agent baseline on
+outcome without safety or resource regression. `ArtifactBoundMedia` accepts only digest-matched
+image/PDF artifacts and never turns them into remote `ImageUrl`s. Unused 1536 pgvector locations and
+unrelated Vercel/React agent skills are removed. See ADR-0020.
+
+Adds a second production-maturity wave that stays honest about host evidence. Local Docker
+primary/standby failover lives in `integration-tests/failover-drill.sh` and is recorded as
+`verified_local`; production RPO/RTO and soak remain `deferred`. Public PubMedQA/InjecAgent
+72-case fixtures can pass a maintainer dual-review gate and a scripted `TestAgentRuntime` loop without claiming
+domain-expert calibration.
+Provider assembly now accepts a JSON multi-endpoint / relay declaration, `ModelRole` routing, and a
+bounded `FallbackChatModel` that only retries typed outages. Artifact durability, Memory export,
+MCP stdio command-digest allowlists, CapabilityMatrix vs `ProviderContract.verifySuite`, and a
+low-evidence RAG refusal grade close the remaining peripheral holes. The admin console projects
+composition, ModelCall, approval subjects, Harness budgets and Memory export without prompt or
+artifact bodies. Observability adds `zyblw.agent.composition.drift.count`, Grafana panels and an
+external-sink matrix.
+
+Adds a durable **ModelCall ledger** so the main model request has the same Intent → Effect → Settlement | Unknown
+window as tools. `RunStore.commit` / `commitFenced` can write `model_call_executions` in the same transaction as
+state and events (Flyway `V004`). Production capture default is `MetadataOnly` (fingerprint and counts, no prompt).
+`CapturePolicy.Replayable` stores a reconstructable `CanonicalModelRequest` for tests and authorized evals.
+Crash after the intent commit marks the call `Unknown` and does **not** automatically re-invoke the provider.
+Recovery also closes the window after a successful settlement if `Complete` never committed, and will not
+reset already consumed budget after a crash that follows a persisted context checkpoint.
+
+`CapturePolicy.Disabled` skips the model ledger (0.6.2 immediate invoke). Settlement persist failure or lost
+lease at the Succeeded transition leaves the call `Unknown`.
+
+Splits tool **online retry** from **crash replay** without changing `tool_executions`. Deployment `ToolRetryPolicy`
+governs same-invocation 429/timeout; `ToolMetadata.recoveryPolicy` (`ReplaySafe` / `Idempotent` / `NeverReplay` /
+`RequiresApproval`) governs whether a `Running`/`Unknown` ledger may be re-executed after process death. `Never`
+online retry does not disable ReplaySafe crash replay. Destructive tools stay `RequiresApproval` even if they were
+approved before the crash.
+
+Scala SPI: `RunStore` gained `commit(..., modelCall)` / `commitFenced(..., modelCall)`, `getModelCall`, and
+`getModelCalls`. Custom adapters must implement them. HTTP/Inspector expose request id, capture policy, counts and
+fingerprint prefix only. `ToolMetadata.automaticallyRetryable` remains as an alias of `onlineRetryable`.
+
+Freezes a **runtime composition fingerprint** on Run create (`submitStart` and sync `run`). Recovery compares the
+frozen profile, instruction fingerprint, allowed tools, effective model overlay, and capture policy against the live
+process. Missing tools still referenced by a pending plan, instruction changes, or model overlay changes are
+`Incompatible`; profile/capture-only changes are `RequiresRevalidation`. Both fail closed (`CompositionIncompatible`)
+instead of silent capability drift. Runs
+created before this field remain recoverable. `AgentApplicationConfig.profile` productizes `CapturePolicy`
+(production default `MetadataOnly`). Context contributors are composed through `ContextSourceResolver` without
+Kernel changes; their `id@version` is frozen in the composition fingerprint. Eval `TrajectoryReplay` grades Replayable
+ledger reconstruction against Fake Model recordings and rejects Inspector JSON that contains secret substrings.
+`AgentEvalGrader` can attach that dimension. `TestAgentRuntime.inMemory` is the shared in-memory Runtime fixture.
+
+Durable tool plans now freeze a canonical SHA-256 contract fingerprint for every called tool. The digest covers the
+model-visible name/description/input/output Schema/strict flag and the Runtime-enforced risk, side-effect, scope,
+redaction and conflict-parallelism metadata, while persisting none of that material a second time. Recovery resolves
+the live registry before any approval or side effect and fails closed if a same-named tool changed or if a previously
+missing tool appeared. Planning also freezes the call IDs that required approval: a later stricter deployment policy
+may add approval, but a relaxed policy cannot remove the frozen requirement. New `AgentState` snapshots use schema v5
+and reject incomplete plan fingerprints/approval snapshots; v4 and earlier plans retain the legacy recovery gates.
+The new fields have safe JSON defaults for old readers and require a minor release rather than a `0.6.x` patch.
+
+Human approval is now bound to an `ApprovalSubject` — the specific side effect — instead of a tool name or a
+provider-supplied call ID. A subject binds the capability, call position, tool contract fingerprint, canonical input
+digest, `ExecutionEnvironmentId`, the caller's tenant/principal/scope digest, the effective approval-policy digest, and
+the declared risk and side-effect levels. Planning freezes a subject for every call that requires approval; the gate
+recomputes it before any side effect and only reuses a recorded approval when every bound property still matches.
+If a property drifted between suspension and approval, the runtime re-requests authorization with the refreshed subject
+rather than honoring a decision the approver never saw, and the refreshed request carries a different approval ID so a
+stale console submission is rejected. Monotonic tightening is preserved: a relaxed policy still cannot remove a frozen
+requirement. `ApprovalRequest.subject` and `DurableToolPlan.approvalSubjects` move `AgentState` to schema v6; v6
+snapshots missing a complete subject snapshot are treated as corrupt, while v5 and earlier keep their existing gates.
+Subjects store digests only, so tool arguments are not persisted a second time. `TestAgentRuntime` gained
+`inMemoryWithToolPolicySource` for tests that need to replace the effective policy mid-run.
+
+Adds Wave 2 first cuts. World-state **ContextSection** snapshots compare fingerprints across turns: unchanged
+payloads are omitted from the model-visible request, Secret sections are never rendered, and the decision is recorded
+in `ModelCallContextLineage.sectionDecisions` without bodies. `AgentState` stores only `ContextSectionCursor`
+fingerprints. `CanonicalModelRequest` remains the reconstructable authority for what the model actually saw.
+`SkillCatalogSection` projects catalog identity as a Metadata section and never includes skill bodies.
+HTTP declares `AgentProtocolStability` and `/api/v1/experimental`; experimental paths are excluded from the stable
+OpenAPI promise until an explicit graduation.
+
+Adds the Wave 1-C **constrained execution** surface (`com.zyblw.agent.execution`). `PermissionProfile` may only
+narrow. `LocalExecutionEnvironment` makes host-JVM execution explicit; MCP workspace and OCI sandbox map through
+`McpSandboxEnvironment` to `mcp-sandbox` (workspace root, no host network/process/secret access). Environment id and
+permission digest bind into `ApprovalSubject` and `RuntimeCompositionFingerprint` without changing the composition
+`value` hash, so old JSON missing the new fields still compares Compatible with Local/host. Switching to
+`mcp-sandbox` or widening permissions is `Incompatible`. Default Local is not frozen into `extensionIds`.
+
+Adds the Wave 1-B **typed extension** surface (`com.zyblw.agent.extension`). Extensions are narrow Scala traits
+composed with `ZLayer`, never a plugin tree: `ToolProvider`, `SkillProvider`, `ApprovalReviewer` and
+`ToolLifecycleObserver`. They receive only `ExtensionInput` (run/agent ids, authorization digest, composition
+snapshot) and cannot see `AgentRuntimeLive` or `RunStore`. `ApprovalReview.Deny` fails closed before the side effect;
+`RecommendAllow` cannot skip human approval or mutate `ApprovalSubject`. Tool lifecycle observers are `UIO` and their
+defects are swallowed so observation cannot own invocation. Extension identities (`id@version`) freeze on Run create;
+adding, removing or replacing an extension is `Incompatible`. Old composition JSON without `extensionIds` still
+decodes and compares as empty. `AgentApplication` and `TestAgentRuntime` default to `RuntimeExtensions.empty`.
+
+Adds the Wave 0 operations runbook and PostgreSQL v6 approval-subject gates. `PostgresApprovalSubjectIntegrationSpec`
+round-trips a frozen subject through PostgreSQL 16 JSONB (V001–V010), checks `schema_version` envelope fail-closed,
+and proves subject JSON does not contain tool-argument secrets. Host-side Pod loss, primary/standby failover and
+hour-scale soak remain environment evidence; the runbook tells on-call how to read `queueSnapshot` /
+`wakeQueueSnapshot` without inventing unmeasured SLOs.
+
+Adds a **Harness** task-state SPI (`Goal` / `Plan` / `Todo` / `Skill`) with revision CAS. Goal `Active` does not start a Run. Plans cannot grant tools. Skills inject through `HarnessContextContributor` as untrusted retrieval data and cannot become System instructions. PostgreSQL Adapter is Flyway `V005` (`harness_goals` / `harness_plans` / `harness_skills`); in-memory remains for tests. Steer / FollowUp / UserMessage are append-only `InteractionInput` facts on a Goal (Flyway `V006`); they are not `RunCommandPayload` control commands and cannot cancel, recover, approve, or retry a Run.
+
+Goal, Plan and Todo can now retain bounded typed `ArtifactReference` values. A reference fixes scope/name/version/media type/size/SHA-256 but contains neither bytes nor private metadata and grants no read authority; `ArtifactStore.read(reference)` revalidates the descriptor and fails closed on drift. `HarnessContextContributor` projects only reference metadata (`harness@2`) and cannot load artifact bodies. Flyway `V008` adds JSONB reference columns with empty-array defaults for rolling compatibility; existing JSON missing the new fields still decodes as empty references.
+
+Adds a paired Harness evaluation gate. `HarnessEvalRunner` compares baseline and Harness observations for the same reviewed dataset, case and attempt under one bounded ZIO concurrency limit. It reports outcome/trajectory deltas, Harness safety failures, Wilson reliability, human-intervention delta, and latency/token/cost ratios; safety failures are never offset by resource gains. `EvalSuiteKind.HarnessComparison` stores only ten low-sensitive gate dimensions under an identity separate from Agent and AgentReliability. Flyway `V009` admits the new kind without changing existing snapshots.
+
+Adds a durable Harness **Goal budget ledger**. `GoalBudgetPolicy` caps runs, model/tool calls, input/output/total tokens and optional estimated cost across concurrent Runs. `HarnessStore` now supports immutable configuration plus idempotent reserve/settle/release and bounded Reserved scans; in-memory uses `Ref.Synchronized`, while PostgreSQL `V010` uses one locked Goal counter row and stable per-Run reservations. Enabling a cost cap requires every Run to reserve an explicit cost limit. Usage above its reservation is still recorded as `Exceeded`, never rolled back or hidden; corrupt persisted `RunLimits`/`UsageSummary` JSON fails closed even though those domain types have construction defaults.
+
+`HarnessCommandService` binds GoalId into the Start request fingerprint. PostgreSQL atomically commits the budget reservation with `AgentState(Created)`, `RunCreated`, the Start command and dispatcher, so exhausted admission leaves no orphan Run and HTTP replay consumes budget once. `HarnessBudgetReconciler` scans Reserved rows with a bounded keyset cursor and settles only durable terminal Run states; active or missing Runs remain reserved for recovery or explicit operator action. These capabilities still use the sole `AgentRuntime` and WorkerHost loop.
+
+A shared Harness budget conformance suite now runs the same policy, reservation, transition, conflict, and cursor contracts against the in-memory and PostgreSQL adapters, preventing their state machines from drifting independently.
+
+Adds a real PostgreSQL command-queue failure test that combines a vanished Worker with database pause/recovery. After the old lease expires, a new Worker must claim the same command at the next generation, stale completion is fenced, and the queue converges cleanly. A separate executable probe now starts the production PostgreSQL migration/store/`WorkerHost` path in forked JVMs, sends `SIGKILL` to the old JVM while it owns generation 1, and verifies that a different JVM completes the same command at generation 2 / attempt 2. Deployment-node loss and database failover remain environment gates.
+
+Strengthens the PostgreSQL Workflow wakeup contract with the same combined outage boundary: a vanished wake Worker and database pause span the lease deadline, recovery is accepted only at the next generation, and stale heartbeat/abandon operations fail with lease loss.
+
+Adds the corresponding executable Workflow process-death proof. The old forked JVM is killed only after it owns both the wake lease and the node-execution lease at generation 1. A different JVM must reclaim both at generation 2, consume the durable wait, commit the node ledger and terminal checkpoint, and leave no current wait. The probe reuses the production `WorkflowWakeWorker`, `WorkflowEngine`, migrations and PostgreSQL store; it is not a second workflow runtime.
+
+CI now runs both process-death probes in a dedicated 20-minute job, with a 10-minute bound per exercise. Both paths restart the same PostgreSQL container after killing the old Worker, rediscover Docker's possibly changed random host port, and prove that durable state and lease fencing survive the database process restart. The release workflow runs the same gates before loading Maven Central signing credentials. Each invocation explicitly sets the forked JVM database environment, so a reused sbt thin server cannot retain the previous disposable container endpoint. This is restart evidence, not primary/standby failover evidence.
+
+Adds a bounded durable-worker soak probe that repeatedly submits real PostgreSQL Start transactions and drains them through three production `WorkerHost` instances, six claim lanes and the sole `AgentRuntime`. Its versioned JSON report contains only aggregate worker/concurrency counts, queue high-water marks, generation/attempt counts and conservative 10ms latency histograms. The default local baseline completed 120/120 Runs with no retry, reclaim, expired lease or dead letter; claim and terminal P95 were 760ms and 980ms on that machine. These are repository regression thresholds, not production capacity or SLO claims. The executable script creates a disposable database and the probe refuses to run without an explicit disposable-database confirmation. CI and release run the bounded smoke before release secrets are loaded.
+
+Adds the matching bounded Workflow wake-worker soak without introducing another workflow runtime. Each of three
+production `WorkflowWakeWorker` instances owns an independent PostgreSQL Store adapter and engine, while all consume
+the same durable signal backlog. The default local baseline completed 126/126 Runs across seven rounds, with exactly
+126 wake claims, node-execution claims and completed cycles; all three wake/node owners participated, maximum node
+concurrency was three, both generation-reclaim counts and every abandon/lease-lost/failure count were zero, and final
+outstanding work was zero. Claim and terminal P95 were 270ms and 700ms on that machine. The JSON report is aggregate
+only, the script requires its own disposable database, and CI/release treat the wide thresholds as regression gates,
+not production SLOs.
+
+Adds `WorkflowExecutionStore.wakeQueueSnapshot(workflowId, definitionVersion)`, a read-only low-sensitivity view of
+pending/due waits, dispatchable/leased wakeups, expired wake leases and oldest dispatchable age. The in-memory and
+PostgreSQL adapters share the same semantics; the PostgreSQL query uses one database-clock snapshot and never resolves,
+claims or mutates a wait. Third-party Stores retain source compatibility through a concrete typed-failure default.
+The Workflow soak now samples this production API and gates due waits, expired wake leases and final queue depth.
+
+Fixes the in-memory `RunStore` transaction boundary: state CAS, events, tool executions, cancellation, and ModelCall ledger now share one `Ref.Synchronized` state. A failed ModelCall insert/transition no longer returns an error after already advancing the Run state or appending events. The focused store test asserts rollback of all three facts. The next-generation handbook and maturity roadmap now record the evidence-gated ideas worth adapting from LangChain/LangGraph, LLM4S, LlamaIndex, PydanticAI, OpenAI Agents SDK, Microsoft Agent Framework/Semantic Kernel, MetaGPT, Letta, and Pig without adding a second Runtime or authority path.
+
+Adds one `RunStore` conformance suite shared by the in-memory Adapter and a real PostgreSQL 16 Testcontainer. Event IDs are now idempotent only when the complete persisted event is identical; reuse across a different Run, sequence, or payload fails instead of being silently dropped. Tool ledger preparation requires an existing Run in memory, matching the production foreign key, and event collection queries consistently return an empty page after deletion.
+
+Hardens the state/event cursor invariant across transaction boundaries. `RunStore.save` can no longer change
+`lastEventSequence` without events; `commit` / `commitFenced` require the first incoming sequence to immediately follow
+the persisted cursor in the same CAS as the version update. `appendEvents` remains available for exact replay or repair
+at or behind the state cursor, but cannot advance authoritative state. PostgreSQL performs the cursor check in the
+transactional `UPDATE` predicate and locks replay boundaries; the shared conformance proves gap failures leave state,
+events, version, and ledgers unchanged. Event sequences must be non-negative, event cursors start at `-1`, and Store
+pages are capped at 4096 so direct Adapter callers cannot bypass the durable-stream boundary. This tightened public
+Store semantic also proves that two commits racing on the same version and previous sequence have exactly one winner.
+It ships only in the next minor, not a 0.6.x patch.
+
+Treats PostgreSQL state, event, Tool ledger, and ModelCall ledger rows as typed persistence envelopes.
+`PostgresRunStore` now cross-checks stable identity/status/version/attempt/index columns against decoded JSON on every
+read, failing closed on drift instead of silently choosing one representation. A real PostgreSQL 16 tamper test covers
+all four record families; diagnostics expose only the record ID and mismatched field, never the stored payload.
+
+Bounds Harness interaction reads. `HarnessStore.listInteractions` now accepts an exclusive `beforeSequence` cursor and a hard 1–512 page limit, fetches the newest page, and returns it in sequence order. `HarnessContextContributor` asks the Store for only the latest 16 interactions instead of loading the complete Goal history. PostgreSQL reuses the existing `(goal_id, sequence)` unique index; no migration is added. Custom `HarnessStore` adapters must implement the new method signature.
+
+Closes the Wave 2 safety gap around dynamic model settings and Skills. Runtime compositions now fingerprint complete effective
+`ModelSettings`; every model call captures one working point, rejects mid-run overlay drift before dispatch, and records a
+separate low-sensitive settings fingerprint in ModelCall lineage. `SkillContextContributor` wires host-selected
+`SkillProvider.load` results into Retrieval only, while `HarnessSkillProvider` verifies loaded bodies against a body-free
+catalog. World-state delivery defaults to `FullSnapshot` for stateless model APIs; omitting unchanged sections requires an
+explicit `TrustedStatefulDelta` contract instead of assuming Providers retain hidden prior context.
+`MemoryRagContextSourceResolver` v2 can additionally turn an explicit low-evidence Retriever result into a fixed trusted
+refusal constraint without copying the query or document body into that instruction.
+
+Removes unused experimental shells instead of promoting them by module count: `ActionFingerprint` had no consumer beyond its
+declaration; the `rag/knowledge` graph SPI had no tests, durable adapter, depth-correct implementation, or retrieval integration;
+and the standalone multimodal SPI had neither a Provider nor a consumer. The immutable V001 `model_calls` table remains only
+because published Flyway migrations cannot be rewritten; it continues to have no writer and is superseded by
+`model_call_executions`.
+
+Adds a bounded, hash-pinned public evaluation import path for PubMedQA and InjecAgent. Public upstream provenance records immutable
+revisions, licenses, source SHA-256 values, and deterministic selection protocols; generated datasets remain Draft until dual
+review. Eval observations can now carry deterministic outcome labels, allowing yes/no/maybe correctness to remain separate from
+tool, citation, safety, recovery, and resource grades.
+
+Adds a local Docker evidence profile with PostgreSQL 16, transaction-mode PgBouncer, constrained backend pooling, command/workflow
+soak, and backup/restore verification. The new pressure gate exposed and fixed global no-op dispatcher normalization acquiring
+locks during every concurrent command claim; normalization now updates only mismatched rows through an ordered,
+`SKIP LOCKED`-bounded candidate set.
+
+MCP clients may now pin the expected initial `serverInfo.name/version`; a mismatch fails before `initialized` or any capability
+call. The local `McpServerId` remains the authorization identity, while TLS/mTLS/OAuth and deployment provenance remain responsible
+for cryptographic server authentication. `McpRootsProvider` adds an explicit, server-scoped `roots/list` handler for absolute local
+file URIs; it never scans the working directory or enables sampling/elicitation as a side effect.
+
+0.7.0 was superseded by the 0.8.0 fresh-install baseline; see [the 0.8.0 upgrade guide](docs/upgrading-to-0.8.0.md).
+
 ## 0.6.2 - 2026-08-16
 
 Makes PDF ingestion operator-usable: quality-gated cascade with `extractionMode=auto` by default, optional operator override (`text|ocr|vision`), replay-safe Tika → Docling → page-bounded vision transcription, and fail-closed indexing when the extract is empty or CID garbage. Successful ingestions return compact extraction reports plus extracted Markdown/outline for the host to persist; the knowledge manifest still stores only short metadata. OpenAI-compatible Chat Completions now sends `image_url` content parts instead of stringifying images. Structure chunking may optionally use an approximate CJK token budget; the default `strategyId` is unchanged. Completes the PostgreSQL catalog dictionary for the 26 core control-plane tables.

@@ -112,7 +112,13 @@ final case class KnowledgeRetrievalRequest(
     permissions: Set[String] = Set.empty,
     limit: Int = 5,
     rerank: Boolean = true,
-    expandContext: Boolean = true
+    expandContext: Boolean = true,
+    mode: String = "hybrid",
+    documentIds: Set[String] = Set.empty,
+    chunkIds: Set[String] = Set.empty,
+    pages: Set[Int] = Set.empty,
+    headingPrefix: List[String] = Nil,
+    metadataEquals: Map[String, String] = Map.empty
 )
 
 /** 检索调试结果，包含足以复现和解释本次召回的全部低敏信息。 */
@@ -297,3 +303,53 @@ object KnowledgeAdminService:
 
   /** 单个上传文档的字节上限，防止管理接口成为内存放大器。 */
   val MaxUploadBytes: Int = 32 * 1024 * 1024
+
+/** 业务知识面的稳定 SPI。tenant 一律由调用方从认证上下文传入，请求体不得覆盖。 */
+trait KnowledgeService:
+  def documents(
+      tenantId: String,
+      limit: Int,
+      cursor: Option[String]
+  ): IO[AgentError, KnowledgeDocumentPage]
+
+  def document(tenantId: String, documentId: String): IO[AgentError, Option[KnowledgeDocumentView]]
+
+  def retire(tenantId: String, documentId: String, expectedActiveVersion: Long): IO[AgentError, Unit]
+
+  def submitIngestion(submission: IngestionSubmission, submittedBy: String): IO[AgentError, IngestionJobView]
+
+  def ingestionJob(tenantId: String, jobId: String): IO[AgentError, Option[IngestionJobView]]
+
+  def search(
+      tenantId: String,
+      permissions: Set[String],
+      request: KnowledgeRetrievalRequest
+  ): IO[AgentError, KnowledgeSearchResult]
+
+  def reindex(
+      tenantId: String,
+      permissions: Set[String],
+      afterDocumentId: Option[String],
+      limit: Int
+  ): IO[AgentError, KnowledgeReindexReportView]
+
+/** 业务检索结果；不含管理沙盒的 provider 调试字段。 */
+final case class KnowledgeSearchResult(
+    citations: Chunk[KnowledgeCitationView],
+    evidenceStatus: String,
+    candidateCount: Int,
+    acceptedCount: Int,
+    topAcceptedScore: Option[Double]
+) derives JsonCodec
+
+final case class KnowledgeReindexItemView(
+    documentId: String,
+    status: String,
+    detail: Option[String] = None
+) derives JsonCodec
+
+final case class KnowledgeReindexReportView(
+    items: Chunk[KnowledgeReindexItemView],
+    nextDocumentId: Option[String],
+    hasMore: Boolean
+) derives JsonCodec

@@ -1,13 +1,25 @@
 package com.zyblw.agent.runtime
 
+import com.zyblw.agent.composition.{
+  ApprovalPolicyFingerprint,
+  ApprovalSubject,
+  AuthorizationFingerprint,
+  CompositionDrift,
+  RuntimeComposition,
+  RuntimeCompositionFingerprint,
+  RuntimeProfile,
+  ToolContractFingerprint
+}
 import com.zyblw.agent.context.*
 import com.zyblw.agent.core.*
+import com.zyblw.agent.extension.*
 import com.zyblw.agent.guardrails.*
 import com.zyblw.agent.memory.*
 import com.zyblw.agent.model.*
 import com.zyblw.agent.tools.*
 import java.util.concurrent.TimeUnit
 import zio.*
+import zio.json.*
 import zio.json.ast.Json
 import zio.stream.*
 
@@ -28,9 +40,15 @@ final class AgentRuntimeLive(
     observer: RunObserver,
     eventQueue: FiberRef[Option[Queue[Take[AgentError, AgentEvent]]]],
     activeRuns: Ref[Map[RunId, Fiber.Runtime[AgentError, RunOutcome]]],
-    executionLease: FiberRef[Option[RunCommandLease]]
+    executionLease: FiberRef[Option[RunCommandLease]],
+    profile: RuntimeProfile,
+    extensions: RuntimeExtensions,
+    roleCatalog: ModelRoleCatalog = ModelRoleCatalog.empty
 ) extends AgentRuntime,
       LeaseAwareAgentRuntime:
+  import AgentRuntimeLive.{PlannedCall, ResumeGrant}
+
+  private def capturePolicy: CapturePolicy = profile.capturePolicy
 
   /** 创建初始状态、执行输入 Guardrail，并在总时限内推动状态机。
     * @param agent
@@ -39,7 +57,7 @@ final class AgentRuntimeLive(
     *   包含线程、输入、可信业务上下文和本次预算
     */
   def run(agent: AgentDefinition, request: RunRequest): IO[AgentError, RunOutcome] =
-    RunId.random.flatMap(runWithId(_, agent, request))
+    resolveRole(agent).flatMap(resolved => RunId.random.flatMap(runWithId(_, resolved, request)))
 
   /** 由同步入口与流式入口共享的创建流程；显式传入 RunId，确保首个事件就能向 SSE 客户端暴露稳定标识。
     * @param runId
@@ -57,12 +75,14 @@ final class AgentRuntimeLive(
     for
       now     <- Clock.instant
       eventId <- EventId.random
+      _       <- registry.requireRegistered(agent.allowedTools)
       initial = RunInitialization.initialState(
         runId,
         agent,
         request,
         toolPolicies.current().maxCallsPerRun,
-        now
+        now,
+        Some(freezeComposition(agent))
       )
       createdEvent = AgentEvent.RunCreated(runId, initial.sessionId, now.toEpochMilli)
       persisted    = PersistedAgentEvent(eventId, runId, 0L, createdEvent, now.toEpochMilli)
@@ -84,6 +104,7 @@ final class AgentRuntimeLive(
       _ <- ZIO
         .fail(AgentError.InvalidResume(initial.runId, s"Start 只接受 Created，实际为 ${initial.status}"))
         .unless(initial.status == RunStatus.Created)
+      _     <- ensureCompatibleComposition(initial)
       input <- ZIO
         .fromOption(initial.messages.headOption)
         .orElseFail(AgentError.InvalidConfiguration(s"Run ${initial.runId.asString} 缺少首条输入消息"))
@@ -113,8 +134,9 @@ final class AgentRuntimeLive(
   def runEvents(agent: AgentDefinition, request: RunRequest): ZStream[Any, AgentError, AgentEvent] =
     ZStream.unwrapScoped {
       for
-        runId  <- RunId.random
-        stream <- streamEffect(runId, runWithId(runId, agent, request))
+        runId    <- RunId.random
+        resolved <- resolveRole(agent)
+        stream   <- streamEffect(runId, runWithId(runId, resolved, request))
       yield stream
     }
 
@@ -156,26 +178,30 @@ final class AgentRuntimeLive(
         .unless(state.status == RunStatus.WaitingForApproval)
       next <- decision match
         case ApprovalDecision.Approve =>
-          for
-            now <- Clock.instant
-            approvalStep = AgentStep.ApprovalStep(
-              state.steps.length + 1,
-              approval,
-              Some(decision),
-              now.toEpochMilli
-            )
-            approved <- save(
-              state,
-              state.copy(
-                status = RunStatus.Running,
-                pendingApproval = None,
-                steps = state.steps :+ approvalStep,
-                updatedAt = now
-              ),
-              AgentEvent.RunResumed(runId, now.toEpochMilli)
-            )
-            next <- processToolPlan(approved, approvedCallIds = Set(item.call.id))
-          yield next
+          revalidateApproval(state, approval, item.call).flatMap {
+            case Left(resuspended) => ZIO.succeed(resuspended)
+            case Right(grant)      =>
+              for
+                now <- Clock.instant
+                approvalStep = AgentStep.ApprovalStep(
+                  state.steps.length + 1,
+                  approval,
+                  Some(decision),
+                  now.toEpochMilli
+                )
+                approved <- save(
+                  state,
+                  state.copy(
+                    status = RunStatus.Running,
+                    pendingApproval = None,
+                    steps = state.steps :+ approvalStep,
+                    updatedAt = now
+                  ),
+                  AgentEvent.RunResumed(runId, now.toEpochMilli)
+                )
+                next <- processToolPlan(approved, grant)
+              yield next
+          }
         case ApprovalDecision.Reject(reason) =>
           val result       = ToolResult(Json.Obj("error" -> Json.Str(s"审批拒绝: $reason")), isError = true)
           val approvalStep = AgentStep.ApprovalStep(
@@ -206,13 +232,11 @@ final class AgentRuntimeLive(
         case RunStatus.Completed => completedOutcome(state)
         case RunStatus.Cancelled => ZIO.fail(AgentError.Cancelled(runId))
         case RunStatus.Failed | RunStatus.TimedOut | RunStatus.BudgetExceeded =>
-          ZIO.fail(AgentError.InvalidResume(runId, s"终态 ${state.status} 不能自动恢复"))
-        case RunStatus.WaitingForApproval | RunStatus.Suspended => recoverPending(state)
-        case RunStatus.Created                                  => startCreated(state)
-        case RunStatus.Running                                  =>
-          state.pendingToolPlan match
-            case Some(_) => recoverToolPlan(state)
-            case None    => loop(state)
+          closeUncertainModelCall(state)
+        case RunStatus.WaitingForApproval | RunStatus.Suspended =>
+          ensureCompatibleComposition(state) *> recoverPending(state)
+        case RunStatus.Created => startCreated(state)
+        case RunStatus.Running => ensureCompatibleComposition(state) *> recoverRunning(state)
     yield result
 
   /** 执行 WorkerHost claim 的类型化耐久命令，并把 fencing 凭证绑定到当前 Fiber 及其所有子 Fiber。
@@ -251,7 +275,10 @@ final class AgentRuntimeLive(
 
   /** 已取消 Run 对恢复命令而言是幂等完成，而不是需要无限重试的 worker 错误。 */
   private def recoverCommand(runId: RunId): IO[AgentError, Unit] =
-    recover(runId).unit.catchSome { case _: AgentError.Cancelled => ZIO.unit }
+    recover(runId).unit.catchSome {
+      case _: AgentError.Cancelled          => ZIO.unit
+      case _: AgentError.ModelCallUncertain => ZIO.unit
+    }
 
   /** 以 approvalId 绑定决定，并处理“状态已提交、命令尚未 complete 时进程崩溃”的重放窗口。
     *
@@ -333,15 +360,21 @@ final class AgentRuntimeLive(
     */
   private def loop(state: AgentState): IO[AgentError, RunOutcome] =
     for
-      _            <- ensureBudget(state)
-      runDecisions <- guardrails.checkRun(state, guardrailContext(state))
-      _            <- emitGuardrails(state.runId, "run", runDecisions)
-      cancelled    <- store.cancellationRequested(state.runId)
-      _            <- ZIO.fail(AgentError.Cancelled(state.runId)).when(cancelled)
-      agent        <- definition(state)
-      sources      <- contextSources.resolve(state, agent)
-      prepared     <- contextManager.build(state, agent, sources, agent.contextPolicy)
-      contextState <- persistPreparedContext(state, prepared)
+      _                  <- ensureBudget(state)
+      runDecisions       <- guardrails.checkRun(state, guardrailContext(state))
+      _                  <- emitGuardrails(state.runId, "run", runDecisions)
+      cancelled          <- store.cancellationRequested(state.runId)
+      _                  <- ZIO.fail(AgentError.Cancelled(state.runId)).when(cancelled)
+      agent              <- definition(state)
+      sources            <- contextSources.resolve(state, agent)
+      retrievalDecisions <- guardrails.checkRetrieval(
+        untrustedContextSnippets(sources),
+        guardrailContext(state)
+      )
+      _            <- emitGuardrails(state.runId, "retrieval", retrievalDecisions)
+      cited        <- persistCitations(state, sources)
+      prepared     <- contextManager.build(cited, agent, sources, agent.contextPolicy)
+      contextState <- persistPreparedContext(cited, prepared)
       // Context 压缩已经计入模型调用预算；主模型开始前再次检查，避免辅助调用用掉最后额度后继续越界。
       _         <- ensureBudget(contextState)
       contextAt <- Clock.currentTime(TimeUnit.MILLISECONDS)
@@ -359,31 +392,31 @@ final class AgentRuntimeLive(
       )
       allowed = agent.allowedTools.map(ToolName(_))
       definitions <- registry.definitions(allowed)
-      // 部署级模型覆盖在这里叠加到 Agent 自己的设置上，之后的能力校验、事件、步骤记录与计费全部使用
-      // 叠加后的结果。在更靠后的位置应用会让 CapabilityValidator 校验一个并非实际发送的模型。
-      settings = modelPolicies.current().applyTo(agent.modelSettings)
-      request  = ChatRequest(prepared.messages, definitions, settings)
+      // 每个调用捕获一次 live 工作点并与创建时组合比较；同一份值随后用于能力校验、账本和 dispatch，消除检查后再次读取造成的漂移窗口。
+      settings <- effectiveModelSettings(contextState, agent)
+      request = ChatRequest(prepared.messages, definitions, settings)
       capabilities <- model.capabilities(settings.model)
       _            <- CapabilityValidator.validate(request, capabilities)
       startedAt    <- Clock.currentTime(TimeUnit.MILLISECONDS)
       resolvedProvider = settings.provider.getOrElse(model.provider)
       resolvedModel    = settings.model.getOrElse("default")
-      _ <- emit(AgentEvent.StepStarted(contextState.runId, contextState.budget.steps + 1, startedAt))
-      _ <- emit(
-        AgentEvent.ModelCallStarted(
-          contextState.runId,
-          resolvedProvider,
-          resolvedModel,
-          startedAt
-        )
+      _          <- emit(AgentEvent.StepStarted(contextState.runId, contextState.budget.steps + 1, startedAt))
+      dispatched <- persistAndInvokeModel(
+        contextState,
+        agent,
+        prepared,
+        request,
+        resolvedProvider,
+        resolvedModel,
+        startedAt
       )
-      response <- invokeModel(contextState, request)
-      _        <- ZIO
+      (invokedState, response, modelRecord) = dispatched
+      _ <- ZIO
         .fail(AgentError.BudgetExceeded("toolCallsPerStep", toolPolicies.current().maxCallsPerStep.toLong))
         .when(response.message.toolCalls.length > toolPolicies.current().maxCallsPerStep)
       now <- Clock.instant
       step = AgentStep.ModelStep(
-        contextState.steps.length + 1,
+        invokedState.steps.length + 1,
         model.provider,
         resolvedModel,
         response.usage,
@@ -392,28 +425,29 @@ final class AgentRuntimeLive(
       )
       // 用实际路由到的 provider/model 查价，而不是 ChatModel.provider——后者在多 Provider 部署里是 "router"，
       // 拿它查价会永远查不到条目，让成本看板静默停留在零。
-      usage = contextState.usage.addModel(
+      usage = invokedState.usage.addModel(
         response.usage,
         modelPolicies.prices.estimate(resolvedProvider, resolvedModel, response.usage)
       )
-      _ <- ensureUsageBudget(contextState.budget.limits, usage)
+      _ <- ensureUsageBudget(invokedState.budget.limits, usage)
       _ <- ZIO
-        .fail(AgentError.BudgetExceeded("toolCalls", contextState.budget.limits.maxToolCalls))
-        .when(usage.toolCalls + response.message.toolCalls.length > contextState.budget.limits.maxToolCalls)
-      pending <- createDurableToolPlan(contextState, response.message.toolCalls)
-      updated0 = contextState.copy(
-        messages = contextState.messages :+ response.message,
-        steps = contextState.steps :+ step,
+        .fail(AgentError.BudgetExceeded("toolCalls", invokedState.budget.limits.maxToolCalls))
+        .when(usage.toolCalls + response.message.toolCalls.length > invokedState.budget.limits.maxToolCalls)
+      pending <- createDurableToolPlan(invokedState, response.message.toolCalls)
+      updated0 = invokedState.copy(
+        messages = invokedState.messages :+ response.message,
+        steps = invokedState.steps :+ step,
         usage = usage,
-        budget = contextState.budget.copy(consumed = usage, steps = contextState.budget.steps + 1),
+        budget = invokedState.budget.copy(consumed = usage, steps = invokedState.budget.steps + 1),
         updatedAt = now,
-        pendingToolPlan = pending
+        pendingToolPlan = pending,
+        pendingModelCall = None
       )
       events = NonEmptyChunk(
-        AgentEvent.ModelCallCompleted(contextState.runId, response.usage, now.toEpochMilli),
+        AgentEvent.ModelCallCompleted(invokedState.runId, response.usage, now.toEpochMilli),
         pending.toList.map(plan =>
           AgentEvent.ToolBatchPlanned(
-            contextState.runId,
+            invokedState.runId,
             plan.id,
             plan.batches.length,
             response.message.toolCalls.length,
@@ -421,12 +455,212 @@ final class AgentRuntimeLive(
           )
         )*
       )
-      updated <- saveEvents(contextState, updated0, events)
+      settled = modelRecord.map { record =>
+        ModelCallWrite.Transition(
+          ModelCallStatus.Dispatched,
+          record.attempt,
+          record.copy(
+            status = ModelCallStatus.Succeeded,
+            usage = Some(response.usage),
+            finishReason = Some(response.finishReason),
+            updatedAtEpochMilli = now.toEpochMilli
+          )
+        )
+      }
+      updated <- saveEvents(invokedState, updated0, events, settled)
       _       <- emit(AgentEvent.UsageUpdated(contextState.runId, usage, now.toEpochMilli))
       outcome <-
         if response.message.toolCalls.isEmpty then complete(updated, response.message)
         else processToolPlan(updated)
     yield outcome
+
+  /** TX1 持久化 Intent，再按 CapturePolicy 重建请求并调用 Provider。Disabled 保持 0.6.2 的即时调用。 */
+  private def persistAndInvokeModel(
+      state: AgentState,
+      agent: AgentDefinition,
+      prepared: PreparedContext,
+      request: ChatRequest,
+      provider: String,
+      modelName: String,
+      startedAt: Long
+  ): IO[AgentError, (AgentState, ChatResponse, Option[ModelCallExecutionRecord])] =
+    capturePolicy match
+      case CapturePolicy.Disabled =>
+        emit(AgentEvent.ModelCallStarted(state.runId, provider, modelName, startedAt)) *>
+          invokeModel(state, request).map(response => (state, response, None))
+      case policy =>
+        for
+          requestId <- ModelRequestId.random
+          now       <- Clock.currentTime(TimeUnit.MILLISECONDS)
+          instructionFp = agent.instructionSet.map(_.fingerprint)
+          fingerprint   = CanonicalModelRequest.fingerprint(request, instructionFp)
+          canonical     = CanonicalModelRequest.from(request)
+          lineage       = ModelCallContextLineage(
+            estimatedTokens = prepared.usage.estimatedTokens,
+            droppedMessages = prepared.usage.droppedMessages,
+            truncatedToolResults = prepared.usage.truncatedToolResults,
+            droppedMemories = prepared.usage.droppedMemories,
+            droppedRetrieval = prepared.usage.droppedRetrieval,
+            summaryCoveredMessages = prepared.summaryUpdate
+              .map(_.coveredMessages)
+              .orElse(state.contextSummary.map(_.coveredMessages)),
+            summarySourceDigest =
+              prepared.summaryUpdate.map(_.sourceDigest).orElse(state.contextSummary.map(_.sourceDigest)),
+            sectionDecisions = prepared.sectionDecisions.map(_.lineageEntry),
+            effectiveModelSettingsFingerprint =
+              Some(RuntimeComposition.modelSettingsFingerprint(request.settings)),
+            toolDefinitionsFingerprint = Some(CanonicalModelRequest.toolDefinitionsFingerprint(request.tools))
+          )
+          record = ModelCallExecutionRecord(
+            runId = state.runId,
+            requestId = requestId,
+            attempt = 1,
+            status = ModelCallStatus.Dispatched,
+            provider = provider,
+            model = modelName,
+            capturePolicy = policy,
+            fingerprint = fingerprint,
+            messageCount = request.messages.length,
+            toolCount = request.tools.length,
+            lineage = lineage,
+            instructionFingerprint = instructionFp,
+            canonicalRequest = Option.when(policy == CapturePolicy.Replayable)(canonical),
+            updatedAtEpochMilli = now
+          )
+          pending       = PendingModelCall(requestId, 1, fingerprint, policy, provider, modelName)
+          preparedEvent = AgentEvent.ModelCallPrepared(
+            state.runId,
+            requestId.asString,
+            provider,
+            modelName,
+            fingerprint,
+            policy.toString,
+            request.messages.length,
+            request.tools.length,
+            now
+          )
+          intentState <- saveEvents(
+            state,
+            state.copy(
+              pendingModelCall = Some(pending),
+              updatedAt = java.time.Instant.ofEpochMilli(now)
+            ),
+            NonEmptyChunk(preparedEvent),
+            Some(ModelCallWrite.Insert(record))
+          )
+          _        <- emit(AgentEvent.ModelCallStarted(state.runId, provider, modelName, startedAt))
+          dispatch <-
+            if policy == CapturePolicy.Replayable then
+              ZIO
+                .fromEither(record.toChatRequest)
+                .mapError(message => AgentError.InvalidConfiguration(message))
+            else ZIO.succeed(request)
+          response <- invokeModel(intentState, dispatch).catchAllCause { cause =>
+            settleInterruptedModelCall(intentState, record, cause).uninterruptible *> ZIO.failCause(cause)
+          }
+        yield (intentState, response, Some(record))
+
+  /** 进程内调用失败时结算账本，避免留下可被误重放的 Dispatched。崩溃路径走 recoverUncertainModelCall。 */
+  private def settleInterruptedModelCall(
+      state: AgentState,
+      record: ModelCallExecutionRecord,
+      cause: Cause[AgentError]
+  ): IO[AgentError, Unit] =
+    Clock.currentTime(TimeUnit.MILLISECONDS).flatMap { now =>
+      val interrupted = cause.isInterrupted
+      val status      = if interrupted then ModelCallStatus.Unknown else ModelCallStatus.Failed
+      val category    = cause.failureOption.map(_.category.toString)
+      val next        = record.copy(
+        status = status,
+        errorCategory = category,
+        updatedAtEpochMilli = now
+      )
+      val event =
+        if status == ModelCallStatus.Unknown then
+          AgentEvent.ModelCallUnknown(state.runId, record.requestId.asString, now)
+        else AgentEvent.ModelCallCompleted(state.runId, TokenUsage(), now)
+      saveEvents(
+        state,
+        state.copy(pendingModelCall = None, updatedAt = java.time.Instant.ofEpochMilli(now)),
+        NonEmptyChunk(event),
+        Some(ModelCallWrite.Transition(ModelCallStatus.Dispatched, record.attempt, next))
+      ).unit
+    }
+
+  /** TX1 之后崩溃：把 Dispatched/Prepared 标为 Unknown，Run 进入 Failed，禁止自动重放。 */
+  private def recoverUncertainModelCall(
+      state: AgentState,
+      pending: PendingModelCall
+  ): IO[AgentError, RunOutcome] =
+    for
+      existing <- store.getModelCall(state.runId, pending.requestId)
+      now      <- Clock.currentTime(TimeUnit.MILLISECONDS)
+      _        <- existing match
+        case Some(record) =>
+          ZIO
+            .fromEither(record.verifyFrozenTools)
+            .mapError(reason => AgentError.PersistenceFailure(s"模型账本工具合同损坏: $reason"))
+        case None => ZIO.unit
+      _ <- existing match
+        case Some(record)
+            if record.status == ModelCallStatus.Prepared || record.status == ModelCallStatus.Dispatched =>
+          val next = record.copy(status = ModelCallStatus.Unknown, updatedAtEpochMilli = now)
+          saveEvents(
+            state,
+            state.copy(
+              status = RunStatus.Failed,
+              pendingModelCall = None,
+              updatedAt = java.time.Instant.ofEpochMilli(now)
+            ),
+            NonEmptyChunk(
+              AgentEvent.ModelCallUnknown(state.runId, pending.requestId.asString, now),
+              AgentEvent.RunFailed(
+                state.runId,
+                ErrorCategory.Conflict.toString,
+                "模型调用在 Provider 结算前中断，结果未知，未自动重放",
+                now
+              )
+            ),
+            Some(ModelCallWrite.Transition(record.status, record.attempt, next))
+          ).unit
+        case Some(record) if record.status == ModelCallStatus.Unknown =>
+          save(
+            state,
+            state.copy(
+              status = RunStatus.Failed,
+              pendingModelCall = None,
+              updatedAt = java.time.Instant.ofEpochMilli(now)
+            ),
+            AgentEvent.RunFailed(
+              state.runId,
+              ErrorCategory.Conflict.toString,
+              "模型调用结果未知，未自动重放",
+              now
+            )
+          ).when(state.status == RunStatus.Running).unit
+        case Some(record) if record.status == ModelCallStatus.Succeeded =>
+          ZIO.fail(
+            AgentError.InvalidResume(state.runId, s"模型调用 ${pending.requestId.asString} 已结算成功但状态游标未清除")
+          )
+        case Some(_) =>
+          save(
+            state,
+            state.copy(
+              status = RunStatus.Failed,
+              pendingModelCall = None,
+              updatedAt = java.time.Instant.ofEpochMilli(now)
+            ),
+            AgentEvent.RunFailed(
+              state.runId,
+              ErrorCategory.Conflict.toString,
+              "模型调用未能结算",
+              now
+            )
+          ).unit
+        case None =>
+          ZIO.fail(AgentError.InvalidResume(state.runId, s"模型调用 ${pending.requestId.asString} 缺少账本记录"))
+      _ <- ZIO.fail(AgentError.ModelCallUncertain(state.runId, pending.requestId.asString))
+    yield (throw new IllegalStateException("ModelCallUncertain 必须中断恢复"))
 
   /** 在主模型调用前原子保存 Context 摘要边界和辅助模型用量。
     *
@@ -440,12 +674,33 @@ final class AgentRuntimeLive(
     * @return
     *   可能递增了 version/lastEventSequence/usage 的新权威状态
     */
+  private def persistCitations(state: AgentState, sources: ContextSources): IO[AgentError, AgentState] =
+    val nextCitations = sources.citations.distinctBy(_.id).take(32)
+    val nextEvidence  = sources.retrievalEvidence.orElse(state.retrievalEvidence)
+    if nextCitations == state.citations && nextEvidence == state.retrievalEvidence then ZIO.succeed(state)
+    else
+      for
+        now <- Clock.instant
+        evidence = nextEvidence.getOrElse(RunRetrievalEvidence("NotEvaluated", 0, 0))
+        next     = state.copy(
+          citations = nextCitations,
+          retrievalEvidence = nextEvidence,
+          updatedAt = now
+        )
+        saved <- saveEvents(
+          state,
+          next,
+          NonEmptyChunk(AgentEvent.RetrievalCited(state.runId, nextCitations, evidence, now.toEpochMilli))
+        )
+      yield saved
+
   private def persistPreparedContext(
       state: AgentState,
       prepared: PreparedContext
   ): IO[AgentError, AgentState] =
     val calls = prepared.usage.compressionModelCalls
-    if prepared.summaryUpdate.isEmpty && calls == 0 then ZIO.succeed(state)
+    if prepared.summaryUpdate.isEmpty && calls == 0 then
+      ZIO.succeed(state.copy(worldSectionCursors = prepared.worldSectionCursors))
     else
       for
         usage <- ZIO
@@ -460,6 +715,7 @@ final class AgentRuntimeLive(
           usage = usage,
           budget = state.budget.copy(consumed = usage),
           contextSummary = checkpoint,
+          worldSectionCursors = prepared.worldSectionCursors,
           updatedAt = now
         )
         compacted = AgentEvent.ContextCompacted(
@@ -481,19 +737,19 @@ final class AgentRuntimeLive(
     *
     * @param state
     *   已保存模型响应、完整计划和 nextBatchIndex 的状态
-    * @param approvedCallIds
-    *   本次 resume 明确批准重放的 callId；后续普通批次不会继承该集合
+    * @param grant
+    *   本次 resume 的人工授权范围；后续普通批次不会继承它
     * @return
     *   遇到审批时返回 Suspended；全部工具与后续模型调用完成时返回 Completed
     */
   private def processToolPlan(
       state: AgentState,
-      approvedCallIds: Set[String] = Set.empty
+      grant: ResumeGrant = ResumeGrant.none
   ): IO[AgentError, RunOutcome] =
     state.pendingToolPlan.flatMap(_.currentBatch) match
       case None        => loop(state.copy(pendingToolPlan = None))
       case Some(batch) =>
-        executeDurableBatch(state, batch, approvedCallIds).flatMap {
+        executeDurableBatch(state, batch, grant).flatMap {
           case Left(outcome) => ZIO.succeed(outcome)
           case Right(next)   => processToolPlan(next)
         }
@@ -516,14 +772,17 @@ final class AgentRuntimeLive(
   ): IO[AgentError, Option[DurableToolPlan]] =
     if calls.isEmpty then ZIO.none
     else
+      // 整个规划过程只读一次生效策略：审批判定与冻结进主体的策略指纹必须来自同一份配置，否则管理面在两次读取之间替换
+      // 配置会让计划带着自相矛盾的审批事实落库。
+      val policy = toolPolicies.current()
       for
-        invocations <- ZIO.foreach(calls.zipWithIndex) { case (call, ordinal) =>
+        resolved <- ZIO.foreach(calls.zipWithIndex) { case (call, ordinal) =>
           registry.get(ToolName(call.name)).either.map {
             case Right(tool) =>
               val canRunInParallel =
                 tool.metadata.conflictAwareParallel &&
-                  tool.metadata.automaticallyRetryable &&
-                  approvalReason(tool.metadata).isEmpty &&
+                  tool.metadata.mayReplayAfterCrash &&
+                  approvalReason(policy, tool.metadata).isEmpty &&
                   tool.metadata.requiredScopes.subsetOf(state.runContext.scopes)
               val metadata =
                 if canRunInParallel then tool.metadata
@@ -532,12 +791,27 @@ final class AgentRuntimeLive(
                     parallelism = ToolParallelism.SequentialOnly,
                     conflictAccesses = Set.empty
                   )
-              PlannedToolInvocation(ordinal, call, planningView(tool, metadata))
+              val contract = ToolContractFingerprint.registered(tool)
+              PlannedCall(
+                PlannedToolInvocation(ordinal, call, planningView(tool, metadata)),
+                contract,
+                Option.when(approvalReason(policy, tool.metadata).nonEmpty)(
+                  approvalSubject(state, policy, call, tool.metadata, contract)
+                )
+              )
             case Left(_) =>
-              PlannedToolInvocation(ordinal, call, unknownPlanningTool(call))
+              val unknown  = unknownPlanningTool(call)
+              val contract = ToolContractFingerprint.missing(call.name)
+              PlannedCall(
+                PlannedToolInvocation(ordinal, call, unknown),
+                contract,
+                Option.when(approvalReason(policy, unknown.metadata).nonEmpty)(
+                  approvalSubject(state, policy, call, unknown.metadata, contract)
+                )
+              )
           }
         }
-        planned <- ZIO.fromEither(ToolBatchPlanner.plan(invocations))
+        planned <- ZIO.fromEither(ToolBatchPlanner.plan(resolved.map(_.invocation)))
         planId  <- Random.nextUUID.map(_.toString)
         batches = planned.batches.zipWithIndex.map { case (batch, index) =>
           DurableToolBatch(
@@ -547,7 +821,16 @@ final class AgentRuntimeLive(
             )
           )
         }
-      yield Some(DurableToolPlan(planId, batches))
+        fingerprints = resolved.map(entry => entry.invocation.call.name -> entry.contract).toMap
+        subjects = resolved.flatMap(entry => entry.approvalSubject.map(entry.invocation.call.id -> _)).toMap
+      yield Some(
+        DurableToolPlan(
+          planId,
+          batches,
+          toolContractFingerprints = fingerprints,
+          approvalSubjects = Some(subjects)
+        )
+      )
 
   /** 执行一个耐久 super-step：先完成注册、权限、审批和 Guardrail 门禁，再一次性写入整批 Prepared pending writes， 最后并行执行并按 ordinal
     * 原子提交全部结果。若进程在若干工具成功后崩溃，成功结果只存在于工具账本，恢复时会 复用它们并补齐剩余调用；AgentState 在整批齐备前不会看到半批消息。
@@ -556,15 +839,15 @@ final class AgentRuntimeLive(
     *   当前批次尚未提交的状态
     * @param batch
     *   当前耐久批次
-    * @param approvedCallIds
-    *   本次人工操作明确允许重放的调用；只影响当前 resume，不会扩大其他调用权限
+    * @param grant
+    *   本次人工操作授予的放行范围；只影响当前 resume，不会扩大其他调用权限
     * @return
     *   Left 表示等待人工审批；Right 表示批次已原子提交并可继续下一批
     */
   private def executeDurableBatch(
       state: AgentState,
       batch: DurableToolBatch,
-      approvedCallIds: Set[String]
+      grant: ResumeGrant
   ): IO[AgentError, Either[RunOutcome, AgentState]] =
     for
       plan <- ZIO
@@ -573,15 +856,16 @@ final class AgentRuntimeLive(
       _ <- ZIO
         .fail(AgentError.PersistenceFailure("执行批次不是当前恢复游标"))
         .unless(plan.currentBatch.contains(batch))
+      resolved <- ZIO.foreach(batch.items)(item =>
+        registry.get(ToolName(item.call.name)).either.map(item -> _)
+      )
+      _  <- validateToolContracts(state, plan, resolved)
       at <- Clock.currentTime(TimeUnit.MILLISECONDS)
       _  <- emit(AgentEvent.ToolBatchStarted(state.runId, plan.id, batch.index, batch.items.length, at))
       _  <- ZIO.foreachDiscard(batch.items)(item =>
         emit(AgentEvent.ToolCallRequested(state.runId, item.call, at))
       )
-      resolved <- ZIO.foreach(batch.items)(item =>
-        registry.get(ToolName(item.call.name)).either.map(item -> _)
-      )
-      gate   <- firstBatchGate(state, batch, resolved, approvedCallIds)
+      gate   <- firstBatchGate(state, plan, batch, resolved, grant)
       result <- gate match
         case Some(Left(outcome))     => ZIO.succeed(Left(outcome))
         case Some(Right(toolResult)) =>
@@ -616,6 +900,9 @@ final class AgentRuntimeLive(
               })
               .get
             _ <- store.prepareToolExecutions(prepared)
+            _ <- ZIO.foreachDiscard(prepared) { record =>
+              notifyToolLifecycle(_.onPrepared(record.callId, record.toolName))
+            }
             invocations = tools.map { case (item, tool) =>
               PlannedToolInvocation(item.ordinal, item.call, tool)
             }
@@ -630,7 +917,7 @@ final class AgentRuntimeLive(
                   state,
                   item,
                   invocation.tool,
-                  forceRetry = approvedCallIds.contains(invocation.call.id)
+                  forceRetry = grant.forceRetryCallIds.contains(invocation.call.id)
                 )
             }
             ordered <- ZIO.foreach(report.outcomes) { outcome =>
@@ -639,11 +926,17 @@ final class AgentRuntimeLive(
                 .map(result => DurableToolPlanItem(outcome.ordinal, outcome.call) -> result)
             }
             _ <- ZIO.foreachDiscard(ordered) { case (item, toolResult) =>
-              guardrails
-                .checkTool(item.call, Some(toolResult), guardrailContext(state))
-                .flatMap(
-                  emitGuardrails(state.runId, "tool.after", _)
-                )
+              val remote = UntrustedRemoteMessage.fromPayload(
+                s"tool:${item.call.name}",
+                toolResult.value.toJson,
+                Set("tool-output")
+              )
+              for
+                after           <- guardrails.checkTool(item.call, Some(toolResult), guardrailContext(state))
+                _               <- emitGuardrails(state.runId, "tool.after", after)
+                remoteDecisions <- guardrails.checkRemote(remote, guardrailContext(state))
+                _               <- emitGuardrails(state.runId, "remote", remoteDecisions)
+              yield ()
             }
             next <- appendToolBatchResults(state, batch, ordered)
           yield Right(next)
@@ -651,14 +944,18 @@ final class AgentRuntimeLive(
 
   /** 检查整个批次在副作用发生前必须满足的动态门禁。
     *
+    * 审批门禁在这里重新计算现场 [[ApprovalSubject]]：规划时冻结的审批要求不会因为策略放宽而消失，而历史批准只有在主体
+    * 逐字段相同时才继续有效。工具契约、参数、执行环境、授权上下文或审批策略任一变化，都会重新请求人工授权。
+    *
     * @return
     *   None 表示整批可执行；Some(Left) 表示暂停审批；Some(Right) 表示单调用应以结构化错误提交。
     */
   private def firstBatchGate(
       state: AgentState,
+      plan: DurableToolPlan,
       batch: DurableToolBatch,
       resolved: Chunk[(DurableToolPlanItem, Either[AgentError.ToolNotFound, RegisteredTool])],
-      approvedCallIds: Set[String]
+      grant: ResumeGrant
   ): IO[AgentError, Option[Either[RunOutcome, ToolResult]]] =
     val missing = resolved.collectFirst { case (item, Left(error)) => item -> error }
     missing match
@@ -678,17 +975,32 @@ final class AgentRuntimeLive(
           case Some((_, result)) =>
             ensureSingletonBatch(state.runId, batch, "权限不足工具") *> ZIO.succeed(Some(Right(result)))
           case None =>
-            tools.collectFirst {
-              case (item, tool)
-                  if approvalReason(tool.metadata).nonEmpty &&
-                    !approvedCallIds.contains(item.call.id) &&
-                    !wasApproved(state, item.call.id) =>
-                (item, tool, approvalReason(tool.metadata).get)
-            } match
-              case Some((item, tool, reason)) =>
-                ensureSingletonBatch(state.runId, batch, "需要审批的工具") *>
-                  suspend(state, item.call, tool.metadata.risk, reason).map(outcome => Some(Left(outcome)))
-              case None => ZIO.none
+            val policy = toolPolicies.current()
+            deniedByExtension(state, plan, tools, policy).flatMap {
+              case Some((item, reason)) =>
+                ensureSingletonBatch(state.runId, batch, "扩展拒绝的工具") *>
+                  ZIO.succeed(Some(Right(errorToolResult(item.call.name, reason))))
+              case None =>
+                tools.iterator
+                  .filter { case (item, tool) =>
+                    plan.frozenApprovalCallIds.exists(_.contains(item.call.id)) ||
+                    approvalReason(policy, tool.metadata).nonEmpty
+                  }
+                  .map { case (item, tool) =>
+                    (item, tool, liveApprovalSubject(state, policy, item.call, tool))
+                  }
+                  .find { case (item, _, subject) =>
+                    !grant.approvedSubjects.contains(subject) && !wasApproved(state, item.call.id, subject)
+                  } match
+                  case Some((item, tool, subject)) =>
+                    val reason = approvalDriftReason(plan, subject)
+                      .orElse(approvalReason(policy, tool.metadata))
+                      .getOrElse("该工具调用在规划时已冻结为需要人工审批")
+                    ensureSingletonBatch(state.runId, batch, "需要审批的工具") *>
+                      suspend(state, item.call, tool.metadata.risk, reason, Some(subject))
+                        .map(outcome => Some(Left(outcome)))
+                  case None => ZIO.none
+            }
 
   /** 单调用错误批次是安全降级；若元数据漂移让并行批次出现动态门禁，则拒绝半批提交。 */
   private def ensureSingletonBatch(
@@ -701,13 +1013,115 @@ final class AgentRuntimeLive(
       .unless(batch.items.length == 1)
       .unit
 
-  /** 查询状态历史中是否已经持久化过该调用的批准决定；恢复不能把重启误认为批准。 */
-  private def wasApproved(state: AgentState, callId: String): Boolean =
+  /** 扩展只能拒绝需要审批的副作用，不能批准。`RecommendAllow` 被忽略。 */
+  private def deniedByExtension(
+      state: AgentState,
+      plan: DurableToolPlan,
+      tools: Chunk[(DurableToolPlanItem, RegisteredTool)],
+      policy: ToolPolicyConfig
+  ): UIO[Option[(DurableToolPlanItem, String)]] =
+    if extensions.approvalReviewers.isEmpty then ZIO.none
+    else
+      val input      = extensionInput(state)
+      val candidates = tools.filter { case (item, tool) =>
+        plan.frozenApprovalCallIds.exists(_.contains(item.call.id)) ||
+        approvalReason(policy, tool.metadata).nonEmpty
+      }
+      ZIO
+        .foldLeft(candidates)(Option.empty[(DurableToolPlanItem, String)]) { (denied, pair) =>
+          denied match
+            case Some(_) => ZIO.succeed(denied)
+            case None    =>
+              val (item, tool) = pair
+              val subject      = liveApprovalSubject(state, policy, item.call, tool)
+              ZIO
+                .foldLeft(extensions.approvalReviewers)(Option.empty[String]) { (found, reviewer) =>
+                  found match
+                    case Some(_) => ZIO.succeed(found)
+                    case None    =>
+                      reviewer.review(subject, input).map {
+                        case ApprovalReview.Deny(reason) =>
+                          Some(
+                            s"扩展 ${reviewer.descriptor.sourceId} 拒绝该副作用: ${reason.take(256)}"
+                          )
+                        case ApprovalReview.Abstain | ApprovalReview.RecommendAllow(_) => None
+                      }
+                }
+                .map(_.map(item -> _))
+        }
+
+  /** 观察者全部是 `UIO`，缺陷也不能取消已经发生或即将发生的副作用。 */
+  private def notifyToolLifecycle(event: ToolLifecycleObserver => UIO[Unit]): UIO[Unit] =
+    ZIO.foreachDiscard(extensions.toolLifecycleObservers) { observer =>
+      event(observer).catchAllCause(_ => ZIO.unit)
+    }
+
+  /** 查询状态历史中是否存在对**同一副作用**的批准；恢复不能把重启误认为批准。
+    *
+    * v6 起比较完整的 [[ApprovalSubject]]：`callId` 由 Provider 给出，模型可以在后续轮次复用同一个 ID 提出不同参数的调用， 只按 ID 匹配会让一次批准变成对该 ID
+    * 的长期授权。v5 及更早的历史步骤没有主体，只能回落到原有的 `callId` 判定。
+    */
+  private def wasApproved(state: AgentState, callId: String, subject: ApprovalSubject): Boolean =
     state.steps.exists {
       case AgentStep.ApprovalStep(_, request, Some(ApprovalDecision.Approve), _) =>
-        request.toolCall.id == callId
+        request.subject.fold(request.toolCall.id == callId)(_ == subject)
       case _ => false
     }
+
+  /** 在写入批准决定之前，确认人工看到的那个副作用此刻仍然成立。
+    *
+    * 从暂停到批准之间可以经过任意长时间：工具实现、审批策略或调用者权限都可能已经变化。如果现场主体与人工审阅时的主体
+    * 不一致，就不能把这次批准记为对当前副作用的授权——那等于让人替一件他没看过的事情背书。此时带着新主体重新请求审批， 而不是直接失败：失败会让 `pendingApproval`
+    * 停留在旧主体上，形成永远无法通过的死锁。
+    *
+    * @return
+    *   Left 表示主体已变化并已重新请求审批；Right 表示可以按人工决定放行
+    */
+  private def revalidateApproval(
+      state: AgentState,
+      approval: ApprovalRequest,
+      call: ToolCall
+  ): IO[AgentError, Either[RunOutcome, ResumeGrant]] =
+    val replay = ResumeGrant(forceRetryCallIds = Set(call.id))
+    approval.subject match
+      // v5 及更早的请求，以及崩溃恢复类的“是否允许重放”请求，都没有主体，沿用原有的 callId 授权语义。
+      case None         => ZIO.succeed(Right(replay))
+      case Some(frozen) =>
+        val policy = toolPolicies.current()
+        registry.get(ToolName(call.name)).either.flatMap {
+          // 工具已从注册表消失：交给既有的契约校验与 ToolNotFound 门禁处理，这里不再重复判定。
+          case Left(_)     => ZIO.succeed(Right(replay))
+          case Right(tool) =>
+            val live = liveApprovalSubject(state, policy, call, tool)
+            if live == frozen then ZIO.succeed(Right(replay.copy(approvedSubjects = Set(frozen))))
+            else
+              suspend(
+                state,
+                call,
+                tool.metadata.risk,
+                s"审批主体在批准前已变化（${frozen.driftFrom(live).mkString("、")}），原批准不再适用，请重新确认",
+                Some(live)
+              ).map(Left(_))
+        }
+
+  /** 生成待审批请求的稳定标识。
+    *
+    * 标识包含审批主体摘要，因此主体变化后刷新出的请求不会与旧请求同名：控制面按 `approvalId` 校验时，旧页面提交的决定 会被拒绝，而不是应用到一条它从未展示过的副作用上。恢复类暂停没有主体，沿用原有的
+    * runId+callId 形式。
+    */
+  private def approvalRequestId(runId: RunId, call: ToolCall, subject: Option[ApprovalSubject]): String =
+    val base = s"approval-${runId.asString}-${call.id}"
+    subject.fold(base)(value => s"$base-${value.value.take(16)}")
+
+  /** 解释一次「历史批准已不再适用」的暂停原因。
+    *
+    * 只输出发生变化的属性名，不输出任一侧取值，因此可以安全进入面向运维的错误信息与事件流。返回 `None` 表示本次暂停 不是由主体漂移触发，调用方应改用策略给出的原因。
+    */
+  private def approvalDriftReason(plan: DurableToolPlan, subject: ApprovalSubject): Option[String] =
+    plan.approvalSubjects
+      .flatMap(_.get(subject.callId))
+      .filterNot(_ == subject)
+      .map(frozen => s"审批主体已变化（${frozen.driftFrom(subject).mkString("、")}），历史批准不再适用，需要重新人工授权")
 
   /** 创建仅用于规划的元数据视图；真正执行仍委托给原注册工具。 */
   private def planningView(tool: RegisteredTool, effectiveMetadata: ToolMetadata): RegisteredTool =
@@ -754,7 +1168,7 @@ final class AgentRuntimeLive(
             )
         case Some(record)
             if Set(ToolExecutionStatus.Running, ToolExecutionStatus.Unknown).contains(record.status) &&
-              !tool.metadata.automaticallyRetryable && !forceRetry =>
+              !tool.metadata.mayReplayAfterCrash && !forceRetry =>
           ZIO.fail(
             AgentError.InvalidResume(state.runId, s"工具 ${item.call.name}/${item.call.id} 执行结果不确定，需要人工确认")
           )
@@ -785,6 +1199,7 @@ final class AgentRuntimeLive(
       )
       active   <- store.transitionToolExecution(existing.status, existing.attempt, running)
       _        <- emit(AgentEvent.ToolExecutionStarted(state.runId, call.id, now))
+      _        <- notifyToolLifecycle(_.onStarted(call.id, call.name))
       executor <- ToolExecutor.make(toolPolicies.current().copy(allowedTools = Set(ToolName(call.name))))
       result   <- executor
         .execute(tool, call, executionContext(state, call))
@@ -793,7 +1208,7 @@ final class AgentRuntimeLive(
             for
               at <- Clock.currentTime(java.util.concurrent.TimeUnit.MILLISECONDS)
               failureStatus =
-                if tool.metadata.automaticallyRetryable then ToolExecutionStatus.Failed
+                if tool.metadata.mayReplayAfterCrash then ToolExecutionStatus.Failed
                 else ToolExecutionStatus.Unknown
               _ <- store.transitionToolExecution(
                 ToolExecutionStatus.Running,
@@ -801,6 +1216,7 @@ final class AgentRuntimeLive(
                 active.copy(status = failureStatus, updatedAtEpochMilli = at)
               )
               _ <- emit(AgentEvent.ToolExecutionFailed(state.runId, call.id, error.category.toString, at))
+              _ <- notifyToolLifecycle(_.onFailed(call.id, call.name, error.category.toString))
               message = if error.safeToExpose then error.message else s"工具 ${call.name} 执行失败"
             yield ToolResult(Json.Obj("error" -> Json.Str(message)), isError = true),
           value =>
@@ -815,6 +1231,7 @@ final class AgentRuntimeLive(
                     updatedAtEpochMilli = at
                   )
                 )
+                .tap(_ => notifyToolLifecycle(_.onCompleted(call.id, call.name)))
                 .as(value)
             }
         )
@@ -881,27 +1298,44 @@ final class AgentRuntimeLive(
       )
     yield next
 
+  /** 崩溃恢复暂停原因由 [[ToolRecoveryPolicy]] 决定，不复用在线 [[ToolRetryPolicy]] 文案。 */
+  private def uncertainToolReason(status: ToolExecutionStatus, metadata: ToolMetadata): String =
+    (status, metadata.recoveryPolicy) match
+      case (ToolExecutionStatus.Running, ToolRecoveryPolicy.RequiresApproval) =>
+        "进程中断时破坏性工具处于 Running，外部副作用结果未知；即使此前已批准也必须再次确认后才允许重放"
+      case (_, ToolRecoveryPolicy.RequiresApproval) =>
+        "破坏性工具执行结果未知；请先核对外部系统，再决定是否重放"
+      case (ToolExecutionStatus.Running, _) =>
+        "进程中断时非幂等工具处于 Running，外部副作用结果未知；确认后才允许重放"
+      case _ =>
+        "非幂等工具执行结果未知；请先核对外部系统，再决定是否重放"
+
   /** 在任何受控副作用之前保存 ApprovalRequest 和完整工具游标。
     * @param risk
     *   工具声明的真实风险，不使用固定占位风险
     * @param reason
     *   给审批人的可理解原因
+    * @param subject
+    *   本次批准所授权的具体副作用。崩溃恢复类暂停暂不携带主体：它请求的是“是否允许重放一个结果未知的副作用”，与授权一次 新副作用不是同一个判定，重放边界仍由 [[ToolRecoveryPolicy]]
+    *   与执行账本决定
     */
   private def suspend(
       state: AgentState,
       call: ToolCall,
       risk: ToolRisk,
-      reason: String
+      reason: String,
+      subject: Option[ApprovalSubject] = None
   ): IO[AgentError, RunOutcome] =
     for
       now <- Clock.instant
       approval = ApprovalRequest(
-        s"approval-${state.runId.asString}-${call.id}",
+        approvalRequestId(state.runId, call, subject),
         state.runId,
         call,
         risk,
         reason,
-        now.toEpochMilli
+        now.toEpochMilli,
+        subject
       )
       suspended <- save(
         state,
@@ -919,6 +1353,93 @@ final class AgentRuntimeLive(
       approval,
       TokenUsage(suspended.usage.inputTokens, suspended.usage.outputTokens),
       suspended.budget.steps
+    )
+
+  /** Running 恢复：未结算模型优先于工具游标；已结算的最终助手消息直接 Complete，禁止再调 Provider。 */
+  private def recoverRunning(state: AgentState): IO[AgentError, RunOutcome] =
+    state.pendingModelCall match
+      case Some(pending) => recoverUncertainModelCall(state, pending)
+      case None          =>
+        store.getModelCalls(state.runId).flatMap { calls =>
+          openUncertainModelCall(calls) match
+            case Some(record) => recoverUncertainModelCall(state, pendingFrom(record))
+            case None         =>
+              state.pendingToolPlan match
+                case Some(_) => recoverToolPlan(state)
+                case None    =>
+                  settledFinalAnswer(state) match
+                    case Some(answer) => complete(state, answer)
+                    case None         => loop(state)
+        }
+
+  /** 在门禁、审批或副作用之前核对计划创建时冻结的工具契约。
+    *
+    * 空 Map 仅代表升级前旧快照，继续沿用既有名称/权限门禁；新计划必须逐个冻结，Schema 或安全元数据任一变化都拒绝恢复。 当前 schema
+    * 写出的计划还必须带有完整审批主体快照，缺失即视为持久化损坏，而不是“这次不需要审批”。
+    */
+  private def validateToolContracts(
+      state: AgentState,
+      plan: DurableToolPlan,
+      resolved: Chunk[(DurableToolPlanItem, Either[AgentError.ToolNotFound, RegisteredTool])]
+  ): IO[AgentError, Unit] =
+    val plannedNames = plan.batches.flatMap(_.items.map(_.call.name)).toSet
+    val complete     =
+      plan.toolContractFingerprints.keySet == plannedNames && plan.approvalSubjects.nonEmpty
+    if state.schemaVersion >= AgentState.CurrentSchemaVersion && !complete then
+      ZIO.fail(AgentError.PersistenceFailure("v6 工具计划缺少完整契约指纹或审批主体快照，拒绝恢复"))
+    else if plan.toolContractFingerprints.isEmpty then ZIO.unit
+    else
+      ZIO.foreachDiscard(resolved) { case (item, tool) =>
+        val expected = plan.toolContractFingerprints.get(item.call.name)
+        val current  = tool.fold(
+          _ => ToolContractFingerprint.missing(item.call.name),
+          ToolContractFingerprint.registered
+        )
+        ZIO
+          .fail(
+            AgentError.CompositionIncompatible(
+              state.runId,
+              s"工具 ${item.call.name} 的 Schema 或安全契约已变化，拒绝执行已冻结计划"
+            )
+          )
+          .unless(expected.contains(current))
+      }
+
+  /** Failed 终态若仍有未结算模型账本，先收口 Unknown，禁止把它当成可忽略的普通终态。 */
+  private def closeUncertainModelCall(state: AgentState): IO[AgentError, RunOutcome] =
+    state.pendingModelCall match
+      case Some(pending) => recoverUncertainModelCall(state, pending)
+      case None          =>
+        store.getModelCalls(state.runId).flatMap { calls =>
+          openUncertainModelCall(calls) match
+            case Some(record) => recoverUncertainModelCall(state, pendingFrom(record))
+            case None         =>
+              ZIO.fail(AgentError.InvalidResume(state.runId, s"终态 ${state.status} 不能自动恢复"))
+        }
+
+  private def openUncertainModelCall(
+      calls: Chunk[ModelCallExecutionRecord]
+  ): Option[ModelCallExecutionRecord] =
+    calls.find(record =>
+      record.status == ModelCallStatus.Prepared ||
+        record.status == ModelCallStatus.Dispatched ||
+        record.status == ModelCallStatus.Unknown
+    )
+
+  private def pendingFrom(record: ModelCallExecutionRecord): PendingModelCall =
+    PendingModelCall(
+      record.requestId,
+      record.attempt,
+      record.fingerprint,
+      record.capturePolicy,
+      record.provider,
+      record.model
+    )
+
+  /** TX2 已写入最终助手消息但尚未把 Run 标为 Completed 时，恢复必须收口而不是再调 Provider。 */
+  private def settledFinalAnswer(state: AgentState): Option[AgentMessage] =
+    state.messages.lastOption.filter(message =>
+      message.role == MessageRole.Assistant && message.toolCalls.isEmpty
     )
 
   /** 在输出 Guardrail 通过后提交 Completed，并构造稳定公开结果。 */
@@ -949,25 +1470,19 @@ final class AgentRuntimeLive(
     * @param event
     *   与该状态转换不可分割的领域事件
     */
-  private def save(current: AgentState, next: AgentState, event: AgentEvent): IO[AgentError, AgentState] =
-    saveEvents(current, next, NonEmptyChunk(event))
+  private def save(
+      current: AgentState,
+      next: AgentState,
+      event: AgentEvent
+  ): IO[AgentError, AgentState] =
+    saveEvents(current, next, NonEmptyChunk(event), None)
 
-  /** 在一个乐观锁事务中提交状态与多条连续事件。
-    *
-    * 批次完成时，每个 ToolExecutionCompleted 与 ToolBatchCommitted 必须和 AgentState 的消息、步骤及游标推进 同生共死；逐条 save
-    * 会暴露半批状态，因此这里一次分配连续 sequence 并调用单次 RunStore.commit。
-    *
-    * @param current
-    *   提供 expectedVersion 与上一条事件序号
-    * @param next
-    *   尚未更新 version/lastEventSequence 的目标状态
-    * @param events
-    *   至少一条、严格按业务发生顺序排列的领域事件
-    */
+  /** 在一个乐观锁事务中提交状态、连续事件和可选的主模型账本。 */
   private def saveEvents(
       current: AgentState,
       next: AgentState,
-      events: NonEmptyChunk[AgentEvent]
+      events: NonEmptyChunk[AgentEvent],
+      modelCall: Option[ModelCallWrite] = None
   ): IO[AgentError, AgentState] =
     for
       eventIds <- ZIO.foreach(events)(_ => EventId.random)
@@ -983,8 +1498,8 @@ final class AgentRuntimeLive(
       durable      = next.copy(lastEventSequence = lastSequence)
       lease   <- executionLease.get
       version <- lease match
-        case Some(value) => store.commitFenced(value, current.version, durable, persisted)
-        case None        => store.commit(current.version, durable, persisted)
+        case Some(value) => store.commitFenced(value, current.version, durable, persisted, modelCall)
+        case None        => store.commit(current.version, durable, persisted, modelCall)
       saved = durable.copy(version = version)
       _ <- ZIO.foreachDiscard(stamped)(emit)
       _ <- emit(AgentEvent.CheckpointSaved(current.runId, version, now))
@@ -1008,7 +1523,7 @@ final class AgentRuntimeLive(
                 if Set(ToolExecutionStatus.Prepared, ToolExecutionStatus.Failed).contains(value.status) =>
               suspendedOutcome(state)
             case Some(value)
-                if value.status == ToolExecutionStatus.Running && !tool.metadata.automaticallyRetryable =>
+                if value.status == ToolExecutionStatus.Running && !tool.metadata.mayReplayAfterCrash =>
               for
                 now <- Clock.currentTime(java.util.concurrent.TimeUnit.MILLISECONDS)
                 _   <- store.transitionToolExecution(
@@ -1020,16 +1535,16 @@ final class AgentRuntimeLive(
                   state.copy(status = RunStatus.Running),
                   item.call,
                   tool.metadata.risk,
-                  "进程中断时非幂等工具处于 Running，外部副作用结果未知；确认后才允许重放"
+                  uncertainToolReason(ToolExecutionStatus.Running, tool.metadata)
                 )
               yield out
             case Some(value)
-                if value.status == ToolExecutionStatus.Unknown && !tool.metadata.automaticallyRetryable =>
+                if value.status == ToolExecutionStatus.Unknown && !tool.metadata.mayReplayAfterCrash =>
               suspend(
                 state.copy(status = RunStatus.Running),
                 item.call,
                 tool.metadata.risk,
-                "非幂等工具执行结果未知；请先核对外部系统，再决定是否重放"
+                uncertainToolReason(ToolExecutionStatus.Unknown, tool.metadata)
               )
             case _ => recoverToolPlan(state.copy(status = RunStatus.Running))
         yield outcome
@@ -1049,7 +1564,7 @@ final class AgentRuntimeLive(
           case Right(tool) =>
             store.getToolExecution(state.runId, item.call.id).flatMap {
               case Some(record)
-                  if record.status == ToolExecutionStatus.Running && !tool.metadata.automaticallyRetryable =>
+                  if record.status == ToolExecutionStatus.Running && !tool.metadata.mayReplayAfterCrash =>
                 for
                   now <- Clock.currentTime(TimeUnit.MILLISECONDS)
                   _   <- store.transitionToolExecution(
@@ -1061,16 +1576,16 @@ final class AgentRuntimeLive(
                     state.copy(status = RunStatus.Running, pendingApproval = None),
                     item.call,
                     tool.metadata.risk,
-                    "进程中断时非幂等工具处于 Running，外部副作用结果未知；核对外部系统后才能决定是否重放"
+                    uncertainToolReason(ToolExecutionStatus.Running, tool.metadata)
                   )
                 yield out
               case Some(record)
-                  if record.status == ToolExecutionStatus.Unknown && !tool.metadata.automaticallyRetryable =>
+                  if record.status == ToolExecutionStatus.Unknown && !tool.metadata.mayReplayAfterCrash =>
                 suspend(
                   state.copy(status = RunStatus.Running, pendingApproval = None),
                   item.call,
                   tool.metadata.risk,
-                  "非幂等工具执行结果未知；请先核对外部系统，再决定是否重放"
+                  uncertainToolReason(ToolExecutionStatus.Unknown, tool.metadata)
                 )
               case _ => processToolPlan(state.copy(status = RunStatus.Running, pendingApproval = None))
             }
@@ -1144,7 +1659,7 @@ final class AgentRuntimeLive(
         current,
         current.copy(status = status, updatedAt = now),
         event
-      )
+      ).when(settledFinalAnswer(current).isEmpty)
     yield ()).ignore
 
   /** 消费 Provider 的语义流并实时转发安全增量。
@@ -1244,7 +1759,7 @@ final class AgentRuntimeLive(
     * @param runId
     *   当前运行
     * @param stage
-    *   `input`、`run`、`tool.before`、`tool.after` 或 `output`
+    *   `input`、`run`、`retrieval`、`tool.before`、`tool.after`、`remote` 或 `output`
     * @param decisions
     *   GuardrailEngine 返回的规则名和判定
     */
@@ -1258,6 +1773,18 @@ final class AgentRuntimeLive(
         .currentTime(TimeUnit.MILLISECONDS)
         .flatMap(at => emit(AgentEvent.GuardrailEvaluated(runId, s"$stage:$name", decision.allowed, at)))
     }
+
+  /** 检索文档、非 Metadata section 和 Memory 都按不可信数据检查；Metadata 目录不含正文。 */
+  private def untrustedContextSnippets(sources: ContextSources): Chunk[UntrustedSnippet] =
+    sources.retrieval.map(document =>
+      UntrustedSnippet.fromDocument(document.id, document.content, Set("retrieval", document.source))
+    ) ++ sources.sections
+      .filter(_.sensitivity != ContextPayloadSensitivity.Metadata)
+      .map(section =>
+        UntrustedSnippet.fromDocument(s"section:${section.id}", section.payload, Set("section"))
+      ) ++ sources.memories.map(memory =>
+      UntrustedSnippet.fromDocument(s"memory:${memory.key}", memory.content, Set("memory"))
+    )
 
   /** 将 Fiber 中断或外部取消请求收敛为幂等耐久终态。 并发取消可能与完成提交竞争；乐观锁失败会被忽略，最终状态始终由数据库中先成功的终态决定。
     */
@@ -1348,13 +1875,18 @@ final class AgentRuntimeLive(
 
   /** 根据集中审批策略与工具风险决定是否暂停。
     *
+    * 策略由调用方以快照形式传入：规划与门禁都要在同一次判定中同时得到“是否需要审批”和“依据哪份策略”，各自重新读取一次 可能已被管理面替换的引用，会让冻结进 [[ApprovalSubject]]
+    * 的策略指纹与判定结果对不上。
+    *
+    * @param policy
+    *   本次判定使用的生效治理配置快照
     * @param metadata
     *   工具作者声明的风险与副作用；模型不能修改
     * @return
     *   `None` 表示允许继续，`Some` 中的中文原因会进入 ApprovalRequest
     */
-  private def approvalReason(metadata: ToolMetadata): Option[String] =
-    toolPolicies.current().approvalPolicy match
+  private def approvalReason(policy: ToolPolicyConfig, metadata: ToolMetadata): Option[String] =
+    policy.approvalPolicy match
       case ApprovalPolicy.Never     => None
       case ApprovalPolicy.Always    => Some("当前运行策略要求所有工具调用经过人工审批")
       case ApprovalPolicy.RiskBased =>
@@ -1362,17 +1894,127 @@ final class AgentRuntimeLive(
           case ToolRisk.ReadOnly | ToolRisk.UserScopedRead => None
           case _                                           => Some("工具具有写入、破坏或管理副作用")
 
+  /** 用给定策略快照、工具契约与 Run 的可信授权上下文构造该调用的审批主体。
+    *
+    * 主体不依赖任何 Runtime 可变状态，因此规划时冻结的值与执行前重新计算的值只在“确实发生了安全相关变化”时才不同。
+    */
+  private def approvalSubject(
+      state: AgentState,
+      policy: ToolPolicyConfig,
+      call: ToolCall,
+      metadata: ToolMetadata,
+      contract: ToolContractFingerprint
+  ): ApprovalSubject =
+    ApprovalSubject.of(
+      call = call,
+      metadata = metadata,
+      toolContract = contract,
+      policy = ApprovalPolicyFingerprint.of(policy, ToolName(call.name)),
+      authorization = AuthorizationFingerprint.of(state.runContext),
+      environment = extensions.environment.id,
+      permissions = extensions.environment.permissions
+    )
+
+  /** 为已注册工具计算执行前的现场审批主体。 */
+  private def liveApprovalSubject(
+      state: AgentState,
+      policy: ToolPolicyConfig,
+      call: ToolCall,
+      tool: RegisteredTool
+  ): ApprovalSubject =
+    approvalSubject(state, policy, call, tool.metadata, ToolContractFingerprint.registered(tool))
+
   /** 读取创建 Run 时冻结的 AgentDefinition；缺失说明状态版本损坏或迁移不完整。 */
   private def definition(state: AgentState): IO[AgentError, AgentDefinition] =
     ZIO
       .fromOption(state.definition)
       .orElseFail(AgentError.InvalidConfiguration(s"Run ${state.runId.asString} 缺少 Agent 定义快照"))
 
+  /** 冻结组合与当前进程比较。缺省指纹视为升级前状态，允许恢复但不声称 Compatible；Incompatible 与 RequiresRevalidation 都 fail-closed。 */
+  private def ensureCompatibleComposition(state: AgentState): IO[AgentError, Unit] =
+    state.composition match
+      case None         => ZIO.unit
+      case Some(frozen) =>
+        for
+          agent <- definition(state)
+          required = pendingToolNames(state)
+          names <- liveToolNames(required)
+          live = freezeComposition(agent)
+          _ <- RuntimeComposition.compare(frozen, live, names, required) match
+            case CompositionDrift.Compatible                   => ZIO.unit
+            case CompositionDrift.RequiresRevalidation(reason) =>
+              ZIO.fail(AgentError.CompositionIncompatible(state.runId, reason))
+            case CompositionDrift.Incompatible(reason) =>
+              ZIO.fail(AgentError.CompositionIncompatible(state.runId, reason))
+        yield ()
+
+  private def pendingToolNames(state: AgentState): Set[String] =
+    state.pendingToolPlan match
+      case None       => Set.empty
+      case Some(plan) => plan.batches.flatMap(_.items.map(_.call.name)).toSet
+
+  private def liveToolNames(required: Set[String]): UIO[Set[String]] =
+    if required.isEmpty then ZIO.succeed(Set.empty)
+    else
+      registry
+        .definitions(required.map(ToolName(_)))
+        .map(_.map(_.name).toSet)
+
   /** 读取业务线程 ID；Durable Runtime 创建的状态必须始终包含该字段。 */
   private def threadId(state: AgentState): IO[AgentError, ThreadId] =
     ZIO
       .fromOption(state.threadId)
       .orElseFail(AgentError.InvalidConfiguration(s"Run ${state.runId.asString} 缺少 ThreadId"))
+
+  /** 捕获本次调用的生效模型设置，并阻止连续运行中的管理面覆盖绕过 Run 创建时组合冻结。 */
+  private def effectiveModelSettings(
+      state: AgentState,
+      agent: AgentDefinition
+  ): IO[AgentError, ModelSettings] =
+    val effective = modelPolicies.current().applyTo(agent.modelSettings)
+    state.composition match
+      case None         => ZIO.succeed(effective)
+      case Some(frozen) =>
+        val live = RuntimeComposition.fingerprint(
+          profile,
+          agent,
+          effective,
+          contextSources.sourceIds,
+          extensions.sourceIds,
+          extensions.environment.id.value,
+          extensions.environment.permissions.fingerprint
+        )
+        RuntimeComposition.compare(frozen, live) match
+          case CompositionDrift.Compatible                   => ZIO.succeed(effective)
+          case CompositionDrift.RequiresRevalidation(reason) =>
+            ZIO.fail(AgentError.CompositionIncompatible(state.runId, reason))
+          case CompositionDrift.Incompatible(reason) =>
+            ZIO.fail(AgentError.CompositionIncompatible(state.runId, reason))
+
+  /** 在 Run 创建前解析 ModelRole，使 provider/model 进入冻结定义与组合指纹。 */
+  private def resolveRole(agent: AgentDefinition): IO[AgentError, AgentDefinition] =
+    roleCatalog.applyTo(agent.modelSettings).map(settings => agent.copy(modelSettings = settings))
+
+  /** 创建与恢复使用同一套冻结规则，避免 submitStart 与 Runtime 算出两份指纹。 */
+  private def freezeComposition(agent: AgentDefinition): RuntimeCompositionFingerprint =
+    RuntimeComposition.freeze(
+      profile,
+      agent,
+      modelPolicies,
+      contextSources.sourceIds,
+      extensions.sourceIds,
+      extensions.environment.id.value,
+      extensions.environment.permissions.fingerprint
+    )
+
+  /** 扩展允许看到的 Host 输入；不含 Runtime、Store 或可变状态。 */
+  private def extensionInput(state: AgentState): ExtensionInput =
+    ExtensionInput(
+      state.runId,
+      state.agentId,
+      AuthorizationFingerprint.of(state.runContext),
+      state.composition
+    )
 
   /** 从可信状态构造工具上下文；模型无法修改其中的租户、用户和 scopes。 */
   private def executionContext(state: AgentState, call: ToolCall): ToolExecutionContext =
@@ -1388,13 +2030,42 @@ final class AgentRuntimeLive(
     GuardrailContext(state.runId, state.runContext, state.agentId)
 
 object AgentRuntimeLive:
+  /** 规划阶段对单个模型调用得出的确定性结论。
+    *
+    * @param invocation
+    *   交给批次规划器的调用与其规划视图元数据
+    * @param contract
+    *   规划时冻结的工具契约指纹
+    * @param approvalSubject
+    *   规划时判定需要人工授权时冻结的审批主体；None 表示当时不需要审批
+    */
+  final private case class PlannedCall(
+      invocation: PlannedToolInvocation,
+      contract: ToolContractFingerprint,
+      approvalSubject: Option[ApprovalSubject]
+  )
+
+  /** 一次人工决定在本次 resume 中授予的放行范围。
+    *
+    * 它只在内存中沿调用链传递，不写入耐久状态，也不扩大其他调用的权限。两个字段回答的是不同问题：`approvedSubjects` 是 “这个具体副作用被授权发生”，`forceRetryCallIds`
+    * 是“这个结果未知的副作用被授权重放”。崩溃恢复类暂停只需要后者。
+    */
+  final private case class ResumeGrant(
+      approvedSubjects: Set[ApprovalSubject] = Set.empty,
+      forceRetryCallIds: Set[String] = Set.empty
+  )
+
+  private object ResumeGrant:
+    /** 普通批次推进：不携带任何人工授权。 */
+    val none: ResumeGrant = ResumeGrant()
+
   /** 以 scoped layer 创建运行时；FiberRef 隔离每个流的事件队列，活动 Fiber 表支持同进程精确取消。
     */
   val layer: URLayer[
     ChatModel & RegisteredToolRegistry & RunStore & ContextManager & GuardrailEngine & ToolPolicySource &
       ModelPolicySource & RunObserver,
     AgentRuntime & LeaseAwareAgentRuntime
-  ] = makeLayer(ContextSourceResolver.emptyValue)
+  ] = RuntimeExtensions.emptyLayer >>> makeLayer(ContextSourceResolver.emptyValue, RuntimeProfile.default)
 
   /** 生产知识 Agent 使用的装配入口：每个模型回合都会从显式 resolver 读取 Memory/RAG 来源。
     *
@@ -1402,26 +2073,53 @@ object AgentRuntimeLive:
     */
   val layerWithContextSources: URLayer[
     ChatModel & RegisteredToolRegistry & RunStore & ContextManager & ContextSourceResolver & GuardrailEngine &
-      ToolPolicySource & ModelPolicySource & RunObserver,
+      ToolPolicySource & ModelPolicySource & RunObserver & RuntimeExtensions,
+    AgentRuntime & LeaseAwareAgentRuntime
+  ] = layerWithProfile(RuntimeProfile.default)
+
+  /** 生产知识 Agent 使用的装配入口：每个模型回合都会从显式 resolver 读取 Memory/RAG 来源。 */
+  def layerWithProfile(
+      profile: RuntimeProfile,
+      roleCatalog: ModelRoleCatalog = ModelRoleCatalog.empty
+  ): URLayer[
+    ChatModel & RegisteredToolRegistry & RunStore & ContextManager & ContextSourceResolver & GuardrailEngine &
+      ToolPolicySource & ModelPolicySource & RunObserver & RuntimeExtensions,
     AgentRuntime & LeaseAwareAgentRuntime
   ] = ZLayer.scoped {
     for
       resolver <- ZIO.service[ContextSourceResolver]
-      runtime  <- build(resolver)
+      runtime  <- build(resolver, profile, roleCatalog)
     yield runtime
   }
 
-  /** 用指定 ContextSourceResolver 构造纯工具 Agent 层，并集中管理 Runtime 的 scoped 资源。 */
-  private def makeLayer(resolver: ContextSourceResolver): URLayer[
+  private def makeLayer(
+      resolver: ContextSourceResolver,
+      profile: RuntimeProfile,
+      roleCatalog: ModelRoleCatalog = ModelRoleCatalog.empty
+  ): URLayer[
+    ChatModel & RegisteredToolRegistry & RunStore & ContextManager & GuardrailEngine & ToolPolicySource &
+      ModelPolicySource & RunObserver & RuntimeExtensions,
+    AgentRuntime & LeaseAwareAgentRuntime
+  ] = ZLayer.scoped(build(resolver, profile, roleCatalog))
+
+  /** 测试与评测使用 Replayable，以便从账本重建 ChatRequest。 */
+  def layerWithCapture(capturePolicy: CapturePolicy): URLayer[
     ChatModel & RegisteredToolRegistry & RunStore & ContextManager & GuardrailEngine & ToolPolicySource &
       ModelPolicySource & RunObserver,
     AgentRuntime & LeaseAwareAgentRuntime
-  ] = ZLayer.scoped(build(resolver))
+  ] = RuntimeExtensions.emptyLayer >>> makeLayer(
+    ContextSourceResolver.emptyValue,
+    RuntimeProfile(capturePolicy = capturePolicy)
+  )
 
   /** 创建 FiberRef、活动 Fiber 注册表和租约上下文。 */
-  private def build(resolver: ContextSourceResolver): ZIO[
+  private def build(
+      resolver: ContextSourceResolver,
+      profile: RuntimeProfile,
+      roleCatalog: ModelRoleCatalog
+  ): ZIO[
     ChatModel & RegisteredToolRegistry & RunStore & ContextManager & GuardrailEngine & ToolPolicySource &
-      ModelPolicySource & RunObserver & Scope,
+      ModelPolicySource & RunObserver & RuntimeExtensions & Scope,
     Nothing,
     AgentRuntimeLive
   ] =
@@ -1434,6 +2132,7 @@ object AgentRuntimeLive:
       toolPolicies   <- ZIO.service[ToolPolicySource]
       modelPolicies  <- ZIO.service[ModelPolicySource]
       observer       <- ZIO.service[RunObserver]
+      extensions     <- ZIO.service[RuntimeExtensions]
       eventQueue     <- FiberRef.make(Option.empty[Queue[Take[AgentError, AgentEvent]]])
       activeRuns     <- Ref.make(Map.empty[RunId, Fiber.Runtime[AgentError, RunOutcome]])
       executionLease <- FiberRef.make(Option.empty[RunCommandLease])
@@ -1449,5 +2148,8 @@ object AgentRuntimeLive:
       observer,
       eventQueue,
       activeRuns,
-      executionLease
+      executionLease,
+      profile,
+      extensions,
+      roleCatalog
     )

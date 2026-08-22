@@ -38,6 +38,9 @@ test('模型目录可键盘选择，探活失败给出可执行处置且不泄�
           knowledge: false,
           evalTrends: false,
           models: true,
+          runInspection: false,
+          harness: false,
+          memoryGovernance: false,
           observability: {},
         },
       });

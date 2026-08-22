@@ -38,7 +38,9 @@ final case class StdioMcpTransportConfig(
     maxLineChars: Int = 1024 * 1024,
     inboundCapacity: Int = 256,
     shutdownGrace: Duration = 5.seconds,
-    terminateGrace: Duration = 5.seconds
+    terminateGrace: Duration = 5.seconds,
+    /** 非空时，`sha256(command 用 NUL 连接)` 必须落在允许集合内。空集合保持开发兼容，生产应显式固定。 */
+    commandDigestAllowlist: Set[String] = Set.empty
 ):
   /** 在启动进程前验证所有静态约束。 */
   def validate: IO[AgentError, Unit] =
@@ -51,6 +53,13 @@ final case class StdioMcpTransportConfig(
       _ <- ZIO
         .fail(AgentError.InvalidConfiguration("Invalid MCP stdio transport configuration"))
         .unless(basic)
+      _ <- ZIO
+        .fail(AgentError.InvalidConfiguration("MCP stdio command digest is not in the allowlist"))
+        .unless(
+          commandDigestAllowlist.isEmpty || commandDigestAllowlist.contains(
+            StdioMcpTransport.commandDigest(command)
+          )
+        )
       _ <- ZIO.foreachDiscard(workingDirectory) { directory =>
         ZIO
           .attemptBlocking(Files.isDirectory(directory))
@@ -144,6 +153,15 @@ final class StdioMcpTransport private (
 object StdioMcpTransport:
   /** 单行读取超限时使用的内部异常；消息不包含原始行。 */
   final private class LineTooLong(label: String) extends IOException(s"$label line exceeded configured limit")
+
+  /** 对 command+args 做稳定 SHA-256；参数用 NUL 连接，避免空格歧义。 */
+  def commandDigest(command: Chunk[String]): String =
+    val material = command.mkString("\u0000").getBytes(StandardCharsets.UTF_8)
+    java.security.MessageDigest
+      .getInstance("SHA-256")
+      .digest(material)
+      .map(byte => f"${byte & 0xff}%02x")
+      .mkString
 
   /** 在当前 Scope 中启动 MCP server 子进程并建立 transport。
     *

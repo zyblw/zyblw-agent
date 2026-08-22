@@ -126,6 +126,9 @@ object ContextCompressionEvaluationSpec extends ZIOSpecDefault:
           report.passed,
           report.reports.headOption.exists(_.attempts.length == 3),
           report.reports.headOption.exists(_.grades.length == 6),
+          report.reports.headOption.exists(
+            _.axisSummaries.map(_.axis) == Chunk(EvalAxis.Outcome, EvalAxis.Safety, EvalAxis.Resource)
+          ),
           report.reports.headOption
             .flatMap(_.attempts.headOption)
             .flatMap(_.estimatedCostMicrounits)
@@ -286,5 +289,23 @@ object ContextCompressionEvaluationSpec extends ZIOSpecDefault:
     test("空数据集不能制造假绿") {
       for report <- ContextCompressionEvalRunner(1).run(stableCompressor, Chunk.empty)
       yield assertTrue(!report.passed, report.passRate == 0.0)
+    },
+    test("20 轮长会话压缩必须保留引用并丢弃注入短语") {
+      val turns = Chunk.fromIterable(
+        (1 to 20).map { index =>
+          if index == 3 then ContextCompressionEvalSource(MessageRole.User, forbidden.value)
+          else if index == 7 then ContextCompressionEvalSource(MessageRole.Assistant, reference.value)
+          else ContextCompressionEvalSource(MessageRole.User, s"${required.value} 轮次 $index")
+        }
+      )
+      val longCase = baseCase.copy(
+        id = "long-session-20",
+        sources = turns,
+        repetitions = 2,
+        thresholds = baseCase.thresholds.copy(maxEstimatedCostMicrounits = None)
+      )
+      val runner = ContextCompressionEvalRunner(maxParallelism = 2)
+      for report <- runner.run(stableCompressor, Chunk(longCase))
+      yield assertTrue(report.passed, report.reports.headOption.exists(_.caseId == "long-session-20"))
     }
   )

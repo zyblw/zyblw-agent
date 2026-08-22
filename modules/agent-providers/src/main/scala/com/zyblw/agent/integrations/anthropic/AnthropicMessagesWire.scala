@@ -1,5 +1,6 @@
 package com.zyblw.agent.integrations.anthropic
 
+import com.zyblw.agent.artifacts.ProviderImagePolicy
 import com.zyblw.agent.core.*
 import zio.*
 import zio.json.*
@@ -41,33 +42,36 @@ private[anthropic] object AnthropicMessagesWire:
   ): Either[AgentError, Json.Obj] =
     val options   = config.defaultOptions ++ request.settings.providerOptions
     val conflicts = options.keySet.intersect(reservedOptions)
-    if conflicts.nonEmpty then
-      Left(
-        AgentError.InvalidConfiguration(
-          s"providerOptions cannot override reserved Anthropic fields: ${conflicts.toList.sorted.mkString(", ")}"
+    ProviderImagePolicy.requireBound(request).flatMap { _ =>
+      if conflicts.nonEmpty then
+        Left(
+          AgentError.InvalidConfiguration(
+            s"providerOptions cannot override reserved Anthropic fields: ${conflicts.toList.sorted.mkString(", ")}"
+          )
         )
-      )
-    else
-      sequence(request.messages.filterNot(isInstruction).map(encodeMessage)).map { encoded =>
-        val messages = mergeAdjacent(encoded).map(message =>
-          obj("role" -> Json.Str(message.role), "content" -> Json.Arr(message.content))
-        )
-        val required = List(
-          "model"      -> Json.Str(request.settings.model.getOrElse(config.defaultModel)),
-          "max_tokens" -> Json.Num(request.settings.maxOutputTokens.getOrElse(config.defaultMaxTokens)),
-          "messages"   -> Json.Arr(messages),
-          "stream"     -> Json.Bool(streaming)
-        )
-        val system = instructionText(request.messages).map(value => "system" -> Json.Str(value))
-        val tools  = Option.when(request.tools.nonEmpty)(
-          "tools" -> Json.Arr(request.tools.map(encodeTool))
-        )
-        val toolChoice = Option.when(request.tools.nonEmpty)(
-          "tool_choice" -> encodeToolChoice(request.settings.toolChoice)
-        )
-        val temperature = request.settings.temperature.map(value => "temperature" -> Json.Num(value))
-        obj(required ++ List(system, tools, toolChoice, temperature).flatten ++ options.toList.sortBy(_._1)*)
-      }
+      else
+        sequence(request.messages.filterNot(isInstruction).map(encodeMessage)).map { encoded =>
+          val messages = mergeAdjacent(encoded)
+            .map(message => obj("role" -> Json.Str(message.role), "content" -> Json.Arr(message.content)))
+          val required = List(
+            "model"      -> Json.Str(request.settings.model.getOrElse(config.defaultModel)),
+            "max_tokens" -> Json.Num(request.settings.maxOutputTokens.getOrElse(config.defaultMaxTokens)),
+            "messages"   -> Json.Arr(messages),
+            "stream"     -> Json.Bool(streaming)
+          )
+          val system = instructionText(request.messages).map(value => "system" -> Json.Str(value))
+          val tools  = Option.when(request.tools.nonEmpty)(
+            "tools" -> Json.Arr(request.tools.map(encodeTool))
+          )
+          val toolChoice = Option.when(request.tools.nonEmpty)(
+            "tool_choice" -> encodeToolChoice(request.settings.toolChoice)
+          )
+          val temperature = request.settings.temperature.map(value => "temperature" -> Json.Num(value))
+          obj(
+            required ++ List(system, tools, toolChoice, temperature).flatten ++ options.toList.sortBy(_._1)*
+          )
+        }
+    }
 
   /** 解码非流式 Messages response，并拒绝负 usage 或非法 tool input。 */
   def decodeResponse(body: String): IO[AgentError, ChatResponse] =
@@ -175,6 +179,8 @@ private[anthropic] object AnthropicMessagesWire:
           "type"   -> Json.Str("image"),
           "source" -> obj("type" -> Json.Str("url"), "url" -> Json.Str(url))
         )
+      case ContentPart.ImageArtifact(sha, media, size) =>
+        obj("type" -> Json.Str("text"), "text" -> Json.Str(s"[unbound-artifact-image $media $sha $size]"))
     }
 
   /** 工具定义使用 Anthropic 顶层 `input_schema`，不带 OpenAI function 包装。 */
@@ -243,9 +249,10 @@ private[anthropic] object AnthropicMessagesWire:
   /** 工具结果的多内容块按原顺序转成字符串，JSON 保持结构表示。 */
   private def contentAsText(message: AgentMessage): String =
     message.content.map {
-      case ContentPart.Text(value)      => value
-      case ContentPart.JsonValue(value) => value.toJson
-      case ContentPart.ImageUrl(url, _) => url
+      case ContentPart.Text(value)                  => value
+      case ContentPart.JsonValue(value)             => value.toJson
+      case ContentPart.ImageUrl(url, _)             => url
+      case ContentPart.ImageArtifact(sha, media, _) => s"artifact:$media:$sha"
     }.mkString
 
   /** 读取必需字符串字段并返回带位置的 typed error。 */

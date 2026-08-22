@@ -10,16 +10,10 @@ Service、Agent、Harness 或 Durable Workflow。
         → 暂停/恢复/取消 → 低敏 Inspector、Trace 与 Eval
 ```
 
-当前版本线是 `0.6.2`，正式制品以
-[Maven Central](https://central.sonatype.com/artifact/io.github.zyblw/zyblw-agent-core_3) 的 Published 状态和
-[`v0.6.2`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.6.2) Release 为准。项目仍处于 `0.x` 演进期：
-核心单 Agent 控制面适合 staging 与受限生产验收，外围 Adapter、管理面和 Durable Workflow 等能力按证据标记为 Beta 或
-Experimental；“有实现”不等于已经经过大规模生产验证。若 Central 尚未显示 Published，请等待 tag 驱动的发布流水线完成，
-不要回退到分支或 SNAPSHOT。
-
-`0.6.0` 将新库 RAG 统一为 `vector(1024)`，并通过核心 `V003` 将 Embedding 缓存按 query/indexing/memory 用途隔离。
-`0.6.2` 在不改 migration 的前提下加入可观察的 PDF 提取级联。所有生产装配都使用 1024 基线；部署从空库开始，不提供旧维度或旧知识 schema 的接入路径。完整操作见
-[升级到 0.6.0](docs/upgrading-to-0.6.0.md) 和 [升级到 0.6.2](docs/upgrading-to-0.6.2.md)。
+当前版本线是 `0.8.0`。这是全新安装基线：没有从 `0.6.x` / `0.7.0` 候选库的原地升级路径。
+已发布的 `0.6.2` Maven 制品仍冻结在
+[`v0.6.2`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.6.2)，不能原地升级到本版本。
+完整操作见 [升级到 0.8.0](docs/upgrading-to-0.8.0.md)。
 
 ## 什么时候使用哪一层
 
@@ -32,39 +26,47 @@ Experimental；“有实现”不等于已经经过大规模生产验证。若 C
 
 Harness 不是第二套模型循环；Workflow 也不替代普通函数。多 Agent 只有在固定 Eval 证明优于单 Agent 时才值得增加。
 
-## 五分钟运行
+## 生产参考入口
 
-开发基线：
+开发与运行基线：
 
 - JDK 21
 - Scala 3.8.4
 - sbt 2.0.1
 - ZIO 2.1.26
+- PostgreSQL 16+
+- 可配置的 OpenAI-compatible Provider
 
-业务项目从最小依赖开始：
+`0.8.0` 的书籍问答入口是 `KnowledgeQaHost`；客户支持与审批写工具仍走 `ProductionSupportHost`。二者都需要 PostgreSQL、可信身份头和 ZIO HTTP。`AgentQuickstart` 已删除。
+
+```bash
+export ZYBLW_AGENT_JDBC_URL=jdbc:postgresql://127.0.0.1:5432/zyblw_agent
+export ZYBLW_AGENT_DB_USER=zyblw_migrate
+export ZYBLW_AGENT_DB_PASSWORD=...
+export OPENAI_BASE_URL=https://api.openai.com/v1
+export OPENAI_API_KEY=...
+export OPENAI_MODEL=gpt-4.1-mini
+
+sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost migrate"
+sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost ingest data/books"
+export ZYBLW_AGENT_DB_USER=zyblw_runtime
+sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost serve"
+```
+
+创建 Run 返回 `202`：HTTP 只提交耐久命令，Worker 随后推进。调用方用 `Idempotency-Key`、`X-Tenant-Id`、`X-User-Id` 和 runId 查询 `/api/v1/runs/{runId}`。退款工具会停在 `WaitingForApproval`，必须由可信身份调用审批接口。
+
+业务项目引入：
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.6.2",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.6.2"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.8.0",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.8.0",
+  "io.github.zyblw" %% "zyblw-agent-postgres"  % "0.8.0",
+  "io.github.zyblw" %% "zyblw-agent-zio-http"  % "0.8.0"
 )
 ```
 
-在源码仓库中，无需 API Key 和数据库即可验证完整的
-`submit → command claim → AgentRuntime → inspect` 主路径：
-
-```bash
-sbt "examples/runMain com.zyblw.agent.examples.QuickstartAgentExample"
-```
-
-预期结果：
-
-```text
-status=Completed, answer=你好，zyblw-agent 的最小运行链路已经完成。
-```
-
-这个示例使用确定性模型和内存控制面，适合学习接线与测试；进程退出后数据会丢失，不能作为生产持久化方案。接下来按
-[总体使用手册](docs/usage-guide.md)和[快速开始](docs/getting-started.md)完成工具、真实 Provider、PostgreSQL、HTTP 和 RAG 接入。
+第一支持面是 Docker 直连自管 PostgreSQL，见 [Docker 接入手册](docs/operations-docker-vm.md)。长时 soak、主备、PgBouncer 和滚动发布等宿主证据已延期，不阻止当前业务接入。CI 可用 `ZYBLW_AGENT_RUNTIME_MODE=contract` 跑脚本化模型，那不是生产配置。完整接入见 [总体使用手册](docs/usage-guide.md) 和 [快速开始](docs/getting-started.md)。
 
 ## 最小业务代码
 
@@ -138,8 +140,8 @@ flowchart TB
 |---|---|---|
 | Agent Runtime | typed error、预算、审批、恢复、取消、流式事件 | Foundation；仍需长运行故障与负载证据 |
 | Tool / Side Effect | typed schema、scope、风险、冲突、幂等、outbox/inbox、补偿 | Foundation/Experimental；需要更多真实写业务 |
-| Durable Control | command queue、有界 Run 并发、lease、heartbeat、generation fencing、低敏 queue snapshot | Foundation；短时三实例 drain/中断重领已验证，仍需业务长时 soak 与 SLO |
-| Workflow | 静态图校验、循环预算、fan-out、checkpoint、execution ledger、低敏 timeline、durable wait/signal、受监督 wake worker | Experimental；kill/restart/multi-worker soak、人工任务、子图待完成 |
+| Durable Control | command queue、有界 Run 并发、lease、heartbeat、generation fencing、低敏 queue snapshot | Foundation；短时三实例 drain、中断重领、独立 JVM `SIGKILL`/数据库 restart，以及正式 Runtime 的 3 Worker/6 lane 有界 soak 回归阈值已验证；仍需业务长时 soak、节点/主备故障与生产 SLO |
+| Workflow | 静态图校验、循环预算、fan-out、checkpoint、execution ledger、低敏 timeline/wake queue、durable wait/signal、受监督 wake worker | Experimental；独立 JVM `SIGKILL` + PostgreSQL restart 后双 generation 接管及 3 Worker/126 Run 有界 wake soak 已验证；仍需数据库 failover、节点丢失、长时 soak、人工任务与子图 |
 | Context / Memory | 分区预算、压缩、可信来源、长期记忆治理 | Beta；需要真实长会话质量趋势 |
 | RAG | 目录/PDF 摄取、Markdown+JSON、page/bbox lineage、结构切分、hybrid、rerank、相邻/同父级扩展、citation、eval | Beta；真实 OCR/恶意 PDF/大规模容量待验收 |
 | Provider | OpenAI-compatible、Responses、Anthropic、Gemini 与 capability contract | Beta；需要持续真实流量证据 |
@@ -243,14 +245,12 @@ npm run dev          # 打开 http://localhost:3000，在右上角填写后端�
 准备把框架用于真实业务时，先按[生产接入基线与发布候选判定](docs/production-readiness.md)区分框架门禁、业务验收和
 分阶段扩流；不要把 `testFull` 绿色直接解释为某个业务已经生产就绪。
 
-1. 先跑无密钥 Quickstart，确认 JDK、sbt 和主链路。
-2. 用 `ScriptedChatModel`、内存 Store 和 Fake Tool 写确定性业务测试。
-3. 接入真实 Provider，但保持工具只读、额度小、live smoke 显式启用。
-4. 引入 PostgreSQL，共享宿主 `DataSource`；选择部署任务显式迁移，或使用名称明确的 `migrated*` ZLayer 在服务启动前迁移并校验。
-5. 将身份从已验签 claim/session 映射为 `RunContext`，再暴露 ZIO HTTP routes。
-6. 接入受控写工具、业务幂等键、outbox/inbox 和审批。
-7. 需要运维界面时再装配管理面，并为它单独确定入口、身份来源与限流，不与业务 API 共用一条公网通道。
-8. 建固定 Eval、SLO、告警、备份恢复和 kill/recover 演练后再扩大流量。
+1. 按生产参考宿主接入 PostgreSQL、真实 Provider、可信身份和 ZIO HTTP，先跑通 `migrate` 再 `serve`。
+2. 用 `ScriptedChatModel` 与 `AgentApplication.inMemory` 写确定性业务测试；不要把内存装配当成部署入口。
+3. 写工具保持固定 SQL、稳定业务幂等键、审批和 outbox；模型参数不能变成语句。
+4. 运行账号只有 DML。Flyway 与结构探针属于部署任务。
+5. 需要运维界面时再装配管理面，并单独确定入口、身份来源与限流。
+6. 当前单库 Docker 路径通过业务接入门禁即可引进；7 项宿主证据保持 `deferred`，有独立上线环境后再补，不宣称通用 production-supported。
 
 ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`/ZIO Schema 维护 `/api/v1` 与 OpenAPI；Server 和
 关键 worker 由同一 Scope 管生命周期。它不会创建 DataSource、匿名认证或 Provider Secret。详见
@@ -313,8 +313,12 @@ ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.6.3-local"; publishM2'
-cd integration-tests/maven-consumer && ZYBLW_AGENT_VERSION=0.6.3-local sbt -batch compile
+./integration-tests/command-worker-kill-recovery.sh --restart-postgres
+./integration-tests/workflow-wake-worker-kill-recovery.sh --restart-postgres
+./integration-tests/durable-worker-soak.sh
+./integration-tests/workflow-wake-worker-soak.sh
+sbt -batch 'set ThisBuild / version := "0.8.0-local"; publishM2'
+cd integration-tests/maven-consumer && ZYBLW_AGENT_VERSION=0.8.0-local sbt -batch compile
 ```
 
 控制台单独验证：

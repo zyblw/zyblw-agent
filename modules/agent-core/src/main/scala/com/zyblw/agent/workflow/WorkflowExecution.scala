@@ -260,6 +260,18 @@ trait WorkflowExecutionStore[S] extends WorkflowCheckpointStore[S]:
       limit: Int = 1
   ): IO[StoreError, Chunk[WorkflowWakeupLease]]
 
+  /** 按 Workflow identity/version 读取低敏 wake backlog/lease 聚合；不得领取、回收或改变任何耐久事实。 */
+  def wakeQueueSnapshot(
+      workflowId: WorkflowId,
+      definitionVersion: WorkflowVersion
+  ): IO[StoreError, WorkflowWakeQueueSnapshot] =
+    val _ = (workflowId, definitionVersion)
+    ZIO.fail(
+      AgentError.PersistenceFailure(
+        "WorkflowExecutionStore Adapter 尚未实现低敏 wake queue snapshot"
+      )
+    )
+
   /** 仅在 owner/token/generation 匹配且租约未过期时续租 wakeup。 */
   def heartbeatWakeup(
       lease: WorkflowWakeupLease,
@@ -638,6 +650,55 @@ object WorkflowExecutionStore:
                     }
                     Chunk.fromIterable(claimed) -> current.copy(wakeups = wakeups)
                   }
+            }
+          }
+
+        override def wakeQueueSnapshot(
+            workflowId: WorkflowId,
+            definitionVersion: WorkflowVersion
+        ): IO[StoreError, WorkflowWakeQueueSnapshot] =
+          Clock.instant.flatMap { now =>
+            state.get.flatMap { current =>
+              val waits = current.waits.valuesIterator
+                .filter(record =>
+                  record.workflowId == workflowId && record.definitionVersion == definitionVersion
+                )
+                .toList
+              val resolved = waits.filter(record =>
+                record.status == WorkflowWaitStatus.Signaled || record.status == WorkflowWaitStatus.TimedOut
+              )
+              val missingDispatch = resolved.exists(record => !current.wakeups.contains(record.key))
+              if missingDispatch then
+                ZIO.fail(AgentError.PersistenceFailure("resolved workflow wait 缺少 wake dispatch"))
+              else
+                val dispatchable = resolved.filter { record =>
+                  val dispatch = current.wakeups(record.key)
+                  !dispatch.availableAt.isAfter(now) && dispatch.lease.forall(!_.leaseExpiresAt.isAfter(now))
+                }
+                val leased = resolved
+                  .count(record => current.wakeups(record.key).lease.exists(_.leaseExpiresAt.isAfter(now)))
+                val expired = dispatchable
+                  .count(record => current.wakeups(record.key).lease.exists(!_.leaseExpiresAt.isAfter(now)))
+                val oldestAge = dispatchable
+                  .flatMap(_.resolvedAt)
+                  .sortBy(_.toEpochMilli)
+                  .headOption
+                  .map(value => java.time.Duration.between(value, now).toMillis.max(0L))
+                ZIO.succeed(
+                  WorkflowWakeQueueSnapshot(
+                    capturedAt = now,
+                    pendingWaits = waits.count(_.status == WorkflowWaitStatus.Pending).toLong,
+                    dueWaits = waits
+                      .count(record =>
+                        record.status == WorkflowWaitStatus.Pending && !record.deadline.isAfter(now)
+                      )
+                      .toLong,
+                    dispatchableWakeups = dispatchable.size.toLong,
+                    leasedWakeups = leased.toLong,
+                    expiredWakeLeases = expired.toLong,
+                    oldestDispatchableAgeMillis = oldestAge
+                  )
+                )
             }
           }
 

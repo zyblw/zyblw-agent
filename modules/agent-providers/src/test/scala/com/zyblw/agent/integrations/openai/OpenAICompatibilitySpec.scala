@@ -94,6 +94,30 @@ object OpenAICompatibilitySpec extends ZIOSpecDefault:
         encoded.forall(!_.contains("[image:"))
       )
     },
+    test("remote ImageUrl and unbound ImageArtifact are rejected before the wire") {
+      val remote = ChatRequest(
+        Chunk(AgentMessage(MessageRole.User, Chunk(ContentPart.ImageUrl("https://evil.example/x.png"))))
+      )
+      val unbound = ChatRequest(
+        Chunk(
+          AgentMessage(
+            MessageRole.User,
+            Chunk(ContentPart.ImageArtifact("0" * 64, "image/png", 4L))
+          )
+        )
+      )
+      val remoteEncoded =
+        OpenAIWire.encodeRequest(remote, "gpt-5.4-mini", OpenAICompatibility.openAI)
+      val unboundEncoded =
+        OpenAIWire.encodeRequest(unbound, "gpt-5.4-mini", OpenAICompatibility.openAI)
+      assertTrue(
+        remoteEncoded.left.exists {
+          case AgentError.PermissionDenied("model.image", _) => true
+          case _                                             => false
+        },
+        unboundEncoded.left.exists(_.isInstanceOf[AgentError.InvalidConfiguration])
+      )
+    },
     test("DeepSeek rejects image parts because the profile has no vision") {
       val request = ChatRequest(
         Chunk(

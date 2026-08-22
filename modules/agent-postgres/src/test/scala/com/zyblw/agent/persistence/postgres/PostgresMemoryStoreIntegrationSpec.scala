@@ -148,7 +148,7 @@ object PostgresMemoryStoreIntegrationSpec extends ZIOSpecDefault:
         purged == 1L,
         expired.isEmpty
       )).provideLayer(harnessLayer)
-    } @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@ TestAspect.timeout(
+    } @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
       3.minutes
     ) @@ TestAspect.sequential,
     test("用户纠正与审计同事务：审计约束失败会回滚 Memory 更新，成功记录只含 hash 和低敏主体") {
@@ -207,7 +207,7 @@ object PostgresMemoryStoreIntegrationSpec extends ZIOSpecDefault:
         audit._5 == "tenant-a",
         audit._6 == "user-a"
       )).provideLayer(harnessLayer)
-    } @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@ TestAspect.timeout(
+    } @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
       3.minutes
     ) @@ TestAspect.sequential
   )

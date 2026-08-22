@@ -65,6 +65,27 @@ object LocalWorkspaceSpec extends ZIOSpecDefault:
       val attempts = List("../secret", "a/../../secret", "a//b", "a/./b", "/absolute", "a\\b", "")
       assertTrue(attempts.forall(value => Try(WorkspacePath(value)).isFailure))
     },
+    test("文件符号链接本身也不能被读取或覆盖") {
+      ZIO.scoped {
+        for
+          root    <- temporaryDirectory("zyblw-workspace-")
+          outside <- temporaryDirectory("zyblw-outside-")
+          secret = outside.resolve("secret.txt")
+          _ <- ZIO.attemptBlocking(Files.writeString(secret, "do-not-read", StandardCharsets.UTF_8))
+          _ <- ZIO.attemptBlocking(Files.createSymbolicLink(root.resolve("alias.txt"), secret))
+          workspace = LocalWorkspace(root)
+          readExit   <- workspace.read(WorkspacePath("alias.txt"), 1024).exit
+          writeExit  <- workspace.write(WorkspacePath("alias.txt"), bytes("overwrite"), overwrite = true).exit
+          deleteExit <- workspace.delete(WorkspacePath("alias.txt")).exit
+          outsideNow <- ZIO.attemptBlocking(Files.readString(secret, StandardCharsets.UTF_8))
+        yield assertTrue(
+          readExit.isFailure,
+          writeExit.isFailure,
+          deleteExit.isFailure,
+          outsideNow == "do-not-read"
+        )
+      }
+    },
     test("根目录内部的符号链接不能读取根目录外文件") {
       ZIO.scoped {
         for

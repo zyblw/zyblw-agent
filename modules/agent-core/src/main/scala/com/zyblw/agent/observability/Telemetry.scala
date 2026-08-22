@@ -89,7 +89,9 @@ final class OpenTelemetryAgentTelemetry(tracer: Tracer) extends AgentTelemetry:
       val span      = builder.setStartTimestamp(startedAt, TimeUnit.MILLISECONDS).startSpan()
       event.runId.foreach(runId => span.setAttribute("agent.run.id", runId.asString))
       event.traceId.foreach(traceId => span.setAttribute("agent.trace.id", traceId))
-      event.attributes.foreach((key, value) => span.setAttribute(key, value))
+      GenAiSemanticMap
+        .project(event.name, event.attributes)
+        .foreach((key, value) => span.setAttribute(key, value))
       event.measurements.foreach((key, value) => span.setAttribute(key, value))
       span.end(event.atEpochMilli, TimeUnit.MILLISECONDS)
     }
@@ -107,7 +109,7 @@ final class OpenTelemetryAgentTelemetry(tracer: Tracer) extends AgentTelemetry:
       ZIO
         .acquireRelease(ZIO.succeed {
           val span = tracer.spanBuilder(name).startSpan()
-          attributes.foreach((key, value) => span.setAttribute(key, value))
+          GenAiSemanticMap.project(name, attributes).foreach((key, value) => span.setAttribute(key, value))
           span -> span.makeCurrent()
         }) { case (_, scope) => ZIO.succeed(scope.close()) }
         .flatMap { case (otelSpan, _) =>

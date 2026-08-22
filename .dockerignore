@@ -1,0 +1,14 @@
+.git
+**/.git
+**/target
+**/.bloop
+**/.metals
+**/.idea
+**/.bsp
+**/node_modules
+modules/agent-dashboard/.next
+*.md
+docs
+integration-tests
+agent-transcripts
+!deploy/docker/package.sh

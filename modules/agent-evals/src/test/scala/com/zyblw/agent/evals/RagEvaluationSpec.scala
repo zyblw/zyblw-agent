@@ -52,7 +52,12 @@ object RagEvaluationSpec extends ZIOSpecDefault:
         Chunk(citation("cite-1", "relevant-1", 0.9))
       )
       val report = RagEvalGrader.grade(baseCase, RagEvalObservation(result, 50L))
-      assertTrue(report.passed, report.grades.length == 4, report.grades.forall(_.score >= 0.0))
+      assertTrue(
+        report.passed,
+        report.grades.length == 4,
+        report.grades.forall(_.score >= 0.0),
+        report.axisSummaries.map(_.axis) == Chunk(EvalAxis.Outcome, EvalAxis.Safety, EvalAxis.Resource)
+      )
     },
     test("相关结果排名过低时 MRR/NDCG 门禁失败") {
       val result = RetrievalResult(
@@ -84,6 +89,35 @@ object RagEvaluationSpec extends ZIOSpecDefault:
       )
       val report = RagEvalGrader.grade(baseCase, RagEvalObservation(result, 10L))
       assertTrue(!report.passed, report.grades.find(_.dimension == "rag-citation-support").exists(!_.passed))
+    },
+    test("低证据必须拒答，弱相关命中泄漏即失败") {
+      val insufficient = RetrievalResult(
+        Chunk.empty,
+        Chunk.empty,
+        RetrievalEvidence(
+          RetrievalEvidenceStatus.BelowMinimumScore,
+          candidateCount = 3,
+          acceptedCount = 0,
+          minimumScore = 0.4
+        )
+      )
+      val leaked = RetrievalResult(
+        Chunk(hit("noise", 0.2)),
+        Chunk.empty,
+        RetrievalEvidence(
+          RetrievalEvidenceStatus.BelowMinimumScore,
+          candidateCount = 3,
+          acceptedCount = 0,
+          minimumScore = 0.4
+        )
+      )
+      val refused =
+        RagEvalGrader.lowEvidenceRefusal(RagEvalObservation(insufficient, 8L), refusalInjected = true)
+      val leakedGrade =
+        RagEvalGrader.lowEvidenceRefusal(RagEvalObservation(leaked, 8L), refusalInjected = true)
+      val silent =
+        RagEvalGrader.lowEvidenceRefusal(RagEvalObservation(insufficient, 8L), refusalInjected = false)
+      assertTrue(refused.passed, !leakedGrade.passed, !silent.passed)
     },
     test("Runner 保持数据集顺序，空数据集不能制造假绿") {
       val runner      = RagEvalRunner(maxParallelism = 2)

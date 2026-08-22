@@ -1,6 +1,8 @@
 package com.zyblw.agent.integrations.openai
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.model.CapabilityMatrix
+import com.zyblw.agent.testkit.*
 import zio.*
 import zio.http.*
 import zio.stream.*
@@ -64,16 +66,18 @@ object OpenAIHttpContractSpec extends ZIOSpecDefault:
   ): Response =
     val first =
       "data: {\"id\":\"stream-1\",\"choices\":[{\"delta\":{\"content\":\"first\"},\"finish_reason\":null}],\"usage\":null}\n\n"
+    val usage =
+      "data: {\"id\":\"stream-1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n"
     val done                                  = "data: [DONE]\n\n"
     val stream: ZStream[Any, Throwable, Byte] =
       if body.contains("\"model\":\"truncated-stream\"") then ZStream.fromIterable(first.getBytes)
       else if body.contains("\"model\":\"slow-stream\"") then
-        ZStream.fromZIO(ZIO.sleep(500.millis)).drain ++ ZStream.fromIterable((first + done).getBytes)
+        ZStream.fromZIO(ZIO.sleep(500.millis)).drain ++ ZStream.fromIterable((first + usage + done).getBytes)
       else if body.contains("\"model\":\"cancel-stream\"") then
         (ZStream.fromZIO(streamStarted.succeed(())).drain ++
           ZStream.fromIterable(first.getBytes) ++ ZStream.fromZIO(ZIO.never).drain)
           .ensuring(streamClosed.succeed(()).unit)
-      else ZStream.fromIterable((first + done).getBytes)
+      else ZStream.fromIterable((first + usage + done).getBytes)
     Response(
       status = Status.Ok,
       headers = Headers(Header.ContentType(MediaType.text.`event-stream`)),
@@ -214,5 +218,104 @@ object OpenAIHttpContractSpec extends ZIOSpecDefault:
           closed <- streamClosed.await.timeout(10.seconds)
         yield closed).provide(Client.default, TestServer.default)
       yield assertTrue(closed.isDefined)
+    } @@ TestAspect.withLiveClock @@ TestAspect.sequential,
+    test("ProviderContract.verifySuite 覆盖成功、429/5xx、负 usage、断流和取消") {
+      for
+        bodies        <- Ref.make(Chunk.empty[String])
+        streamStarted <- Promise.make[Nothing, Unit]
+        streamClosed  <- Promise.make[Nothing, Unit]
+        result        <- (for
+          _      <- TestServer.addRoutes(routes(bodies, streamStarted, streamClosed))
+          port   <- ZIO.serviceWithZIO[Server](_.port)
+          client <- ZIO.service[Client]
+          model = OpenAICompatibleChatModel(
+            client,
+            OpenAICompatibleConfig(
+              s"http://127.0.0.1:$port/v1",
+              "stub-secret",
+              "stub-model",
+              requestTimeout = 5.seconds,
+              compatibility = OpenAICompatibility.openAI
+            )
+          )
+          cassette <- ProviderCassette.inMemory(ProviderCassettePolicy.Redacted)
+          suite    <- ProviderContract.verifySuite(
+            model,
+            ChatRequest(Chunk(AgentMessage.user("hello"))),
+            Chunk(
+              ProviderFailureProbe(
+                "429",
+                ErrorCategory.RateLimit,
+                true,
+                model.complete(
+                  ChatRequest(
+                    Chunk(AgentMessage.user("hello")),
+                    settings = ModelSettings(model = Some("rate-limit"))
+                  )
+                )
+              ),
+              ProviderFailureProbe(
+                "500",
+                ErrorCategory.Unavailable,
+                true,
+                model.complete(
+                  ChatRequest(
+                    Chunk(AgentMessage.user("hello")),
+                    settings = ModelSettings(model = Some("server-error"))
+                  )
+                )
+              ),
+              ProviderFailureProbe(
+                "invalid-usage",
+                ErrorCategory.Validation,
+                false,
+                model.complete(
+                  ChatRequest(
+                    Chunk(AgentMessage.user("hello")),
+                    settings = ModelSettings(model = Some("invalid-usage"))
+                  )
+                )
+              ),
+              ProviderFailureProbe(
+                "truncated",
+                ErrorCategory.Validation,
+                false,
+                model
+                  .stream(
+                    ChatRequest(
+                      Chunk(AgentMessage.user("hello")),
+                      settings = ModelSettings(model = Some("truncated-stream"))
+                    )
+                  )
+                  .runDrain
+              )
+            ),
+            Some(
+              ProviderCancellationProbe(
+                "cancel",
+                model
+                  .stream(
+                    ChatRequest(
+                      Chunk(AgentMessage.user("hello")),
+                      settings = ModelSettings(model = Some("cancel-stream"))
+                    )
+                  )
+                  .tap(_ => streamStarted.succeed(()).unit)
+                  .runDrain,
+                streamClosed.isDone,
+                streamStarted.await
+              )
+            ),
+            cassette
+          )
+          probed <- model.capabilities(Some("stub-model"))
+        yield suite -> probed).provide(Client.default, TestServer.default)
+        matrix = CapabilityMatrix.fromDescriptor(OpenAICompatibility.openAI.descriptor)
+      yield assertTrue(
+        result._1.success.emittedCompleted,
+        result._1.failures.forall(_.passed),
+        result._1.cancellation.forall(_.passed),
+        matrix.requireConsistent("openai", "*", result._2).isRight
+      )
     } @@ TestAspect.withLiveClock @@ TestAspect.sequential
   )

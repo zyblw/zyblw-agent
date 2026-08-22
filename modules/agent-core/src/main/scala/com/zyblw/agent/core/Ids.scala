@@ -227,6 +227,20 @@ object EventId:
   extension (id: EventId) def asString: String = id.toString
   given JsonCodec[EventId]                     = JsonCodec.string.transformOrFail(fromString, _.asString)
 
+/** 一次主模型调用 Intent 在 effect 前预留的稳定 ID。 */
+opaque type ModelRequestId = UUID
+object ModelRequestId:
+  def apply(value: UUID): ModelRequestId = value
+
+  def random: UIO[ModelRequestId] = Random.nextUUID.map(ModelRequestId(_))
+
+  def fromString(value: String): Either[String, ModelRequestId] =
+    scala.util.Try(UUID.fromString(value)).toEither.left.map(_ => s"非法 ModelRequestId: $value")
+
+  extension (id: ModelRequestId) def asString: String = id.toString
+  given JsonCodec[ModelRequestId]                     =
+    JsonCodec.string.transformOrFail(fromString, _.asString)
+
 opaque type Version = Long
 object Version:
   val initial: Version = 0L

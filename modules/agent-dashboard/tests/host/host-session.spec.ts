@@ -19,6 +19,9 @@ test('宿主会话不读取 Bearer token，并通过同源 BFF 携带 CSRF 标�
         knowledge: false,
         evalTrends: false,
         models: false,
+        runInspection: false,
+        harness: false,
+        memoryGovernance: false,
         observability: {},
       },
     });

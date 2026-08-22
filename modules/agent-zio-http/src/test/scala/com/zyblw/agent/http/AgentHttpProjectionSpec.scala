@@ -17,6 +17,29 @@ object AgentHttpProjectionSpec extends ZIOSpecDefault:
     PersistedAgentEvent(EventId(UUID.randomUUID()), runId, sequence, event, now.toEpochMilli)
 
   def spec = suite("AgentHttpProjection")(
+    test("ModelCallPrepared 只公开指纹与计数，不含 prompt") {
+      val internal = persisted(
+        AgentEvent.ModelCallPrepared(
+          runId,
+          "11111111-1111-4111-8111-111111111111",
+          "scripted",
+          "default",
+          "a" * 64,
+          "Replayable",
+          2,
+          1,
+          now.toEpochMilli
+        )
+      )
+      val encoded = AgentHttpProjection.event(internal).toJson
+      assertTrue(
+        encoded.contains("ModelCallPrepared"),
+        encoded.contains("Replayable"),
+        encoded.contains("aaaaaaaaaaaa"),
+        !encoded.contains("system prompt"),
+        !encoded.contains("user message")
+      )
+    },
     test("工具请求只公开 callId/name，不公开 arguments") {
       val internal = persisted(
         AgentEvent.ToolCallRequested(

@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-08
+> 最后核验：2026-08-22
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -14,6 +14,12 @@
 
 若看到 `unable to create native thread`，应先检查是否绕过根构建并并行启动了多个 sbt 进程；不要通过删除流式契约测试
 或增大生产连接池来掩盖测试宿主资源问题。
+
+```bash
+./scripts/verify-business-ready.sh
+```
+
+业务接入只要求这一档：格式、`testFull`、证据清单结构。长时 soak、主备、PgBouncer 和滚动发布不在当前门禁里。
 
 ```bash
 sbt "scalafmtCheckAll; scalafmtSbtCheck"
@@ -35,6 +41,11 @@ Testcontainer 改为先执行核心 migration、再执行知识 migration、最�
 - `scalafmtCheckAll; scalafmtSbtCheck; testFull` 全部通过；
 - `RUN_POSTGRES_INTEGRATION=1 postgres/testFull` 在 PostgreSQL 16/pgvector 下全部通过，且覆盖 `V002` 生成列抽取、
   keyset 分页与内存实现一致、亚毫秒游标推进、append-only 覆盖历史与并发写入的乐观锁裁决；
+- command 与 Workflow 两条独立 JVM `SIGKILL` 演练通过，并都在 kill 后重启同一 PostgreSQL 实例；CI 以独立 20 分钟 job、每条 10 分钟硬上限运行相同脚本；
+- `durable-worker-soak.sh` 通过正式 PostgreSQL Start 事务、多个 `WorkerHost` 和唯一 `AgentRuntime` 执行有界多轮负载；CI 以独立 15 分钟 job、脚本 10 分钟硬上限运行相同 smoke；
+- `workflow-wake-worker-soak.sh` 通过多个独立 PostgreSQL Store/`WorkflowWakeWorker` 执行 durable signal 多轮负载；CI 以独立 15 分钟 job、脚本 10 分钟硬上限运行相同 smoke；
+- `integration-tests/eval-release-gate-smoke.sh` 跑 72 条公开 fixture 双审门禁、`TestAgentRuntime` 闭环与文件后端 `EvalReleaseGateCli`；不调用真实模型，也不把宿主领域校准写成已完成；
+- `integration-tests/failover-drill.sh` 在本地 Docker 主备上输出 RPO/RTO JSON。这是 `verified_local` 机制证据，生产 failover/SLO 仍是 `deferred`；
 - 组合顺序首次知识迁移执行 1 项、重复启动执行 0 项，并验证专属 schema/history、`public.vector >= 0.8.0`、
   `vector(1024)`、关键列和完整 lineage；
 - staging 不可见、原子发布/回滚/退役、ACL、hybrid retrieval、父级/相邻扩展和复合 document/chunk 身份通过；
@@ -44,6 +55,36 @@ Testcontainer 改为先执行核心 migration、再执行知识 migration、最�
 - 与候选一致的 `0.6.x-local publishM2`、独立 Maven consumer 与关键示例成功。
 
 ### 最近一次完整本地证据
+
+2026-08-21 的 Harness H3-B/H3-C/H3-D 增量复核（不是完整发布门禁）：
+
+- core/testkit 12 项定向测试通过：typed ArtifactReference、旧 Goal/Plan/Todo JSON 安全默认、descriptor 漂移拒绝、`harness@2` 仅投影引用元数据以及唯一 Runtime 接入；
+- H3-C 成对评测定向测试覆盖同 case/attempt、固定并发、四轴/Wilson/人工介入/资源倍率、安全不可抵消、数据集篡改提前失败与低敏趋势投影；
+- H3-D core 覆盖不可变策略、并发不透支、费用额度 fail-closed、幂等预留/结算/释放、Exceeded 真实落账、损坏 usage 拒绝、Harness Start 重放与 Goal 换绑冲突、终态 Reconciler 的非终态保留/缺失告警/游标回绕；
+- 本轮确定性模块回归：core 196、evals 54、testkit 79、postgres 默认 16 项通过，均为 0 失败；随后以
+  `RUN_POSTGRES_INTEGRATION=1 postgres/testFull` 在 PostgreSQL 16.14/pgvector 上从空库执行正式 V001–V010 与 repeatable
+  migration，88 项真实容器契约全部通过、0 失败、0 忽略；
+- `RUN_POSTGRES_INTEGRATION=1` 的 Harness 套件在 PostgreSQL 16.14 从空库执行 11 个 migration，达到 V010；10 项 CAS/外键/Skill/Interaction/ArtifactReference/预算行锁/Reserved keyset 分页/结算/损坏 JSON fail-closed/终态恢复对账契约通过；
+- Harness budget conformance 使用同一组三项断言分别运行内存与 PostgreSQL 16.14 Adapter，6/6 通过；覆盖策略不可覆盖、并发防透支、稳定 Run 幂等、结算/释放状态机、失败不改账、复合游标与 RunId 禁止跨 Goal 换绑；
+- `RUN_POSTGRES_INTEGRATION=1` 的 command/dispatcher 套件 11 项通过，其中 12 路同 Harness Start 重放只生成一个 Run/command/reservation，额度不足同时回滚预算、Created、首事件、Start 与 dispatcher，且没有孤儿 Run；还覆盖 Worker 消失与 PostgreSQL pause/unpause 同时发生后的过期重领、generation fencing 和队列收敛；
+- 独立进程演练 `integration-tests/command-worker-kill-recovery.sh --restart-postgres` 通过：旧 forked JVM 持有 generation 1 / attempt 1 时被操作系统 `SIGKILL`，同一 PostgreSQL 容器随后 restart，脚本重新发现 Docker 随机宿主端口，新 JVM 以 generation 2 / attempt 2 完成同一命令，最终低敏队列快照归零；
+- 独立 Workflow 演练 `integration-tests/workflow-wake-worker-kill-recovery.sh --restart-postgres` 通过：旧 JVM 同时持有 wake 与 node execution generation 1 后被 `SIGKILL`，同一 PostgreSQL 容器随后 restart 并重新发现宿主端口，新 JVM 将两条租约都提升到 generation 2，消费 wait 并提交终态 checkpoint；
+- 有界多 Worker smoke `integration-tests/durable-worker-soak.sh` 通过：5 秒内完成 5 轮、120 个正式 Agent Run；3 个 Worker/6 lane 全部参与，最大并发 6，generation reclaim/自动重试/过期租约/死信均为 0，最终队列归零；本机 claim P95 为 760ms、terminal P95 为 980ms，分别低于 5000ms/10000ms 的仓库回归阈值。这是本机回归基线，不是生产 SLO 或容量结论；
+- Workflow 有界 smoke `integration-tests/workflow-wake-worker-soak.sh` 通过：5 秒内完成 7 轮、126 个 Run；3 个独立 wake/node Worker 全部参与，最大节点并发 3，wake claim、execution claim、完成 cycle 均为 126，双 generation reclaim 与 abandon/lease-lost/failed 均为 0，最终未完成量归零；本机 claim P95 为 270ms、terminal P95 为 700ms。随后正式 `wakeQueueSnapshot` 采样版以 18 Run 复核，41 次快照捕获 Pending/dispatchable/leased 高水位 3/3/3，due/expired/final depth 为 0；这些仍只是仓库回归基线；
+- 工具恢复切片以 9 项纯指纹/JSON 契约和 8 项 Runtime 契约证明：Schema 对象与 Set 顺序不会制造伪漂移，同名工具契约变化在副作用前拒绝，新计划自动冻结真实注册契约，审批策略放宽不能取消已冻结要求，当前 schema 的不完整快照 fail-closed，旧版本计划仍可按旧门禁读取；
+- 审批主体切片（v6）另以 10 项 `ApprovalSubjectSpec` 纯契约和 2 项 `ApprovalSubjectRuntimeSpec` 运行时契约证明：字段书写顺序不制造伪漂移，参数/策略/授权上下文/工具契约任一变化都让历史批准失效且只报告属性名，主体与漂移说明都不携带参数正文，`DurableToolPlan` 拒绝同时持有 v5 callId 与 v6 主体两份事实，待审批请求与批准步骤记录同一个可审计主体，以及策略在批准前收紧时重新请求授权（不执行旧主体、刷新 `approvalId`、下一次批准能通过而不死锁）。测试用 `TestAgentRuntime.inMemoryWithToolPolicySource` 在运行中途替换生效配置，覆盖固定 `ToolPolicyConfig` 无法触及的路径；
+- Typed Extension 切片以 4 项 `ExtensionSpec`、2 项组合指纹契约和 4 项 `ExtensionRuntimeSpec` 证明：Skill 目录不含正文也不能授工具/升 System，重名扩展与重名工具在装配期失败，`RecommendAllow` 不能跳过人工审批，`Deny` 在副作用前拒绝且不进入审批，观察者缺陷不能取消已执行副作用，扩展身份冻结进组合指纹；旧 `RuntimeCompositionFingerprint` JSON 缺 `extensionIds` 仍与空扩展兼容；
+- Wave 1-C 执行环境以 `ExecutionEnvironmentSpec`、组合指纹契约、`ApprovalSubjectSpec`、`ExecutionEnvironmentRuntimeSpec` 与 `McpSandboxEnvironmentSpec` 证明：子能力不能变宽，`local` 与 `mcp-sandbox` 不是同一审批主体，MCP 写工具仍须人工审批，环境或权限剖面漂移恢复 Incompatible，旧 JSON 缺环境/权限字段仍与 Local 宿主兼容；
+- Wave 2 ContextSection 以 `ContextWorldSectionSpec`、`DefaultContextManagerSpec` 与 `ContextSectionRuntimeSpec`
+  证明：无状态请求默认发送 `FullSnapshot`；只有显式 `TrustedStatefulDelta` 才省略相同指纹 section；Secret
+  永不渲染，决策进入 lineage 且不含正文，Replayable 账本重建含本回合实际渲染结果。`ExtensionSpec` 证明
+  `SkillProvider.load` 只按宿主选择物化正文到 Retrieval、目录 section 不含正文且不能授予工具；HTTP 契约测试锁定
+  `/api/v1/experimental` 不进入稳定 OpenAPI；
+- PostgreSQL 16.14 Testcontainer 上 `PostgresApprovalSubjectIntegrationSpec` 2 项通过：v6 主体经 JSONB 往返结构相等且主体 JSON 不含参数正文，`schema_version` 关系列与 JSON 信封不一致 fail-closed（Flyway V001–V010）；
+- 上述变更后的 `scalafmtCheckAll; scalafmtSbtCheck; Test/testFull` 已全部通过（本轮 734 项，0 失败；PostgreSQL 集成用例在未 fork/`RUN_POSTGRES_INTEGRATION` 时按环境门控跳过）；
+- 两个脚本在同一个常驻 sbt thin server 上顺序运行也通过；每次 `runMain` 显式覆盖 forked JVM 的临时数据库环境，第二条演练不会继承第一条已经销毁的容器端点；
+- V008 为 Goal/Plan 追加带空数组默认值的 JSONB 列，不修改已执行 migration，也不为 JSON 增加无查询依据的索引。
+- V010 新增两张预算表；费用使用 `NUMERIC`，`(status, created_at, run_id)` 只服务有界恢复扫描，`(goal_id, status)` 服务 Goal 关联与级联。当前 V010 尚未发布，因此本轮格式化后仍可在候选内完善；发布后必须冻结 checksum。
 
 2026-08-08 的 `0.5.0` 发布候选复核：
 
@@ -70,8 +111,8 @@ Testcontainer 改为先执行核心 migration、再执行知识 migration、最�
   0 失败、0 忽略；命令队列可靠性子套件 8 项全部通过；
 - `0.3.0-local publishM2` 成功生成 11 个公开模块的 POM、binary、sources 与 Scaladoc JAR；独立 Maven consumer 不引用
   仓库源码，重新编译 Agent Definition、Worker 配置、PostgreSQL 控制面、知识 Store 和 durable Application 生产装配；
-- `QuickstartAgentExample` 与 `RagAgentExample` 实际运行到 `Completed`，后者同时完成文档摄取、active snapshot、检索和引用；
-- 已完成框架内短时多 Worker、中断重领、数据库短时不可用和 `pg_dump/pg_restore`；尚未执行真实部署节点 `SIGKILL`、
+- `ProductionSupportHostContractSpec` 覆盖配置 fail-closed、未注册工具拒绝和查询→审批退款主线；`RagAgentExample` 实际运行到 `Completed`，并完成文档摄取、active snapshot、检索和引用；
+- 已完成框架内短时多 Worker、Worker 消失 + 数据库短时不可用的组合故障、generation 重领和 `pg_dump/pg_restore`；尚未执行真实部署节点 `SIGKILL`、
   主备切换、数小时/数天 soak 与业务容量曲线，因此结论是“0.3.0 业务生产基线”，不是通用规模 GA。
 
 2026-08-01 的 `0.3.0` breaking development line 复核：
@@ -83,7 +124,7 @@ Testcontainer 改为先执行核心 migration、再执行知识 migration、最�
 - `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`：PostgreSQL 16.14 只执行一个
   `V001__zyblw_agent_0_3_baseline.sql`，连同 optional pgvector 共 30 项通过、0 失败、0 忽略；
 - PostgreSQL Workflow 共 9 项：除 checkpoint/ledger/timeline/fencing 外，真实验证 wait 与 checkpoint 原子注册、跨 Store
-  signal 去重、毫秒 deadline 身份、signal/`expireDue` 唯一决议，以及两个 Store 并发唯一 wake claim、数据库租约过期重领和旧 fence 拒绝；
+  signal 去重、毫秒 deadline 身份、signal/`expireDue` 唯一决议，以及两个 Store 并发唯一 wake claim、wake Worker 消失 + 数据库 pause/recover 后过期重领和旧 fence 拒绝；
 - `0.3.0-local publishM2` 生成 11 个公开模块的 POM、binary、sources 与 Scaladoc JAR；独立
   `integration-tests/maven-consumer` 仅解析 Maven Local 坐标并完成 clean compile；
 - 尚未执行长期 process kill/数据库 restart/multi-worker soak；上述证据证明事务与短时并发契约正确性，不等同于生产容量结论。
@@ -99,7 +140,7 @@ Testcontainer 改为先执行核心 migration、再执行知识 migration、最�
   migration 全部执行，27 项通过、0 失败、0 忽略；
 - `0.2.1-local publishM2`：11 个公开 artifact 的 POM、binary、sources 与 Scaladoc JAR 完整；
   `integration-tests/maven-consumer` 只从 Maven Local 解析这些坐标并执行 clean compile 成功；
-- `QuickstartAgentExample` 实际完成异步 command/worker/runtime 主线，`GraphWorkflowExample` 实际完成 durable
+- 生产参考 contract 覆盖异步 command/worker/runtime 主线，`GraphWorkflowExample` 实际完成 durable
   execution 示例；
 - release provenance gate 的隔离成功用例通过，并确认旧 `v0.2.0` 对当前 `0.2.1` CHANGELOG 会 fail-closed；正式
   annotated `v0.2.1` 已验证升级指南、CHANGELOG 与远端 `main` 一致；
@@ -155,7 +196,7 @@ Testcontainer 改为先执行核心 migration、再执行知识 migration、最�
 - `testFull`：所有确定性模块测试通过；PostgreSQL 用例按设计在该命令中忽略；
 - `RUN_POSTGRES_INTEGRATION=1 postgres / Test / testFull`：21 项通过、0 失败、0 忽略；
 - ZIO HTTP Inspector/协议：35 项通过；
-- 五分钟 Quickstart：实际运行到 `Completed`；
+- 生产参考宿主契约：`ProductionSupportHostContractSpec`（配置 fail-closed、未注册工具拒绝、查询→审批退款）；五分钟 Quickstart 已删除，不再作为证据；
 - `0.1.0-local publishM2`：11 个公开 artifact 均生成 POM、binary、sources 与 Scaladoc JAR；
 - `zyblw-server` 源码 ProjectRef 与 Maven-local 二进制两种模式各 28 项通过；两项 server 自身的远程数据库用例未启用。
 
@@ -169,8 +210,8 @@ Anthropic 与 Gemini 密钥均未配置，因此没有执行真实付费 Provide
 - SSE 任意 byte 分块、UTF-8、工具参数、usage、空流和错误。
 - 文本回答、工具循环、未知工具、预算、审批和恢复。
 - 流式事件、显式取消和 Cancelled 状态。
-- RunStore 乐观锁与事件幂等。
-- RunStore 乐观锁、幂等事件、版本递增与级联删除。
+- RunStore 乐观锁、精确事件幂等、版本递增与级联删除；同一 conformance 在内存和真实 PostgreSQL 16 上覆盖原子回滚、有界分页、工具账本身份冲突、EventId 跨 Run 漂移拒绝、`save` 游标漂移、跨批 sequence gap、同 version/sequence 并发提交唯一胜者、负 sequence 和非法游标拒绝；PostgreSQL 专项篡改测试还验证 AgentState、Event、Tool ledger 与 ModelCall ledger 的关系列/JSON 信封漂移会 fail-closed。
+- Harness Interaction 的排他倒序游标、1–512 硬上限、升序页结果，以及 Contributor 仅取最近 16 条。
 - Durable Runtime 直接状态、事件序号、审批、账本成功复用与非幂等 Unknown 恢复。
 - DurableRunEventStream 有界分页、sequence 缺口拒绝、事件/状态查询之间提交的 TOCTOU 安全重读、TestClock 轮询恢复、
   超前游标拒绝；HTTP 覆盖 Last-Event-ID、SSE 终态结束与统一 tenant/user 读取授权。
@@ -185,7 +226,7 @@ Anthropic 与 Gemini 密钥均未配置，因此没有执行真实付费 Provide
 - AgentDefinitionBuilder：不可变定义组合、缺失指令、工具策略漂移、敏感 metadata 和非法模型参数的启动期门禁。
 - AgentApplication：异步 Start、Worker claim、审批恢复、Cancel 抢占活动 lease/模型 Fiber、durable 依赖显式接入和 scoped Worker 中断；验证便利层没有旁路
   耐久状态机或静默注入生产治理默认值。
-- AgentQuickstart：五分钟入口仍经过 submit/claim/Runtime/inspect，工具白名单引用未注册工具时在付费模型调用前拒绝。
+- ProductionSupportHost：正式路径在模型调用前拒绝白名单中尚未注册的工具；contract 主线覆盖查询、审批和完成。
 - Run Inspector：Timeline 不含消息、Prompt、工具参数/结果与失败正文；分页游标、sequence 缺口、Run 混入、审批、
   usage 和终态事件诊断稳定。
 - AgentApplication Context 压缩装配：`*WithContextCompressor` 真实进入主 loop、checkpoint 与辅助 usage 被持久化；
@@ -206,6 +247,8 @@ Anthropic 与 Gemini 密钥均未配置，因此没有执行真实付费 Provide
 - 工具 callId 的同批幂等恢复与跨批身份冲突拒绝。
 - 单次模型响应的工具总预算前置门禁，验证任何 pending write 和业务副作用发生前即拒绝超限。
 - 业务 eval：工具选择、引用正确率、恢复重复副作用、延迟、token 和成本门禁。
+- 公开 eval 输入：固定 PubMedQA/InjecAgent commit、许可证、源 SHA-256、下载上限与确定性分层抽样；结构化
+  outcome labels 精确评分，Draft 只能通过 integrity 校验，未双审不能通过发布门禁。
 - RAG eval：Recall@K、Precision@K、MRR、NDCG、引用 excerpt 证据、required source、tenant/permission、禁止片段、
   重复/非有限分数、延迟和空数据集 fail-closed。
 - Context 压缩 eval：版本化严格 UTF-8 数据集、重复运行、关键证据/引用最差召回、禁止内容零命中、摘要哈希与版本稳定性、
@@ -221,6 +264,8 @@ Anthropic 与 Gemini 密钥均未配置，因此没有执行真实付费 Provide
 - ZIO Config 部署契约：AgentApplication、Context Compressor、HTTP Host 与 Eval CLI 使用点分 prefix +
   `snake_case` 叶子键，确保默认环境 Provider 真实命中 `.env.example` 中的 `ZYBLW_AGENT_*` 变量。
 - DataSource 连接池耗尽映射为 typed、retryable 持久化错误。
+- 本地类 staging：PostgreSQL 16 + transaction-mode PgBouncer 小 backend pool 下并发 command/workflow soak、
+  备份恢复和 JSON 证据；仍明确排除主备/AZ/Kubernetes 与生产 SLO 结论。
 - OutboxPublisher 根据 typed error 执行 published/abandon/dead-letter，并与 heartbeat Fiber 结构化绑定。
 - CompensationRegistry 重名拒绝与 CompensationWorker 固定 handler 执行。
 - Embedding HTTP stub：分批、乱序 index、固定维度、usage 汇总、429、慢 Body、非法响应与取消关闭连接。
@@ -262,11 +307,17 @@ RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.po
 RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.postgres.PostgresMemoryStoreIntegrationSpec"
 RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.postgres.PostgresEmbeddingGovernanceIntegrationSpec"
 RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.postgres.PostgresEvalTrendStoreIntegrationSpec"
+RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.postgres.PostgresHarnessStoreIntegrationSpec"
 RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.postgres.PostgresWorkflowCheckpointStoreIntegrationSpec"
+./integration-tests/command-worker-kill-recovery.sh --restart-postgres
+./integration-tests/workflow-wake-worker-kill-recovery.sh --restart-postgres
+./integration-tests/durable-worker-soak.sh
+./integration-tests/workflow-wake-worker-soak.sh
 ```
 
 该测试使用 PostgreSQL 16 而不是 H2，执行正式 Flyway migration，并验证事务、乐观锁、审批状态恢复、工具
 账本、并发取消、24 worker command `SKIP LOCKED` claim、租约过期抢占、Cancel 原子抢占、旧 generation 状态 fencing，
+以及 Worker 消失与 PostgreSQL pause/unpause 组合故障后的代际接管和队列收敛，
 真实 `pg_dump`/`pg_restore` 后 Run、命令正文与 dispatcher generation 的恢复，以及业务 mutation/outbox/补偿同事务、
 错误回滚、发布确认崩溃窗口、旧 generation 拒绝、inbox/consumer mutation 同事务去重。独立 CI job 与发布门禁均设置
 该变量；本地默认
@@ -283,10 +334,36 @@ Eval 趋势用例验证低敏表、跨 Store 并发 `ON CONFLICT` 仲裁、同 I
   definition/session identity、单调写冲突、未声明动态路由拒绝，以及 `AllSucceeded` fan-out 失败时的兄弟 Fiber 中断和
   join checkpoint 隔离；durable 模式另覆盖 lease generation/fencing 和 Prepared outcome 故障恢复。
 - PostgreSQL Workflow：0.3 fresh baseline、跨 Store 并发幂等与单调 step、identity 漂移拒绝、checksum 损坏 fail-closed、
-  暂停后跨 Adapter 实例恢复、execution ledger/checkpoint/wait 原子提交、signal 去重与数据库时钟 deadline 竞态。
+  暂停后跨 Adapter 实例恢复、execution ledger/checkpoint/wait 原子提交、signal 去重、数据库时钟 deadline 竞态，以及 wake Worker 消失 + 数据库 pause/recover 组合故障后的 generation 接管。
 - RAG tenant/permission 前置过滤。
 
-Testkit 提供 Scripted/Recording Provider、Stub/Failing/Slow/NonInterruptible Tool、固定 TokenCounter 和确定性 ID。
+Testkit 提供 Scripted/Recording Provider、Stub/Failing/Slow/NonInterruptible Tool、固定 TokenCounter、确定性 ID，以及 `TestAgentRuntime.inMemory` 共享内存 Runtime 装配。Replayable 轨迹门禁用 `TrajectoryReplay` 评分账本重建，`AgentEvalGrader` 可附加该维度，并用 `TrajectoryReplayEvalSpec` 跑通 Runtime 夹具。
 
-尚需补充：多节点网络分区/进程 `SIGKILL` 混沌测试、持续数小时 soak test、真实 HikariCP/PgBouncer 饱和测试、
+两个进程故障脚本各自使用临时 PostgreSQL 16 容器和三个短命 probe 进程，只杀死报告中精确的旧 Worker PID，并验证
+old/recovery PID 不同。command 脚本复用正式 Flyway、`PostgresRunCommandStore` 与 `WorkerHost`；Workflow 脚本只有在
+`WorkflowWakeWorker` 同时取得 wake 与 node execution lease 后才允许 kill，并验证 wait、execution ledger 与 checkpoint
+一起收敛。两条脚本的 `--restart-postgres` 都证明同一 PostgreSQL 实例进程重启后事实仍在；它们不证明
+Kubernetes/VM 节点丢失、存储卷丢失或数据库主备 failover。
+
+`durable-worker-soak.sh` 另外创建一次性 PostgreSQL 16，要求 disposable 确认后才运行。默认至少 4 轮且至少 5 秒，每轮
+24 个 Run、3 个 Worker × 2 lane；只有轮数和持续时间都满足才停止。可通过 `ZYBLW_AGENT_SOAK_*` 调节持续时间、每轮负载、
+并发、模型延迟、采样周期、P95 阈值和全局 timeout。报告使用保守 10ms 上界桶并只输出聚合；提高持续时间仍需同时按
+磁盘容量调整每轮负载/间隔，且必须使用一次性数据库。
+
+例如，下面只把同一套本机回归机制延长到至少 4 小时；这是一条待执行的 soak 命令，不代表已经取得部署环境容量证据：
+
+```bash
+ZYBLW_AGENT_SOAK_MIN_DURATION_SECONDS=14400 \
+ZYBLW_AGENT_SOAK_RUNS_PER_ROUND=6 \
+ZYBLW_AGENT_SOAK_ROUND_PAUSE_MILLIS=1000 \
+ZYBLW_AGENT_SOAK_TIMEOUT_SECONDS=14700 \
+./integration-tests/durable-worker-soak.sh
+```
+
+`workflow-wake-worker-soak.sh` 使用相同的“双停止条件 + 一次性 PostgreSQL”纪律，默认每轮 18 个 Run、3 个独立
+Store/Worker，至少 4 轮且至少 5 秒。`ZYBLW_AGENT_WORKFLOW_SOAK_*` 可调轮数、负载、Worker、节点延迟、P95 与 timeout；
+报告采样正式 `wakeQueueSnapshot`，并门禁 due wait、过期 wake lease 与最终队列深度；不包含 Run/Session/signal identity、
+payload、state、owner 值或 lease token。
+
+尚需补充：多节点网络分区/节点丢失、持续数小时 soak test、真实 HikariCP/PgBouncer 饱和测试、
 MCP 已有脚本协议、真实 JDK stdio 子进程和 ZIO HTTP stub contract，覆盖取消、非法 stdout、SSE 断流、Last-Event-ID、404 session 恢复、Bearer、审批与实验 Tasks；仍需 OAuth server、真实第三方 MCP 互操作、模糊测试和容器故障注入。当前 64/24 并发规格是回归负载，不应冒充容量结论。

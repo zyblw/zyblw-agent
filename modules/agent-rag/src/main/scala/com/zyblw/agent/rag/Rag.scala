@@ -241,9 +241,32 @@ trait VectorStore:
       scope: RetrievalScope,
       limit: Int
   ): IO[RetrievalError, Chunk[RetrievalHit]] =
-    // 显式消费参数，表明默认实现有意忽略全文信号，而不是遗漏实现。
-    val _ = queryText
-    search(query, scope, limit)
+    searchFiltered(RetrievalMode.Hybrid, queryText, query, scope, RetrievalFilter.empty, limit)
+
+  /** 授权之后、排序之前应用结构化过滤的统一检索入口。
+    *
+    * `DefaultRetriever` 只调用本方法。默认实现取更大候选池再内存过滤，且不得再回调 `searchHybrid`，以免与 `searchHybrid` 的默认委托形成递归。覆盖了
+    * `searchHybrid` 的自定义 Store 必须同时覆盖本方法。生产 Adapter 必须在 SQL 中下推过滤。
+    */
+  def searchFiltered(
+      mode: RetrievalMode,
+      queryText: String,
+      query: Embedding,
+      scope: RetrievalScope,
+      filter: RetrievalFilter,
+      limit: Int
+  ): IO[RetrievalError, Chunk[RetrievalHit]] =
+    val _    = (mode, queryText)
+    val pool = math.min(math.max(limit, 1).toLong * 8L, Int.MaxValue.toLong).toInt
+    search(query, scope, pool).map(_.filter(hit => filter.matches(hit.chunk)).take(limit.max(0)))
+
+  /** 按 chunk ID 精确再识别；必须再次应用 tenant/permission，跨租户 ID 不得命中。 */
+  def fetchChunks(
+      chunkIds: Set[String],
+      scope: RetrievalScope
+  ): IO[RetrievalError, Chunk[DocumentChunk]] =
+    val _ = (chunkIds, scope)
+    ZIO.succeed(Chunk.empty)
 
   /** 在 rerank 之后根据受控谱系补充相邻块和同父级块。
     *
@@ -273,18 +296,46 @@ final class InMemoryVectorStore private (
 
   /** 先过滤 tenant/permission，再计算 cosine，防止未授权内容进入候选集。 */
   def search(query: Embedding, scope: RetrievalScope, limit: Int): IO[RetrievalError, Chunk[RetrievalHit]] =
-    state.get.map { all =>
-      val authorized = all.valuesIterator.filter { item =>
-        item.chunk.tenantId == scope.tenantId && item.chunk.permissions.subsetOf(scope.permissions)
+    searchFiltered(RetrievalMode.VectorOnly, "", query, scope, RetrievalFilter.empty, limit)
+
+  override def searchFiltered(
+      mode: RetrievalMode,
+      queryText: String,
+      query: Embedding,
+      scope: RetrievalScope,
+      filter: RetrievalFilter,
+      limit: Int
+  ): IO[RetrievalError, Chunk[RetrievalHit]] =
+    if limit <= 0 then ZIO.succeed(Chunk.empty)
+    else
+      state.get.map { all =>
+        val authorized = all.valuesIterator.filter { item =>
+          item.chunk.tenantId == scope.tenantId &&
+          item.chunk.permissions.subsetOf(scope.permissions) &&
+          filter.matches(item.chunk)
+        }
+        Chunk.fromIterable(RetrievalScoring.rank(mode, queryText, query, authorized).take(limit))
       }
-      Chunk.fromIterable(
-        authorized
-          .map(item => RetrievalHit(item.chunk, cosine(query, item.embedding)))
-          .toList
-          .sortBy(hit => -hit.score)
-          .take(limit.max(0))
-      )
-    }
+
+  override def fetchChunks(
+      chunkIds: Set[String],
+      scope: RetrievalScope
+  ): UIO[Chunk[DocumentChunk]] =
+    if chunkIds.isEmpty then ZIO.succeed(Chunk.empty)
+    else
+      state.get.map { all =>
+        Chunk.fromIterable(
+          all.valuesIterator
+            .map(_.chunk)
+            .filter(chunk =>
+              chunkIds.contains(chunk.id) &&
+                chunk.tenantId == scope.tenantId &&
+                chunk.permissions.subsetOf(scope.permissions)
+            )
+            .toVector
+            .sortBy(_.id)
+        )
+      }
 
   /** 内存实现与 PostgreSQL Adapter 共享相同语义：先授权，再选相邻/同父级，最后做全局有界截断。 */
   override def expandContext(
@@ -374,14 +425,6 @@ final class InMemoryVectorStore private (
       _.filterNot((_, item) => item.chunk.documentId == documentId && item.chunk.tenantId == tenantId)
     )
 
-  /** 计算余弦相似度；维度不一致或零向量返回零，避免 NaN。 */
-  private def cosine(left: Embedding, right: Embedding): Double =
-    val pairs = left.values.zip(right.values)
-    val dot   = pairs.foldLeft(0.0)((sum, pair) => sum + pair._1.toDouble * pair._2.toDouble)
-    val normL = math.sqrt(left.values.foldLeft(0.0)((sum, value) => sum + value.toDouble * value.toDouble))
-    val normR = math.sqrt(right.values.foldLeft(0.0)((sum, value) => sum + value.toDouble * value.toDouble))
-    if normL == 0.0 || normR == 0.0 then 0.0 else dot / (normL * normR)
-
 object InMemoryVectorStore:
   val layer: ULayer[VectorStore] =
     ZLayer.fromZIO(
@@ -403,7 +446,15 @@ object Reranker:
 
 trait Retriever:
   /** 完成 query embedding、权限检索、rerank 和引用组装。 */
-  def retrieve(query: String, scope: RetrievalScope, limit: Int): IO[RetrievalError, RetrievalResult]
+  def retrieve(query: String, scope: RetrievalScope, limit: Int): IO[RetrievalError, RetrievalResult] =
+    retrieve(RetrievalRequest(query, scope, limit))
+
+  def retrieve(request: RetrievalRequest): IO[RetrievalError, RetrievalResult]
+
+  /** 按 chunkId 精确再识别；默认实现拒绝，避免自定义 Retriever 静默返回空而伪装成“没有这段”。 */
+  def fetch(chunkIds: Set[String], scope: RetrievalScope): IO[RetrievalError, RetrievalResult] =
+    val _ = (chunkIds, scope)
+    ZIO.fail(AgentError.RetrievalFailed("Retriever 未实现 fetchChunks"))
 
 final class DefaultRetriever(
     embeddings: EmbeddingService,
@@ -414,7 +465,10 @@ final class DefaultRetriever(
     lexical: LexicalProcessor = SimpleChineseLexicalProcessor
 ) extends Retriever:
   /** 把单 query 编码后搜索并重排，最终引用保留 source 与 metadata。 */
-  def retrieve(query: String, scope: RetrievalScope, limit: Int): IO[RetrievalError, RetrievalResult] =
+  def retrieve(request: RetrievalRequest): IO[RetrievalError, RetrievalResult] =
+    val query = request.text
+    val scope = request.scope
+    val limit = request.limit
     if limit <= 0 then
       ZIO.succeed(
         RetrievalResult(
@@ -438,10 +492,17 @@ final class DefaultRetriever(
           .orElseFail(AgentError.RetrievalFailed("Embedding provider 返回空结果"))
         // 候选池放大三倍供 reranker 选择；Long 中间值防止外部错误 limit 造成 Int 溢出。
         candidateLimit = Math.min(limit.toLong * 3L, Int.MaxValue.toLong).toInt
-        // 文本 query 与 vector query 语义分离：FTS 只接收与摄取端同策略生成的 lexical representation。
-        candidates <- vectors.searchHybrid(lexical.query(query), queryEmbedding, scope, candidateLimit)
+        lexicalQuery   = lexical.query(query)
+        candidates <- vectors.searchFiltered(
+          request.mode,
+          lexicalQuery,
+          queryEmbedding,
+          scope,
+          request.filter,
+          candidateLimit
+        )
         // 关闭重排时直接截断候选池。这里不能跳过后续校验：截断结果同样要满足数量、去重和权限契约，
-        // 而 searchHybrid 来自存储 Adapter，与 reranker 一样位于信任边界之外。
+        // 而 searchFiltered 来自存储 Adapter，与 reranker 一样位于信任边界之外。
         reranked <-
           if policy.rerankEnabled then reranker.rerank(query, candidates, limit)
           else ZIO.succeed(candidates.take(limit))
@@ -475,6 +536,44 @@ final class DefaultRetriever(
           )
         }
       yield RetrievalResult(context, citations, evidence)
+
+  override def fetch(chunkIds: Set[String], scope: RetrievalScope): IO[RetrievalError, RetrievalResult] =
+    if chunkIds.isEmpty then
+      ZIO.succeed(
+        RetrievalResult(
+          Chunk.empty,
+          Chunk.empty,
+          RetrievalEvidence(RetrievalEvidenceStatus.NoAcceptedHits)
+        )
+      )
+    else
+      vectors.fetchChunks(chunkIds, scope).map { chunks =>
+        val hits = chunks.zipWithIndex.map { case (chunk, index) =>
+          RetrievalHit(chunk, 1.0d, Map("fetch" -> 1.0d, "ordinal" -> index.toDouble))
+        }
+        val citations = hits.zipWithIndex.map { case (hit, index) =>
+          val origins = hit.chunk.lineage.fold(Chunk.empty[DocumentOrigin])(_.origins)
+          Citation(
+            s"cite-${index + 1}",
+            hit.chunk.sourceUri,
+            hit.chunk.text.take(500),
+            hit.score,
+            origins.map(_.pageNumber).distinct,
+            origins
+          )
+        }
+        RetrievalResult(
+          hits,
+          citations,
+          RetrievalEvidence(
+            if hits.isEmpty then RetrievalEvidenceStatus.NoAcceptedHits
+            else RetrievalEvidenceStatus.Supported,
+            candidateCount = hits.length,
+            acceptedCount = hits.length,
+            topAcceptedScore = hits.map(_.score).maxOption
+          )
+        )
+      }
 
   /** 在 Reranker 信任边界之后重新验证身份、授权、数量和数值。
     *

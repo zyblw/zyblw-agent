@@ -218,6 +218,27 @@ object MemoryHttpApiSpec extends ZIOSpecDefault:
         missing.status == Status.NotFound
       )
     },
+    test("导出只返回自己的记忆并写入 Export 审计，审计不含正文") {
+      for
+        tuple <- fixture
+        (store, repository, api) = tuple
+        _        <- store.put(scope, entry("伤寒论"))
+        response <- api.routes.runZIO(
+          authenticated(
+            Request.post(memory / "export", Body.fromString(MemoryExportRequest(None, 10).toJson))
+          )
+        )
+        body   <- response.body.asString
+        denied <- api.routes.runZIO(Request.post(memory / "export", Body.empty))
+        audits <- repository.records
+      yield assertTrue(
+        response.status == Status.Ok,
+        body.contains("伤寒论"),
+        denied.status == Status.Forbidden,
+        audits.exists(_.action == MemoryAuditAction.Export),
+        !audits.exists(_.reasonCode.exists(_.contains("伤寒")))
+      )
+    },
     test("旧的无版本 Memory 路径不会被意外保留") {
       for
         tuple <- fixture

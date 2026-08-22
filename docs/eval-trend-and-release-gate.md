@@ -2,13 +2,13 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-29
+> 最后核验：2026-08-21
 >
 > 事实来源：对应模块源码、测试与构建定义
 
 ## 1. 解决什么问题
 
-`AgentEvalRunner`、`RagEvalRunner` 和 `ContextCompressionEvalRunner` 已经能够对一次运行生成确定性硬门禁，但单次报告不能回答：
+`AgentEvalRunner`、`RagEvalRunner` 和 `ContextCompressionEvalRunner` 已经能够对一次运行生成确定性硬门禁。Agent 内置评分按 `EvalAxis` 显式聚合为 `Outcome`、`Trajectory`、`Safety`、`Resource`；禁止工具、重复副作用与 Inspector 泄漏分别作为 Safety 硬门禁，正确结果不能抵消不安全过程。Replayable 轨迹重建仍必须与 Fake Model 记录深比较相等；`MetadataOnly` / `Disabled` 不得声称 exact replay。单次报告仍不能回答：
 
 - 新模型是否比当前生产模型退化；
 - 新 Prompt 是否删除了某条历史用例或评分维度；
@@ -36,10 +36,12 @@
 - 观察到的逐次 `successRate`；
 - 以该成功率估算 k 次至少一次成功的 `estimatedPassAtK(k)`；
 - 以该成功率估算连续 k 次全部成功的 `estimatedPassPowerK(k)`；
-- 最严格的 `passedEveryTrial`。
+- 最严格的 `passedEveryTrial`；
+- 观察成功率的 `confidenceInterval95`（Wilson score interval）。
 
-`pass@k` 适合“允许多试几次、至少一次成功”的探索任务；面向用户且每次都应可靠的路径应重点看 `pass^k` 和
-`passedEveryTrial`。当前估算假设试验近似独立同分布，尚未进入长期趋势 schema；小样本不能被宣传为统计保证。
+`pass@k` 适合“允许多试几次、至少一次成功”的探索任务；面向用户且每次都应可靠的路径应重点看 `pass^k`、
+`passedEveryTrial` 和置信下界。当前估算仍假设试验近似独立同分布；Wilson 区间量化二项抽样不确定性，但不能修复数据集偏差、
+试验相关性或 grader 错误，因此不能宣传为总体质量保证。
 
 ```scala
 val reliability =
@@ -51,7 +53,44 @@ val reliability =
   }
 ```
 
+可靠性通过独立 `EvalSuiteKind.AgentReliability` 进入现有趋势与发布门禁，不会与同名 `Agent` 单次质量快照互相成为基线：
+
+```scala
+val policy = AgentEvalReliabilityPolicy(
+  minimumTrialsPerCase = 10,
+  minimumObservedSuccessRate = 0.95,
+  minimumWilsonLowerBound95 = 0.80
+)
+
+for
+  snapshot <- EvalSuiteSnapshot.fromAgentReliability(metadata, reliability, policy)
+  decision <- EvalReleaseGate.evaluateAndAppend(store, snapshot)
+yield decision
+```
+
+长期快照只保存三个 0..1 维度：`reliability-minimum-trials`、`reliability-observed-success-rate` 和
+`reliability-wilson-lower-95`。逐次 trial、输入、回答、轨迹与 `details` 都不进入趋势。策略阈值属于 harness 配置；调整阈值时必须推进
+`harnessVersion`，并按正常 bootstrap 流程审查新基线。默认策略为至少 5 次、观察成功率 1.0、Wilson 95% 下界至少 0.5，目的只是阻止
+“一次跑绿”；关键生产路径应根据风险提高样本数和下界。
+
+Harness 是否值得采用必须用同一已审查数据集、同一 case、同一 attempt 做成对实验，不能比较两次无关运行的均值。`HarnessEvalRunner` 接收由宿主执行的完整 pair，因此随机种子、执行顺序和 Provider 固定策略不会被框架暗中拆开；所有 pair 共用一个 `maxParallelism` 边界。报告分别门禁 Harness 成功率/Wilson 下界、安全失败、outcome/trajectory 差值、人工介入差值和 latency/token/cost 倍率：
+
+```scala
+for
+  comparison <- HarnessEvalRunner(maxParallelism = 8).runRepeated(dataset, trialsPerCase = 10) {
+    (evalCase, attempt) => runBaselineAndHarness(evalCase, attempt)
+  }
+  snapshot <- EvalSuiteSnapshot.fromHarnessComparison(metadata, comparison, reviewedPolicy)
+  decision <- EvalReleaseGate.evaluateAndAppend(store, snapshot)
+yield decision
+```
+
+`HarnessComparison` 是独立趋势 kind。长期快照只保存十个低敏门禁维度，不保存输入、回答、逐次观测、Artifact 名称或 Tool 参数。默认策略只提供保守起点；阈值变化必须推进 `harnessVersion` 并重新审查基线。合成 pair 通过只证明基础设施语义，不证明真实业务收益。
+
 ## 2. 为什么不直接长期保存原始报告
+
+发布级 Agent 数据集应先通过 [Agent Eval 数据集治理](eval-dataset-governance.md) 的 provenance、人工审查与内容摘要校验；该输入
+artifact 与本章的长期低敏结果快照是两个不同信任边界。
 
 单次报告可能含有：
 
@@ -71,7 +110,7 @@ val reliability =
 - `passed` 与 0..1 分数；
 - 开始/完成时间。
 
-`EvalSuiteSnapshot.fromAgent`、`fromRag`、`fromContextCompression` 会主动删除 `EvalGrade.details`。快照校验还要求 ID
+`EvalSuiteSnapshot.fromAgent`、`fromAgentReliability`、`fromHarnessComparison`、`fromRag`、`fromContextCompression` 会主动删除输入、逐次报告和 `EvalGrade.details`。快照校验还要求 ID
 使用低风险稳定字符、数值有限且位于 0..1、用例/维度不重复、时间范围与数据集版本一致。
 
 ## 3. 创建快照
@@ -155,7 +194,7 @@ val configured: URLayer[DataSource, EvalTrendStore] =
   )
 ```
 
-0.3 fresh baseline 创建 `agent_eval_snapshots`。每行同时保存：
+0.3 fresh baseline 创建 `agent_eval_snapshots`，V007 增加独立的 `AgentReliability` suite kind，V009 增加独立的 `HarnessComparison` suite kind。每行同时保存：
 
 - `snapshot_payload TEXT`：保留应用生成的确定性 UTF-8 字节，供 SHA-256 校验；
 - `snapshot_json JSONB`：供 SQL 分析和 dashboard 查询；
@@ -409,7 +448,7 @@ yield (latest, history)
 
 ## 14. 当前边界
 
-- 已完成 Agent/RAG/Context Compression 三类报告的统一低敏快照；
+- 已完成 Agent/Agent Reliability/RAG/Context Compression 四类报告的统一低敏快照；
 - 已完成 fail-closed 基线比较、不可绕过的显式 bootstrap、已有基线后的失败候选留痕；
 - 已完成带 checksum、文件锁、fsync、并发幂等和崩溃尾恢复的本地 Store；
 - 已完成 PostgreSQL Adapter、完整身份复合索引、成功基线部分索引、不可变并发幂等和读取完整性校验；

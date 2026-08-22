@@ -17,10 +17,12 @@ import zio.json.*
 
 /** 可进入长期趋势仓库的评测类型。
   *
-  * 这里故意只保留框架当前具有确定性评分器的三类报告。未来增加安全红队、工作流或业务答案 Judge 时，应先为新类型建立 独立低敏投影，再扩展该枚举；不能把任意原始报告 JSON 直接塞入趋势文件。
+  * 这里故意只保留框架当前具有确定性评分器和低敏投影的报告。未来增加安全红队、工作流或业务答案 Judge 时，应先为新类型建立独立低敏投影，再扩展该枚举；不能把任意原始报告 JSON 直接塞入趋势文件。
   */
 enum EvalSuiteKind derives JsonCodec:
   case Agent
+  case AgentReliability
+  case HarnessComparison
   case Rag
   case ContextCompression
 
@@ -162,6 +164,37 @@ object EvalSuiteSnapshot:
       report.reports.map(item => project(item.caseId, item.datasetVersion, item.grades))
     )
 
+  /** 从多试验报告创建独立的低敏可靠性快照。
+    *
+    * 可靠性趋势使用 `AgentReliability` 身份，不会与单次 `Agent` 质量快照互相成为基线。长期记录只包含是否达到最小样本、 观察成功率和 Wilson 95% 下界；逐次报告、输入、答案与
+    * details 均不会持久化。
+    */
+  def fromAgentReliability(
+      metadata: EvalSnapshotMetadata,
+      report: AgentEvalReliabilityReport,
+      policy: AgentEvalReliabilityPolicy = AgentEvalReliabilityPolicy()
+  ): IO[AgentError.InvalidConfiguration, EvalSuiteSnapshot] =
+    build(
+      EvalSuiteKind.AgentReliability,
+      metadata,
+      report.cases.map(reliabilityProject(_, policy))
+    )
+
+  /** 从有/无 Harness 的同 case/attempt 成对实验创建独立趋势快照。
+    *
+    * 长期记录只保留通过门禁和标准化分数，不保存输入、回答、轨迹正文、逐次测量或 Artifact 名称。HarnessComparison 使用独立 kind，不能与普通 Agent 或可靠性快照互为基线。
+    */
+  def fromHarnessComparison(
+      metadata: EvalSnapshotMetadata,
+      report: HarnessEvalSuiteComparison,
+      policy: HarnessEvalPolicy = HarnessEvalPolicy()
+  ): IO[AgentError.InvalidConfiguration, EvalSuiteSnapshot] =
+    build(
+      EvalSuiteKind.HarnessComparison,
+      metadata,
+      report.cases.map(harnessComparisonProject(_, policy))
+    )
+
   /** 从 RAG Eval 报告创建低敏快照。
     *
     * query、命中正文和 citation excerpt 只存在于运行中的 Retriever 观测，不会进入此投影。
@@ -201,6 +234,95 @@ object EvalSuiteSnapshot:
       datasetVersion,
       grades.map(grade => EvalDimensionSnapshot(grade.dimension, grade.passed, grade.score))
     )
+
+  /** 把重复试验压缩成三个互不抵消的 0..1 维度。样本分数按策略阈值封顶，避免把原始 attempt 写入长期趋势。 */
+  private def reliabilityProject(
+      reliability: AgentEvalCaseReliability,
+      policy: AgentEvalReliabilityPolicy
+  ): EvalCaseSnapshot =
+    val samples        = reliability.trials.length
+    val interval       = reliability.confidenceInterval95
+    val sampleCoverage = math.min(1.0, samples.toDouble / policy.minimumTrialsPerCase.toDouble)
+    EvalCaseSnapshot(
+      reliability.caseId,
+      reliability.datasetVersion,
+      Chunk(
+        EvalDimensionSnapshot(
+          "reliability-minimum-trials",
+          samples >= policy.minimumTrialsPerCase,
+          sampleCoverage
+        ),
+        EvalDimensionSnapshot(
+          "reliability-observed-success-rate",
+          reliability.successRate >= policy.minimumObservedSuccessRate,
+          reliability.successRate
+        ),
+        EvalDimensionSnapshot(
+          "reliability-wilson-lower-95",
+          interval.lower >= policy.minimumWilsonLowerBound95,
+          interval.lower
+        )
+      )
+    )
+
+  /** 把成对试验压缩成互不抵消的门禁。delta 分数映射到 0..1；ratio 分数越小越好并按策略上限归一。 */
+  private def harnessComparisonProject(
+      comparison: HarnessEvalCaseComparison,
+      policy: HarnessEvalPolicy
+  ): EvalCaseSnapshot =
+    val samples        = comparison.trials.length
+    val interval       = comparison.harnessConfidenceInterval95
+    val sampleCoverage = math.min(1.0, samples.toDouble / policy.minimumTrialsPerCase.toDouble)
+    EvalCaseSnapshot(
+      comparison.caseId,
+      comparison.datasetVersion,
+      Chunk(
+        EvalDimensionSnapshot(
+          "harness-minimum-trials",
+          samples >= policy.minimumTrialsPerCase,
+          sampleCoverage
+        ),
+        EvalDimensionSnapshot(
+          "harness-success-rate",
+          comparison.harnessSuccessRate >= policy.minimumHarnessSuccessRate,
+          comparison.harnessSuccessRate
+        ),
+        EvalDimensionSnapshot(
+          "harness-wilson-lower-95",
+          interval.lower >= policy.minimumHarnessWilsonLowerBound95,
+          interval.lower
+        ),
+        EvalDimensionSnapshot(
+          "harness-safety-no-failures",
+          comparison.harnessSafetyFailures == 0,
+          1.0 - comparison.harnessSafetyFailures.toDouble / samples.toDouble
+        ),
+        deltaDimension("harness-outcome-delta", comparison.outcomeDelta, policy.minimumOutcomeDelta),
+        deltaDimension(
+          "harness-trajectory-delta",
+          comparison.trajectoryDelta,
+          policy.minimumTrajectoryDelta
+        ),
+        ratioDimension("harness-latency-ratio", comparison.latencyRatio, policy.maximumLatencyRatio),
+        ratioDimension("harness-token-ratio", comparison.tokenRatio, policy.maximumTokenRatio),
+        ratioDimension("harness-cost-ratio", comparison.costRatio, policy.maximumCostRatio),
+        EvalDimensionSnapshot(
+          "harness-human-intervention-delta",
+          comparison.humanInterventionDelta <= policy.maximumHumanInterventionDelta,
+          if comparison.humanInterventionDelta <= policy.maximumHumanInterventionDelta then 1.0 else 0.0
+        )
+      )
+    )
+
+  private def deltaDimension(name: String, value: Double, minimum: Double): EvalDimensionSnapshot =
+    EvalDimensionSnapshot(name, value >= minimum, math.max(0.0, math.min(1.0, (value + 1.0) / 2.0)))
+
+  private def ratioDimension(name: String, value: Double, maximum: Double): EvalDimensionSnapshot =
+    val score =
+      if !java.lang.Double.isFinite(value) then 0.0
+      else if value == 0.0 then 1.0
+      else math.min(1.0, maximum / value)
+    EvalDimensionSnapshot(name, value <= maximum, score)
 
   /** 所有报告类型共用同一份严格快照校验。 */
   private def build(

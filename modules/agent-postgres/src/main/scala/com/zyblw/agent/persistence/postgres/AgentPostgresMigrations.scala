@@ -18,11 +18,7 @@ object AgentPostgresMigrations:
 
   /** 1024 维 embedding 的独立 fresh-install RAG baseline。 */
   val OptionalPgVector1024Location: String =
-    "classpath:com/zyblw/agent/persistence/postgres/optional/pgvector_1024_v0_6"
-
-  /** 已随 0.3.0 发布的 pgvector location，只保留 checksum/源码审计，不用于 0.4 fresh install。 */
-  val LegacyPgVector03Location: String =
-    "classpath:com/zyblw/agent/persistence/postgres/optional/pgvector"
+    "classpath:com/zyblw/agent/persistence/postgres/optional/pgvector_1024"
 
   val DefaultHistoryTable: String = "flyway_zyblw_agent_schema_history"
 
@@ -31,15 +27,14 @@ object AgentPostgresMigrations:
   /** 1024 知识索引的专属 PostgreSQL schema；与核心控制面隔离 Flyway 生命周期和对象命名空间。 */
   val Knowledge1024Schema: String = "zyblw_agent_knowledge"
 
+  /** V001 创建但无 writer 的投影；V012 在空表时删除。共享 public baseline 仍把它们视为已有 agent 对象。 */
+  private val LegacyDeadRelations = Chunk("agent_messages", "agent_steps", "model_calls", "usage_records")
+
   private val CoreRelations = Chunk(
     "agent_runs",
     "agent_events",
     "tool_executions",
-    "agent_messages",
-    "agent_steps",
-    "model_calls",
     "approval_requests",
-    "usage_records",
     "agent_memories",
     "agent_memory_audit",
     "agent_run_commands",
@@ -57,7 +52,17 @@ object AgentPostgresMigrations:
     "agent_workflow_waits",
     "agent_workflow_signals",
     "agent_runtime_overrides",
-    "agent_ingestion_jobs"
+    "agent_ingestion_jobs",
+    "model_call_executions",
+    "harness_goals",
+    "harness_plans",
+    "harness_skills",
+    "harness_interactions",
+    "harness_goal_budgets",
+    "harness_budget_reservations",
+    "agent_artifacts",
+    "agent_artifact_versions",
+    "agent_artifact_audit"
   )
 
   private val KnowledgeRelations = Chunk(
@@ -104,6 +109,43 @@ object AgentPostgresMigrations:
       result <- runMigration(dataSource, validated, Some(Knowledge1024Schema))
       _      <- verifyKnowledge1024(dataSource)
     yield result
+
+  /** 只读检查核心或知识库 Flyway 状态，不执行 DDL。
+    *
+    * 用于升级预检：宿主先看当前 version 和 pending 列表，再决定是否 drain 后 migrate。失败语义与 [[migrate]] 相同——非法配置在接触 DataSource 前被拒绝。
+    */
+  def inspect(
+      dataSource: DataSource,
+      config: AgentPostgresMigrationConfig = AgentPostgresMigrationConfig()
+  ): Task[AgentPostgresSchemaStatus] =
+    schemaStatus(dataSource, config, managedSchemaOf(config))
+
+  /** 只读检查 1024 知识 Flyway 状态，不执行 DDL。 */
+  def inspectKnowledge1024(
+      dataSource: DataSource,
+      config: AgentPostgresMigrationConfig = AgentPostgresMigrationConfig.knowledge1024
+  ): Task[AgentPostgresSchemaStatus] =
+    schemaStatus(dataSource, config, Some(Knowledge1024Schema))
+
+  /** 丢弃核心与知识对象，供参考宿主 `reset` 与测试重建。不走 Flyway clean。 */
+  def resetAll(dataSource: DataSource): Task[Unit] =
+    ZIO.attemptBlocking {
+      val connection = dataSource.getConnection
+      try
+        val statement = connection.createStatement()
+        try
+          statement.execute(s"DROP SCHEMA IF EXISTS $Knowledge1024Schema CASCADE")
+          statement.execute(s"DROP TABLE IF EXISTS $Knowledge1024HistoryTable")
+          CoreRelations.foreach { relation =>
+            statement.execute(s"DROP TABLE IF EXISTS ${quoteIdent(relation)} CASCADE")
+          }
+          val _ = statement.execute(s"DROP TABLE IF EXISTS ${quoteIdent(DefaultHistoryTable)}")
+        finally statement.close()
+      finally connection.close()
+    }
+
+  private def quoteIdent(value: String): String =
+    "\"" + value.replace("\"", "\"\"") + "\""
 
   /** 一站式启动入口：核心控制面 + 1024 维知识索引，各自保留独立 Flyway history。 */
   def migrateCoreAndKnowledge1024(
@@ -178,25 +220,56 @@ object AgentPostgresMigrations:
       finally connection.close()
     }
 
+  private def managedSchemaOf(config: AgentPostgresMigrationConfig): Option[String] =
+    Option.when(config.locations == List(OptionalPgVector1024Location))(Knowledge1024Schema)
+
+  private def schemaStatus(
+      dataSource: DataSource,
+      config: AgentPostgresMigrationConfig,
+      managedSchema: Option[String]
+  ): Task[AgentPostgresSchemaStatus] =
+    for
+      validated <- ZIO.fromEither(config.validated).mapError(message => new IllegalArgumentException(message))
+      status    <- ZIO.attemptBlockingInterrupt {
+        val info    = loadFlyway(dataSource, validated, managedSchema).info()
+        val current = Option(info.current()).flatMap(item => Option(item.getVersion).map(_.toString))
+        val pending = Chunk.fromArray(info.pending()).map { item =>
+          Option(item.getVersion).map(_.toString).getOrElse(item.getScript)
+        }
+        AgentPostgresSchemaStatus(
+          historyPresent = current.nonEmpty || info.applied().nonEmpty,
+          currentVersion = current,
+          pendingCount = pending.length,
+          pendingVersions = pending,
+          appliedCount = info.applied().length
+        )
+      }
+    yield status
+
+  private def loadFlyway(
+      dataSource: DataSource,
+      config: AgentPostgresMigrationConfig,
+      managedSchema: Option[String]
+  ) =
+    val flywayConfiguration = Flyway
+      .configure()
+      .dataSource(dataSource)
+      .locations(config.locations*)
+      .table(config.historyTable)
+      .baselineOnMigrate(config.baselineOnMigrate)
+      .validateOnMigrate(true)
+      .cleanDisabled(true)
+    config.baselineVersion.foreach(version => flywayConfiguration.baselineVersion(version))
+    managedSchema.foreach(schema => flywayConfiguration.defaultSchema(schema).schemas(schema))
+    flywayConfiguration.load()
+
   private def runMigration(
       dataSource: DataSource,
       config: AgentPostgresMigrationConfig,
       managedSchema: Option[String] = None
   ): Task[AgentPostgresMigrationResult] =
     ZIO.attemptBlocking {
-      val flywayConfiguration = Flyway
-        .configure()
-        .dataSource(dataSource)
-        .locations(config.locations*)
-        .table(config.historyTable)
-        .baselineOnMigrate(config.baselineOnMigrate)
-        .validateOnMigrate(true)
-        .cleanDisabled(true)
-      config.baselineVersion.foreach(version => flywayConfiguration.baselineVersion(version))
-      managedSchema.foreach(schema => flywayConfiguration.defaultSchema(schema).schemas(schema))
-      val migration = flywayConfiguration
-        .load()
-        .migrate()
+      val migration = loadFlyway(dataSource, config, managedSchema).migrate()
       if !migration.success then throw IllegalStateException("Flyway migration did not report success")
       AgentPostgresMigrationResult(
         success = migration.success,
@@ -230,7 +303,10 @@ object AgentPostgresMigrations:
         // 已有 agent history 代表此前已由本框架接管；此时交给 Flyway 校验 migration 状态，不能把
         // 正常存在的 core 表误报为旧库冲突。只有 history 不存在时才执行 version-0 baseline 前检查。
         if !relationExists(connection, None, historyTable) then
-          val existing = CoreRelations.filter(relation => relationExists(connection, None, relation))
+          val existing =
+            (CoreRelations ++ LegacyDeadRelations).filter(relation =>
+              relationExists(connection, None, relation)
+            )
           if existing.nonEmpty then
             throw IllegalStateException(
               s"拒绝对包含既有 zyblw-agent core 表的 public schema 执行 baseline: ${existing.mkString(",")}. " +
@@ -403,6 +479,19 @@ object AgentPostgresMigrationConfig:
     historyTable = AgentPostgresMigrations.Knowledge1024HistoryTable,
     locations = List(AgentPostgresMigrations.OptionalPgVector1024Location)
   )
+
+/** [[AgentPostgresMigrations.inspect]] 的只读 schema 视图；不含 JDBC URL 或 SQL 错误正文。 */
+final case class AgentPostgresSchemaStatus(
+    historyPresent: Boolean,
+    currentVersion: Option[String],
+    pendingCount: Int,
+    pendingVersions: Chunk[String],
+    appliedCount: Int
+):
+  require(pendingCount >= 0 && appliedCount >= 0, "Flyway 计数不能为负数")
+  require(pendingVersions.length == pendingCount, "pendingVersions 必须与 pendingCount 一致")
+
+  def hasPending: Boolean = pendingCount > 0
 
 /** [[AgentPostgresMigrations.migrate]] 返回的低耦合结果。 */
 final case class AgentPostgresMigrationResult(

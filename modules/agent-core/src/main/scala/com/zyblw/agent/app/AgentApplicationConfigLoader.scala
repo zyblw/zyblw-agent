@@ -1,6 +1,8 @@
 package com.zyblw.agent.app
 
+import com.zyblw.agent.composition.RuntimeProfile
 import com.zyblw.agent.core.*
+import com.zyblw.agent.model.{ModelRole, ModelRoleBinding, ModelRoleCatalog}
 import com.zyblw.agent.scheduler.WorkerHostConfig
 import com.zyblw.agent.tools.*
 import zio.*
@@ -32,7 +34,10 @@ object AgentApplicationConfigLoader:
     */
   def description(prefix: String = DefaultPrefix): Config[AgentApplicationConfig] =
     ZioConfigPath.nested(
-      (toolPolicyDescription ++ workerDescription).map(AgentApplicationConfig.apply),
+      (toolPolicyDescription ++ workerDescription ++ profileDescription ++ roleCatalogDescription).map {
+        case (toolPolicy, worker, profile, roleCatalog) =>
+          AgentApplicationConfig(toolPolicy, worker, profile, roleCatalog)
+      },
       prefix
     )
 
@@ -139,6 +144,33 @@ object AgentApplicationConfigLoader:
         Config.int("parallelism").withDefault(4)
     ).mapAttempt(WorkerHostConfig.apply).nested("worker")
 
+  /** 运行组合与 CapturePolicy，路径位于 `<prefix>.runtime.*`。不授予工具权限。 */
+  private lazy val profileDescription: Config[RuntimeProfile] =
+    (
+      Config.string("profile_id").withDefault("default") ++
+        Config.string("capture_policy").withDefault("metadata-only")
+    ).mapAttempt { case (id, policy) =>
+      val capture = normalized(policy) match
+        case "disabled"      => CapturePolicy.Disabled
+        case "metadata-only" => CapturePolicy.MetadataOnly
+        case "replayable"    => CapturePolicy.Replayable
+        case _               =>
+          throw IllegalArgumentException("runtime.capture-policy 仅支持 disabled、metadata-only 或 replayable")
+      RuntimeProfile(id, capture)
+    }.nested("runtime")
+
+  /** 部署侧角色目录，路径位于 `<prefix>.role.bindings`。
+    *
+    * 协议是逗号分隔的 `role=provider/model`，例如 `planner=openai/gpt-4.1,summarizer=openai/gpt-4.1-mini`。
+    * 密钥不出现在本字段；未声明角色在 Run 创建时 fail-closed。
+    */
+  private lazy val roleCatalogDescription: Config[ModelRoleCatalog] =
+    Config
+      .string("bindings")
+      .withDefault("")
+      .mapAttempt(parseRoleBindings)
+      .nested("role")
+
   /** 把逗号分隔的部署值转换为去重后的类型化工具名，并拒绝控制字符或异常长度。 */
   private def parseToolNames(raw: String): Set[ToolName] =
     raw
@@ -151,6 +183,33 @@ object AgentApplicationConfigLoader:
         ToolName(value)
       }
       .toSet
+
+  /** 解析 `role=provider/model` 列表；重复角色或空绑定在启动期失败。 */
+  private def parseRoleBindings(raw: String): ModelRoleCatalog =
+    val entries = raw
+      .split(',')
+      .iterator
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map { entry =>
+        val eq = entry.indexOf('=')
+        require(eq > 0 && eq < entry.length - 1, "role.bindings 必须是 role=provider/model 列表")
+        val roleRaw = entry.substring(0, eq).trim
+        val target  = entry.substring(eq + 1).trim
+        val slash   = target.lastIndexOf('/')
+        require(slash > 0 && slash < target.length - 1, s"角色绑定缺少 provider/model: $entry")
+        val provider = target.substring(0, slash).trim
+        val model    = target.substring(slash + 1).trim
+        val role     =
+          ModelRole.fromString(roleRaw).fold(error => throw IllegalArgumentException(error), identity)
+        require(provider.nonEmpty && model.nonEmpty, s"角色绑定的 provider 与 model 不能为空: $entry")
+        role.value -> ModelRoleBinding(role, provider, model)
+      }
+      .toList
+    val duplicates =
+      entries.groupMap(_._1)(_._2).collect { case (role, bindings) if bindings.size > 1 => role }
+    require(duplicates.isEmpty, s"角色绑定重复: ${duplicates.mkString(",")}")
+    ModelRoleCatalog(entries.toMap)
 
   /** 配置协议统一忽略首尾空格、大小写，并接受下划线作为连字符的部署友好别名。 */
   private def normalized(value: String): String = value.trim.toLowerCase.replace('_', '-')

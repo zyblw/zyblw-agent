@@ -10,7 +10,12 @@
  */
 
 import type {
+  AdminApprovalSubjectView,
   AdminCapabilitiesView,
+  AdminCompositionView,
+  AdminHarnessView,
+  AdminModelCallView,
+  MemoryExportView,
   CommandRetryResult,
   DeadLetterCommandView,
   ErrorResponse,
@@ -248,6 +253,33 @@ export const adminApi = {
         limit: query.limit,
       })}`,
     );
+  },
+
+  runComposition(config: AdminClientConfig, runId: string): Promise<AdminCompositionView> {
+    return request(config, `${ADMIN_BASE}/runs/${encodeURIComponent(runId)}/composition`);
+  },
+
+  runModelCalls(config: AdminClientConfig, runId: string): Promise<AdminModelCallView[]> {
+    return request(config, `${ADMIN_BASE}/runs/${encodeURIComponent(runId)}/model-calls?limit=50`);
+  },
+
+  runApproval(config: AdminClientConfig, runId: string): Promise<AdminApprovalSubjectView | null> {
+    return request(config, `${ADMIN_BASE}/runs/${encodeURIComponent(runId)}/approval`);
+  },
+
+  harnessGoal(config: AdminClientConfig, goalId: string): Promise<AdminHarnessView> {
+    return request(config, `${ADMIN_BASE}/harness/goals/${encodeURIComponent(goalId)}`);
+  },
+
+  harnessPlan(config: AdminClientConfig, planId: string): Promise<AdminHarnessView> {
+    return request(config, `${ADMIN_BASE}/harness/plans/${encodeURIComponent(planId)}`);
+  },
+
+  exportMemory(config: AdminClientConfig, afterKey?: string): Promise<MemoryExportView> {
+    return request(config, '/api/v1/memory/export', {
+      method: 'POST',
+      json: { afterKey: afterKey ?? null, limit: 20 },
+    });
   },
 
   /** 读取按状态聚合的部署总览。 */

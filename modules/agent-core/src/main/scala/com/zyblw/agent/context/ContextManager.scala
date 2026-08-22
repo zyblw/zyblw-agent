@@ -53,7 +53,11 @@ final case class ContextSources(
     memories: Chunk[ContextMemory] = Chunk.empty,
     retrieval: Chunk[ContextDocument] = Chunk.empty,
     safetyInstructions: Chunk[String] = Chunk.empty,
-    existingSummary: Option[String] = None
+    existingSummary: Option[String] = None,
+    /** 可选 world-state section；指纹相同则本回合可不重复发给模型。 */
+    sections: Chunk[ContextSectionSnapshot] = Chunk.empty,
+    citations: Chunk[RunCitation] = Chunk.empty,
+    retrievalEvidence: Option[RunRetrievalEvidence] = None
 )
 
 /** 在每个模型回合之前解析动态上下文来源。 */
@@ -68,6 +72,9 @@ trait ContextSourceResolver:
     *   已通过隔离与数量限制的记忆、检索资料、安全指令和可选历史摘要
     */
   def resolve(state: AgentState, definition: AgentDefinition): IO[ContextError, ContextSources]
+
+  /** 低敏来源身份，进入组合指纹；格式 `id@version`，不含 query 或正文。 */
+  def sourceIds: Chunk[String] = Chunk.empty
 
 object ContextSourceResolver:
   /** 默认空解析器，适合不需要 Memory/RAG 的 Agent。 */
@@ -86,6 +93,9 @@ object ContextSourceResolver:
     *   只拼接结构化来源的解析器，格式化和预算仍由唯一 ContextManager 负责
     */
   def combine(resolvers: Chunk[ContextSourceResolver]): ContextSourceResolver = new ContextSourceResolver:
+    override val sourceIds: Chunk[String] =
+      resolvers.foldLeft(Chunk.empty[String])((ids, resolver) => ids ++ resolver.sourceIds)
+
     def resolve(state: AgentState, definition: AgentDefinition): IO[ContextError, ContextSources] =
       ZIO.foreach(resolvers)(_.resolve(state, definition)).map { values =>
         values.foldLeft(ContextSources()) { (left, right) =>
@@ -93,7 +103,10 @@ object ContextSourceResolver:
             memories = left.memories ++ right.memories,
             retrieval = left.retrieval ++ right.retrieval,
             safetyInstructions = left.safetyInstructions ++ right.safetyInstructions,
-            existingSummary = right.existingSummary.orElse(left.existingSummary)
+            existingSummary = right.existingSummary.orElse(left.existingSummary),
+            sections = left.sections ++ right.sections,
+            citations = left.citations ++ right.citations,
+            retrievalEvidence = right.retrievalEvidence.orElse(left.retrievalEvidence)
           )
         }
       }
@@ -187,7 +200,9 @@ final case class PreparedContext(
     usage: ContextUsage,
     debug: ContextDebugView = ContextDebugView.empty,
     summaryUpdate: Option[ContextSummaryCheckpoint] = None,
-    compressionUsage: TokenUsage = TokenUsage()
+    compressionUsage: TokenUsage = TokenUsage(),
+    sectionDecisions: Chunk[ContextSectionDecision] = Chunk.empty,
+    worldSectionCursors: Chunk[ContextSectionCursor] = Chunk.empty
 )
 
 /** Provider tokenizer 的可替换边界。 */
@@ -350,7 +365,12 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
         .sortBy(memory => (-memory.importance, memory.key))
         .map(renderMemory)
       memorySelection <- selectSection(memoryCandidates, budget.memory)
-      retrievalCandidates = deduplicated.retrieval.map(renderDocument)
+      sectionPlan = ContextWorldSections.plan(
+        state.worldSectionCursors,
+        sources.sections,
+        omitUnchanged = policy.worldStateDelivery == WorldStateDelivery.TrustedStatefulDelta
+      )
+      retrievalCandidates = sectionPlan.messages ++ deduplicated.retrieval.map(renderDocument)
       retrievalSelection <- selectSection(retrievalCandidates, budget.retrieval)
       recentPlan         <- planRecent(
         state,
@@ -435,7 +455,9 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
       usage,
       ContextDebugView(inputBudget, totalTokens, sections, signals),
       recentPlan.summaryUpdate,
-      compressionUsage
+      compressionUsage,
+      sectionPlan.decisions,
+      sectionPlan.cursors
     )
 
   /** Agent 指令与安全约束都不可静默丢弃，合并后由 system 分区统一硬校验。 */
@@ -917,6 +939,8 @@ private[context] object ContextRendering:
         case ContentPart.Text(value)           => value
         case ContentPart.JsonValue(value)      => value.toJson
         case ContentPart.ImageUrl(url, detail) => s"[image url=$url detail=${detail.getOrElse("auto")}]"
+        case ContentPart.ImageArtifact(sha, media, size) =>
+          s"[image artifact sha=$sha type=$media bytes=$size]"
       }
       .mkString("\n")
 

@@ -15,36 +15,40 @@
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.6.2",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.6.2"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.8.0",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.8.0"
 )
 ```
 
 需要 ZIO HTTP 控制面再加入 `zyblw-agent-zio-http`；需要 PostgreSQL 耐久化再加入
 `zyblw-agent-postgres`。完整矩阵见 [模块选择](modules.md)。
 
-`0.6.2` 由 `v0.6.2` annotated tag 发布到 Maven Central。验证尚未发布的候选时，可以在框架目录执行
-`sbt -batch 'set ThisBuild / version := "0.6.3-local"; publishM2'`，宿主临时使用同一唯一版本并显式启用 Maven
+`0.8.0` 是当前全新安装基线。验证未发布提交时，可以在框架目录执行
+`sbt -batch 'set ThisBuild / version := "0.8.0-local"; publishM2'`，宿主临时使用同一唯一版本并显式启用 Maven
 Local；不要覆盖旧本地版本，也不要把本地版本或 `SNAPSHOT` 当作可重复生产发布物。完整命令见
 [server 消费指南](consuming-from-server.md)。
 
-### 先在仓库内用五分钟确认主链路
+### 先按生产参考宿主接入
 
-不配置 API Key、不安装数据库也可以执行：
+`0.8.0` 不再提供无数据库 Quickstart。仓库入口是客户支持参考宿主与书籍问答宿主：
 
 ```bash
-sbt "examples/runMain com.zyblw.agent.examples.QuickstartAgentExample"
+sbt "examples/runMain com.zyblw.agent.examples.production.ProductionSupportHost status"
+sbt "examples/runMain com.zyblw.agent.examples.production.ProductionSupportHost migrate"
+sbt "examples/runMain com.zyblw.agent.examples.production.ProductionSupportHost serve"
+
+sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost status"
+sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost migrate"
+sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost ingest data/books"
+sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost serve"
 ```
 
-预期输出包含：
+它要求 PostgreSQL 与 Provider 环境变量，并分离 status/migrate/serve。升级前用 `status` 看 Flyway 版本和进行中
+Run。CI 可用
+`ZYBLW_AGENT_RUNTIME_MODE=contract` 跑脚本化模型，但不能把 contract 模式写成生产命令。完整步骤见
+[PostgreSQL 生产接入](postgres-quickstart.md) 与 [Docker/VM 手册](operations-docker-vm.md)。
 
-```text
-status=Completed, answer=你好，zyblw-agent 的最小运行链路已经完成。
-```
-
-这个示例使用确定性 `ScriptedChatModel` 与隔离的内存控制面，但没有另写一套“简化 Agent 循环”：它仍完整经过
-`submit -> command claim -> AgentRuntime -> inspect`。因此它可以证明依赖和主接线正确，却不能证明真实 Provider、
-PostgreSQL、跨节点恢复或生产负载已经通过。
+确定性测试继续使用 `ScriptedChatModel` 与 `AgentApplication.inMemory`，它们不是部署入口。
 
 ## 2. 定义工具
 

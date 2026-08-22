@@ -12,6 +12,9 @@ enum ContentPart derives JsonCodec:
   case JsonValue(value: Json)
   case ImageUrl(url: String, detail: Option[String] = None)
 
+  /** 耐久图片引用：只保存 digest/MIME/大小，禁止把二进制或远程 URL 写入 State JSON。 */
+  case ImageArtifact(sha256: String, mediaType: String, byteSize: Long)
+
 /** Provider-neutral 工具调用；稳定 callId 是恢复和幂等的基础。 */
 final case class ToolCall(id: String, name: String, arguments: Json) derives JsonCodec
 

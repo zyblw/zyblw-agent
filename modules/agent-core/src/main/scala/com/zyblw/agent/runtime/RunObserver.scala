@@ -378,6 +378,47 @@ object TelemetryRunObserver:
             "langfuse.observation.type" -> "generation"
           )
         )
+      case AgentEvent.ModelCallPrepared(
+            runId,
+            requestId,
+            provider,
+            model,
+            fingerprint,
+            policy,
+            messageCount,
+            toolCount,
+            at
+          ) =>
+        some(
+          runId,
+          "agent.model.prepared",
+          at,
+          Map(
+            "agent.provider"            -> provider,
+            "agent.model"               -> model,
+            "agent.model.request.id"    -> requestId,
+            "agent.model.fingerprint"   -> fingerprint,
+            "agent.model.capture"       -> policy,
+            "gen_ai.operation.name"     -> "chat",
+            "gen_ai.provider.name"      -> providerFamily(provider),
+            "gen_ai.request.model"      -> model,
+            "langfuse.observation.type" -> "generation"
+          ),
+          Map(
+            "agent.model.message_count" -> messageCount.toDouble,
+            "agent.model.tool_count"    -> toolCount.toDouble
+          )
+        )
+      case AgentEvent.ModelCallUnknown(runId, requestId, at) =>
+        some(
+          runId,
+          "agent.model.unknown",
+          at,
+          Map(
+            "agent.model.request.id"     -> requestId,
+            "langfuse.observation.level" -> "ERROR"
+          )
+        )
       case AgentEvent.ModelCallCompleted(runId, usage, at) =>
         some(
           runId,
@@ -507,6 +548,16 @@ object TelemetryRunObserver:
           "agent.run.cancelled",
           at,
           Map("agent.status" -> "cancelled", "langfuse.observation.type" -> "agent")
+        )
+      case AgentEvent.RetrievalCited(runId, citations, evidence, at) =>
+        some(
+          runId,
+          "agent.retrieval.cited",
+          at,
+          Map(
+            "agent.retrieval.citation_count" -> citations.length.toString,
+            "agent.retrieval.evidence"       -> evidence.status
+          )
         )
 
   /** Context Rot Trace 属性允许的固定 code；未知插件值统一折叠为 `other`。 */
@@ -721,8 +772,12 @@ object MetricsRunObserver:
       case AgentEvent.RunCompleted(runId, _, usage, at) =>
         finishRun(current, runId, MetricOutcome.Succeeded, at, usage.estimatedCost.toDouble)
 
-      case AgentEvent.RunFailed(runId, category, _, at) =>
-        finishRun(current, runId, outcomeFromCategory(category), at, 0.0)
+      case AgentEvent.RunFailed(runId, category, message, at) =>
+        val (finished, next) = finishRun(current, runId, outcomeFromCategory(category), at, 0.0)
+        val extra            =
+          if message.contains("组合已不兼容") then Chunk(AgentMetric.CompositionDriftDetected("incompatible"))
+          else Chunk.empty
+        (extra ++ finished) -> next
 
       case AgentEvent.RunCancelled(runId, at) =>
         finishRun(current, runId, MetricOutcome.Cancelled, at, 0.0)

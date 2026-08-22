@@ -74,7 +74,12 @@ Session 默认拒绝普通用户，是因为当前 Memory 模块没有“session
 | `GET /api/v1/memory/{key}` | 精确读取 | 200 / 不存在 404 |
 | `PUT /api/v1/memory/{key}` | expectedVersion CAS 纠正 | 200 / 冲突 409 |
 | `DELETE /api/v1/memory/{key}` | 幂等删除单条 | 200，affectedCount 0/1 |
+| `POST /api/v1/memory/export` | 有界导出自己的记忆 | 200 |
 | `DELETE /api/v1/memory` | 删除自己的全部长期记忆 | 200 |
+
+`ProductionSupportHost` 通过 `AgentHttpAdditionalRoutes` 安装这组路由：contract 内存路径使用
+`InMemoryMemoryGovernanceRepository`，durable 路径使用 `PostgresMemoryStore.governanceLayer`，并以后台进程运行
+`MemoryRetentionWorker`。身份仍来自同一 `AgentRequestContextResolver`（live 必须是可信反代头）。
 
 这些路径已采用 v1 URL 和版本响应头，但 Memory DTO 当前仍是 Beta 子契约，尚未进入稳定 OpenAPI。升级边界见
 [HTTP API、OpenAPI 与 Schema 演进](http-api-versioning.md)。

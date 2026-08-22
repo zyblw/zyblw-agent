@@ -1,5 +1,8 @@
 # 升级到 0.4.0
 
+> 状态：历史归档。1536 维 knowledge location 与 `migrateKnowledge1536` 已删除。
+> 当前 fresh install 只使用 1024 维基线，见 [legacy 说明](legacy/README.md) 与 [升级到 0.8.0](upgrading-to-0.8.0.md)。
+>
 > 适用范围：从 0.3.0/0.3.x 采用 0.4 的结构化文档与 RAG 能力
 > 原则：保留权威原文和业务权限，重建派生知识索引，不修改已发布 migration
 

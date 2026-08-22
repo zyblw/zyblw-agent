@@ -43,20 +43,47 @@ final class InMemoryKnowledgeIndexStore private (
       scope: RetrievalScope,
       limit: Int
   ): UIO[Chunk[RetrievalHit]] =
+    searchFiltered(RetrievalMode.VectorOnly, "", query, scope, RetrievalFilter.empty, limit)
+
+  override def searchFiltered(
+      mode: RetrievalMode,
+      queryText: String,
+      query: Embedding,
+      scope: RetrievalScope,
+      filter: RetrievalFilter,
+      limit: Int
+  ): UIO[Chunk[RetrievalHit]] =
     if limit <= 0 then ZIO.succeed(Chunk.empty)
+    else
+      state.get.map { current =>
+        val authorized = current.published.valuesIterator
+          .flatMap(_.iterator)
+          .filter(item =>
+            item.chunk.tenantId == scope.tenantId &&
+              item.chunk.permissions.subsetOf(scope.permissions) &&
+              filter.matches(item.chunk)
+          )
+        Chunk.fromIterable(RetrievalScoring.rank(mode, queryText, query, authorized).take(limit))
+      }
+
+  override def fetchChunks(
+      chunkIds: Set[String],
+      scope: RetrievalScope
+  ): UIO[Chunk[DocumentChunk]] =
+    if chunkIds.isEmpty then ZIO.succeed(Chunk.empty)
     else
       state.get.map { current =>
         Chunk.fromIterable(
           current.published.valuesIterator
             .flatMap(_.iterator)
-            .filter(item =>
-              item.chunk.tenantId == scope.tenantId &&
-                item.chunk.permissions.subsetOf(scope.permissions)
+            .map(_.chunk)
+            .filter(chunk =>
+              chunkIds.contains(chunk.id) &&
+                chunk.tenantId == scope.tenantId &&
+                chunk.permissions.subsetOf(scope.permissions)
             )
-            .map(item => RetrievalHit(item.chunk, cosine(query, item.embedding)))
             .toVector
-            .sortBy(hit => (-hit.score, hit.chunk.id))
-            .take(limit)
+            .sortBy(_.id)
         )
       }
 
@@ -331,15 +358,6 @@ final class InMemoryKnowledgeIndexStore private (
     */
   def manifests: UIO[Chunk[KnowledgeIndexManifest]] =
     state.get.map(current => Chunk.fromIterable(current.manifests.values))
-
-  private def cosine(left: Embedding, right: Embedding): Double =
-    if left.values.length != right.values.length then 0.0
-    else
-      val pairs = left.values.zip(right.values)
-      val dot   = pairs.foldLeft(0.0)((sum, pair) => sum + pair._1.toDouble * pair._2.toDouble)
-      val normL = math.sqrt(left.values.foldLeft(0.0)((sum, value) => sum + value.toDouble * value.toDouble))
-      val normR = math.sqrt(right.values.foldLeft(0.0)((sum, value) => sum + value.toDouble * value.toDouble))
-      if normL == 0.0 || normR == 0.0 then 0.0 else dot / (normL * normR)
 
   /** 比较幂等请求的所有不可变字段，防止复用 ingestionId 覆盖另一份内容。 */
   private def sameRequest(manifest: KnowledgeIndexManifest, request: BeginKnowledgeIndex): Boolean =

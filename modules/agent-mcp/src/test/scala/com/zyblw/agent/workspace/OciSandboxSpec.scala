@@ -107,6 +107,26 @@ object OciSandboxSpec extends ZIOSpecDefault:
         )
       }
     },
+    test("拒绝相对路径和交互 shell，避免用宽泛 shell 代替窄工具") {
+      ZIO.scoped {
+        for
+          fixture <- sandboxFixture
+          (root, runtime) = fixture
+          requests <- Ref.make(Chunk.empty[SandboxProcessRequest])
+          executor = OciSandboxExecutor(
+            OciSandboxConfig(runtime, immutableImage, root),
+            RecordingRunner(requests)
+          )
+          relative <- executor
+            .execute(SandboxCommand("sh", Chunk("-c", "id"), WorkspacePath("work")))
+            .exit
+          shell <- executor
+            .execute(SandboxCommand("/bin/bash", Chunk("-c", "id"), WorkspacePath("work")))
+            .exit
+          captured <- requests.get
+        yield assertTrue(relative.isFailure, shell.isFailure, captured.isEmpty)
+      }
+    },
     test("可漂移镜像 tag 和 root 容器用户在配置构造期即被拒绝") {
       val root    = Path.of("/tmp/zyblw-workspace")
       val runtime = Path.of("/usr/bin/docker")

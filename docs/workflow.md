@@ -195,7 +195,7 @@ val receipt = executionStore.signal(
 - signal 仅能在 deadline 前胜出；PostgreSQL 用数据库时钟和行锁裁决 signal/timeout，恰好等于 deadline 时 timeout 胜出；
 - payload 上限默认 64 KiB，不进入 timeline、通用指标或日志；
 - `currentWait` 只返回尚未消费的当前等待；Pending 状态下普通 `resume` 返回 `workflow-wait-pending`；已决议等待则返回
-  `workflow-wakeup-claim-required`，不能绕过租约直接恢复。
+  `workflow-wakeup-claim-required`，不能绕过租约直接恢复。真实 PostgreSQL 16 契约还验证 wake Worker 消失与数据库 pause/recover 同时发生后，只有新 generation 能 heartbeat/恢复，旧 fence 不得改写 wait。
 
 框架把 Signaled/TimedOut wait 行本身作为 durable wake command，避免“先决议 wait、再写队列表”形成双写崩溃窗口。
 `WorkflowWakeWorker` 每轮先用有界 `expireDue(limit)` 决议 timer，再按 workflow/version 使用 owner/token/generation/expiry
@@ -252,6 +252,18 @@ val nextPage =
 timeline 是 Inspector/CLI/运维诊断的只读投影，不能用于恢复或重放。Store 接口不掌握业务 tenant，因此 Adapter/HTTP 在调用前
 必须使用可信身份验证 `runId` 的读取权限。`limit` 被限制在 1..500；内存和 PostgreSQL 实现共享同一分页、排序和低敏契约。
 
+### 低敏 wake queue snapshot
+
+生产宿主可按冻结的 Workflow identity/version 采样控制面 backlog：
+
+```scala
+executionStore.wakeQueueSnapshot(workflowId, definitionVersion)
+```
+
+返回值仅含采样时刻、Pending/Due wait、可领取/活跃 wakeup、过期 wake lease 与最早可领取年龄。它不含 Run/Session、
+signal payload、owner 或 token；读取不会顺带执行 `expireDue`、claim 或回收。内存与 PostgreSQL Adapter 共享同一契约，
+PostgreSQL 使用单次数据库权威时钟聚合，适合由宿主投影成 backlog、deadline lag 和 lease-health 指标。
+
 这关闭了“节点结果已经返回、checkpoint 尚未提交”造成的框架级重复调用窗口，但不宣称任意外部副作用 exactly-once。节点若
 直接调用支付、发信或第三方写 API，仍需稳定业务幂等键；需要本地业务写与消息发布一致时使用
 [Outbox/Inbox 与补偿](side-effects.md)。
@@ -280,14 +292,20 @@ sbt -batch "examples/runMain com.zyblw.agent.examples.DurableWorkflowWakeExample
 
 当前已经实现“可验证图内核 + PostgreSQL checkpoint + 节点 execution ledger/pending outcome/fencing + 低敏 timeline +
 耐久 timer/signal + 受监督 wake worker”，并用故障注入证明 prepare 后崩溃可恢复且节点不重复执行；真实 PostgreSQL 16
-测试证明两个 Store 并发只会领取一次、过期重领递增 generation 且旧 fence 无法写入。当前仍未完成：
+独立进程演练还在旧 JVM 同时持有 wake 与 node execution generation 1 时发送 `SIGKILL`，随后重启同一 PostgreSQL
+容器并重新发现宿主端口，验证新 JVM 以双 generation 2 消费 wait、提交 execution ledger 和终态 checkpoint；
+Testcontainers 还证明两个 Store 并发只会领取一次、过期重领递增 generation 且旧 fence 无法写入。当前仍未完成：
 
-- 数据库重启、进程 kill、多 Worker 长时间 soak 与容量/SLO 证据；
+仓库级 `workflow-wake-worker-soak.sh` 进一步让三个独立 PostgreSQL Store/`WorkflowWakeWorker` 共同处理 durable signal。
+默认本机基线在 7 轮完成 126 个 Run，wake claim、node execution claim 与完成 cycle 一一对应，双 generation 零重领，
+最终未完成量为零，并输出不含业务身份/正文的 claim 与 terminal P95。它仍只是短时回归门禁。
+
+- 数据库主备 failover、部署节点丢失、数小时/数天多 Worker soak 与生产容量/SLO 证据；
 - 人工任务的身份、权限、撤销与升级协议；
 - 多节点子图、checkpoint fork/time travel；
 - quorum/race 等更多 fan-in policy；
 - 完整 Graph Inspector UI/CLI 和图级质量/成本 eval。
 
-下一纵向切片是对已完成的原子 wake 回路做数据库 restart、进程 kill 与多 Worker soak，并建立 backlog、claim latency、
-lease-lost rate 和恢复时延 SLO。随后才根据真实业务证据选择人工任务、子图或更多 fan-in policy。只有固定任务证明单
+下一纵向切片是把同一原子 wake 回路带到部署环境，做数据库主备 failover、节点丢失与长时间 soak，并将现有 backlog、
+claim latency、lease-lost 和恢复时延回归信号校准为业务 SLO。随后才根据真实业务证据选择人工任务、子图或更多 fan-in policy。只有固定任务证明单
 Agent 受角色或上下文隔离限制时，才在这个内核上增加 Agent handoff 或多 Agent 调度。

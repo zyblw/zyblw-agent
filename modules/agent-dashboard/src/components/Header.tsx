@@ -15,6 +15,9 @@ import {
   ExternalLink,
   KeyRound,
   Layers,
+  Fingerprint,
+  Goal,
+  Brain,
   ListChecks,
   Settings2,
   ShieldCheck,
@@ -24,7 +27,17 @@ import { grafanaDashboardUrl } from '@/types/admin';
 import type { AdminCapabilitiesView } from '@/types/admin';
 import { Badge, FOCUS_RING, TextInput } from '@/components/ui';
 
-export type DashboardTab = 'runs' | 'rag' | 'queue' | 'models' | 'config' | 'security' | 'evals';
+export type DashboardTab =
+  | 'runs'
+  | 'inspect'
+  | 'harness'
+  | 'memory'
+  | 'rag'
+  | 'queue'
+  | 'models'
+  | 'config'
+  | 'security'
+  | 'evals';
 
 interface TabDefinition {
   id: DashboardTab;
@@ -36,6 +49,9 @@ interface TabDefinition {
 
 const TABS: TabDefinition[] = [
   { id: 'runs', label: '运行', icon: Activity, capability: 'runDirectory' },
+  { id: 'inspect', label: '检查', icon: Fingerprint, capability: 'runInspection' },
+  { id: 'harness', label: '支架', icon: Goal, capability: 'harness' },
+  { id: 'memory', label: '记忆', icon: Brain, capability: 'memoryGovernance' },
   { id: 'rag', label: '知识库', icon: Database, capability: 'knowledge' },
   { id: 'queue', label: '队列', icon: Layers, capability: 'queueOps' },
   { id: 'models', label: '模型', icon: Cpu, capability: 'models' },
@@ -120,7 +136,7 @@ export function Header({
           {capabilities && <Badge>API v{capabilities.apiVersion}</Badge>}
         </div>
 
-        {/* 页签数量会随后端装配的能力增长（当前 7 个），窄屏放不下时横向滚动而不是换行或挤压：
+        {/* 页签数量会随后端装配的能力增长，窄屏放不下时横向滚动而不是换行或挤压：
             换行会让下方内容的位置随页签数跳动，挤压则会把图标和文字压成不可读的一团。 */}
         {tabs.length > 0 && (
         <nav

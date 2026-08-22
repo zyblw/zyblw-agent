@@ -1,5 +1,6 @@
 package com.zyblw.agent.core
 
+import com.zyblw.agent.composition.RuntimeCompositionFingerprint
 import java.time.Instant
 import zio.*
 import zio.json.*
@@ -103,14 +104,6 @@ final case class ContextSummaryCheckpoint(
     "Context summary compressorVersion 只能包含安全版本字符"
   )
 
-/** 一次模型或工具动作的稳定摘要，用于无进展循环检测。 */
-final case class ActionFingerprint(
-    kind: String,
-    name: Option[String],
-    argumentsHash: Option[String],
-    resultHash: Option[String]
-) derives JsonCodec
-
 enum AgentStep derives JsonCodec:
   case ModelStep(
       index: Int,
@@ -150,7 +143,7 @@ final case class AgentState(
     updatedAt: Instant,
     version: Version,
     metadata: Map[String, String] = Map.empty,
-    schemaVersion: Int = 4,
+    schemaVersion: Int = AgentState.CurrentSchemaVersion,
     /** 业务会话的稳定线程 ID；Runtime 创建新状态时必须填写。 */
     threadId: Option[ThreadId] = None,
     /** 创建 Run 时使用的 Agent 定义快照，确保部署配置变化后仍可准确恢复。 */
@@ -167,10 +160,30 @@ final case class AgentState(
       */
     contextSummary: Option[ContextSummaryCheckpoint] = None,
     /** 最近一次持久化领域事件的序号；新事件必须严格递增，初始值 -1 表示尚无事件。 */
-    lastEventSequence: Long = -1L
+    lastEventSequence: Long = -1L,
+    /** 主模型 Intent 已提交、Settlement 尚未完成时的恢复游标；不含 prompt。 */
+    pendingModelCall: Option[PendingModelCall] = None,
+    /** 创建 Run 时冻结的运行组合指纹；缺省表示 0.6.2 之前的状态，恢复不做漂移拒绝。 */
+    composition: Option[RuntimeCompositionFingerprint] = None,
+    /** 上一回合 world-state section 指纹；不含正文。缺省表示尚未使用差量渲染。 */
+    worldSectionCursors: Chunk[ContextSectionCursor] = Chunk.empty,
+    /** 最近一次被接受的有界引用；只保留 seed 命中，上限由 reducer 截断。 */
+    citations: Chunk[RunCitation] = Chunk.empty,
+    retrievalEvidence: Option[RunRetrievalEvidence] = None
 )
 
+/** 上一回合 world-state section 的低敏游标。只保存身份与指纹，不保存正文。 */
+final case class ContextSectionCursor(id: String, version: String, fingerprint: String) derives JsonCodec:
+  require(id.trim.nonEmpty && id.length <= 64 && !id.contains('@'), "ContextSectionCursor.id 必须为 1..64 且不含 @")
+  require(version.matches("[A-Za-z0-9._-]{1,32}"), "ContextSectionCursor.version 只能包含安全版本字符")
+  require(fingerprint.matches("[0-9a-f]{64}"), "ContextSectionCursor.fingerprint 必须是 SHA-256 十六进制")
+
 object AgentState:
+  /** v6 把审批从 callId 升级为 [[com.zyblw.agent.composition.ApprovalSubject]]，让批准绑定具体副作用；v5 增加完整工具契约 指纹与单调审批要求；v4
+    * 及更早状态只按旧恢复门禁读取。
+    */
+  val CurrentSchemaVersion: Int = 7
+
   given JsonCodec[AgentState] = DeriveJsonCodec.gen[AgentState]
 
 enum ToolExecutionStatus derives JsonCodec:

@@ -23,7 +23,8 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
   final private case class Harness(
       storeA: PostgresWorkflowCheckpointStore[WorkflowState],
       storeB: PostgresWorkflowCheckpointStore[WorkflowState],
-      dataSource: DataSource
+      dataSource: DataSource,
+      container: PostgreSQLContainer
   )
 
   private val workflowId      = WorkflowId("postgres-workflow-spec")
@@ -58,7 +59,8 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
     yield Harness(
       PostgresWorkflowCheckpointStore[WorkflowState](dataSource),
       PostgresWorkflowCheckpointStore[WorkflowState](dataSource),
-      dataSource
+      dataSource,
+      container
     )
   }
 
@@ -439,7 +441,7 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
         remaining.isEmpty
       )).provideLayer(harnessLayer)
     },
-    test("两 Store 只领取一个 wakeup，数据库租约过期后递增 generation 并拒绝旧 fence") {
+    test("wake Worker 消失且数据库 pause/recover 后 generation 接管并拒绝旧 fence") {
       (for
         harness <- ZIO.service[Harness]
         runId   <- RunId.random
@@ -486,7 +488,8 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
           signalName,
           "ready"
         )
-        raced <- harness.storeA
+        dispatchableSnapshot <- harness.storeA.wakeQueueSnapshot(workflowId, workflowVersion)
+        raced                <- harness.storeA
           .claimWakeups(workflowId, workflowVersion, WorkerId("wake-owner-a"), 1.second)
           .zipPar(
             harness.storeB
@@ -495,13 +498,33 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
         first <- ZIO
           .fromOption((raced._1 ++ raced._2).headOption)
           .orElseFail(AgentError.PersistenceFailure("postgres first wake claim missing"))
-        busy <- harness.storeA.claimWakeups(
+        leasedSnapshot <- harness.storeB.wakeQueueSnapshot(workflowId, workflowVersion)
+        busy           <- harness.storeA.claimWakeups(
           workflowId,
           workflowVersion,
           WorkerId("wake-owner-c"),
           1.second
         )
-        _      <- Live.live(ZIO.sleep(1200.millis))
+        boundedDataSource <- ZIO.attempt {
+          val value = PGSimpleDataSource()
+          value.setURL(harness.container.jdbcUrl)
+          value.setUser(harness.container.username)
+          value.setPassword(harness.container.password)
+          value.setConnectTimeout(1)
+          value.setSocketTimeout(1)
+          value: DataSource
+        }
+        boundedStore = PostgresWorkflowCheckpointStore[WorkflowState](boundedDataSource)
+        unavailable <- (ZIO.attemptBlocking(
+          harness.container.dockerClient.pauseContainerCmd(harness.container.containerId).exec()
+        ) *> boundedStore.currentWait(runId).exit <* Live.live(ZIO.sleep(1200.millis)))
+          .ensuring(
+            ZIO
+              .attemptBlocking(
+                harness.container.dockerClient.unpauseContainerCmd(harness.container.containerId).exec()
+              )
+              .orDie
+          )
         second <- harness.storeB
           .claimWakeups(workflowId, workflowVersion, WorkerId("wake-owner-c"), 5.seconds)
           .flatMap(value =>
@@ -509,13 +532,22 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
               .fromOption(value.headOption)
               .orElseFail(AgentError.PersistenceFailure("postgres second wake claim missing"))
           )
-        staleHeartbeat <- harness.storeA.heartbeatWakeup(first, 5.seconds).either
-        staleAbandon   <- harness.storeA.abandonWakeup(first, now).either
-        renewed        <- harness.storeB.heartbeatWakeup(second, 5.seconds)
+        reclaimedSnapshot <- harness.storeA.wakeQueueSnapshot(workflowId, workflowVersion)
+        staleHeartbeat    <- harness.storeA.heartbeatWakeup(first, 5.seconds).either
+        staleAbandon      <- harness.storeA.abandonWakeup(first, now).either
+        renewed           <- harness.storeB.heartbeatWakeup(second, 5.seconds)
       yield assertTrue(
+        dispatchableSnapshot.dispatchableWakeups == 1L,
+        dispatchableSnapshot.oldestDispatchableAgeMillis.nonEmpty,
         raced._1.length + raced._2.length == 1,
+        leasedSnapshot.dispatchableWakeups == 0L,
+        leasedSnapshot.leasedWakeups == 1L,
         busy.isEmpty,
+        unavailable.isFailure,
         second.generation == first.generation + 1L,
+        reclaimedSnapshot.dispatchableWakeups == 0L,
+        reclaimedSnapshot.leasedWakeups == 1L,
+        reclaimedSnapshot.expiredWakeLeases == 0L,
         staleHeartbeat.left.exists(_.isInstanceOf[AgentError.LeaseLost]),
         staleAbandon.left.exists(_.isInstanceOf[AgentError.LeaseLost]),
         renewed.generation == second.generation

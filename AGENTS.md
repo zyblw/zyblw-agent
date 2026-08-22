@@ -10,20 +10,9 @@ Read `README.md`, `docs/README.md`, `docs/architecture.md`, `docs/maturity-and-r
 configuration. Build definitions, sources, tests, migrations, and generated POMs take precedence
 over roadmap prose. When code and a document disagree, fix the document.
 
-Use the repository-local `zyblw-agent-development` skill for framework implementation, review,
-documentation, source-learning, and releases. It routes version-sensitive ZIO and ZIO HTTP work to
-their current official documentation without importing private product rules.
-
-Use the repository-local `zyblw-system-evolution` skill before cross-cutting architecture,
-reliability, scaling, data-boundary, compatibility, migration, context, memory, RAG, artifact, or
-multi-agent decisions. It turns external system-design patterns into evidence gates, the smallest
-reversible increment, executable verification, and rollback; it does not authorize speculative
-infrastructure. Combine it with `zyblw-agent-development` for implementation.
-
 Project skills live in `.agents/skills/` and are committed with the repository. Third-party sources
 are pinned in `skills-lock.json`. Another machine can clone this repo and use them without running
-`npx skills add`. `zyblw-agent-development` and `zyblw-system-evolution` are first-party and are not
-lock entries.
+`npx skills add`.
 
 ## Where things live
 
@@ -49,36 +38,47 @@ lifecycle, protocol, security, or license boundary plus an ADR.
 
 ## Current state
 
-The version line is `0.6.2`. `0.3.0` froze the core control plane, `0.4.0` established structured
-RAG on a dedicated knowledge schema, `0.5.0` added the optional administration sub-surface, and
-`0.6.0` established the fresh-install 1024-dimensional knowledge baseline. `0.6.1` added host
-governance and dashboard embedding. `0.6.2` is a compatible patch for quality-gated PDF extraction
-(text → OCR → optional vision) and extraction reports; it does not change released migrations.
+The version line is `0.8.0`: folded Flyway, retrieval modes, knowledge HTTP, and `KnowledgeQaHost`.
+There is no in-place upgrade from `0.6.x` or the superseded `0.7.0` candidate. See
+`docs/upgrading-to-0.8.0.md`.
 
-Maturity is tracked per capability in `docs/maturity-and-roadmap.md`, not per module. As of `0.6.2`:
+Maturity is tracked per capability in `docs/maturity-and-roadmap.md`, not per module. As of
+`0.8.0`:
 
 - **Foundation**: runtime loop, typed tools and policy, durable command worker, layered
   instructions, business HTTP v1, run inspection.
 - **Beta**: context and memory, RAG and document loading, providers, admin surface and console,
-  model governance, PostgreSQL, OTLP/Langfuse, cost estimation.
-- **Experimental**: workflow graph, artifacts, side-effect tooling, MCP, workspace/sandbox,
-  multimodal, knowledge graph, evaluation trend gating.
+  model governance, PostgreSQL, OTLP/Langfuse, cost estimation, Artifact metadata store.
+- **Experimental**: workflow graph, side-effect tooling, MCP (locked to 2025-11-25),
+  workspace/sandbox, evaluation trend gating, Harness/Skill. Multimodal and knowledge-graph
+  packages were removed; do not document them as current capabilities.
 
 Never promote a capability in a document without new test, failure-injection, or production
 evidence. "Implemented" is not "production proven".
 
 ## Direction
 
-Deepen the verified mainline instead of widening the module surface. In priority order:
+Deepen the verified mainline instead of widening the module surface. The authoritative sequencing
+is the Wave 0–3 roadmap in
+[ADR-0019](docs/architecture/0019-typed-extensions-and-constrained-execution.md) and
+[the handbook](docs/architecture/next-generation-runtime.md); kernel invariants remain governed by
+[ADR-0018](docs/architecture/0018-next-generation-runtime-kernel.md). In priority order:
 
-1. Long-running soak, node kill, database failover and capacity curves for the durable worker and
-   the workflow wake worker; publish SLOs from `queueSnapshot`.
-2. Outcome / trajectory / safety / resource scoring separated in evals, with confidence intervals
+1. Wave 0 production evidence: v6 approval-subject PostgreSQL gates and the operations runbook are in
+   the repo; long-running soak, node kill, database failover and capacity SLO calibration remain
+   `deferred` host-environment evidence. Do not report those host items as verified.
+2. Wave 1 security and execution boundary has landed. Wave 2 first cuts (ContextSection delta, Skill catalog
+   projection, stable/experimental protocol declaration) have landed. Next is Wave 3 only after fixed evals
+   justify branching/orchestration. Honest breaking changes must still be documented per surface.
+3. Outcome / trajectory / safety / resource scoring separated in evals, with confidence intervals
    and human calibration, before any release claims quality improvements.
-3. RAG hardening: real OCR and malicious-PDF corpora, tokenizer-aligned chunking, low-evidence
-   refusal gating, retention workers.
-4. Agent harness (goal / plan / todo / skill) as durable auditable state, not prompt text.
-5. Interoperability and multi-agent only after fixed evals show a single agent is insufficient.
+4. RAG hardening beyond the 0.8.0 baseline: real OCR and malicious-PDF corpora, host-side
+   object-store source resolvers, and retention workers.
+5. Wave 2 context and protocol: `ContextSection` snapshot/diff, `SkillCatalog` with on-demand
+   loading, and the stable/experimental `AgentProtocol` declaration; then continue hardening the
+   landed Harness slice with fixed long-task evals.
+6. Wave 3 branching and orchestration (tree/fork/replay, human tasks, subgraphs, multi-agent) only
+   after fixed evals show a single agent is insufficient.
 
 Do not add multi-agent orchestration, a graph studio, GraphRAG, or a general transaction platform
 speculatively. Do not save full chain-of-thought as an audit record.
@@ -123,9 +123,9 @@ Run the smallest relevant checks during development and the full gates before a 
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.6.3-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.8.0-local"; publishM2'
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.6.3-local sbt -batch compile
+ZYBLW_AGENT_VERSION=0.8.0-local sbt -batch compile
 ```
 
 Console changes additionally require, in `modules/agent-dashboard`:
@@ -134,8 +134,7 @@ Console changes additionally require, in `modules/agent-dashboard`:
 npm run typecheck && npm run lint && npm run build && npm run test:e2e
 ```
 
-For console design and interaction work, start with `zyblw-agent-development`, then use the
-repository-local frontend skills in this order:
+For console design and interaction work, use the repository-local frontend skills in this order:
 
 1. `frontend-design` to ground the visual direction in the actual operator job: connection setup,
    capability discovery, run/trace inspection, model governance, configuration, and failure recovery.
@@ -143,12 +142,8 @@ repository-local frontend skills in this order:
    and Next.js implementation guidance. In Codex or Cursor, run the script at the resolved absolute
    path `<repository-root>/.agents/skills/ui-ux-pro-max/scripts/search.py` with `python3`; do not use
    the upstream Claude-only `CLAUDE_PLUGIN_ROOT` example.
-3. `vercel-composition-patterns` and `vercel-react-best-practices` for maintainable React 19 / Next.js
-   16 component APIs, loading paths, rendering, and bundle performance.
-4. `vercel-react-view-transitions` only for motion that communicates continuity or state change, with
-   a non-animated fallback and `prefers-reduced-motion` support.
-5. `web-design-guidelines` for the final responsive, keyboard, focus, form-feedback, contrast, and
-   interaction audit.
+3. `web-design-guidelines` for the final responsive, keyboard, focus, form-feedback, contrast, and
+   interaction audit. Unrelated Vercel/React runtime skills were removed from this repository.
 
 The dashboard is an operations console, not a marketing surface. Prefer calm hierarchy, explicit
 system state, legible dense data, predictable navigation, and recoverable actions over decorative

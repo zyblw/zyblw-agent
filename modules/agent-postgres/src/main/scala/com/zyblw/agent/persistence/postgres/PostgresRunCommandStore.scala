@@ -449,10 +449,21 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
   /** 没有 Queued 命令的非 Leased dispatcher 归一化为 Idle。 */
   private def normalizeDispatchers(connection: Connection): Unit =
     val statement = connection.prepareStatement(
-      """UPDATE agent_run_dispatch d SET status = CASE WHEN EXISTS (
-        |  SELECT 1 FROM agent_run_commands c WHERE c.run_id = d.run_id AND c.status = 'Queued'
-        |) THEN 'Queued' ELSE 'Idle' END, updated_at = CURRENT_TIMESTAMP
-        |WHERE d.status <> 'Leased'""".stripMargin
+      """WITH candidates AS (
+        |  SELECT d.run_id, CASE WHEN EXISTS (
+        |    SELECT 1 FROM agent_run_commands c WHERE c.run_id = d.run_id AND c.status = 'Queued'
+        |  ) THEN 'Queued' ELSE 'Idle' END AS target_status
+        |  FROM agent_run_dispatch d
+        |  WHERE d.status <> 'Leased'
+        |    AND d.status IS DISTINCT FROM CASE WHEN EXISTS (
+        |      SELECT 1 FROM agent_run_commands c WHERE c.run_id = d.run_id AND c.status = 'Queued'
+        |    ) THEN 'Queued' ELSE 'Idle' END
+        |  ORDER BY d.run_id
+        |  FOR UPDATE OF d SKIP LOCKED
+        |  LIMIT 256
+        |)
+        |UPDATE agent_run_dispatch d SET status = candidates.target_status, updated_at = CURRENT_TIMESTAMP
+        |FROM candidates WHERE d.run_id = candidates.run_id""".stripMargin
     )
     try
       val _ = statement.executeUpdate()

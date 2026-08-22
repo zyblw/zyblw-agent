@@ -109,11 +109,7 @@ object RagApplicationSpec extends ZIOSpecDefault:
         store    <- InMemoryKnowledgeIndexStore.make
         registry <- DocumentLoaderRegistry.make(Chunk(markdownLoader))
         retriever = new Retriever:
-          override def retrieve(
-              query: String,
-              scope: RetrievalScope,
-              limit: Int
-          ): IO[RetrievalError, RetrievalResult] =
+          def retrieve(request: RetrievalRequest): IO[RetrievalError, RetrievalResult] =
             calls.update(_ + 1).as(RetrievalResult(Chunk.empty, Chunk.empty))
         ingestion = DocumentIngestionService(
           registry,

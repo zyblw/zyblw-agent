@@ -1,5 +1,6 @@
 package com.zyblw.agent.integrations.openai
 
+import com.zyblw.agent.artifacts.ProviderImagePolicy
 import com.zyblw.agent.core.*
 import com.zyblw.agent.model.*
 import zio.*
@@ -161,20 +162,23 @@ private[openai] object OpenAIWire:
         Option.unless(request.settings.toolChoice == ToolChoice.Auto)("tool_choice is omitted")
     val options  = defaultOptions ++ request.settings.providerOptions
     val reserved = options.keySet.intersect(reservedOptions)
+    val media    = ProviderImagePolicy.requireBound(request)
 
-    if request.tools.nonEmpty && !compatibility.descriptor.capabilities.toolCalls then
-      Left(AgentError.UnsupportedModelCapability(provider, "tool calls", "tools were supplied"))
-    else if request.tools.nonEmpty && unsupportedChoice.nonEmpty then
-      Left(AgentError.UnsupportedModelCapability(provider, "tool_choice", unsupportedChoice.get))
-    else if hasImageUrl(request) && !compatibility.descriptor.capabilities.vision then
-      Left(AgentError.UnsupportedModelCapability(provider, "vision", "请求包含图片"))
-    else if reserved.nonEmpty then
-      Left(
-        AgentError.InvalidConfiguration(
-          s"providerOptions cannot override reserved fields: ${reserved.toList.sorted.mkString(", ")}"
+    media.flatMap { _ =>
+      if request.tools.nonEmpty && !compatibility.descriptor.capabilities.toolCalls then
+        Left(AgentError.UnsupportedModelCapability(provider, "tool calls", "tools were supplied"))
+      else if request.tools.nonEmpty && unsupportedChoice.nonEmpty then
+        Left(AgentError.UnsupportedModelCapability(provider, "tool_choice", unsupportedChoice.get))
+      else if hasImageUrl(request) && !compatibility.descriptor.capabilities.vision then
+        Left(AgentError.UnsupportedModelCapability(provider, "vision", "请求包含图片"))
+      else if reserved.nonEmpty then
+        Left(
+          AgentError.InvalidConfiguration(
+            s"providerOptions cannot override reserved fields: ${reserved.toList.sorted.mkString(", ")}"
+          )
         )
-      )
-    else Right(encodeValidated(request, defaultModel, compatibility, options))
+      else Right(encodeValidated(request, defaultModel, compatibility, options))
+    }
 
   /** 执行字段兼容校验并按“基础字段→默认选项→请求选项”合并。 */
   private def encodeValidated(
@@ -261,9 +265,10 @@ private[openai] object OpenAIWire:
       if message.content.exists(isImageUrl) then arr(message.content.map(encodeContentPart))
       else
         Json.Str(message.content.map {
-          case ContentPart.Text(value)      => value
-          case ContentPart.JsonValue(value) => value.toJson
-          case ContentPart.ImageUrl(url, _) => s"[image: $url]"
+          case ContentPart.Text(value)                  => value
+          case ContentPart.JsonValue(value)             => value.toJson
+          case ContentPart.ImageUrl(url, _)             => s"[image: $url]"
+          case ContentPart.ImageArtifact(sha, media, _) => s"[image-artifact: $media $sha]"
         }.mkString)
     val base = List(
       "role"    -> Json.Str(roleName(message.role, compatibility)),
@@ -301,10 +306,16 @@ private[openai] object OpenAIWire:
         List("url" -> Json.Str(url)) ++ detail.map(value => "detail" -> Json.Str(value)).toList*
       )
       obj("type" -> Json.Str("image_url"), "image_url" -> image)
+    case ContentPart.ImageArtifact(sha, media, size) =>
+      obj(
+        "type" -> Json.Str("text"),
+        "text" -> Json.Str(s"[unbound-artifact-image $media $sha $size]")
+      )
 
   private def isImageUrl(part: ContentPart): Boolean = part match
-    case ContentPart.ImageUrl(_, _) => true
-    case _                          => false
+    case ContentPart.ImageUrl(_, _)         => true
+    case ContentPart.ImageArtifact(_, _, _) => true
+    case _                                  => false
 
   private def hasImageUrl(request: ChatRequest): Boolean =
     request.messages.exists(_.content.exists(isImageUrl))

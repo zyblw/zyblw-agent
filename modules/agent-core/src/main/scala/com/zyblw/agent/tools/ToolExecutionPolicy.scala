@@ -7,6 +7,7 @@ import zio.json.*
 enum ApprovalPolicy:
   case Never, RiskBased, Always
 
+/** 同一次在线工具调用的有界热重试。不决定进程死后是否重放；崩溃恢复看 [[ToolRecoveryPolicy]]。 */
 enum ToolRetryPolicy:
   case Never
   case IdempotentOnly(policy: RetryPolicy)
@@ -82,8 +83,8 @@ final class ToolExecutor private (semaphore: Semaphore, policy: ToolPolicyConfig
       semaphore.withPermit {
         val invocation = tool.invoke(call.arguments, context)
         val resilient  = policy.retryPolicy match
-          case ToolRetryPolicy.Never                                                            => invocation
-          case ToolRetryPolicy.IdempotentOnly(settings) if tool.metadata.automaticallyRetryable =>
+          case ToolRetryPolicy.Never                                                     => invocation
+          case ToolRetryPolicy.IdempotentOnly(settings) if tool.metadata.onlineRetryable =>
             val backoff = Schedule
               .exponential(settings.initialDelay)
               .modifyDelay((_, delay) => delay.min(settings.maxDelay))

@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-08
+> 最后核验：2026-08-22
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -16,6 +16,12 @@
 ## Guardrail
 
 提供 Input、Output、Tool、Run 四个阶段，支持 Blocking/Monitoring 和 FailClosed/FailOpen。关键授权必须由代码策略完成，不能仅靠 prompt。
+
+Typed extension（`ApprovalReviewer` / `ToolLifecycleObserver` 等）拿不到 Runtime 内部，不能绕过本页的信任边界、审批或
+fencing。`RecommendAllow` 不是批准。Skill 目录与正文不能授予工具，也不能把不可信来源升为 System。
+
+工具副作用绑定 `ExecutionEnvironment` + `PermissionProfile`。子 scope 只能收窄；`local` 与 `mcp-sandbox` 不是同一个审批
+主体。MCP 远端 schema 不能改写本地 `ToolMetadata`，也不能把 sandbox 调用伪装成已批准的宿主调用。
 
 ## HTTP 协议边界
 

@@ -320,6 +320,76 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         }
       }
 
+  /** 使用数据库权威时钟读取低敏 wake 聚合；查询不决议 due wait、不领取 wakeup，也不改变租约。 */
+  override def wakeQueueSnapshot(
+      workflowId: WorkflowId,
+      definitionVersion: WorkflowVersion
+  ): IO[StoreError, WorkflowWakeQueueSnapshot] = withConnection { connection =>
+    jdbc("wait-wake-snapshot") {
+      val statement = connection.prepareStatement(
+        """WITH snapshot_clock AS (
+          |  SELECT clock_timestamp() AS captured_at
+          |)
+          |SELECT snapshot_clock.captured_at,
+          |  COUNT(*) FILTER (WHERE waits.status = 'Pending') AS pending_waits,
+          |  COUNT(*) FILTER (
+          |    WHERE waits.status = 'Pending' AND waits.deadline <= snapshot_clock.captured_at
+          |  ) AS due_waits,
+          |  COUNT(*) FILTER (
+          |    WHERE waits.status IN ('Signaled', 'TimedOut')
+          |      AND waits.wake_available_at <= snapshot_clock.captured_at
+          |      AND (waits.wake_token IS NULL OR waits.wake_lease_expires_at <= snapshot_clock.captured_at)
+          |  ) AS dispatchable_wakeups,
+          |  COUNT(*) FILTER (
+          |    WHERE waits.status IN ('Signaled', 'TimedOut')
+          |      AND waits.wake_token IS NOT NULL
+          |      AND waits.wake_lease_expires_at > snapshot_clock.captured_at
+          |  ) AS leased_wakeups,
+          |  COUNT(*) FILTER (
+          |    WHERE waits.status IN ('Signaled', 'TimedOut')
+          |      AND waits.wake_available_at <= snapshot_clock.captured_at
+          |      AND waits.wake_token IS NOT NULL
+          |      AND waits.wake_lease_expires_at <= snapshot_clock.captured_at
+          |  ) AS expired_wake_leases,
+          |  CASE WHEN MIN(waits.resolved_at) FILTER (
+          |    WHERE waits.status IN ('Signaled', 'TimedOut')
+          |      AND waits.wake_available_at <= snapshot_clock.captured_at
+          |      AND (waits.wake_token IS NULL OR waits.wake_lease_expires_at <= snapshot_clock.captured_at)
+          |  ) IS NULL THEN NULL ELSE GREATEST(
+          |    0,
+          |    FLOOR(EXTRACT(EPOCH FROM (
+          |      snapshot_clock.captured_at - MIN(waits.resolved_at) FILTER (
+          |        WHERE waits.status IN ('Signaled', 'TimedOut')
+          |          AND waits.wake_available_at <= snapshot_clock.captured_at
+          |          AND (waits.wake_token IS NULL OR waits.wake_lease_expires_at <= snapshot_clock.captured_at)
+          |      )
+          |    )) * 1000)
+          |  )::BIGINT END AS oldest_dispatchable_age_millis
+          |FROM snapshot_clock
+          |LEFT JOIN agent_workflow_waits AS waits
+          |  ON waits.workflow_id = ? AND waits.definition_version = ?
+          |  AND waits.status IN ('Pending', 'Signaled', 'TimedOut')
+          |GROUP BY snapshot_clock.captured_at""".stripMargin
+      )
+      try
+        statement.setString(1, workflowId.value)
+        statement.setInt(2, definitionVersion.value)
+        val result = statement.executeQuery()
+        if !result.next() then throw IllegalStateException("workflow wake snapshot query returned no row")
+        val oldest = Option(result.getObject(7)).map(_ => result.getLong(7))
+        WorkflowWakeQueueSnapshot(
+          capturedAt = result.getObject(1, classOf[OffsetDateTime]).toInstant,
+          pendingWaits = result.getLong(2),
+          dueWaits = result.getLong(3),
+          dispatchableWakeups = result.getLong(4),
+          leasedWakeups = result.getLong(5),
+          expiredWakeLeases = result.getLong(6),
+          oldestDispatchableAgeMillis = oldest
+        )
+      finally statement.close()
+    }
+  }
+
   override def heartbeatWakeup(
       lease: WorkflowWakeupLease,
       leaseDuration: Duration

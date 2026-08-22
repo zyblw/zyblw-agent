@@ -1,0 +1,1303 @@
+{
+  "openapi" : "3.1.0",
+  "info" : {
+    "title" : "zyblw-agent API",
+    "version" : "1.1.0"
+  },
+  "paths" : {
+    "/api/v1/agents/{agentId}/runs" : {
+      "description" : "异步创建 Agent Run；路径 agentId 最大 128 字符。\n\n- Runs\n",
+      "post" : {
+        "tags" : [
+          "Runs"
+        ],
+        "description" : "异步创建 Agent Run；路径 agentId 最大 128 字符。\n\n- Runs\n",
+        "parameters" : [
+          {
+            "name" : "agentId",
+            "in" : "path",
+            "required" : true,
+            "schema" : {
+              "type" : "string"
+            },
+            "style" : "simple"
+          },
+          {
+            "name" : "idempotency-Key",
+            "in" : "header",
+            "description" : "客户端生成的稳定幂等键；重试必须复用，最大 256 字符。\n\n",
+            "required" : true,
+            "schema" : {
+              "type" : "string"
+            },
+            "style" : "simple"
+          }
+        ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/CreateRunRequest",
+                "description" : "JSON 最大 256 KiB；线程最大 256 字符，输入最大 65,536 字符；身份由宿主认证上下文提供。\n\n"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "202" : {
+            "description" : "命令已耐久接收，尚未代表 Run 完成。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/CommandReceipt"
+                }
+              }
+            }
+          },
+          "400" : {
+            "description" : "稳定错误分类与可安全展示的消息；不会返回内部异常或 Provider 正文。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/commands/{commandId}" : {
+      "description" : "查询异步命令状态。\n\n- Commands\n",
+      "get" : {
+        "tags" : [
+          "Commands"
+        ],
+        "description" : "查询异步命令状态。\n\n- Commands\n",
+        "parameters" : [
+          {
+            "name" : "commandId",
+            "in" : "path",
+            "required" : true,
+            "schema" : {
+              "type" : "string"
+            },
+            "style" : "simple"
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/CommandView"
+                }
+              }
+            }
+          },
+          "404" : {
+            "description" : "稳定错误分类与可安全展示的消息；不会返回内部异常或 Provider 正文。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/commands/{commandId}/retry" : {
+      "description" : "人工重试 DeadLetter 命令。\n\n- Commands\n",
+      "post" : {
+        "tags" : [
+          "Commands"
+        ],
+        "description" : "人工重试 DeadLetter 命令。\n\n- Commands\n",
+        "parameters" : [
+          {
+            "name" : "commandId",
+            "in" : "path",
+            "required" : true,
+            "schema" : {
+              "type" : "string"
+            },
+            "style" : "simple"
+          }
+        ],
+        "responses" : {
+          "202" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/CommandReceipt"
+                }
+              }
+            }
+          },
+          "409" : {
+            "description" : "稳定错误分类与可安全展示的消息；不会返回内部异常或 Provider 正文。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{runId}" : {
+      "description" : "读取 Run 状态、用量、输出与待审批摘要。\n\n耐久提交取消命令。\n\n- Runs\n- Runs\n",
+      "get" : {
+        "tags" : [
+          "Runs"
+        ],
+        "description" : "读取 Run 状态、用量、输出与待审批摘要。\n\n- Runs\n",
+        "parameters" : [
+          {
+            "name" : "runId",
+            "in" : "path",
+            "required" : true,
+            "schema" : {
+              "type" : "string"
+            },
+            "style" : "simple"
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "description" : "授权后的稳定 Run 投影。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/RunView"
+                }
+              }
+            }
+          },
+          "404" : {
+            "description" : "稳定错误分类与可安全展示的消息；不会返回内部异常或 Provider 正文。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete" : {
+        "tags" : [
+          "Runs"
+        ],
+        "description" : "耐久提交取消命令。\n\n- Runs\n",
+        "parameters" : [
+          {
+            "name" : "runId",
+            "in" : "path",
+            "required" : true,
+            "schema" : {
+              "type" : "string"
+            },
+            "style" : "simple"
+          }
+        ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/CancelCommand",
+                "description" : "取消原因；允许 reason 为空，存在时最大 2,048 字符。\n\n"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "202" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/CommandReceipt"
+                }
+              }
+            }
+          },
+          "400" : {
+            "description" : "稳定错误分类与可安全展示的消息；不会返回内部异常或 Provider 正文。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{runId}/approval" : {
+      "description" : "批准或拒绝当前等待中的工具动作。\n\n- Approvals\n",
+      "post" : {
+        "tags" : [
+          "Approvals"
+        ],
+        "description" : "批准或拒绝当前等待中的工具动作。\n\n- Approvals\n",
+        "parameters" : [
+          {
+            "name" : "runId",
+            "in" : "path",
+            "required" : true,
+            "schema" : {
+              "type" : "string"
+            },
+            "style" : "simple"
+          }
+        ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/ApprovalCommand",
+                "description" : "decision 为 approve/reject；可选 reason 最大 2,048 字符。\n\n"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "202" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/CommandReceipt"
+                }
+              }
+            }
+          },
+          "400" : {
+            "description" : "稳定错误分类与可安全展示的消息；不会返回内部异常或 Provider 正文。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{runId}/commands" : {
+      "description" : "列出一个 Run 的低敏命令视图。\n\n- Commands\n",
+      "get" : {
+        "tags" : [
+          "Commands"
+        ],
+        "description" : "列出一个 Run 的低敏命令视图。\n\n- Commands\n",
+        "parameters" : [
+          {
+            "name" : "runId",
+            "in" : "path",
+            "required" : true,
+            "schema" : {
+              "type" : "string"
+            },
+            "style" : "simple"
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "type" : "array",
+                  "items" : {
+                    "$ref" : "#/components/schemas/CommandView"
+                  }
+                }
+              }
+            }
+          },
+          "404" : {
+            "description" : "稳定错误分类与可安全展示的消息；不会返回内部异常或 Provider 正文。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{runId}/events" : {
+      "description" : "一次性读取耐久公共事件页。\n\n- Events\n",
+      "get" : {
+        "tags" : [
+          "Events"
+        ],
+        "description" : "一次性读取耐久公共事件页。\n\n- Events\n",
+        "parameters" : [
+          {
+            "name" : "runId",
+            "in" : "path",
+            "required" : true,
+            "schema" : {
+              "type" : "string"
+            },
+            "style" : "simple"
+          },
+          {
+            "name" : "last-Event-ID",
+            "in" : "header",
+            "description" : "已确认的最后 sequence；缺失表示从头读取。\n\n",
+            "schema" : {
+              "type" : [
+                "string",
+                "null"
+              ]
+            },
+            "style" : "simple"
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "type" : "array",
+                  "items" : {
+                    "$ref" : "#/components/schemas/RunEventView"
+                  }
+                }
+              }
+            }
+          },
+          "400" : {
+            "description" : "稳定错误分类与可安全展示的消息；不会返回内部异常或 Provider 正文。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{runId}/events/stream" : {
+      "description" : "跨 Worker 可恢复的耐久 SSE；SSE data 是 RunEventView JSON。\n\n- Events\n",
+      "get" : {
+        "tags" : [
+          "Events"
+        ],
+        "description" : "跨 Worker 可恢复的耐久 SSE；SSE data 是 RunEventView JSON。\n\n- Events\n",
+        "parameters" : [
+          {
+            "name" : "runId",
+            "in" : "path",
+            "required" : true,
+            "schema" : {
+              "type" : "string"
+            },
+            "style" : "simple"
+          },
+          {
+            "name" : "last-Event-ID",
+            "in" : "header",
+            "description" : "SSE 断点续传 sequence。\n\n",
+            "schema" : {
+              "type" : [
+                "string",
+                "null"
+              ]
+            },
+            "style" : "simple"
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "text/event-stream" : {
+                "schema" : {
+                  "type" : "array",
+                  "items" : {
+                    "$ref" : "#/components/schemas/ServerSentEvent"
+                  }
+                }
+              }
+            }
+          },
+          "400" : {
+            "description" : "稳定错误分类与可安全展示的消息；不会返回内部异常或 Provider 正文。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{runId}/inspection" : {
+      "description" : "分页检查 Run，不返回 Prompt、工具参数/结果、健康正文或隐藏推理。\n\n- Inspection\n",
+      "get" : {
+        "tags" : [
+          "Inspection"
+        ],
+        "description" : "分页检查 Run，不返回 Prompt、工具参数/结果、健康正文或隐藏推理。\n\n- Inspection\n",
+        "parameters" : [
+          {
+            "name" : "runId",
+            "in" : "path",
+            "required" : true,
+            "schema" : {
+              "type" : "string"
+            },
+            "style" : "simple"
+          },
+          {
+            "name" : "last-Event-ID",
+            "in" : "header",
+            "description" : "已检查的最后 sequence；缺失表示从头读取。\n\n",
+            "schema" : {
+              "type" : [
+                "string",
+                "null"
+              ]
+            },
+            "style" : "simple"
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "description" : "权威 Run 摘要、低敏时间线、instruction fingerprint 和机械一致性诊断。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/RunInspectionView"
+                }
+              }
+            }
+          },
+          "400" : {
+            "description" : "稳定错误分类与可安全展示的消息；不会返回内部异常或 Provider 正文。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{runId}/recover" : {
+      "description" : "从最近耐久边界恢复 Run。\n\n- Runs\n",
+      "post" : {
+        "tags" : [
+          "Runs"
+        ],
+        "description" : "从最近耐久边界恢复 Run。\n\n- Runs\n",
+        "parameters" : [
+          {
+            "name" : "runId",
+            "in" : "path",
+            "required" : true,
+            "schema" : {
+              "type" : "string"
+            },
+            "style" : "simple"
+          }
+        ],
+        "responses" : {
+          "202" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/CommandReceipt"
+                }
+              }
+            }
+          },
+          "404" : {
+            "description" : "稳定错误分类与可安全展示的消息；不会返回内部异常或 Provider 正文。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{runId}/retry" : {
+      "description" : "提交带业务幂等 ID 的显式重试。\n\n- Runs\n",
+      "post" : {
+        "tags" : [
+          "Runs"
+        ],
+        "description" : "提交带业务幂等 ID 的显式重试。\n\n- Runs\n",
+        "parameters" : [
+          {
+            "name" : "runId",
+            "in" : "path",
+            "required" : true,
+            "schema" : {
+              "type" : "string"
+            },
+            "style" : "simple"
+          }
+        ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/RetryRunCommand",
+                "description" : "requestId 最大 256 字符，reason 最大 2,048 字符。\n\n"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "202" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/CommandReceipt"
+                }
+              }
+            }
+          },
+          "400" : {
+            "description" : "稳定错误分类与可安全展示的消息；不会返回内部异常或 Provider 正文。\n\n",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components" : {
+    "schemas" : {
+      "ApprovalCommand" : {
+        "type" : "object",
+        "properties" : {
+          "decision" : {
+            "type" : "string"
+          },
+          "reason" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          }
+        },
+        "required" : [
+          "decision"
+        ],
+        "description" : "审批命令。\n@param decision\n只允许 `approve` 或 `reject`，由实现层 fail-closed 校验\n@param reason\n拒绝或人工决策的低敏说明；不得携带密钥和完整医疗隐私"
+      },
+      "ApprovalView" : {
+        "type" : "object",
+        "properties" : {
+          "requestedAtEpochMilli" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "risk" : {
+            "type" : "string"
+          },
+          "reason" : {
+            "type" : "string"
+          },
+          "toolName" : {
+            "type" : "string"
+          },
+          "approvalId" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "approvalId",
+          "toolName",
+          "risk",
+          "reason",
+          "requestedAtEpochMilli"
+        ],
+        "description" : "等待人工介入时公开的最小审批视图，不包含完整工具参数。\n@param approvalId\n恢复命令必须关联的稳定审批 ID\n@param toolName\n模型提议调用的工具名称\n@param risk\n工具注册时确定的风险等级，不由模型自行声明\n@param reason\n经过长度限制的低敏审批原因\n@param requestedAtEpochMilli\n审批请求写入耐久状态的 UTC epoch 毫秒"
+      },
+      "CancelCommand" : {
+        "type" : "object",
+        "properties" : {
+          "reason" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          }
+        },
+        "description" : "@param reason 取消 Run 的可选低敏原因；身份仍从可信认证上下文取得。"
+      },
+      "CommandReceipt" : {
+        "type" : "object",
+        "properties" : {
+          "commandId" : {
+            "type" : "string"
+          },
+          "runId" : {
+            "type" : "string"
+          },
+          "commandType" : {
+            "type" : "string"
+          },
+          "status" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "commandId",
+          "runId",
+          "commandType",
+          "status"
+        ],
+        "description" : "异步控制命令的 `202 Accepted` 回执。\n`Accepted` 只表示命令已耐久接收，不表示 Agent 已完成；调用方应查询 `commandId` 或 `runId`。\n@param commandId\n本次耐久命令的唯一 ID，用于查询排队、执行、完成或死信状态\n@param runId\n命令所属 Run；创建命令第一次返回时客户端应同时保存它\n@param commandType\n稳定命令类别，例如 Start、Cancel、Recover 或 Retry\n@param status\n接收时状态，通常为 Queued；它不是 RunStatus"
+      },
+      "CommandView" : {
+        "type" : "object",
+        "properties" : {
+          "commandType" : {
+            "type" : "string"
+          },
+          "lastFailure" : {
+            "type" : [
+              "string",
+              "null"
+            ]
+          },
+          "commandId" : {
+            "type" : "string"
+          },
+          "attempt" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "runId" : {
+            "type" : "string"
+          },
+          "manualRetryCount" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "status" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "commandId",
+          "runId",
+          "commandType",
+          "status",
+          "attempt",
+          "manualRetryCount"
+        ],
+        "description" : "不暴露内部 payload、lease token、generation 或完整失败正文的命令查询视图。\n@param commandId\n命令唯一 ID\n@param runId\n目标 Run ID\n@param commandType\n稳定命令类别\n@param status\n当前耐久队列状态\n@param attempt\n当前人工重试周期内已经发生的自动 claim 次数\n@param manualRetryCount\n从 DeadLetter 被人工重新排队的累计次数\n@param lastFailure\n最近一次低敏失败摘要；不会包含 Provider 原文、用户输入或堆栈"
+      },
+      "ContextUsageView" : {
+        "type" : "object",
+        "properties" : {
+          "droppedMemories" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "rotSignalCodes" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string"
+            }
+          },
+          "estimatedTokens" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "droppedMessages" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "droppedRetrieval" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "truncatedToolResults" : {
+            "type" : "integer",
+            "format" : "int32"
+          }
+        },
+        "required" : [
+          "estimatedTokens",
+          "droppedMessages",
+          "truncatedToolResults",
+          "droppedMemories",
+          "droppedRetrieval",
+          "rotSignalCodes"
+        ],
+        "description" : "公开事件中的 Context 预算摘要，不包含 Memory/RAG/Prompt 正文。\n@param estimatedTokens\nContextEngine 对最终请求的确定性 token 估算\n@param droppedMessages\n因预算裁剪的历史消息数\n@param truncatedToolResults\n被摘要或截断的工具结果数\n@param droppedMemories\n未被注入的长期记忆数\n@param droppedRetrieval\n未被注入的 RAG 片段数\n@param rotSignalCodes\nContext Rot 检测产生的固定低基数信号码"
+      },
+      "CreateRunRequest" : {
+        "type" : "object",
+        "properties" : {
+          "threadId" : {
+            "type" : "string"
+          },
+          "input" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "threadId",
+          "input"
+        ],
+        "description" : "创建异步 Run 的稳定请求。\n@param threadId\n业务会话线程 ID，由客户端稳定生成；不能为空\n@param input\n本轮用户输入；身份、tenant 和 scopes 不允许出现在正文"
+      },
+      "ErrorResponse" : {
+        "type" : "object",
+        "properties" : {
+          "category" : {
+            "type" : "string"
+          },
+          "message" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "category",
+          "message"
+        ],
+        "description" : "对外错误只包含稳定分类和安全消息，不包含 SQL、堆栈、Provider 正文或内部 cause。\n@param category\ntyped AgentError 的稳定高层分类，客户端应优先依据 HTTP status 与该值处理\n@param message\n允许展示的低敏消息；不可依赖其自然语言文本做程序分支"
+      },
+      "RetryRunCommand" : {
+        "type" : "object",
+        "properties" : {
+          "requestId" : {
+            "type" : "string"
+          },
+          "reason" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "requestId",
+          "reason"
+        ],
+        "description" : "显式重试请求。\n@param requestId\n本次人工操作的稳定幂等 ID，HTTP 重试必须复用\n@param reason\n低敏运维原因"
+      },
+      "RunDiagnosticView" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "string"
+          },
+          "severity" : {
+            "type" : "string"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "sequence" : {
+            "type" : [
+              "integer",
+              "null"
+            ],
+            "format" : "int64",
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          }
+        },
+        "required" : [
+          "code",
+          "severity",
+          "message"
+        ],
+        "description" : "Inspector 发现的固定结构一致性诊断；消息不会拼接业务正文或内部异常。"
+      },
+      "RunEventView" : {
+        "type" : "object",
+        "properties" : {
+          "step" : {
+            "type" : [
+              "integer",
+              "null"
+            ],
+            "format" : "int32",
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "tool" : {
+            "anyOf" : [
+              {
+                "type" : "null"
+              },
+              {
+                "$ref" : "#/components/schemas/ToolProgressView"
+              }
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "usage" : {
+            "anyOf" : [
+              {
+                "type" : "null"
+              },
+              {
+                "$ref" : "#/components/schemas/UsageView"
+              }
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "context" : {
+            "anyOf" : [
+              {
+                "type" : "null"
+              },
+              {
+                "$ref" : "#/components/schemas/ContextUsageView"
+              }
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "atEpochMilli" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "eventId" : {
+            "type" : "string"
+          },
+          "sequence" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "status" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "category" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "message" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "output" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "runId" : {
+            "type" : "string"
+          },
+          "stage" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "eventType" : {
+            "type" : "string"
+          },
+          "stateVersion" : {
+            "type" : [
+              "integer",
+              "null"
+            ],
+            "format" : "int64",
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "approval" : {
+            "anyOf" : [
+              {
+                "type" : "null"
+              },
+              {
+                "$ref" : "#/components/schemas/ApprovalView"
+              }
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          }
+        },
+        "required" : [
+          "eventId",
+          "runId",
+          "sequence",
+          "eventType",
+          "atEpochMilli"
+        ],
+        "description" : "耐久事件的稳定公共信封。\n新事件类型可以通过 `eventType` 增加；客户端必须忽略未知类型。可选字段允许不同事件共享一个向前兼容结构。最终回答可在 `output` 出现，但工具参数、工具结果、隐藏推理、Provider\n原文和内部 AgentMessage 编码不会外泄。\n@param eventId\nEvent Store 的幂等事件 ID\n@param runId\n所属 Run ID\n@param sequence\nRun 内从零递增的耐久序号，也是 SSE id\n@param eventType\nv1 显式映射的稳定事件名称\n@param atEpochMilli\n事件发生 UTC epoch 毫秒\n@param status\n与本事件有关的 RunStatus\n@param step\nAgent loop 步数\n@param output\n可直接展示的文本增量或最终输出\n@param message\n经过安全策略与长度裁剪的可展示消息\n@param category\n固定错误/决策类别或低敏摘要\n@param stage\nmodel/tool/guardrail 等稳定阶段\n@param stateVersion\ncheckpoint 提交后的乐观锁版本\n@param usage\n模型调用或 Run 累计用量\n@param approval\n等待人工介入的摘要\n@param tool\n工具执行进度摘要\n@param context\nContext 预算与裁剪摘要"
+      },
+      "RunInspectionSummaryView" : {
+        "type" : "object",
+        "properties" : {
+          "agentId" : {
+            "type" : "string"
+          },
+          "usage" : {
+            "$ref" : "#/components/schemas/UsageView"
+          },
+          "stateVersion" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "status" : {
+            "type" : "string"
+          },
+          "steps" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "createdAtEpochMilli" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "runId" : {
+            "type" : "string"
+          },
+          "updatedAtEpochMilli" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "awaitingApproval" : {
+            "type" : "boolean"
+          }
+        },
+        "required" : [
+          "runId",
+          "agentId",
+          "status",
+          "steps",
+          "usage",
+          "awaitingApproval",
+          "createdAtEpochMilli",
+          "updatedAtEpochMilli",
+          "stateVersion"
+        ],
+        "description" : "Inspector 专用的无正文 Run 摘要。\n普通 `RunView` 可以在业务授权后返回 threadId、最终答案与审批摘要；运维 Inspector 不需要这些正文，因此使用独立 DTO， 避免 Timeline 权限隐式扩大成业务内容读取权限。"
+      },
+      "RunInspectionView" : {
+        "type" : "object",
+        "properties" : {
+          "nextCursor" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "completeHistory" : {
+            "type" : "boolean"
+          },
+          "consistent" : {
+            "type" : "boolean"
+          },
+          "diagnostics" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/RunDiagnosticView"
+            }
+          },
+          "instructionFingerprint" : {
+            "type" : [
+              "string",
+              "null"
+            ]
+          },
+          "timeline" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/RunTimelineEntryView"
+            }
+          },
+          "hasMore" : {
+            "type" : "boolean"
+          },
+          "run" : {
+            "$ref" : "#/components/schemas/RunInspectionSummaryView"
+          }
+        },
+        "required" : [
+          "run",
+          "timeline",
+          "diagnostics",
+          "nextCursor",
+          "hasMore",
+          "completeHistory",
+          "consistent"
+        ],
+        "description" : "面向本地调试、运维和未来 Run Studio 的聚合读模型。\n`run` 来自权威状态；`timeline` 来自一页耐久事件；`diagnostics` 只做机械一致性检查，不重新执行模型或工具。 `hasMore=true` 时继续携带\n`Last-Event-ID=nextCursor` 请求下一页。"
+      },
+      "RunTimelineEntryView" : {
+        "type" : "object",
+        "properties" : {
+          "eventType" : {
+            "type" : "string"
+          },
+          "step" : {
+            "type" : [
+              "integer",
+              "null"
+            ],
+            "format" : "int32",
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "outcome" : {
+            "type" : "string"
+          },
+          "atEpochMilli" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "eventId" : {
+            "type" : "string"
+          },
+          "sequence" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "elapsedMillis" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "callId" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "category" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "toolName" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "usage" : {
+            "anyOf" : [
+              {
+                "type" : "null"
+              },
+              {
+                "$ref" : "#/components/schemas/UsageView"
+              }
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "phase" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "eventId",
+          "sequence",
+          "eventType",
+          "phase",
+          "outcome",
+          "atEpochMilli",
+          "elapsedMillis"
+        ],
+        "description" : "Run Inspector 中的低敏时间线条目。\n该 DTO 不包含模型文本、工具参数、工具结果、Prompt 或失败正文；需要展示最终业务输出时使用授权后的 `RunView`。"
+      },
+      "RunView" : {
+        "type" : "object",
+        "properties" : {
+          "agentId" : {
+            "type" : "string"
+          },
+          "usage" : {
+            "$ref" : "#/components/schemas/UsageView"
+          },
+          "updatedAtEpochMilli" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "stateVersion" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "status" : {
+            "type" : "string"
+          },
+          "output" : {
+            "type" : [
+              "string",
+              "null"
+            ]
+          },
+          "threadId" : {
+            "type" : "string"
+          },
+          "createdAtEpochMilli" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "runId" : {
+            "type" : "string"
+          },
+          "pendingApproval" : {
+            "anyOf" : [
+              {
+                "type" : "null"
+              },
+              {
+                "$ref" : "#/components/schemas/ApprovalView"
+              }
+            ]
+          },
+          "steps" : {
+            "type" : "integer",
+            "format" : "int32"
+          }
+        },
+        "required" : [
+          "runId",
+          "threadId",
+          "agentId",
+          "status",
+          "steps",
+          "usage",
+          "createdAtEpochMilli",
+          "updatedAtEpochMilli",
+          "stateVersion"
+        ],
+        "description" : "Run 查询的版本化公共投影。\n它故意不直接序列化框架内部的耐久状态对象：消息历史、工具参数、内部步骤、Context metadata 和恢复游标都不是公共协议。\n@param runId\nRun 唯一 ID\n@param threadId\n业务会话线程 ID\n@param agentId\n创建 Run 时冻结的 Agent ID\n@param status\n当前 RunStatus 字符串\n@param steps\n已消耗的 Agent loop 步数\n@param usage\n当前累计用量与费用估算\n@param output\n最近可公开的助手输出；尚未产生时为空\n@param pendingApproval\n等待人工处理时的最小审批摘要\n@param createdAtEpochMilli\nRun 创建 UTC epoch 毫秒\n@param updatedAtEpochMilli\n最近一次权威状态提交 UTC epoch 毫秒\n@param stateVersion\nPostgreSQL/RunStore 乐观锁版本，仅用于观察新旧，不可当作 lease token"
+      },
+      "ToolProgressView" : {
+        "type" : "object",
+        "properties" : {
+          "callId" : {
+            "type" : [
+              "string",
+              "null"
+            ]
+          },
+          "toolName" : {
+            "type" : [
+              "string",
+              "null"
+            ]
+          },
+          "batchIndex" : {
+            "type" : [
+              "integer",
+              "null"
+            ],
+            "format" : "int32"
+          }
+        },
+        "description" : "公开事件中的工具进度；只提供稳定标识，不返回 arguments 或 ToolResult 正文。\n@param callId\nProvider 生成或框架规范化的工具调用 ID\n@param toolName\n注册工具名称；纯增量事件可能尚未取得名称\n@param batchIndex\n耐久并行计划中的零基批次位置"
+      },
+      "UsageView" : {
+        "type" : "object",
+        "properties" : {
+          "totalTokens" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "outputTokens" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "modelCalls" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "inputTokens" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "cachedInputTokens" : {
+            "type" : "integer",
+            "format" : "int64",
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : 0
+          },
+          "reasoningOutputTokens" : {
+            "type" : "integer",
+            "format" : "int64",
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : 0
+          },
+          "toolCalls" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "estimatedCost" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "modelCalls",
+          "toolCalls",
+          "inputTokens",
+          "outputTokens",
+          "totalTokens",
+          "estimatedCost"
+        ],
+        "description" : "Run 对外可展示的模型/工具累计用量；费用使用十进制字符串避免 JSON 浮点损失。\n@param modelCalls\n已完成的模型调用次数\n@param toolCalls\n已计费/计入预算的工具调用次数\n@param inputTokens\nProvider 报告的累计输入 token\n@param outputTokens\nProvider 报告的累计输出 token\n@param totalTokens\n输入与输出 token 之和\n@param estimatedCost\n按配置价格估算的十进制费用字符串；币种由宿主定价策略约定"
+      }
+    }
+  }
+}

@@ -1,7 +1,11 @@
 package com.zyblw.agent.runtime
 
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
+import com.zyblw.agent.context.ContextSourceResolver
 import com.zyblw.agent.core.*
+import com.zyblw.agent.extension.RuntimeExtensions
 import com.zyblw.agent.memory.*
+import com.zyblw.agent.model.ModelRoleCatalog
 import com.zyblw.agent.tools.ToolPolicySource
 import java.time.Instant
 import zio.*
@@ -76,7 +80,12 @@ final class AgentCommandServiceLive(
     runs: RunStore,
     commands: RunCommandStore,
     submissions: RunSubmissionStore,
-    toolPolicies: ToolPolicySource
+    toolPolicies: ToolPolicySource,
+    profile: RuntimeProfile = RuntimeProfile.default,
+    modelPolicies: ModelPolicySource = ModelPolicySource.default,
+    contextSources: ContextSourceResolver = ContextSourceResolver.emptyValue,
+    extensions: RuntimeExtensions = RuntimeExtensions.empty,
+    roleCatalog: ModelRoleCatalog = ModelRoleCatalog.empty
 ) extends AgentCommandService:
   /** 先在内存中准备不可变初始事实，再由 Adapter 用一个事务落库。 这里不调用 `runs.createWithEvents`，否则会重新引入“状态成功、Start 命令失败”的双写窗口。
     */
@@ -85,8 +94,28 @@ final class AgentCommandServiceLive(
       request: RunRequest,
       idempotencyKey: String
   ): IO[AgentError, RunCommandRecord] =
-    RunInitialization
-      .prepare(agent, request, idempotencyKey, toolPolicies.current().maxCallsPerRun)
+    roleCatalog
+      .applyTo(agent.modelSettings)
+      .map(settings => agent.copy(modelSettings = settings))
+      .flatMap { resolved =>
+        RunInitialization.prepare(
+          resolved,
+          request,
+          idempotencyKey,
+          toolPolicies.current().maxCallsPerRun,
+          Some(
+            RuntimeComposition.freeze(
+              profile,
+              resolved,
+              modelPolicies,
+              contextSources.sourceIds,
+              extensions.sourceIds,
+              extensions.environment.id.value,
+              extensions.environment.permissions.fingerprint
+            )
+          )
+        )
+      }
       .flatMap(submissions.submitStart)
 
   /** 审批幂等键只绑定 approvalId，保证相反决定不能各自创建成功。 */
@@ -194,4 +223,42 @@ object AgentCommandServiceLive:
   /** 通过 ZLayer 将状态、命令、原子提交和工具预算组装为控制面。 */
   val layer
       : URLayer[RunStore & RunCommandStore & RunSubmissionStore & ToolPolicySource, AgentCommandService] =
-    ZLayer.fromFunction(AgentCommandServiceLive.apply)
+    ZLayer.fromFunction {
+      (
+          runs: RunStore,
+          commands: RunCommandStore,
+          submissions: RunSubmissionStore,
+          toolPolicies: ToolPolicySource
+      ) => AgentCommandServiceLive(runs, commands, submissions, toolPolicies)
+    }
+
+  /** 使用部署 Profile 与当前模型覆盖冻结组合指纹；HTTP submitStart 与同步 Runtime 共用同一套冻结规则。 */
+  def configured(
+      profile: RuntimeProfile,
+      roleCatalog: ModelRoleCatalog = ModelRoleCatalog.empty
+  ): URLayer[
+    RunStore & RunCommandStore & RunSubmissionStore & ToolPolicySource & ModelPolicySource &
+      ContextSourceResolver & RuntimeExtensions,
+    AgentCommandService
+  ] =
+    ZLayer.fromZIO {
+      for
+        runs           <- ZIO.service[RunStore]
+        commands       <- ZIO.service[RunCommandStore]
+        submissions    <- ZIO.service[RunSubmissionStore]
+        toolPolicies   <- ZIO.service[ToolPolicySource]
+        modelPolicies  <- ZIO.service[ModelPolicySource]
+        contextSources <- ZIO.service[ContextSourceResolver]
+        extensions     <- ZIO.service[RuntimeExtensions]
+      yield AgentCommandServiceLive(
+        runs,
+        commands,
+        submissions,
+        toolPolicies,
+        profile,
+        modelPolicies,
+        contextSources,
+        extensions,
+        roleCatalog
+      )
+    }

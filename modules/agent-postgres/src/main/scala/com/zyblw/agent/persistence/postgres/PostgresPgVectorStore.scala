@@ -248,6 +248,56 @@ final class PostgresPgVectorStore(
         }
       }
 
+  override def searchFiltered(
+      mode: RetrievalMode,
+      queryText: String,
+      query: Embedding,
+      scope: RetrievalScope,
+      filter: RetrievalFilter,
+      limit: Int
+  ): IO[RetrievalError, Chunk[RetrievalHit]] =
+    if limit <= 0 then ZIO.succeed(Chunk.empty)
+    else if filter.isEmpty && mode == RetrievalMode.VectorOnly then search(query, scope, limit)
+    else if filter.isEmpty && mode == RetrievalMode.Hybrid then searchHybrid(queryText, query, scope, limit)
+    else
+      mode match
+        case RetrievalMode.Hybrid if queryText.trim.nonEmpty =>
+          filteredHybrid(queryText, query, scope, filter, limit)
+        case RetrievalMode.LexicalOnly =>
+          filteredLexical(queryText, scope, filter, limit)
+        case RetrievalMode.Phrase =>
+          filteredPhrase(queryText, scope, filter, limit)
+        case RetrievalMode.Hybrid | RetrievalMode.VectorOnly =>
+          filteredVector(query, scope, filter, limit)
+
+  override def fetchChunks(
+      chunkIds: Set[String],
+      scope: RetrievalScope
+  ): IO[RetrievalError, Chunk[DocumentChunk]] =
+    if chunkIds.isEmpty then ZIO.succeed(Chunk.empty)
+    else
+      withConnection { connection =>
+        ZIO.attemptBlocking {
+          val statement = connection.prepareStatement(
+            """SELECT chunk_id, document_id, chunk_text, search_text, source_uri, permissions, metadata::text, index_version,
+              |       parent_id, lineage_ordinal, previous_chunk_id, next_chunk_id, heading_path,
+              |       page_numbers, origins::text, block_ids
+              |FROM zyblw_agent_knowledge.agent_knowledge_chunks
+              |WHERE tenant_id = ? AND permissions <@ ?::text[] AND chunk_id = ANY(?)
+              |ORDER BY chunk_id""".stripMargin
+          )
+          try
+            statement.setString(1, scope.tenantId.value)
+            statement.setArray(2, connection.createArrayOf("text", scope.permissions.toArray))
+            statement.setArray(3, connection.createArrayOf("text", chunkIds.toArray))
+            val result  = statement.executeQuery()
+            val builder = ChunkBuilder.make[DocumentChunk]()
+            while result.next() do builder += readChunk(result, scope)
+            builder.result()
+          finally statement.close()
+        }
+      }
+
   /** 在 rerank 之后读取相邻块与同父级块。SQL 重新应用 tenant/permission，扩展行不会因为种子命中已授权就被隐式信任。 */
   override def expandContext(
       seeds: Chunk[RetrievalHit],
@@ -384,6 +434,254 @@ final class PostgresPgVectorStore(
           statement.setString(2, documentId)
           statement.executeUpdate()
           ()
+        finally statement.close()
+      }
+    }
+
+  private val FilterSql: String =
+    """AND (cardinality(?::text[]) = 0 OR document_id = ANY(?))
+      |AND (cardinality(?::text[]) = 0 OR chunk_id = ANY(?))
+      |AND (cardinality(?::int[]) = 0 OR page_numbers && ?)
+      |AND (cardinality(?::text[]) = 0 OR heading_path[1:cardinality(?::text[])] = ?)
+      |AND (?::jsonb = '{}'::jsonb OR metadata @> ?::jsonb)""".stripMargin
+
+  private def bindFilter(
+      statement: java.sql.PreparedStatement,
+      connection: Connection,
+      start: Int,
+      filter: RetrievalFilter
+  ): Int =
+    val documents = connection.createArrayOf("text", filter.documentIds.toArray)
+    val chunks    = connection.createArrayOf("text", filter.chunkIds.toArray)
+    val pages     = connection.createArrayOf("integer", filter.pages.map(Int.box).toArray)
+    val headings  = connection.createArrayOf("text", filter.headingPrefix.toArray)
+    val metadata  = filter.metadataEquals.toJson
+    statement.setArray(start, documents)
+    statement.setArray(start + 1, documents)
+    statement.setArray(start + 2, chunks)
+    statement.setArray(start + 3, chunks)
+    statement.setArray(start + 4, pages)
+    statement.setArray(start + 5, pages)
+    statement.setArray(start + 6, headings)
+    statement.setArray(start + 7, headings)
+    statement.setString(start + 8, metadata)
+    statement.setString(start + 9, metadata)
+    start + 10
+
+  private def filteredVector(
+      query: Embedding,
+      scope: RetrievalScope,
+      filter: RetrievalFilter,
+      limit: Int
+  ): IO[RetrievalError, Chunk[RetrievalHit]] =
+    validateQueryDimension(query) *> withConnection { connection =>
+      ZIO.attemptBlocking {
+        val sql =
+          s"""SELECT chunk_id, document_id, chunk_text, search_text, source_uri, permissions, metadata::text, index_version,
+             |       parent_id, lineage_ordinal, previous_chunk_id, next_chunk_id, heading_path,
+             |       page_numbers, origins::text, block_ids,
+             |       1 - (embedding <=> ?::public.vector) AS score
+             |FROM zyblw_agent_knowledge.agent_knowledge_chunks
+             |WHERE tenant_id = ? AND permissions <@ ?::text[]
+             |$FilterSql
+             |ORDER BY embedding <=> ?::public.vector
+             |LIMIT ?""".stripMargin
+        val statement = connection.prepareStatement(sql)
+        try
+          val vector = vectorLiteral(query)
+          statement.setString(1, vector)
+          statement.setString(2, scope.tenantId.value)
+          statement.setArray(3, connection.createArrayOf("text", scope.permissions.toArray))
+          val next = bindFilter(statement, connection, 4, filter)
+          statement.setString(next, vector)
+          statement.setInt(next + 1, limit)
+          val result  = statement.executeQuery()
+          val builder = ChunkBuilder.make[RetrievalHit]()
+          while result.next() do builder += RetrievalHit(readChunk(result, scope), result.getDouble("score"))
+          builder.result()
+        finally statement.close()
+      }
+    }
+
+  private def filteredLexical(
+      queryText: String,
+      scope: RetrievalScope,
+      filter: RetrievalFilter,
+      limit: Int
+  ): IO[RetrievalError, Chunk[RetrievalHit]] =
+    withConnection { connection =>
+      ZIO.attemptBlocking {
+        val sql =
+          s"""SELECT chunk_id, document_id, chunk_text, search_text, source_uri, permissions, metadata::text, index_version,
+             |       parent_id, lineage_ordinal, previous_chunk_id, next_chunk_id, heading_path,
+             |       page_numbers, origins::text, block_ids,
+             |       ts_rank_cd(search_vector, websearch_to_tsquery(?::regconfig, ?), 32) AS score
+             |FROM zyblw_agent_knowledge.agent_knowledge_chunks
+             |WHERE tenant_id = ? AND permissions <@ ?::text[]
+             |  AND search_vector @@ websearch_to_tsquery(?::regconfig, ?)
+             |$FilterSql
+             |ORDER BY score DESC, document_id, chunk_id
+             |LIMIT ?""".stripMargin
+        val statement = connection.prepareStatement(sql)
+        try
+          statement.setString(1, hybridConfig.textSearchConfig)
+          statement.setString(2, queryText)
+          statement.setString(3, scope.tenantId.value)
+          statement.setArray(4, connection.createArrayOf("text", scope.permissions.toArray))
+          statement.setString(5, hybridConfig.textSearchConfig)
+          statement.setString(6, queryText)
+          val next = bindFilter(statement, connection, 7, filter)
+          statement.setInt(next, limit)
+          val result  = statement.executeQuery()
+          val builder = ChunkBuilder.make[RetrievalHit]()
+          while result.next() do
+            val score = result.getDouble("score")
+            builder += RetrievalHit(readChunk(result, scope), score, Map("textScore" -> score))
+          builder.result()
+        finally statement.close()
+      }
+    }
+
+  private def filteredPhrase(
+      queryText: String,
+      scope: RetrievalScope,
+      filter: RetrievalFilter,
+      limit: Int
+  ): IO[RetrievalError, Chunk[RetrievalHit]] =
+    withConnection { connection =>
+      ZIO.attemptBlocking {
+        val sql =
+          s"""SELECT chunk_id, document_id, chunk_text, search_text, source_uri, permissions, metadata::text, index_version,
+             |       parent_id, lineage_ordinal, previous_chunk_id, next_chunk_id, heading_path,
+             |       page_numbers, origins::text, block_ids,
+             |       similarity(search_text, ?) AS score
+             |FROM zyblw_agent_knowledge.agent_knowledge_chunks
+             |WHERE tenant_id = ? AND permissions <@ ?::text[]
+             |  AND search_text % ?
+             |$FilterSql
+             |ORDER BY score DESC, document_id, chunk_id
+             |LIMIT ?""".stripMargin
+        val statement = connection.prepareStatement(sql)
+        try
+          statement.setString(1, queryText)
+          statement.setString(2, scope.tenantId.value)
+          statement.setArray(3, connection.createArrayOf("text", scope.permissions.toArray))
+          statement.setString(4, queryText)
+          val next = bindFilter(statement, connection, 5, filter)
+          statement.setInt(next, limit)
+          val result  = statement.executeQuery()
+          val builder = ChunkBuilder.make[RetrievalHit]()
+          while result.next() do
+            val score = result.getDouble("score")
+            builder += RetrievalHit(readChunk(result, scope), score, Map("phraseScore" -> score))
+          builder.result()
+        finally statement.close()
+      }
+    }
+
+  private def filteredHybrid(
+      queryText: String,
+      query: Embedding,
+      scope: RetrievalScope,
+      filter: RetrievalFilter,
+      limit: Int
+  ): IO[RetrievalError, Chunk[RetrievalHit]] =
+    validateQueryDimension(query) *> withConnection { connection =>
+      ZIO.attemptBlocking {
+        val sql =
+          s"""WITH search_query AS (
+             |  SELECT websearch_to_tsquery(?::regconfig, ?) AS value
+             |),
+             |vector_hits AS MATERIALIZED (
+             |  SELECT document_id, chunk_id,
+             |         row_number() OVER (ORDER BY embedding <=> ?::public.vector, document_id, chunk_id) AS vector_rank,
+             |         1 - (embedding <=> ?::public.vector) AS vector_score
+             |  FROM zyblw_agent_knowledge.agent_knowledge_chunks
+             |  WHERE tenant_id = ? AND permissions <@ ?::text[]
+             |  $FilterSql
+             |  ORDER BY embedding <=> ?::public.vector, document_id, chunk_id
+             |  LIMIT ?
+             |),
+             |text_hits AS MATERIALIZED (
+             |  SELECT document_id, chunk_id,
+             |         row_number() OVER (
+             |           ORDER BY ts_rank_cd(search_vector, search_query.value, 32) DESC, document_id, chunk_id
+             |         ) AS text_rank,
+             |         ts_rank_cd(search_vector, search_query.value, 32) AS text_score
+             |  FROM zyblw_agent_knowledge.agent_knowledge_chunks CROSS JOIN search_query
+             |  WHERE tenant_id = ?
+             |    AND permissions <@ ?::text[]
+             |    AND search_vector @@ search_query.value
+             |    $FilterSql
+             |  ORDER BY text_score DESC, document_id, chunk_id
+             |  LIMIT ?
+             |),
+             |ranks AS (
+             |  SELECT COALESCE(vector_hits.document_id, text_hits.document_id) AS document_id,
+             |         COALESCE(vector_hits.chunk_id, text_hits.chunk_id) AS chunk_id,
+             |         vector_rank, text_rank, vector_score, text_score
+             |  FROM vector_hits FULL OUTER JOIN text_hits USING (document_id, chunk_id)
+             |),
+             |fused AS (
+             |  SELECT *,
+             |         CASE WHEN vector_rank IS NULL THEN 0.0
+             |              ELSE ?::double precision / (?::double precision + vector_rank) END +
+             |         CASE WHEN text_rank IS NULL THEN 0.0
+             |              ELSE ?::double precision / (?::double precision + text_rank) END AS fused_score
+             |  FROM ranks
+             |)
+             |SELECT c.chunk_id, c.document_id, c.chunk_text, c.search_text, c.source_uri,
+             |       c.permissions, c.metadata::text, f.fused_score,
+             |       f.vector_score, f.text_score, f.vector_rank, f.text_rank, c.index_version,
+             |       c.parent_id, c.lineage_ordinal, c.previous_chunk_id, c.next_chunk_id,
+             |       c.heading_path, c.page_numbers, c.origins::text, c.block_ids
+             |FROM fused f
+             |JOIN zyblw_agent_knowledge.agent_knowledge_chunks c
+             |  ON c.tenant_id = ? AND c.document_id = f.document_id AND c.chunk_id = f.chunk_id
+             |ORDER BY f.fused_score DESC, c.document_id, c.chunk_id
+             |LIMIT ?""".stripMargin
+        val statement = connection.prepareStatement(sql)
+        try
+          val vector      = vectorLiteral(query)
+          val permissions = connection.createArrayOf("text", scope.permissions.toArray)
+          statement.setString(1, hybridConfig.textSearchConfig)
+          statement.setString(2, queryText)
+          statement.setString(3, vector)
+          statement.setString(4, vector)
+          statement.setString(5, scope.tenantId.value)
+          statement.setArray(6, permissions)
+          var next = bindFilter(statement, connection, 7, filter)
+          statement.setString(next, vector)
+          statement.setInt(next + 1, hybridConfig.vectorCandidateCount(limit))
+          statement.setString(next + 2, scope.tenantId.value)
+          statement.setArray(next + 3, permissions)
+          next = bindFilter(statement, connection, next + 4, filter)
+          statement.setInt(next, hybridConfig.textCandidateCount(limit))
+          statement.setDouble(next + 1, hybridConfig.vectorWeight)
+          statement.setDouble(next + 2, hybridConfig.rrfK)
+          statement.setDouble(next + 3, hybridConfig.textWeight)
+          statement.setDouble(next + 4, hybridConfig.rrfK)
+          statement.setString(next + 5, scope.tenantId.value)
+          statement.setInt(next + 6, limit)
+          val result  = statement.executeQuery()
+          val builder = ChunkBuilder.make[RetrievalHit]()
+          while result.next() do
+            val chunk   = readChunk(result, scope)
+            val signals = Map.newBuilder[String, Double]
+            Option(result.getObject("vector_score")).foreach(_ =>
+              signals += "vectorScore" -> result.getDouble("vector_score")
+            )
+            Option(result.getObject("text_score")).foreach(_ =>
+              signals += "textScore" -> result.getDouble("text_score")
+            )
+            Option(result.getObject("vector_rank")).foreach(_ =>
+              signals += "vectorRank" -> result.getDouble("vector_rank")
+            )
+            Option(result.getObject("text_rank")).foreach(_ =>
+              signals += "textRank" -> result.getDouble("text_rank")
+            )
+            builder += RetrievalHit(chunk, result.getDouble("fused_score"), signals.result())
+          builder.result()
         finally statement.close()
       }
     }

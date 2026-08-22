@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-02
+> 最后核验：2026-08-22
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -37,6 +37,7 @@ PostgreSQL/RunStore 为准；Trace 被采样或 Metrics 丢失都不影响恢复
 - usage 除输入/输出总量外，还保存 Provider 明确报告的缓存输入与推理输出明细；隐藏推理正文仍被丢弃。
 - `OpenTelemetryAgentMetrics` 提供真正的 Counter、UpDownCounter 和 Histogram instruments。
 - `OtlpAgentObservability` 用同一个 scoped SDK 管理 Trace/Metrics exporter、后台线程、flush 和 close。
+- `OpenTelemetryAgentTelemetry` 通过版本化 `GenAiSemanticMap`（约定 1.37.0）投影 `gen_ai.operation.name`；prompt/messages/arguments/document 属性键被丢掉。
 - `MetricAttributePolicy` 对模型、工具和 evaluator 使用 allow-list；未知值折叠为 `other`。
 - `SanitizingTelemetry` 默认删除 prompt、answer、arguments、result、query、document 和凭据字段。
 - Langfuse 使用官方 OTLP traces endpoint、Basic Auth 和 ingestion version 4。
@@ -65,6 +66,7 @@ OTel instrument 名称如下；Prometheus exporter 通常把点转换成下划�
 | `zyblw.agent.worker.command.*` | Counter/Histogram | command/outcome | 耐久命令处理 |
 | `zyblw.agent.worker.lease.operation.count` | Counter | action/outcome | claim/heartbeat/release/reclaim |
 | `zyblw.agent.evaluation.*` | Counter/Histogram | evaluator/passed | 评测分数和通过率 |
+| `zyblw.agent.composition.drift.count` | Counter | `agent.composition.drift.kind` | 冻结组合与现场进程不一致；kind 仅 `incompatible` / `requires-revalidation` / `other` |
 
 绝对禁止作为 Metrics label 的字段：runId、sessionId、tenantId、userId、callId、commandId、prompt、query、工具参数、
 工具结果、引用正文、错误消息。它们要么高基数，要么敏感，通常两者兼有。
@@ -208,7 +210,18 @@ Langfuse Scores 只是查询与反馈视图；本地/CI 报告仍是发布门禁
 Trace 可以带 run/session ID 用于单次诊断，但 Metrics 绝不携带这些 ID。模型、工具和 evaluator 只有业务配置
 allow-list 后才保留；其他值统一为 `other`。`Redacted` 只应在宿主提供真正的医疗 PII Redactor 后使用。
 
-## 7. 部署基线
+## 7. 外接观测矩阵
+
+| 出口 | 接入方式 | 权威事实 | 低敏边界 |
+|---|---|---|---|
+| OTLP traces | `OtlpAgentObservability` / 宿主 MeterProvider | 否。RunStore / PersistedAgentEvent 才是恢复权威 | `SanitizingTelemetry` 删除 prompt、答案、工具参数/结果、query、文档、凭据 |
+| OTLP metrics → Prometheus / Grafana | Collector + `zyblw-agent-overview.json` + `zyblw-agent-alerts.yml` | 否。指标丢失不能改变 AgentState | 禁止 runId/tenantId/userId/callId 作 label；模型/工具名走 allow-list |
+| Langfuse traces | 官方 OTLP traces endpoint + Basic Auth | 否。采样或 UI 故障不影响恢复 | 与 Metrics 分开发送；Score 只上传固定维度，不上传 eval 输入或答案 |
+| 组合漂移告警 | `zyblw.agent.composition.drift.count` + `ZyblwAgentCompositionDrift` | 否。漂移本身以 `CompositionIncompatible` 失败为准 | kind 仅 incompatible / requires-revalidation / other |
+
+宿主负责 Collector、Prometheus、Grafana 和 Langfuse 项目隔离。框架提供 instruments、脱敏和 dashboard/alert 基线，不声称已替宿主完成值班 SLO。
+
+## 8. 部署基线
 
 - Collector：[otel-collector.yaml](../deploy/observability/otel-collector.yaml)
 - Prometheus：[prometheus.yml](../deploy/observability/prometheus/prometheus.yml)
@@ -218,7 +231,7 @@ allow-list 后才保留；其他值统一为 `other`。`Redacted` 只应在宿�
 Collector/Prometheus 对 OTel 名称的翻译策略可以配置。导入 dashboard 后应先查看 Collector 实际 `/metrics`，若部署
 选择“不添加 unit suffix”的 translation strategy，需要同步调整 dashboard/alert 中的 `_seconds`、`_total` 名称。
 
-## 8. 上线门禁
+## 9. 上线门禁
 
 1. 用假 prompt、工具参数、答案、病历、密钥跑一遍，确认 collector payload 和 Langfuse UI 均无正文。
 2. 关闭 collector/Langfuse，验证 Run 仍完成、RunStore 审计完整，应用关闭不超过 exporter timeout。

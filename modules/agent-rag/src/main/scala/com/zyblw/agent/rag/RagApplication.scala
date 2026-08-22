@@ -27,7 +27,9 @@ final case class RagApplicationConfig(
 final case class RagQuery(
     text: String,
     scope: RetrievalScope,
-    limit: Option[Int] = None
+    limit: Option[Int] = None,
+    mode: RetrievalMode = RetrievalMode.Hybrid,
+    filter: RetrievalFilter = RetrievalFilter.empty
 )
 
 /** 统一知识摄取和查询的业务门面。
@@ -56,6 +58,25 @@ final class RagApplication(
   ): ZStream[Any, RetrievalError, DocumentIngestionOutcome] =
     ingestion.ingest(requests)
 
+  /** 把已扫描的目录输入流转成摄入请求。目录扫描本身由 document-loaders 提供，避免 rag 反向依赖解析器。 */
+  def ingestInputs(
+      inputs: ZStream[Any, RetrievalError, DocumentInput],
+      tenantId: TenantId,
+      permissions: Set[String],
+      ingestionPrefix: String
+  ): ZStream[Any, RetrievalError, DocumentIngestionOutcome] =
+    ingest(
+      inputs.zipWithIndex.map { case (input, index) =>
+        DocumentIngestionRequest(
+          input,
+          tenantId,
+          permissions,
+          s"$ingestionPrefix-${input.id.take(80)}-$index",
+          ActiveVersionExpectation.AnyVersion
+        )
+      }
+    )
+
   /** 在进入 Embedding/数据库前验证 query 与 topK，避免错误调用消耗远程额度或创建超大候选池。
     *
     * `maxTopK` 始终取自部署基线，即使运行时覆盖把默认 topK 调到更高：覆盖层移动工作点，基线定义安全边界。 因此一个越界的覆盖会在这里被拒绝，而不是悄悄放大候选池。
@@ -74,7 +95,11 @@ final class RagApplication(
       )
     else if limit <= 0 || limit > config.maxTopK then
       ZIO.fail(AgentError.RetrievalFailed(s"RAG topK 必须位于 1..${config.maxTopK}"))
-    else retriever.retrieve(normalized, query.scope, limit)
+    else retriever.retrieve(RetrievalRequest(normalized, query.scope, limit, query.mode, query.filter))
+
+  /** 按 chunkId 精确再识别；授权仍由 Retriever / VectorStore 在读取时复核。 */
+  def fetch(chunkIds: Set[String], scope: RetrievalScope): IO[RetrievalError, RetrievalResult] =
+    retriever.fetch(chunkIds, scope)
 
 object RagApplication:
   /** 默认业务装配；依赖缺失会在 ZLayer 图构建时暴露。 */

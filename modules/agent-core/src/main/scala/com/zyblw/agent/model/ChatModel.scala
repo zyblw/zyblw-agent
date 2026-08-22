@@ -23,6 +23,9 @@ final case class ModelCapabilities(
     audio: Boolean = false,
     parallelToolCalls: Boolean = false,
     usageReporting: Boolean = true,
+    promptCache: Boolean = false,
+    reasoningTokens: Boolean = false,
+    serverContinuation: Boolean = false,
     maxInputTokens: Option[Long] = None,
     maxOutputTokens: Option[Long] = None
 ):
@@ -123,14 +126,15 @@ object CapabilityValidator:
       ZIO.fail(AgentError.UnsupportedModelCapability(provider, "tool calling", "请求包含工具定义"))
     else if request.settings.toolChoice.isInstanceOf[ToolChoice.Specific] && !capabilities.specificToolChoice
     then ZIO.fail(AgentError.UnsupportedModelCapability(provider, "specific tool choice", "请求指定了工具"))
-    else if hasImageUrl(request) && !capabilities.vision then
+    else if hasImage(request) && !capabilities.vision then
       ZIO.fail(AgentError.UnsupportedModelCapability(provider, "vision", "请求包含图片"))
     else ZIO.unit
 
-  private def hasImageUrl(request: ChatRequest): Boolean =
+  private def hasImage(request: ChatRequest): Boolean =
     request.messages.exists(_.content.exists {
-      case ContentPart.ImageUrl(_, _) => true
-      case _                          => false
+      case ContentPart.ImageUrl(_, _)         => true
+      case ContentPart.ImageArtifact(_, _, _) => true
+      case _                                  => false
     })
 
 final class RoutedChatModel private (
@@ -196,3 +200,29 @@ object RoutedChatModel:
 final case class CapabilityMatrix(entries: Map[(String, String), ModelCapabilities]):
   /** 按 Provider 和模型精确查询能力；没有条目返回 None，不做隐式猜测。 */
   def get(provider: String, model: String): Option[ModelCapabilities] = entries.get(provider -> model)
+
+  /** 声明与 `ProviderContract` 探测到的能力必须逐字段一致。
+    *
+    * 未覆盖的 `(provider, model)` fail-closed，避免“目录没写就当全支持”。探测结果来自真实 Adapter 的 `descriptor`/`capabilities`，不是
+    * HTTP stub 的猜测。
+    */
+  def requireConsistent(
+      provider: String,
+      model: String,
+      probed: ModelCapabilities
+  ): Either[String, Unit] =
+    get(provider, model) match
+      case None                                 => Left(s"capability-matrix-missing:$provider/$model")
+      case Some(declared) if declared == probed => Right(())
+      case Some(_)                              => Left(s"capability-matrix-mismatch:$provider/$model")
+
+object CapabilityMatrix:
+  /** 从单个 Provider 描述生成矩阵；模型清单为空时只登记 Provider 默认能力，键为 `*`。 */
+  def fromDescriptor(descriptor: ProviderDescriptor): CapabilityMatrix =
+    val named = descriptor.models.map { case (name, capabilities) =>
+      (descriptor.id, name) -> capabilities
+    }
+    val fallback =
+      if descriptor.models.isEmpty then Map((descriptor.id, "*") -> descriptor.capabilities)
+      else Map.empty
+    CapabilityMatrix(named ++ fallback)

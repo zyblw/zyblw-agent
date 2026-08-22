@@ -91,6 +91,15 @@ final class AgentHttpApi(
       yield Response.json(AgentHttpProjection.run(authorized).toJson))
         .catchAll(error => ZIO.succeed(errorResponse(error)))
     },
+    AgentHttpContract.getRunCitationsPattern -> handler { (runId: String, request: Request) =>
+      (for
+        parsed     <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+        state      <- runtime.inspect(parsed)
+        actor      <- contexts.resolve(request)
+        authorized <- RunAuthorization.read(state, actor)
+      yield Response.json(AgentHttpProjection.run(authorized).toJson))
+        .catchAll(error => ZIO.succeed(errorResponse(error)))
+    },
     AgentHttpContract.cancelRunPattern -> handler { (runId: String, request: Request) =>
       (for
         parsed  <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))

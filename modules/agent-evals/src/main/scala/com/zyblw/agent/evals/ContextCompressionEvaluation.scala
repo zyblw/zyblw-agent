@@ -251,6 +251,9 @@ final case class ContextCompressionEvalReport(
   def averageScore: Double =
     if grades.isEmpty then 0.0 else grades.map(_.score).sum / grades.length.toDouble
 
+  /** outcome、safety 与 resource 的独立解释视图。 */
+  def axisSummaries: Chunk[EvalAxisSummary] = EvalAxisSummary.from(grades)
+
 /** 一次 Context 压缩数据集的聚合报告。 */
 final case class ContextCompressionEvalSuiteReport(reports: Chunk[ContextCompressionEvalReport])
     derives JsonCodec:
@@ -627,9 +630,10 @@ final class ContextCompressionEvalRunner(
     */
   private def renderVisibleContent(message: AgentMessage): String =
     val content = message.content.map {
-      case ContentPart.Text(value)           => value
-      case ContentPart.JsonValue(value)      => value.toJson
-      case ContentPart.ImageUrl(url, detail) => s"$url:${detail.getOrElse("")}"
+      case ContentPart.Text(value)                     => value
+      case ContentPart.JsonValue(value)                => value.toJson
+      case ContentPart.ImageUrl(url, detail)           => s"$url:${detail.getOrElse("")}"
+      case ContentPart.ImageArtifact(sha, media, size) => s"artifact:$sha:$media:$size"
     }
     val calls = message.toolCalls.map(call => s"${call.id}:${call.name}:${call.arguments.toJson}")
     (content ++ calls).mkString("\n")

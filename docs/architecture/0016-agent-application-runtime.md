@@ -62,9 +62,9 @@ Telemetry 与 Eval，但如果没有统一的架构语义，新增能力仍可�
 
 | 平面 | 当前落点 | 下一项可验证工作 |
 |---|---|---|
-| Application SDK | `app`、Builder、Quickstart、HTTP host | PostgreSQL 最小应用与更少样板的生产 preset |
+| Application SDK | `app`、Builder、`ProductionSupportHost`、HTTP host | PostgreSQL 生产参考与显式 durable 装配 |
 | Intelligence | Provider、Instruction、Context、Tool、Memory、RAG | capability/native extension、真实长会话与 RAG lineage |
-| Execution | Agent Runtime、command worker、Workflow execution ledger、低敏 timeline、durable wait/signal、Scoped wake worker | kill/recover、多节点 soak 与恢复 SLO |
+| Execution | Agent Runtime、command worker、Workflow execution ledger、低敏 timeline/wake queue、durable wait/signal、Scoped wake worker；command/Workflow 独立 JVM kill/recover | 部署节点丢失、多节点 soak 与恢复 SLO |
 | Control | Permission、Guardrail、Approval、Limit、Cost | policy 管理 UX、任务级总预算与保留策略 |
 | State | Run/Event/Command、checkpoint、Memory、Artifact | Goal/Plan/Todo SPI、Artifact durable Adapter、schema upcaster |
 | Quality / Ops | Inspector、OTLP、Eval、趋势门禁 | outcome/trajectory 分离、`pass@k`/`pass^k` 趋势、图级 eval |
@@ -90,8 +90,7 @@ MCP 是 Agent 与工具/资源/Prompt 的上下文交换边界，不负责 Agent
 
 ### 下一阶段
 
-1. Workflow G3-A2c：对已完成的 wait-as-command/Scoped wake worker 做数据库重启、进程 kill 与多 Worker soak，建立
-   backlog、claim latency、lease-lost 和恢复时延 SLO；
+1. Workflow G3-A2c：本机独立 JVM kill/reclaim、同实例 PostgreSQL restart 与 3 Worker/126 Run 有界 soak 已完成；继续在部署环境做数据库主备切换、节点丢失与长时 soak，并校准 backlog、claim latency、lease-lost 和恢复时延 SLO；
 2. RAG R2-C：在已有 block/page/bbox lineage、parent/neighbor 扩展和 ACL 前置上，补真实 OCR/敌对 PDF、token-aware 与容量证据；
 3. Harness H1：小型 Goal/Plan/Todo/Skill ADT 与 Store SPI，复用 Artifact/Workspace/Approval；
 4. Quality Q1：结果与轨迹评分分离，多试验趋势和 failure corpus；

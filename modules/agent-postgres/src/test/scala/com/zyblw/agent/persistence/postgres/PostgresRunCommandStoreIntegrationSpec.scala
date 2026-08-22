@@ -2,6 +2,7 @@ package com.zyblw.agent.persistence.postgres
 
 import com.dimafeng.testcontainers.PostgreSQLContainer
 import com.zyblw.agent.core.*
+import com.zyblw.agent.harness.*
 import com.zyblw.agent.memory.*
 import com.zyblw.agent.runtime.*
 import com.zyblw.agent.scheduler.*
@@ -22,7 +23,8 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
       container: PostgreSQLContainer,
       runStore: RunStore,
       commandStore: RunCommandStore,
-      submissionStore: RunSubmissionStore
+      submissionStore: RunSubmissionStore,
+      harnessStore: HarnessStore
   )
 
   /** 启动 PostgreSQL 16 并执行正式 Flyway 迁移。 */
@@ -55,7 +57,8 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
       container,
       PostgresRunStore(dataSource),
       PostgresRunCommandStore(dataSource),
-      PostgresRunSubmissionStore(dataSource)
+      PostgresRunSubmissionStore(dataSource),
+      PostgresHarnessStore(dataSource)
     )
   }
 
@@ -149,6 +152,81 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
         commands.length == 1,
         conflict.isFailure,
         orphan.isFailure
+      )).provideLayer(storesLayer)
+    },
+    test("Harness 预算预留与 Run/事件/Start/dispatcher 同事务，失败不留下孤儿 Run") {
+      val limits = RunLimits(
+        maxSteps = 4,
+        maxModelCalls = 2,
+        maxToolCalls = 2,
+        maxRepeatedActions = 2,
+        maxInputTokens = 100,
+        maxOutputTokens = 50,
+        maxTotalTokens = 120,
+        maxEstimatedCost = Some(BigDecimal("2.00")),
+        maxDuration = 1.minute
+      )
+      val policy = GoalBudgetPolicy(
+        maxRuns = 1,
+        maxModelCalls = 2,
+        maxToolCalls = 2,
+        maxInputTokens = 100,
+        maxOutputTokens = 50,
+        maxTotalTokens = 120,
+        maxEstimatedCost = Some(BigDecimal("2.00"))
+      )
+      (for
+        stores    <- ZIO.service[Stores]
+        goalId    <- GoalId.random
+        otherGoal <- GoalId.random
+        _         <- stores.harnessStore.saveGoal(
+          0L,
+          Goal(goalId, ThreadId("pg-harness-submit"), "原子预算 Start")
+        )
+        _ <- stores.harnessStore.saveGoal(
+          0L,
+          Goal(otherGoal, ThreadId("pg-harness-other"), "另一个 Goal")
+        )
+        _ <- stores.harnessStore.configureGoalBudget(goalId, policy)
+        _ <- stores.harnessStore.configureGoalBudget(otherGoal, policy)
+        agent   = AgentDefinition(AgentId("pg-harness-submit"), "PG Harness", "完成任务")
+        request = RunRequest(ThreadId("pg-harness-submit"), AgentMessage.user("开始"), limits = limits)
+        submissions <- ZIO.foreachPar(1 to 12)(_ =>
+          RunInitialization
+            .prepareForGoal(goalId, agent, request, "pg-harness-key", maxToolCalls = 2)
+            .flatMap(stores.submissionStore.submitStart)
+        )
+        accepted = submissions.head
+        reservation      <- stores.harnessStore.getGoalBudgetReservation(goalId, accepted.runId)
+        snapshot         <- stores.harnessStore.getGoalBudget(goalId)
+        failedSubmission <- RunInitialization.prepareForGoal(
+          goalId,
+          agent,
+          request,
+          "pg-harness-over-budget",
+          maxToolCalls = 2
+        )
+        exhausted         <- stores.submissionStore.submitStart(failedSubmission).either
+        orphan            <- stores.runStore.load(failedSubmission.state.runId).either
+        reboundSubmission <- RunInitialization.prepareForGoal(
+          otherGoal,
+          agent,
+          request,
+          "pg-harness-key",
+          maxToolCalls = 2
+        )
+        rebound       <- stores.submissionStore.submitStart(reboundSubmission).either
+        otherSnapshot <- stores.harnessStore.getGoalBudget(otherGoal)
+      yield assertTrue(
+        submissions.map(_.runId).distinct.length == 1,
+        submissions.map(_.commandId).distinct.length == 1,
+        reservation.exists(_.status == GoalBudgetReservationStatus.Reserved),
+        reservation.exists(_.limits == limits),
+        snapshot.exists(_.reserved.runs == 1L),
+        exhausted.left.exists(_.isInstanceOf[AgentError.HarnessBudgetExceeded]),
+        orphan.left.exists(_.isInstanceOf[AgentError.RunNotFound]),
+        rebound.left.exists(_.isInstanceOf[AgentError.RunSubmissionConflict]),
+        otherSnapshot.exists(_.reserved == GoalBudgetAmount.zero)
       )).provideLayer(storesLayer)
     },
     test("并发 claim 唯一，租约过期后同一命令可由新 generation 抢占") {
@@ -263,6 +341,107 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
         events.map(_.sequence) == Chunk(0L, 1L, 2L),
         events.drop(1).map(_.eventId) == Chunk(startedId, completedId),
         !events.exists(_.eventId == staleId)
+      )).provideLayer(storesLayer)
+    },
+    test("旧 worker 不能把主模型账本从 Dispatched 结算成 Succeeded") {
+      (for
+        stores <- ZIO.service[Stores]
+        runId  <- createRun(stores.runStore)
+        _      <- stores.commandStore.submit(runId, RunCommandPayload.Recover, "recover:model-call")
+        first  <- stores.commandStore
+          .claim(WorkerId("model-old-worker"), 250.millis, 3)
+          .someOrFail(AgentError.Unexpected("first claim missing"))
+        initial    <- stores.runStore.load(runId)
+        now        <- Clock.instant
+        requestId  <- ModelRequestId.random
+        preparedId <- EventId.random
+        fingerprint = "c" * 64
+        record      = ModelCallExecutionRecord(
+          runId,
+          requestId,
+          1,
+          ModelCallStatus.Dispatched,
+          "pg",
+          "test",
+          CapturePolicy.MetadataOnly,
+          fingerprint,
+          1,
+          0,
+          ModelCallContextLineage(4, 0, 0, 0, 0),
+          None,
+          None,
+          updatedAtEpochMilli = now.toEpochMilli
+        )
+        prepared = PersistedAgentEvent(
+          preparedId,
+          runId,
+          1L,
+          AgentEvent.ModelCallPrepared(
+            runId,
+            requestId.asString,
+            "pg",
+            "test",
+            fingerprint,
+            "MetadataOnly",
+            1,
+            0,
+            now.toEpochMilli
+          ),
+          now.toEpochMilli
+        )
+        running = initial.copy(
+          status = RunStatus.Running,
+          lastEventSequence = 1L,
+          pendingModelCall = Some(
+            PendingModelCall(requestId, 1, fingerprint, CapturePolicy.MetadataOnly, "pg", "test")
+          )
+        )
+        version1 <- stores.runStore.commitFenced(
+          first,
+          Version.initial,
+          running,
+          NonEmptyChunk(prepared),
+          Some(ModelCallWrite.Insert(record))
+        )
+        _      <- ZIO.sleep(350.millis)
+        second <- stores.commandStore
+          .claim(WorkerId("model-new-worker"), 5.seconds, 3)
+          .someOrFail(AgentError.Unexpected("second claim missing"))
+        loaded1 <- stores.runStore.load(runId)
+        staleId <- EventId.random
+        staleEvent = PersistedAgentEvent(
+          staleId,
+          runId,
+          2L,
+          AgentEvent.ModelCallCompleted(runId, TokenUsage(1, 1), now.toEpochMilli),
+          now.toEpochMilli
+        )
+        stale <- stores.runStore
+          .commitFenced(
+            first,
+            version1,
+            loaded1.copy(pendingModelCall = None, lastEventSequence = 2L),
+            NonEmptyChunk(staleEvent),
+            Some(
+              ModelCallWrite.Transition(
+                ModelCallStatus.Dispatched,
+                1,
+                record.copy(status = ModelCallStatus.Succeeded, updatedAtEpochMilli = now.toEpochMilli)
+              )
+            )
+          )
+          .exit
+        ledger <- stores.runStore.getModelCall(runId, requestId)
+        _      <- stores.commandStore.complete(second)
+        staleLeaseLost = stale match
+          case Exit.Failure(cause) => cause.failureOption.exists(_.isInstanceOf[AgentError.LeaseLost])
+          case Exit.Success(_)     => false
+      yield assertTrue(
+        version1 == Version(1L),
+        second.generation == first.generation + 1L,
+        staleLeaseLost,
+        ledger.exists(_.status == ModelCallStatus.Dispatched),
+        loaded1.pendingModelCall.isDefined
       )).provideLayer(storesLayer)
     },
     test("Cancel 提交原子撤销活动租约，完成后 supersede 被抢占命令") {
@@ -388,6 +567,81 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
         stale.isFailure,
         saved.status == RunCommandStatus.Completed,
         saved.attempt == 2,
+        recovered.leasedRuns == 0L,
+        recovered.expiredLeases == 0L
+      )).provideLayer(storesLayer)
+    },
+    test("Worker 消失且 PostgreSQL pause/unpause 后新 Worker 以更高 generation 接管") {
+      (for
+        stores  <- ZIO.service[Stores]
+        runId   <- createRun(stores.runStore)
+        command <- stores.commandStore.submit(runId, RunCommandPayload.Recover, "outage-recover")
+        oldSeen <- Promise.make[Nothing, RunCommandLease]
+        oldRuntime = new LeaseAwareAgentRuntime:
+          def executeLeased(lease: RunCommandLease): IO[AgentError, Unit] =
+            oldSeen.succeed(lease).unit *> ZIO.never
+        oldHost <- WorkerHost
+          .make(
+            WorkerId("outage-old-host"),
+            WorkerHostConfig(
+              leaseDuration = 1.second,
+              heartbeatEvery = 200.millis,
+              pollEvery = 10.millis,
+              parallelism = 1
+            )
+          )
+          .provide(ZLayer.succeed(stores.commandStore), ZLayer.succeed(oldRuntime))
+        oldFiber          <- oldHost.claimOnce.fork
+        oldLease          <- oldSeen.await
+        _                 <- oldFiber.interrupt
+        boundedDataSource <- ZIO.attempt {
+          val value = PGSimpleDataSource()
+          value.setURL(stores.container.jdbcUrl)
+          value.setUser(stores.container.username)
+          value.setPassword(stores.container.password)
+          value.setConnectTimeout(1)
+          value.setSocketTimeout(1)
+          value: DataSource
+        }
+        unavailable <- (ZIO.attemptBlocking(
+          stores.container.dockerClient.pauseContainerCmd(stores.container.containerId).exec()
+        ) *> PostgresRunStore(boundedDataSource).load(runId).exit <* ZIO.sleep(1200.millis))
+          .ensuring(
+            ZIO
+              .attemptBlocking(
+                stores.container.dockerClient.unpauseContainerCmd(stores.container.containerId).exec()
+              )
+              .orDie
+          )
+        restoredRun <- stores.runStore
+          .load(runId)
+          .retry(Schedule.spaced(100.millis) && Schedule.recurs(30))
+        persisted <- stores.commandStore.get(command.commandId)
+        expired   <- stores.commandStore.queueSnapshot
+        newSeen   <- Promise.make[Nothing, RunCommandLease]
+        newRuntime = new LeaseAwareAgentRuntime:
+          def executeLeased(lease: RunCommandLease): IO[AgentError, Unit] = newSeen.succeed(lease).unit
+        newHost <- WorkerHost
+          .make(WorkerId("outage-recovery-host"), WorkerHostConfig(parallelism = 1))
+          .provide(ZLayer.succeed(stores.commandStore), ZLayer.succeed(newRuntime))
+        processed <- newHost.claimOnce
+        newLease  <- newSeen.await
+        stale     <- stores.commandStore.complete(oldLease).exit
+        saved     <- stores.commandStore.get(command.commandId)
+        recovered <- stores.commandStore.queueSnapshot
+      yield assertTrue(
+        unavailable.isFailure,
+        restoredRun.runId == runId,
+        persisted.status == RunCommandStatus.Leased,
+        persisted.attempt == 1,
+        expired.expiredLeases == 1L,
+        processed,
+        newLease.commandId == oldLease.commandId,
+        newLease.generation == oldLease.generation + 1L,
+        stale.isFailure,
+        saved.status == RunCommandStatus.Completed,
+        saved.attempt == 2,
+        recovered.queuedCommands == 0L,
         recovered.leasedRuns == 0L,
         recovered.expiredLeases == 0L
       )).provideLayer(storesLayer)

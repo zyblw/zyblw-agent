@@ -41,7 +41,80 @@ export interface AdminCapabilitiesView {
   knowledge: boolean;
   evalTrends: boolean;
   models: boolean;
+  runInspection: boolean;
+  harness: boolean;
+  memoryGovernance: boolean;
   observability: ObservabilityLinks;
+}
+
+/** 低敏组合指纹。 */
+export interface AdminCompositionView {
+  runId: string;
+  fingerprintPrefix: string;
+  profileId: string;
+  modelRefPrefix: string;
+  capturePolicy: string;
+  sourceIds: string[];
+  environmentId: string;
+  permissionFingerprintPrefix: string;
+}
+
+/** 低敏 ModelCall 账本行。 */
+export interface AdminModelCallView {
+  requestId: string;
+  status: string;
+  provider: string;
+  model: string;
+  capturePolicy: string;
+  fingerprintPrefix: string;
+  inputTokens: number;
+  outputTokens: number;
+  errorCategory?: string | null;
+}
+
+/** 低敏 Harness 投影。 */
+export interface AdminHarnessView {
+  goalId: string;
+  status: string;
+  objectivePrefix: string;
+  runId?: string | null;
+  revision: number;
+  remainingRuns?: number | null;
+  remainingModelCalls?: number | null;
+  remainingToolCalls?: number | null;
+  remainingTotalTokens?: number | null;
+  planId?: string | null;
+  todoStatuses: string[];
+}
+
+/** 低敏记忆治理视图；不含 sourceRunId。 */
+export interface MemoryView {
+  key: string;
+  value: unknown;
+  importance: number;
+  kind: string;
+  confidence: number;
+  sensitivity: string;
+  evidence: string;
+  version: number;
+  createdAtEpochMilli: number;
+  updatedAtEpochMilli: number;
+  expiresAtEpochMilli?: number | null;
+}
+
+export interface MemoryExportView {
+  items: MemoryView[];
+  nextCursor?: string | null;
+}
+
+/** 低敏审批主体。 */
+export interface AdminApprovalSubjectView {
+  approvalId: string;
+  toolName: string;
+  risk: string;
+  environmentId: string;
+  permissionFingerprintPrefix: string;
+  subjectFingerprintPrefix?: string | null;
 }
 
 /** Run 目录列表项的低敏用量摘要。 */

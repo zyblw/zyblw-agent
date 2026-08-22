@@ -68,7 +68,8 @@ object DefaultContextManagerSpec extends ZIOSpecDefault:
       recent: Long = 300,
       toolCharacters: Int = 200,
       historyCompression: CompressionMode = CompressionMode.Deterministic,
-      toolCompression: CompressionMode = CompressionMode.Deterministic
+      toolCompression: CompressionMode = CompressionMode.Deterministic,
+      worldStateDelivery: WorldStateDelivery = WorldStateDelivery.FullSnapshot
   ): ContextPolicy = ContextPolicy(
     budget = ContextBudget(
       total = 1000,
@@ -82,7 +83,8 @@ object DefaultContextManagerSpec extends ZIOSpecDefault:
     ),
     maxToolResultCharacters = toolCharacters,
     historyCompression = historyCompression,
-    toolOutputCompression = toolCompression
+    toolOutputCompression = toolCompression,
+    worldStateDelivery = worldStateDelivery
   )
 
   def spec = suite("DefaultContextManager")(
@@ -346,5 +348,27 @@ object DefaultContextManagerSpec extends ZIOSpecDefault:
         full <- counter.countMessage(message)
         text <- counter.count(message.text)
       yield assertTrue(message.text.isEmpty, full > text)
+    },
+    test("world-state section 指纹不变则本回合不再发给模型，决策进入 PreparedContext") {
+      val snapshot = ContextSectionSnapshot.of("goal", "objective: 学习中医")
+      val sources  = ContextSources(sections = Chunk(snapshot))
+      val messages = Chunk(AgentMessage.user("继续"))
+      for
+        deltaPolicy = policy(worldStateDelivery = WorldStateDelivery.TrustedStatefulDelta)
+        first  <- manager.build(state(messages), definition, sources, deltaPolicy)
+        second <- manager.build(
+          state(messages).copy(worldSectionCursors = first.worldSectionCursors),
+          definition,
+          sources,
+          deltaPolicy
+        )
+      yield assertTrue(
+        first.messages.exists(_.text.contains("objective: 学习中医")),
+        first.sectionDecisions == Chunk(ContextSectionDecision.Rendered("goal", snapshot.fingerprint)),
+        !second.messages.exists(_.text.contains("objective: 学习中医")),
+        second.sectionDecisions == Chunk(ContextSectionDecision.Unchanged("goal", snapshot.fingerprint)),
+        second.worldSectionCursors == first.worldSectionCursors,
+        !first.worldSectionCursors.toJson.contains("学习中医")
+      )
     }
   )

@@ -43,6 +43,7 @@ object OpenTelemetryAgentMetricsSpec extends ZIOSpecDefault:
             )
             _ <- metrics.record(AgentMetric.ContextPrepared(1200L, 3L, 1L, 2L, 4L, 2L))
             _ <- metrics.record(AgentMetric.ContextCompacted(12L, 1L, 6L, 2L))
+            _ <- metrics.record(AgentMetric.CompositionDriftDetected("incompatible"))
             _ <- metrics.record(
               AgentMetric.ToolCallFinished(
                 toolName = "tenant-dynamic-secret-tool",
@@ -71,6 +72,7 @@ object OpenTelemetryAgentMetricsSpec extends ZIOSpecDefault:
             names.contains("zyblw.agent.context.compression.count"),
             names.contains("zyblw.agent.context.compression.model.call.count"),
             names.contains("zyblw.agent.context.compression.covered.message.count"),
+            names.contains("zyblw.agent.composition.drift.count"),
             tokenPoints.map(_.getCount).sum == 4L,
             tokenSum == 23.0,
             serialized.contains("gcp.gen_ai"),

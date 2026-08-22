@@ -1,5 +1,6 @@
 package com.zyblw.agent.persistence.postgres
 
+import com.zyblw.agent.artifacts.ArtifactStore
 import com.zyblw.agent.memory.{MemoryStore, RunCommandStore, RunStore, RunSubmissionStore}
 import com.zyblw.agent.rag.{
   EmbeddingCacheStore,
@@ -9,6 +10,7 @@ import com.zyblw.agent.rag.{
   VectorStore
 }
 import com.zyblw.agent.evals.EvalTrendStore
+import com.zyblw.agent.harness.HarnessStore
 import com.zyblw.agent.workflow.{WorkflowCheckpointStore, WorkflowExecutionStore}
 import javax.sql.DataSource
 import zio.*
@@ -116,6 +118,20 @@ object PostgresAgentPersistence:
     */
   val evalTrends: URLayer[DataSource, EvalTrendStore] =
     PostgresEvalTrendStore.layer
+
+  /** 长任务 Goal/Plan/Skill。不加入默认 Runtime 控制面，避免未使用 Harness 的宿主被迫构造该 Adapter。 */
+  val harness: URLayer[DataSource, HarnessStore] =
+    PostgresHarnessStore.layer
+
+  /** 耐久 Artifact 元数据与版本。不加入最小控制面，避免不保存工件的宿主被迫构造该 Adapter。 */
+  val artifacts: URLayer[DataSource, ArtifactStore] =
+    PostgresArtifactStore.layer
+
+  /** 控制面与 Artifact 的常用组合；仍不包含 Harness、Workflow 或固定维度知识索引。 */
+  val layerWithArtifacts: URLayer[
+    DataSource,
+    RunStore & RunCommandStore & RunSubmissionStore & ArtifactStore
+  ] = layer ++ artifacts
 
   /** 声明式 Workflow 的耐久 checkpoint。
     *

@@ -2,7 +2,7 @@
 
 > 状态：当前运行手册
 >
-> 最后核验：2026-08-09
+> 最后核验：2026-08-23
 >
 > 事实来源：源码、测试、0.3 core baseline、0.5 admin V002、0.6 knowledge baseline、CI/发布工作流与本项目成熟度矩阵
 
@@ -12,20 +12,23 @@
 ## 当前结论与版本建议
 
 当前源码已经具备开发真实业务的主干：耐久提交、异步 Worker、有界多 Run 并发、lease/fencing、类型化工具与权限、
-审批/取消/恢复、PostgreSQL、HTTP/SSE、低敏观测、RAG 和 Eval。新业务统一基于 0.6.0 构建垂直切片，
+审批/取消/恢复、PostgreSQL、HTTP/SSE、低敏观测、RAG 和 Eval。**当前支持的接入拓扑是 Docker 启动 + 自管
+PostgreSQL 直连**；7 项宿主环境证据已延期。新业务统一基于 `0.8.0` 构建垂直切片，
 不需要等待 Harness、多 Agent、Graph Studio 或完整 GraphRAG。
 
-**`0.6.0` 统一 core V001/V002/V003 与 1024 维结构化 RAG 基线**，适合从 staging
+**`0.8.0` 是全新安装基线**：核心与 1024 知识各一份 V001；适合从 staging
 进入受限生产验收，而不是已经通过任意规模验证的通用 GA：
 
-- 核心 V001/V002/V003、业务 HTTP v1、state/outcome 与核心控制面保持冻结；空库按顺序执行全部三项 core migration；
+- 核心与 1024 知识各一份 0.8 V001；业务 HTTP v1 / OpenAPI 1.2.0、state v7 与知识检索 mode 是当前契约；
 - RAG 固定使用独立 1024 knowledge schema/history；所有新索引都按同一模型身份、维度与 lexical strategy 建立；
-- 管理面（`/api/v1/admin/**`）与控制台是 **Beta 且完全可选**：不装配任何管理能力就不挂载任何管理路由，业务主线行为不变；
-- 业务先在 staging 和受限流量使用 0.6.0，完成自己的数据、权限、Provider、容量和恢复验收后再扩大流量；
-- Workflow、Artifact、MCP/Sandbox 等标记为 Experimental 的能力不自动继承核心主线的成熟度。
+- 稳定知识面是 `/api/v1/knowledge/**`；管理面（`/api/v1/admin/**`）与控制台是 **Beta 且完全可选**；
+- 业务先在 staging 和受限流量使用精确 `0.8.0`，完成自己的数据、权限、Provider、容量和恢复验收后再扩大流量；
+- Workflow、Harness、MCP/Sandbox 等标记为 Experimental 的能力不自动继承核心主线的成熟度。Artifact 元数据
+  存储已升为 Beta，仍需业务侧验收附件路径。平台切换顺序见
+  [升级到 0.8.0](upgrading-to-0.8.0.md)。
 
-发布流水线完成前，业务仓库应使用唯一的内部 `0.6.0-local.*` 候选；Maven Central 显示 Published 后固定精确 `0.6.0`，不要使用
-移动分支、版本范围或 `latest.release`。
+业务仓库应固定精确 `0.8.0`，不要使用移动分支、版本范围或 `latest.release`。验证未发布提交时才使用唯一的内部
+`0.8.0-local` 候选，且不得上传 Central。
 
 启用管理面时，它本身也是一条需要单独验收的暴露面：管理路由必须只对运维身份开放，`agent:admin:debug` 会产生真实
 Provider 费用，管理台的地址不应与业务 API 共用同一条公网入口和限流策略。
@@ -96,6 +99,10 @@ consumer 会从制品重新编译这条生产装配，而不是引用仓库源�
 `expiredLeases` 和 `deadLetterCommands`。框架提供数据，不替业务选择阈值；至少把“最长等待持续增长”“过期 lease 非零”和
 “DeadLetter 新增”配置成不同告警，因为三者的处置分别是扩容/下游诊断、Worker/数据库诊断和人工重试审查。
 
+Workflow 宿主可按冻结的 workflow/version 采样 `WorkflowExecutionStore.wakeQueueSnapshot`。`dueWaits` 持续非零表示 deadline
+决议器滞后，`dispatchableWakeups`/`oldestDispatchableAgeMillis` 增长表示恢复能力不足，`expiredWakeLeases` 非零则优先排查
+Worker、节点逻辑或数据库；该快照按定义聚合且不含业务身份和 signal 正文。
+
 ## 上线前六类强制证据
 
 ### 1. 身份、权限与不可信输入
@@ -131,7 +138,7 @@ consumer 会从制品重新编译这条生产装配，而不是引用仓库源�
 
 - liveness 反映关键 Worker 生命周期，readiness 在硬超时内验证耐久依赖；
 - dashboard 能区分排队、模型、工具、审批、恢复和投影阶段；
-- 告警具有负责人、阈值、runbook 和可执行止损动作；
+- 告警具有负责人、阈值、[值班 runbook](operations-runbook.md) 和可执行止损动作；
 - OTel/Langfuse 不可用时 Run 仍正确推进，关闭过程不超过既定超时。
 
 ### 6. 发布与升级
@@ -143,14 +150,26 @@ consumer 会从制品重新编译这条生产装配，而不是引用仓库源�
 - CHANGELOG、升级指南、tag、远端 main 和 Maven 制品来自同一提交；
 - 先 canary，再受限租户/只读工具，最后开放写工具；每一步都有回滚或停止扩流条件。
 
+## 业务接入门禁
+
+先跑这一档，再把框架引进业务 Docker：
+
+```bash
+./scripts/verify-business-ready.sh
+sbt -batch 'set ThisBuild / version := "0.8.0-local"; publishM2'
+```
+
+公开 Central 发布仍走 tag 触发的 release workflow。kill-recovery 与有界 soak 属于仓库机制证据，不是当前单库 Docker
+拓扑的上线前提。
+
 ## 框架发布候选门禁
 
 ```bash
-sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
+./scripts/verify-business-ready.sh
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.6.0-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.8.0-local"; publishM2'
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.6.0-local sbt -batch 'clean; compile'
+ZYBLW_AGENT_VERSION=0.8.0-local sbt -batch 'clean; compile'
 ```
 
 使用控制台的部署还需在 `modules/agent-dashboard` 执行：
@@ -176,8 +195,13 @@ Workflow、MCP/Sandbox、长期 Memory 与多 Agent 必须分别完成自己的�
 
 ## 当前仍阻止“通用生产 GA”宣称的证据缺口
 
-- 已完成短时三 Worker/六 lane/48 Run 排他 drain、Worker Fiber 中断后过期重领、数据库 pause/unpause 与
-  `pg_dump/pg_restore`；仍缺部署环境中的数小时/数天 soak、真实 `SIGKILL`/节点丢失、数据库主备切换和容量曲线；
+- 已完成短时三 Worker/六 lane/48 Run 排他 drain、Worker Fiber 中断后过期重领、Worker 消失 + 数据库 pause/unpause
+  组合故障后代际接管、本机独立 Worker JVM `SIGKILL` 后 generation 2 接管，以及 `pg_dump/pg_restore`；Workflow wake 与
+  node execution 双租约也已通过独立 JVM `SIGKILL` 后 generation 2 接管；两条路径都验证同一 PostgreSQL 实例 restart
+  后耐久事实与租约接管；正式 Start/Runtime 路径另有 3 Worker/6 lane、120 Run 的本机有界 soak 回归基线，全部完成且
+  claim/terminal P95 通过宽松的仓库阈值；Workflow wait-as-command 路径也以 3 个独立 Store/Worker 完成 126 Run，wake/
+  execution claim 与完成数一致、双 generation 零重领、最终未完成量为零；仍缺部署环境中的
+  数小时/数天 soak、节点/Pod/VM 丢失、数据库主备切换和容量曲线；
 - 真实 HikariCP/PgBouncer 饱和、滚动发布与备份恢复演练；
 - RAG block/page/bbox lineage 已实现并通过 PostgreSQL round-trip；仍缺恶意 PDF/真实 OCR、大规模 corpus 容量和线上领域质量趋势；
 - MCP OAuth/Roots/供应链、OCI 隔离攻击和真实第三方互操作；
