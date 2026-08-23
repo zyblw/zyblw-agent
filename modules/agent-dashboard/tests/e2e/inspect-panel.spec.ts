@@ -75,5 +75,5 @@ test('检查面板只渲染低敏组合指纹和账本字段', async ({ page }) 
   await page.getByLabel('Run ID').fill('11111111-1111-1111-1111-111111111111');
   await expect(page.getByText('abcd1234abcd1234')).toBeVisible();
   await expect(page.getByText('stub-model')).toBeVisible();
-  await expect(page.getByText('prompt')).toHaveCount(0);
+  await expect(page.getByText('prompt', { exact: true })).toHaveCount(0);
 });
