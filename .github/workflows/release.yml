@@ -68,7 +68,12 @@ jobs:
           sbt -batch \
             "set ThisBuild / version := \"$release_version\";" \
             "set ThisBuild / versionPolicyIntention := sbtversionpolicy.Compatibility.None;" \
-            "versionCheck; show versionPolicyAssessCompatibility"
+            "versionCheck"
+          # Assess must not see versionPolicyIntention; the plugin treats that as a
+          # versionCheck-only setting and fail-closes if both run in one session.
+          sbt -batch \
+            "set ThisBuild / version := \"$release_version\";" \
+            "show versionPolicyAssessCompatibility"
 
       - name: Verify process-death and database-restart recovery
         run: |
