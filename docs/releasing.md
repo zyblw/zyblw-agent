@@ -102,8 +102,8 @@ Central artifact 不可覆盖；失败修复必须用新版本。
 
 仓库使用 sbt-version-policy/MiMa 对 `COMPAT_BASELINE_VERSION` 指定的 Maven Central 历史制品执行兼容审计。
 `0.8.0` 相对已发布 `0.6.2` 允许已记录的 early-semver minor 破坏，因此 PR 使用
-`show versionPolicyAssessCompatibility` 记录每个 artifact 的实际兼容等级，
-tag 使用 `versionCheck` 验证版本幅度；发布后切换到 `0.8.0` 基线并对 patch 使用
+`show versionPolicyAssessCompatibility` 记录每个 artifact 的实际兼容等级（不要同时设置
+`versionPolicyIntention`），tag 使用单独的 `versionCheck` 验证版本幅度。发布后切换到 `0.8.0` 基线并对 patch 使用
 `BinaryAndSourceCompatible`/`versionPolicyCheck`。独立 Maven consumer 与平台下游回归仍必须执行，因为 MiMa 不验证
 POM、资源、服务装配和真实宿主启动路径。
 
