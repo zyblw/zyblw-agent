@@ -146,6 +146,7 @@ jobs:
               if old in text:
                   path.write_text(text.replace(old, new, 1))
           PY
+          trap 'git checkout -- tests/e2e/inspect-panel.spec.ts' EXIT
           npm ci
           npm run typecheck
           npm run lint
@@ -219,7 +220,14 @@ jobs:
           # foreground JVM; using the default sbtn client here may reconnect to
           # the credential-less verification server, and a preceding `shutdown`
           # races its socket teardown (observed as an immediate silent exit).
-          sbt --server --batch --supershell=false ci-release
+          # Pin the release version: a dirty tree after dashboard recover would
+          # otherwise make sbt-dynver publish 0.8.0+0-<sha>-SNAPSHOT to
+          # maven-snapshots (Forbidden).
+          release_version="${RELEASE_TAG#v}"
+          git checkout -- modules/agent-dashboard/tests/e2e/inspect-panel.spec.ts || true
+          sbt --server --batch --supershell=false \
+            "set ThisBuild / version := \"$release_version\";" \
+            "ci-release"
 
       - name: Create GitHub release
         env:
