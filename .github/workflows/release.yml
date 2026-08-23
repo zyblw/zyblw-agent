@@ -65,13 +65,13 @@ jobs:
         run: |
           set -euo pipefail
           release_version="${RELEASE_TAG#v}"
-          sbt -batch \
+          # --server starts a fresh JVM. A shared sbtn server would keep
+          # versionPolicyIntention from versionCheck and fail-close assess.
+          sbt --server --batch --supershell=false \
             "set ThisBuild / version := \"$release_version\";" \
             "set ThisBuild / versionPolicyIntention := sbtversionpolicy.Compatibility.None;" \
             "versionCheck"
-          # Assess must not see versionPolicyIntention; the plugin treats that as a
-          # versionCheck-only setting and fail-closes if both run in one session.
-          sbt -batch \
+          sbt --server --batch --supershell=false \
             "set ThisBuild / version := \"$release_version\";" \
             "show versionPolicyAssessCompatibility"
 
