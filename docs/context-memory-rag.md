@@ -457,7 +457,7 @@ Docling Adapter 默认 HTTPS、请求/响应/Markdown 硬上限、API Key 脱敏
 本轮已经完成真实 OpenAI-compatible Embedding、HTTP stub 契约、租户隔离精确缓存与 PostgreSQL 事务化硬配额、
 PostgreSQL FTS+pgvector weighted RRF、索引 manifest/暂存/原子发布、真实 pgvector Testcontainers，以及有界
 `DocumentInput`/Loader 注册/并发摄取、本地目录 Source、可选 Tika 3.3.1 text/Markdown/HTML/PDF/EPUB Adapter、Docling Serve v1
-PDF→Markdown+JSON Adapter、page/bbox/block lineage、`DocumentStructureChunker`、0.4 单文件 pgvector 基线原子发布和 ACL 后相邻/同父级扩展。RAG eval 已能对
+PDF→Markdown+JSON Adapter、page/bbox/block lineage、`DocumentStructureChunker`、0.9 单文件 pgvector V001 原子发布和 ACL 后相邻/同父级扩展。RAG eval 已能对
 Recall/Precision/MRR/NDCG、引用证据、租户授权、禁止片段、数值完整性和延迟做独立硬门禁。仍需继续完成：
 
 - 部署侧运行 LLM Extractor 真实 Provider smoke、前端治理页面、审计归档策略和业务级敏感信息分类；

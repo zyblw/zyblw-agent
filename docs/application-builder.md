@@ -41,7 +41,7 @@ libraryDependencies ++= Seq(
 
 ```scala
 val toolPolicy = ToolPolicyConfig(
-  allowedTools = Set(ToolName("search_knowledge")),
+  allowedTools = Set(ToolName("knowledge_search")),
   maxCallsPerRun = 12,
   maxCallsPerStep = 3
 )
@@ -53,7 +53,7 @@ val definition: IO[AgentError.InvalidConfiguration, AgentDefinition] =
     .addDeveloperInstruction("answer.citations", "2", "关键结论必须附带来源引用。")
     .withProvider(ProviderId("deepseek"))
     .withModel(ModelId("deepseek-chat"))
-    .allowTool(ToolName("search_knowledge"))
+    .allowTool(ToolName("knowledge_search"))
     .withMetadata("version", "2026-07")
     .buildFor(toolPolicy)
 ```

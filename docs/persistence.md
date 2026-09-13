@@ -71,9 +71,9 @@ modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/m
 记录 ID 与冲突字段名，不回显状态、事件、工具结果或模型请求正文。时间列不参与交叉比较，避免 PostgreSQL/JDBC 精度差异
 产生虚假冲突。该规则不增加第二事实源：JSON 仍是可恢复负载，冗余列负责约束、索引和完整性证明。
 
-`PostgresHarnessStore` 通过 V008 将 Goal/Plan 的有界 `ArtifactReference` 写入 JSONB；Todo 引用随 `todos_json` 保存。引用不含制品 bytes、私有 metadata 或创建时间，`DEFAULT '[]'` 保持旧 Adapter 的滚动写入兼容。读取时必须成功解码为领域类型，否则返回持久化失败；引用本身不授予 ArtifactStore 读取权限。V011 增加 `agent_artifacts` / `agent_artifact_versions` / `agent_artifact_audit`。V013 允许 `bytes` 为空：配置 `ArtifactBlobStore` 时 PostgreSQL 只保存元数据，正文按 sha256 外置。
+`PostgresHarnessStore` 将 Goal/Plan 的有界 `ArtifactReference` 写入 JSONB；Todo 引用随 `todos_json` 保存。引用不含制品 bytes、私有 metadata 或创建时间。读取时必须成功解码为领域类型，否则返回持久化失败；引用本身不授予 ArtifactStore 读取权限。`agent_artifacts` / `agent_artifact_versions` / `agent_artifact_audit` 保存 Artifact 元数据和审计；配置 `ArtifactBlobStore` 时版本表的 `bytes` 可空，正文按 sha256 外置。上述现行结构都由核心 0.9 V001 一次建立。
 
-V010 增加 `harness_goal_budgets` 与 `harness_budget_reservations`。前者保存不可变总策略以及 Reserved/Consumed 原子计数器；后者以全局 RunId 保存完整 `RunLimits`、状态与结算后的 `UsageSummary`。预留事务先锁 Goal budget 行，再验证所有剩余额度并同时更新计数器和 reservation；相同 RunId/limits 幂等，不同绑定冲突。`NUMERIC` 保存费用，不能经过浮点数。`RunLimits`/`UsageSummary` 虽有 Scala 构造默认值，Adapter 读取耐久 JSON 时仍要求当前全部字段存在，避免 `{}` 被静默解码为宽松默认配置。
+`harness_goal_budgets` 与 `harness_budget_reservations` 由核心 0.9 V001 建立。前者保存不可变总策略以及 Reserved/Consumed 原子计数器；后者以全局 RunId 保存完整 `RunLimits`、状态与结算后的 `UsageSummary`。预留事务先锁 Goal budget 行，再验证所有剩余额度并同时更新计数器和 reservation；相同 RunId/limits 幂等，不同绑定冲突。`NUMERIC` 保存费用，不能经过浮点数。`RunLimits`/`UsageSummary` 虽有 Scala 构造默认值，Adapter 读取耐久 JSON 时仍要求当前全部字段存在，避免 `{}` 被静默解码为宽松默认配置。
 
 异步 Harness Start 使用 `HarnessCommandService`。`RunInitialization.prepareForGoal` 将 GoalId 绑定进 request hash；`PostgresRunSubmissionStore` 在原有 Created State、RunCreated、Start command、dispatcher 事务中追加预算预留。预算失败会回滚全部五类事实；同一 HTTP 幂等请求只返回第一条 Run/command/reservation。普通非 Harness `AgentCommandService.submitStart` 的事务和行为不变。
 
@@ -151,6 +151,6 @@ TEXT checksum 事实与 JSONB 分析投影。它通过 `PostgresAgentPersistence
 
 `PostgresHarnessStore` 保存 Goal/Plan/Skill、追加式 Steer/FollowUp/UserMessage 与任务预算。CAS、Goal 外键、Skill 指纹冲突、交互序号和预算预留状态机与内存实现一致。`listInteractions` 使用排他的 `beforeSequence` 游标在数据库侧倒序截取最近页，limit 为 1–512，返回值恢复为升序；`HarnessContextContributor` 固定只读取最近 16 条。预算扫描使用 `(createdAt, runId)` 排他游标，limit 同样为 1–512。交互和预算当前随 Goal 级联删除，自动 TTL 要等宿主明确合规保留窗口后再引入。通过
 `PostgresAgentPersistence.harness` 装配，不加入默认 Runtime `layer`，以免未使用 Harness 的宿主被迫构造 Adapter。
-核心 Flyway `V005`/`V006`/`V008`/`V010` 仍会随 `migrate` 建表或追加列。
+核心 Flyway 只执行 0.9 V001；Harness、Artifact 与预算的现行表、列和约束均由该基线一次建立。
 
 完整表说明、唯一 migration 事实源与 pgvector 接入见 [database-schema.md](database-schema.md)。

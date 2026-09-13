@@ -71,7 +71,7 @@ Embedding 不只是“调一个 API”：
 
 ## 5. PostgreSQL / pgvector 设计
 
-0.8 知识 baseline 只有一份 fresh-install V001，固定在 `zyblw_agent_knowledge` schema 一次建立 manifest、staging、
+0.9 知识 baseline 只有一份 fresh-install V001，固定在 `zyblw_agent_knowledge` schema 一次建立 manifest、staging、
 active chunks、FTS/HNSW 和 parent/ordinal/previous/next/heading/page/origin/block 谱系，vector 类型显式来自 `public`。
 staging/active 字段对称，因此 `activate` 可在同一短事务内发布向量和谱系；
 正式 chunk 使用 tenant/document/chunk 复合身份，局部 ID 在另一文档复用不会覆盖或串联。
@@ -114,7 +114,7 @@ Tool 的 query/topK/filter 必须校验，tenant/permissions 仍由运行时注�
 - 数据库重启、worker kill、Embedding 超时、重复 ingestion、撤回与重建的恢复演练；
 - 百万级 chunk 的 WAL、索引构建、vacuum、备份/恢复和容量曲线。
 
-当前代码已实现契约级的 Markdown+JSON 解码、page/bbox/block lineage、结构切分、提取质量门禁、可回放解析级联、可选逐页视觉转录、0.4 单文件基线原子发布、ACL 后相邻/同父级扩展和真实 pgvector
+当前代码已实现契约级的 Markdown+JSON 解码、page/bbox/block lineage、结构切分、提取质量门禁、可回放解析级联、可选逐页视觉转录、0.9 单文件 V001 基线原子发布、ACL 后相邻/同父级扩展和真实 pgvector
 Testcontainer。上述质量/容量/敌对样本证据仍必须在业务语料与目标硬件上完成，不能由单元测试代替。
 
 ## 10. 一手设计参考

@@ -23,7 +23,7 @@ final case class AgentUpgradeReadiness(
   )
   require(waitingForApproval <= activeRuns, "等待审批的 Run 必须计入进行中 Run")
 
-  /** 仍有可推进工作：应先停止提交并等待 Worker drain，再切换 0.7 进程。 */
+  /** 仍有可推进工作：切换候选进程前应先停止提交并等待 Worker drain。 */
   def drainRequired: Boolean =
     activeRuns > 0L || queuedCommands > 0L || leasedCommands > 0L
 

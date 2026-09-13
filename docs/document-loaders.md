@@ -333,7 +333,7 @@ PostgresAgentPersistence.knowledge(
 
 已由自动测试覆盖：纯文本、HTML 脚本排除、真实 Tika PDF/EPUB、声明长度预拒绝、实际字节越界、MIME 伪装、并发顺序、
 单项失败隔离、Fiber 取消、Docling v1 multipart/API Key/容量/低敏错误、提取质量门禁、级联回放与 fail-closed、视觉 stub 页转录、OpenAI `image_url` 编码，以及 Markdown 标题/表格/fenced code/Unicode/
-稳定 ID、Docling Markdown+JSON 解码、block/page/bbox lineage、结构切分、本地目录 Source、0.4 单文件 pgvector 基线谱系回读，以及
+稳定 ID、Docling Markdown+JSON 解码、block/page/bbox lineage、结构切分、本地目录 Source、0.9 单文件 pgvector V001 谱系回读，以及
 ACL 复核后的相邻/同父级有界扩展。Docling 测试是本地 HTTP stub 契约，真实 Docling/OCR 质量、恶意 PDF corpus、
 多页复杂表格和大规模容量仍需业务环境验收。
 

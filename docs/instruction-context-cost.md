@@ -37,7 +37,7 @@ val definition =
       version = "3",
       content = "关键结论必须关联已授权资料引用；证据不足时拒绝下结论。"
     )
-    .allowTool(ToolName("search_knowledge"))
+    .allowTool(ToolName("knowledge_search"))
     .buildFor(toolPolicy)
 ```
 

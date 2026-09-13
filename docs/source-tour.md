@@ -130,7 +130,7 @@ sbt 'testkit/testOnly com.zyblw.agent.runtime.AgentRuntimeSpec -- -t "关键词"
 5. `rag/Rag.scala`：`RagApplication`、`KnowledgeIndexer`、Retriever 与 Citation；
 6. `postgres/PostgresKnowledgeIndexStore.scala`：Building/stage/activate 原子发布；
 7. `postgres/PostgresPgVectorStore.scala`：ACL-first vector/FTS/RRF 与谱系扩展；
-8. 0.4 pgvector V001 和 `PostgresKnowledgeIndexIntegrationSpec`：物理约束与真实数据库证据。
+8. 0.9 的 1024 维 pgvector V001 和 `PostgresKnowledgeIndexIntegrationSpec`：物理约束与真实数据库证据。
 
 完成标准：能解释原始 PDF、Markdown、chunk、向量和 citation 分别由谁拥有，以及为什么不同文档复用相同 chunk ID 不会
 覆盖或跨文档扩展。

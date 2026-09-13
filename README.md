@@ -74,7 +74,7 @@ Agent 定义与运行装配分开：定义描述业务意图和可见能力，�
 val definition =
   AgentDefinitionBuilder(AgentId("knowledge-assistant"), "知识助手")
     .withInstructions("只依据已授权资料回答；资料不足时明确说明。")
-    .allowTool(ToolName("search_knowledge"))
+    .allowTool(ToolName("knowledge_search"))
     .buildFor(toolPolicy)
 
 val program =

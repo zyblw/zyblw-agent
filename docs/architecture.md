@@ -76,7 +76,7 @@ flowchart LR
 ```
 
 原始 PDF/完整 Markdown 属于宿主对象存储；知识表只保存稳定 URI、hash、可回答 chunk、向量、ACL 与可追溯谱系。核心表和知识表使用同一
-`DataSource` 时仍有独立 Flyway 生命周期：核心管理宿主默认 schema，0.4 知识索引固定管理 `zyblw_agent_knowledge`，运行时 SQL 不依赖
+`DataSource` 时仍有独立 Flyway 生命周期：核心 0.9 V001 管理宿主默认 schema，1024 维知识 0.9 V001 固定管理 `zyblw_agent_knowledge`，运行时 SQL 不依赖
 `search_path`。OCR、LLM、Embedding 和对象存储调用全部在数据库事务之外完成。
 
 下图是当前已经落地的主路径。HTTP、CLI 与恢复 worker 都调用同一个 `AgentRuntime`；`ContextManager`、

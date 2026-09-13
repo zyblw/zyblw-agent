@@ -51,13 +51,13 @@
 已删除、不要再当作当前能力：`com.zyblw.agent.multimodal` 与 `com.zyblw.agent.knowledge.KnowledgeGraph`。它们没有
 Provider、消费者或评测；未来若重建必须带真实场景和测试，而不是恢复空壳。
 
-## 0.6.0 收口状态与下一批必须完成项
+## 0.9.0 收口状态与下一批必须完成项
 
-`0.5.0` 已经收口的范围：管理面授权边界、能力探测、keyset 目录、CAS 配置覆盖与审计历史、Run SSE 调试器、模型目录
-fail-closed 校验与运行时切换、脱敏 HTTP 失败分类、部署声明价目表的成本估算，以及七面板控制台的浏览器契约。核心
-`V002` 只做加法，业务 HTTP v1、workflow outcome v2 和 0.4 知识 schema 未变。
+`0.9.0` 把此前已验证的管理面、模型治理、Harness、Artifact、耐久 Worker 和结构化 RAG 能力折叠进单一绿场基线：
+核心与 1024 维知识各只有一份 V001，不提供旧 schema 原地升级。业务 HTTP v1、workflow outcome 和知识检索能力的
+成熟度仍按本页矩阵分别标记，不能因基线收口自动升级为 GA。
 
-**明确不在 0.5 范围内、已知仍缺口的项**（按下一步优先级排列，详细验收条件见后续各节）：
+**0.9.0 之后仍需取得证据的缺口**（按下一步优先级排列，详细验收条件见后续各节）：
 
 | 缺口 | 影响面 | 归属章节 |
 |---|---|---|
@@ -124,8 +124,8 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
 2. **已完成**：`0.1.0` 的 11 个 POM、binary、sources、Scaladoc JAR 和签名已发布并可从 Central 解析。
 3. **已完成**：`0.2.0` 与兼容 patch `0.2.1` 的签名制品、独立 Maven consumer、GitHub Release 与 Central
    公共解析均已验证；`0.2.1` 还验证了 tag/main/CHANGELOG/升级指南来源一致性门禁。
-4. **已完成**：`zyblw-server` 已分别通过源码、Maven-local 候选和正式 Central `0.1.0` 的 PostgreSQL 门禁；`0.2.0`
-   发布后下游 Central 回归仍需按 runbook 执行。
+4. **历史发布证据已保留**：`zyblw-server` 曾验证早期 Maven-local/Central 制品；当前 Platform 已改为固定
+   sibling commit 的唯一源码路径，公开制品完整性只由 Agent 仓库的 consumer 门禁验证。
 5. **部分完成**：HTTP/OpenAPI 兼容测试、格式门禁、兼容面文档和 tag/main/CHANGELOG/升级指南一致性门禁已建立；
    结构化 OpenAPI diff 与真实历史 artifact 的二进制 diff 仍待自动化。
 6. **已转向生产参考**：无数据库五分钟 Quickstart 已删除；权威入口是 `ProductionSupportHost` 与
@@ -215,7 +215,7 @@ PostgreSQL Testcontainers 与故障注入证据。
 6. **已完成 R2-A 接入收口**：`RagApplication` 固定业务主入口，内存/PostgreSQL 同源组合层保证
    `KnowledgeIndexStore & VectorStore` 指向相同 active snapshot，示例不再绕过 Loader/Indexer；
 7. **已完成 R2-B 契约层**：保留 Docling JSON block/page/bbox lineage，`DocumentStructureChunker` 生成 parent/neighbor，
-   0.4 单文件 pgvector 基线随 active snapshot 原子发布；rerank 后相邻/同父级扩展重新应用 tenant ACL 和数量上限；
+   0.9 单文件 pgvector V001 随 active snapshot 原子发布；rerank 后相邻/同父级扩展重新应用 tenant ACL 和数量上限；
 8. **下一步 R2-C**：真实 Docling/OCR smoke、恶意 PDF corpus、与 Embedding tokenizer 对齐的切分、索引构建性能/成本/质量趋势、
    低证据拒答门禁和保留期 Worker。提取质量门禁、可回放解析级联和可选逐页 VLM 转录已作为契约落地，但不能代替上述运行证据。
 9. **随后 R2-D**：在视觉复杂 corpus 证明布局/OCR 仍不足后，再引入 late-interaction 页面检索 Adapter。整页 VLM 转录只是摄取回退，不是检索替换。

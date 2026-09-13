@@ -69,7 +69,7 @@ object ProductionSupportHost extends ZIOAppDefault:
       .when(readiness.drainRequired)(
         Console
           .printLine(
-            s"警告：仍有进行中工作 activeRuns=${readiness.activeRuns} queued=${readiness.queuedCommands} leased=${readiness.leasedCommands}。加法 migration 可以继续，但切换 0.8 进程前应先 drain。"
+            s"警告：仍有进行中工作 activeRuns=${readiness.activeRuns} queued=${readiness.queuedCommands} leased=${readiness.leasedCommands}。切换候选进程前应先停止新提交并完成 drain。"
           )
           .orDie
       )

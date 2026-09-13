@@ -31,7 +31,7 @@ migration 下进行。
 | `tool_executions` | Prepared/Running/Unknown/Succeeded/Failed 副作用账本 | 至少覆盖副作用追溯与幂等窗口 |
 | `model_call_executions` | 主模型 Intent/Settlement 账本（Prepared/Dispatched/Succeeded/Failed/Unknown）；Replayable 才保存 CanonicalModelRequest | 与 Run 级联；MetadataOnly 不含 prompt |
 | `approval_requests` | 人工审批请求和决定 | 涉及敏感操作时按审计政策保留 |
-| 已删除的 V001 投影（`agent_messages` / `agent_steps` / `model_calls` / `usage_records`） | V012 在确认空表后丢弃 | 权威消息在 `state_json`，权威模型账本在 `model_call_executions` |
+| 不属于 0.9 基线的旧投影（`agent_messages` / `agent_steps` / `model_calls` / `usage_records`） | 当前 V001 不创建；结构探针发现旧关系即拒绝启动 | 权威消息在 `state_json`，权威模型账本在 `model_call_executions` |
 | `agent_run_commands` | Start/Recover/ResumeApproval/Cancel/Retry 正文、幂等键、优先级、尝试与死信审计 | 随 Run 级联；DeadLetter 需先完成排障 |
 | `agent_run_dispatch` | 每 Run 一个串行租约槽、currentCommand、owner/token/generation | 随 Run 级联；Idle 行可长期保留 |
 | `agent_business_operations` | producer 业务幂等键、请求指纹与可重放结果 | 至少覆盖客户端/Agent 最大重试窗口；按业务合规归档 |
@@ -129,13 +129,13 @@ Embedding cache 使用 `REAL[]` 而不是 pgvector，因为它只按完整主键
 `agent_eval_snapshots` 的主键是稳定 `evaluation_id`，查询身份由
 `suite_kind + suite_id + dataset_id + dataset_version` 共同组成。发布门禁通过部分索引读取最近 `passed=true` 快照；
 历史查询先按 `finished_epoch_second + finished_nano + evaluation_id` 降序取最近 N 行，再升序返回，不使用深 OFFSET。
-V007 将 `AgentReliability` 加入 suite kind CHECK，使多试验统计与单次 `Agent` 质量拥有互不混用的基线身份。
+核心 0.9 V001 的 suite kind CHECK 包含 `AgentReliability`，使多试验统计与单次 `Agent` 质量拥有互不混用的基线身份。
 
-V008 以带空数组默认值的 JSONB 列为 Goal/Plan 追加 typed ArtifactReference 持久化。Todo 引用位于 `todos_json`；所有引用只保存 scope/name/version/media type/size/SHA-256，不保存 bytes、私有 metadata 或创建时间。默认值允许滚动升级期间旧 Adapter 继续写入，读取仍由 Scala 领域模型执行结构与数量校验。
+Goal/Plan 的 JSONB 列保存 typed ArtifactReference，Todo 引用位于 `todos_json`；所有引用只保存 scope/name/version/media type/size/SHA-256，不保存 bytes、私有 metadata 或创建时间。读取仍由 Scala 领域模型执行结构与数量校验。
 
-V009 将 `HarnessComparison` 加入 suite kind CHECK，使同 case/attempt 的有无 Harness 成对实验拥有独立趋势身份，不会与普通 Agent 或 AgentReliability 互为基线。已有快照行和物理列不变。
+核心 0.9 V001 的 suite kind CHECK 同时包含 `HarnessComparison`，使同 case/attempt 的有无 Harness 成对实验拥有独立趋势身份，不会与普通 Agent 或 AgentReliability 互为基线。
 
-V010 增加 Harness 跨 Run 任务预算。`harness_goal_budgets` 以 `goal_id` 为主键，保存不可变总上限以及 reserved/consumed 计数器；并发预留通过 `SELECT ... FOR UPDATE` 串行，检查和计数更新在同一事务。`harness_budget_reservations` 以全局 `run_id` 为主键，保存完整 `RunLimits`、Reserved/Settled/Released/Exceeded 状态与可选 `UsageSummary`。`(status, created_at, run_id)` 支撑有界恢复扫描，`(goal_id, status)` 支撑 Goal 级联与诊断。费用列使用 `NUMERIC`。异步 Harness Start 会在创建 Agent Run 的同一事务写入 reservation；终态 Reconciler 只结算耐久终态，缺失或活跃 Run 不自动释放。
+核心 0.9 V001 建立 Harness 跨 Run 任务预算。`harness_goal_budgets` 以 `goal_id` 为主键，保存不可变总上限以及 reserved/consumed 计数器；并发预留通过 `SELECT ... FOR UPDATE` 串行，检查和计数更新在同一事务。`harness_budget_reservations` 以全局 `run_id` 为主键，保存完整 `RunLimits`、Reserved/Settled/Released/Exceeded 状态与可选 `UsageSummary`。`(status, created_at, run_id)` 支撑有界恢复扫描，`(goal_id, status)` 支撑 Goal 级联与诊断。费用列使用 `NUMERIC`。异步 Harness Start 会在创建 Agent Run 的同一事务写入 reservation；终态 Reconciler 只结算耐久终态，缺失或活跃 Run 不自动释放。
 
 快照同时保存 `snapshot_payload TEXT` 和 `snapshot_json JSONB`：前者保留确定性 UTF-8 字节供 SHA-256 校验，后者用于
 SQL 分析；数据库 CHECK 保证二者解析后的 JSONB 相等。不能使用 `snapshot_json::text` 复算应用 checksum，因为 JSONB

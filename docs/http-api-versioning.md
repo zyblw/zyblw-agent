@@ -86,7 +86,7 @@ Memory 用户治理路由也使用 `/api/v1/memory/...`，但 DTO 暂时标记�
 
 ### 2.1 `/api/v1/admin/**` 是有意划在稳定承诺之外的管理子面
 
-`0.5.0` 引入的管理子面共享 `/api/v1` 前缀和同一套认证解析，但**不属于 `AgentHttpContract` 的稳定 OpenAPI 承诺**，也不出现在
+管理子面共享 `/api/v1` 前缀和同一套认证解析，但**不属于 `AgentHttpContract` 的稳定 OpenAPI 承诺**，也不出现在
 `GET /api/v1/openapi.json` 的稳定基线里。它的定位是运维控制台与内部工具，允许按 minor 演进：
 
 - 每项管理能力都是宿主注入的 `Option`。未装配的能力不挂载任何路由，`GET /api/v1/admin/capabilities` 必须把它报告为

@@ -29,12 +29,12 @@ sbt testFull
 Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基线由仓库 `.scalafmt.conf` 与
 `sbt-scalafmt` 锁定，不以某位开发者的编辑器配置为准。
 
-### 0.6.x 发布候选必须重新通过的门禁
+### 0.9.x 发布候选必须重新通过的门禁
 
-0.4 收口审计发现：只在空数据库单独测试核心和知识 migration，无法证明生产中的“先核心、后知识”顺序。两套 history 若共同管理非空
-`public` schema，Flyway 会正确拒绝启动。当前实现已经把知识表和专属 history 固定到 `zyblw_agent_knowledge`，并把真实知识
-Testcontainer 改为先执行核心 migration、再执行知识 migration、最后重复执行知识 migration。`0.9.0`
-以 core 与 1024 Space/Profile knowledge 两条唯一 V001 绿场基线验证该约束。
+核心与知识 migration 必须验证生产中的“先核心、后知识”顺序。两套 history 若共同管理非空 `public` schema，
+Flyway 会正确拒绝启动。当前实现把知识表和专属 history 固定到 `zyblw_agent_knowledge`，真实知识 Testcontainer
+先执行核心 migration、再执行知识 migration、最后重复执行知识 migration。`0.9.0` 以 core 与 1024
+Space/Profile knowledge 两条唯一 V001 绿场基线验证该约束。
 
 每个 `0.9.x` 标签前必须重新取得以下完整证据，任一项缺失都不能称为已发布：
 
@@ -56,15 +56,18 @@ Testcontainer 改为先执行核心 migration、再执行知识 migration、最�
 
 ### 最近一次完整本地证据
 
+> 以下按日期保存当时尚未折叠的增量 migration 与版本证据，仅用于审计历史；当前安装拓扑始终以本页上方
+> 0.9 双 V001 门禁、`docs/compatibility.md` 和实际 migration 目录为准。
+
 2026-08-21 的 Harness H3-B/H3-C/H3-D 增量复核（不是完整发布门禁）：
 
 - core/testkit 12 项定向测试通过：typed ArtifactReference、旧 Goal/Plan/Todo JSON 安全默认、descriptor 漂移拒绝、`harness@2` 仅投影引用元数据以及唯一 Runtime 接入；
 - H3-C 成对评测定向测试覆盖同 case/attempt、固定并发、四轴/Wilson/人工介入/资源倍率、安全不可抵消、数据集篡改提前失败与低敏趋势投影；
 - H3-D core 覆盖不可变策略、并发不透支、费用额度 fail-closed、幂等预留/结算/释放、Exceeded 真实落账、损坏 usage 拒绝、Harness Start 重放与 Goal 换绑冲突、终态 Reconciler 的非终态保留/缺失告警/游标回绕；
 - 本轮确定性模块回归：core 196、evals 54、testkit 79、postgres 默认 16 项通过，均为 0 失败；随后以
-  `RUN_POSTGRES_INTEGRATION=1 postgres/testFull` 在 PostgreSQL 16.14/pgvector 上从空库执行正式 V001–V010 与 repeatable
+  `RUN_POSTGRES_INTEGRATION=1 postgres/testFull` 在 PostgreSQL 16.14/pgvector 上从空库执行当时的 V001–V010 增量线与 repeatable
   migration，88 项真实容器契约全部通过、0 失败、0 忽略；
-- `RUN_POSTGRES_INTEGRATION=1` 的 Harness 套件在 PostgreSQL 16.14 从空库执行 11 个 migration，达到 V010；10 项 CAS/外键/Skill/Interaction/ArtifactReference/预算行锁/Reserved keyset 分页/结算/损坏 JSON fail-closed/终态恢复对账契约通过；
+- `RUN_POSTGRES_INTEGRATION=1` 的 Harness 套件在 PostgreSQL 16.14 从空库执行当时的 11 个增量 migration；10 项 CAS/外键/Skill/Interaction/ArtifactReference/预算行锁/Reserved keyset 分页/结算/损坏 JSON fail-closed/终态恢复对账契约通过；
 - Harness budget conformance 使用同一组三项断言分别运行内存与 PostgreSQL 16.14 Adapter，6/6 通过；覆盖策略不可覆盖、并发防透支、稳定 Run 幂等、结算/释放状态机、失败不改账、复合游标与 RunId 禁止跨 Goal 换绑；
 - `RUN_POSTGRES_INTEGRATION=1` 的 command/dispatcher 套件 11 项通过，其中 12 路同 Harness Start 重放只生成一个 Run/command/reservation，额度不足同时回滚预算、Created、首事件、Start 与 dispatcher，且没有孤儿 Run；还覆盖 Worker 消失与 PostgreSQL pause/unpause 同时发生后的过期重领、generation fencing 和队列收敛；
 - 独立进程演练 `integration-tests/command-worker-kill-recovery.sh --restart-postgres` 通过：旧 forked JVM 持有 generation 1 / attempt 1 时被操作系统 `SIGKILL`，同一 PostgreSQL 容器随后 restart，脚本重新发现 Docker 随机宿主端口，新 JVM 以 generation 2 / attempt 2 完成同一命令，最终低敏队列快照归零；
@@ -80,7 +83,7 @@ Testcontainer 改为先执行核心 migration、再执行知识 migration、最�
   永不渲染，决策进入 lineage 且不含正文，Replayable 账本重建含本回合实际渲染结果。`ExtensionSpec` 证明
   `SkillProvider.load` 只按宿主选择物化正文到 Retrieval、目录 section 不含正文且不能授予工具；HTTP 契约测试锁定
   `/api/v1/experimental` 不进入稳定 OpenAPI；
-- PostgreSQL 16.14 Testcontainer 上 `PostgresApprovalSubjectIntegrationSpec` 2 项通过：v6 主体经 JSONB 往返结构相等且主体 JSON 不含参数正文，`schema_version` 关系列与 JSON 信封不一致 fail-closed（Flyway V001–V010）；
+- PostgreSQL 16.14 Testcontainer 上 `PostgresApprovalSubjectIntegrationSpec` 2 项通过：v6 主体经 JSONB 往返结构相等且主体 JSON 不含参数正文，`schema_version` 关系列与 JSON 信封不一致 fail-closed（当时的 Flyway 增量线）；
 - 上述变更后的 `scalafmtCheckAll; scalafmtSbtCheck; Test/testFull` 已全部通过（本轮 734 项，0 失败；PostgreSQL 集成用例在未 fork/`RUN_POSTGRES_INTEGRATION` 时按环境门控跳过）；
 - 两个脚本在同一个常驻 sbt thin server 上顺序运行也通过；每次 `runMain` 显式覆盖 forked JVM 的临时数据库环境，第二条演练不会继承第一条已经销毁的容器端点；
 - V008 为 Goal/Plan 追加带空数组默认值的 JSONB 列，不修改已执行 migration，也不为 JSON 增加无查询依据的索引。
