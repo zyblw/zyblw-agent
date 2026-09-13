@@ -57,7 +57,7 @@ jobs:
 
       - name: Check stable OpenAPI compatibility
         if: github.event_name == 'pull_request'
-        uses: oasdiff/oasdiff-action/breaking@v0.1.12
+        uses: oasdiff/oasdiff-action/breaking@v0.1.15
         with:
           base: origin/${{ github.base_ref }}:modules/agent-zio-http/src/test/resources/openapi/agent-http-v1.1.0.json
           revision: target/agent-http-openapi-current.json
