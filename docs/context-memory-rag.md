@@ -1,6 +1,6 @@
 # Context、Memory 与 RAG 接入指南
 
-> 状态：0.8.0 当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
+> 状态：0.9.0 当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
 > 最后核验：2026-08-23
 >
@@ -35,7 +35,7 @@ val sourceLayer = MemoryRagContextSourceResolver.configured(
     retrievalLimit = 6,
     includeSessionMemory = true,
     includeUserMemory = true,
-    minimumRetrievalScore = 0.35,
+    minimumRetrievalScore = 0.35, // 余弦 vectorScore；有词法命中时不受此阈值约束。RRF 分只排序。
     lowEvidenceResponse = LowEvidenceResponse.RequireExplicitRefusal
   )
 )
@@ -78,7 +78,7 @@ val applicationLayer = ZLayer.make[AgentApplication.Services](
 任何 Memory/Retriever 错误都会转换为 `ContextBuildFailed` 并终止本回合，而不是悄悄省略依据后让模型自由回答。
 业务如果希望“检索降级为纯模型”必须实现一个显式、有遥测记录的 resolver 策略。
 
-0.8.0 把检索结果同时写入 `AgentState.citations` / `retrievalEvidence`（schema v7），并投影到
+0.9.0 把检索结果同时写入 `AgentState.citations` / `retrievalEvidence`（schema v7），并投影到
 `RunView` 与 `GET /api/v1/runs/{runId}/citations`。模型侧应使用 `knowledge_search` / `knowledge_fetch`，
 而不是自行拼 tenant。稳定知识 HTTP 是 `/api/v1/knowledge/search`，支持 `hybrid|vector|lexical|phrase`
 与 document/page/heading/metadata/chunk 过滤；过滤发生在 ACL 之后。
@@ -299,7 +299,7 @@ val embeddingConfig = OpenAICompatibleEmbeddingConfig(
   requestTimeout = 60.seconds
 )
 
-val embeddingLayer: ZLayer[Client, Nothing, EmbeddingService] =
+val embeddingLayer: ZLayer[Client, Nothing, EmbeddingModel] =
   OpenAICompatibleEmbeddingService.configured(embeddingConfig)
 ```
 
@@ -435,7 +435,7 @@ Building 和 Ready/active 永不进入 retention 候选。暂存块由 manifest 
   → DoclingDocumentLoader(PDF→Markdown+JSON structure) 或 TikaDocumentLoader(轻量文本)
   → DocumentLoaderRegistry(身份/MIME/metadata/容量)
   → DocumentStructureChunker(block/page/bbox/parent/neighbor，无 structure 时降级 Markdown)
-  → GovernedEmbeddingService(tenant cache/quota)
+  → GovernedEmbeddingModel(tenant cache/quota)
   → KnowledgeIndexer(Building→stage→activate)
   → Postgres pgvector + FTS weighted RRF
   → ModelReranker

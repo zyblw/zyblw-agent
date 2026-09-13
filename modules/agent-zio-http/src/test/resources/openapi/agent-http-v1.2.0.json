@@ -987,12 +987,25 @@
             "description" : "If not set, this field defaults to the value of the default annotation.",
             "default" : null
           },
+          "sourceType" : {
+            "type" : "string",
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : "site"
+          },
           "excerpt" : {
             "type" : "string"
           },
           "score" : {
             "type" : "number",
             "format" : "double"
+          },
+          "sourceKind" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
           },
           "id" : {
             "type" : "string"

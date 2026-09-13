@@ -1,6 +1,6 @@
 # PostgreSQL 生产接入与运维
 
-> 状态：0.8.0 全新安装指南
+> 状态：0.9.0 空库安装指南
 > 最后核验：2026-08-23
 > 事实来源：`ProductionSupportHost`、`KnowledgeQaHost`、`AgentPostgresMigrations`、`PostgresAgentPersistence`
 
@@ -53,10 +53,10 @@ sbt "examples/runMain com.zyblw.agent.examples.production.ProductionSupportHost 
 
 最小生产层是 `PostgresAgentPersistence.layer`：`RunStore`、`RunCommandStore`、`RunSubmissionStore` 共享同一个 `DataSource`。需要工件时显式叠加 `PostgresAgentPersistence.layerWithArtifacts`，不要假设最小层已经包含 Artifact、Harness 或知识索引。
 
-`0.8.0` 不从 0.6.2 追加 V004–V011。空库执行折叠后的核心 V001 与 1024 知识 V001。书籍问答用
+`0.9.0` 只支持空库执行核心 V001 与 1024 知识 V001。书籍问答用
 `KnowledgeQaHost migrate`，它调用 `migrateCoreAndKnowledge1024`；`status` 同时报告两套 Flyway。细节见
-[升级到 0.8.0](upgrading-to-0.8.0.md) 与 [宿主数据库迁移](database-migrations.md)。
+[升级到 0.9.0](fresh-install-0.9.0.md) 与 [宿主数据库迁移](database-migrations.md)。
 
 ## 4. Docker / VM
 
-仓库第一支持面是 Docker 或 Linux VM，外加自管 PostgreSQL。见 [Docker/VM 手册](operations-docker-vm.md) 与 [`deploy/docker/`](../deploy/docker/README.md)。Compose 内的 PostgreSQL 只用于 staging 演练。
+仓库第一支持面是 Docker 或 Linux VM，外加自管 PostgreSQL。见 [Docker/VM 手册](operations-docker-vm.md) 与 [`deploy/docker/`](../deploy/docker/README.md)。内置 PostgreSQL 只属于 `compose.staging.yml` 的本机演练；`compose.business.yml` 连接外部库，和生产同构。知识索引里的 `staging` 表是数据模型，不是第三套产品环境。

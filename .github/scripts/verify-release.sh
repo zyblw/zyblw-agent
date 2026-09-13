@@ -44,9 +44,9 @@ if [[ "$changelog_version" != "$version" ]]; then
   exit 1
 fi
 
-upgrade_guide="docs/upgrading-to-${version}.md"
-if [[ ! -f "$upgrade_guide" ]]; then
-  echo "Release upgrade guide is missing: ${upgrade_guide}" >&2
+install_guide="docs/fresh-install-${version}.md"
+if [[ ! -f "$install_guide" ]]; then
+  echo "Release fresh-install guide is missing: ${install_guide}" >&2
   exit 1
 fi
 

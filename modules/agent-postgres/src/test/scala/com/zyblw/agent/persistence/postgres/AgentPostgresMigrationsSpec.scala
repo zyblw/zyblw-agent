@@ -47,21 +47,23 @@ object AgentPostgresMigrationsSpec extends ZIOSpecDefault:
         shared.baselineVersion.contains("0")
       )
     },
-    test("0.8 核心与知识库各只有一个版本化 baseline") {
+    test("0.9 核心与知识库各只有一个版本化 baseline") {
       val coreV001 = Option(
         getClass.getResource(
-          "/com/zyblw/agent/persistence/postgres/migration/V001__zyblw_agent_0_8_baseline.sql"
+          "/com/zyblw/agent/persistence/postgres/migration/V001__zyblw_agent_0_9_baseline.sql"
         )
       )
       val knowledgeV001 = Option(
         getClass.getResource(
-          "/com/zyblw/agent/persistence/postgres/optional/pgvector_1024/V001__agent_knowledge_0_8_baseline.sql"
+          "/com/zyblw/agent/persistence/postgres/optional/pgvector_1024/V001__agent_knowledge_0_9_baseline.sql"
         )
       )
       val leftover = List(
         "/com/zyblw/agent/persistence/postgres/migration/V001__zyblw_agent_0_3_baseline.sql",
+        "/com/zyblw/agent/persistence/postgres/migration/V001__zyblw_agent_0_8_baseline.sql",
         "/com/zyblw/agent/persistence/postgres/migration/V012__drop_dead_projection_tables.sql",
         "/com/zyblw/agent/persistence/postgres/migration/V013__artifact_blob_offload.sql",
+        "/com/zyblw/agent/persistence/postgres/optional/pgvector_1024/V001__agent_knowledge_0_8_baseline.sql",
         "/com/zyblw/agent/persistence/postgres/optional/pgvector_1024_v0_6/V001__agent_knowledge_pgvector_1024_baseline.sql"
       ).flatMap(path => Option(getClass.getResource(path)))
       assertTrue(coreV001.nonEmpty, knowledgeV001.nonEmpty, leftover.isEmpty)

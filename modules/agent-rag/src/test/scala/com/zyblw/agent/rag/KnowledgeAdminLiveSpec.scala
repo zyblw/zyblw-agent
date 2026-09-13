@@ -176,7 +176,12 @@ object KnowledgeAdminLiveSpec extends ZIOSpecDefault:
         !neither.rerankApplied,
         !neither.contextExpanded,
         both.embeddingProvider == HashEmbedding(16).descriptor.provider,
-        both.embeddingDimension == 16
+        both.embeddingDimension == 16,
+        both.evidenceStatus == RetrievalEvidenceStatus.Supported.toString,
+        both.acceptedCount > 0,
+        both.profileId.nonEmpty,
+        both.knowledgeSpaceId.contains("default"),
+        both.evidenceSelections.exists(_.decision == EvidenceDecision.KeptSeed.toString)
       )
     },
     test("异步摄入立即返回 Queued，后台完成后任务与文档目录都反映终态") {

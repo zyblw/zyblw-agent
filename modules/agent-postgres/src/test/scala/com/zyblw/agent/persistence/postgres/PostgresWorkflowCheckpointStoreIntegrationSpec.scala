@@ -611,7 +611,7 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
         resolved.signal.isEmpty
       )).provideLayer(harnessLayer)
     }
-  ) @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@ TestAspect.timeout(
+  ) @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
     3.minutes
   ) @@ TestAspect.sequential
 

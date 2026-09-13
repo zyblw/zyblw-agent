@@ -269,14 +269,15 @@ token 计费，为它单独计价就是重复计费。
 
 | scope | 覆盖 |
 | --- | --- |
-| `agent:admin:read` | Run 目录、单 Run 实时事件流、队列积压、有效配置、评测趋势、索引清单、摄入任务、模型目录 |
-| `agent:admin:write` | 工具白名单、审批策略、死信重排、索引退役、模型切换（蕴含 read） |
-| `agent:admin:debug` | 检索沙盒、文档摄入、模型探活（**不被 write 蕴含**） |
+| `agent:admin:read` | Run 目录、单 Run 实时事件流、队列积压、有效配置、评测趋势、模型目录 |
+| `agent:admin:write` | 工具白名单、审批策略、死信重排、模型切换（蕴含 read） |
+| `agent:admin:debug` | 检索沙盒、模型探活（**不被 write 蕴含**）；沙盒另外要求 `knowledge:read` |
+| `knowledge:read` | 索引清单与检索沙盒 |
+| `knowledge:write` | 索引退役 |
 
-`debug` 单独存在是因为这三个操作会调用外部 Provider 并产生真实费用。让一个能改配置的账号
-顺带获得无限量的 Provider 调用权限，是把两类不同的风险混为一谈。
+`debug` 单独存在是因为付费调试会调用外部 Provider。让一个能改配置的账号顺带获得无限量的 Provider 调用权限，是把两类不同的风险混为一谈。`agent:admin:*` 不蕴含 `knowledge:*`。
 
-建议的授予方式：值班与监控只给 `read`；变更审批人给 `write`；`debug` 只在排查检索质量时临时授予。
+建议的授予方式：值班与监控只给 `read`；变更审批人给 `write`；`debug` 只在排查检索质量时临时授予，并同时授予 `knowledge:read`。
 
 ## 3. 端点
 
@@ -293,12 +294,9 @@ token 计费，为它单独计价就是重复计费。
 两个管理员同时编辑时，后提交的一方收到 409 并必须重新加载，而不是静默覆盖对方的改动。请求体是**稀疏补丁**：
 缺失的字段表示沿用部署基线，因此删除一项覆盖与从未设置过它完全等价。
 
-**文档摄入是异步的。** `POST /api/v1/admin/knowledge/ingestions` 返回 202 与一个任务 ID，正文是原始字节而
-不是 base64 JSON。解析 PDF 并写入向量可能耗时数分钟，把它做成同步端点意味着一个必然超时的 HTTP 连接。
-后台 Fiber 挂在应用级 Scope 而不是请求 Scope 上——挂在请求 Scope 会让任务在响应写出的同一刻被中断，控制台
-永远只能看到 `Queued`。
+**控制台不摄入问答知识。** `/api/v1/admin/knowledge/**` 已删除。稳定面是 `/api/v1/knowledge/**`（租户只来自会话）；检索沙盒是 `POST /api/v1/admin/debug/retrieve`（`agent:admin:debug` 且 `knowledge:read`，请求体给出模拟租户与权限）。平台宿主禁止 `POST /api/v1/knowledge/documents`，问答写入只走书库运营面。
 
-**索引退役需要前置条件。** `expectedActiveVersion` 防止在并发重建期间退役掉刚刚发布的新版本。
+**索引退役需要前置条件。** `DELETE /api/v1/knowledge/documents/{id}` 带 `expectedActiveVersion`，防止在并发重建期间退役掉刚刚发布的新版本。需要 `knowledge:write`。
 
 **实时事件流是可续传的 SSE，且只发低敏投影。** `GET /api/v1/admin/runs/{runId}/events/stream` 要求
 `agent:admin:read`。它不是业务侧 `GET /api/v1/runs/{runId}/events/stream` 的别名：管理投影

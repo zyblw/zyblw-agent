@@ -190,6 +190,6 @@ object PostgresEmbeddingGovernanceIntegrationSpec extends ZIOSpecDefault:
         afterPurge.requests == 1L
       )).provideLayer(harnessLayer)
     }
-  ) @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@ TestAspect.timeout(
+  ) @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
     3.minutes
   ) @@ TestAspect.sequential

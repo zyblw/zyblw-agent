@@ -41,15 +41,34 @@ object KnowledgeTools:
       score: Double,
       pageNumbers: Chunk[Int],
       chunkId: String,
-      documentId: String
+      documentId: String,
+      sourceKind: Option[String] = None,
+      title: Option[String] = None,
+      headingPath: List[String] = Nil,
+      vectorScore: Option[Double] = None
   ) derives JsonCodec
+
+  val KnowledgeIndexRead: Set[ToolConflictAccess] =
+    Set(ToolConflictAccess("knowledge.index", ToolAccessMode.Read))
+
+  def knowledgeReadMetadata(scopes: Set[String] = Set("knowledge:read")): ToolMetadata =
+    ToolMetadata(
+      ToolRisk.UserScopedRead,
+      SideEffect.None,
+      requiredScopes = scopes,
+      parallelism = ToolParallelism.ConflictAware,
+      conflictAccesses = KnowledgeIndexRead
+    )
 
   final case class SearchOutput(
       status: String,
       excerpts: Chunk[String],
       citations: Chunk[CitationOut],
       evidenceStatus: String,
-      acceptedCount: Int
+      acceptedCount: Int,
+      profileId: Option[String] = None,
+      knowledgeSpaceId: Option[String] = None,
+      degradedStages: Chunk[String] = Chunk.empty
   ) derives JsonCodec
 
   def layer: ZLayer[RagApplication, AgentError, Chunk[RegisteredTool]] =
@@ -64,10 +83,10 @@ object KnowledgeTools:
   def searchTool(rag: RagApplication): Tool[Any, SearchInput, AgentError, SearchOutput] =
     Tool.json[Any, SearchInput, AgentError, SearchOutput](
       SearchName,
-      "在已授权的知识库中检索可引用资料。不要填写 tenant 或 permissions。",
+      "在已授权的知识库中检索可引用资料。返回短摘录与 chunkId，细讲时再 knowledge_fetch。不要填写 tenant 或 permissions。",
       searchSchema,
       None,
-      ToolMetadata(ToolRisk.UserScopedRead, SideEffect.None, requiredScopes = Set("knowledge:read"))
+      knowledgeReadMetadata()
     ) { (input, context) =>
       for
         _      <- rejectCallerOverride(input.tenantId, input.permissions)
@@ -77,16 +96,16 @@ object KnowledgeTools:
         result <- rag
           .retrieve(RagQuery(input.query, scope, input.limit, mode, filter))
           .mapError(error => AgentError.ToolExecutionFailed(SearchName.value, error.message, error.retryable))
-      yield toOutput(result)
+      yield toOutput(result, includeFullChunkText = false)
     }
 
   def fetchTool(rag: RagApplication): Tool[Any, FetchInput, AgentError, SearchOutput] =
     Tool.json[Any, FetchInput, AgentError, SearchOutput](
       FetchName,
-      "按 chunkId 精确取回已授权知识块，用于引用回溯。不要填写 tenant 或 permissions。",
+      "按 chunkId 精确取回已授权知识块全文（切分上限内），用于细讲。不要填写 tenant 或 permissions。",
       fetchSchema,
       None,
-      ToolMetadata(ToolRisk.UserScopedRead, SideEffect.None, requiredScopes = Set("knowledge:read"))
+      knowledgeReadMetadata()
     ) { (input, context) =>
       for
         _      <- rejectCallerOverride(input.tenantId, input.permissions)
@@ -94,7 +113,7 @@ object KnowledgeTools:
         result <- rag
           .fetch(Set(input.chunkId), scope)
           .mapError(error => AgentError.ToolExecutionFailed(FetchName.value, error.message, error.retryable))
-      yield toOutput(result)
+      yield toOutput(result, includeFullChunkText = true)
     }
 
   private def rejectCallerOverride(
@@ -108,7 +127,14 @@ object KnowledgeTools:
   private def trustedScope(context: ToolExecutionContext): IO[AgentError, RetrievalScope] =
     context.runContext.tenantId match
       case Some(tenant) if tenant.trim.nonEmpty =>
-        ZIO.succeed(RetrievalScope(TenantId(tenant), context.runContext.scopes))
+        ZIO.succeed(
+          RetrievalScope(
+            TenantId(tenant),
+            context.runContext.scopes,
+            runId = Some(context.runId),
+            parentSpanId = Some(com.zyblw.agent.observability.TelemetrySpanIdentity.tool(context.callId))
+          )
+        )
       case _ =>
         ZIO.fail(AgentError.ToolExecutionFailed(SearchName.value, "缺少可信 tenant，拒绝检索"))
 
@@ -134,26 +160,58 @@ object KnowledgeTools:
       }
       .mapError(error => AgentError.ToolInputInvalid(SearchName.value, error.getMessage))
 
-  private def toOutput(result: RetrievalResult): SearchOutput =
-    val citations = result.citations.zip(result.hits).map { case (citation, hit) =>
-      CitationOut(
-        citation.id,
-        citation.sourceUri,
-        citation.excerpt,
-        citation.score,
-        citation.pageNumbers,
-        hit.chunk.id,
-        hit.chunk.documentId
-      )
+  def toSearchOutput(result: RetrievalResult, includeFullChunkText: Boolean): SearchOutput =
+    val seedCount = result.evidence.acceptedCount.max(0)
+    val seedHits  = result.hits.take(seedCount)
+    val seedCites = result.citations.take(seedCount)
+    val citations = seedCites.zip(seedHits).map { case (citation, hit) =>
+      citationOut(citation, hit)
     }
+    val excerpts =
+      if includeFullChunkText then result.hits.map(_.chunk.displayText)
+      else result.hits.map(_.chunk.displayText.take(500))
     val status =
       if result.evidence.supportsGroundedAnswer then "ok" else "insufficient_evidence"
     SearchOutput(
       status,
-      result.hits.map(_.chunk.text.take(500)),
+      excerpts,
       citations,
       result.evidence.status.toString,
-      result.evidence.acceptedCount
+      result.evidence.acceptedCount,
+      result.diagnostics.profileId,
+      result.diagnostics.knowledgeSpaceId,
+      result.diagnostics.degradedStages
+    )
+
+  private def toOutput(result: RetrievalResult, includeFullChunkText: Boolean): SearchOutput =
+    toSearchOutput(result, includeFullChunkText)
+
+  private def headingPathOf(chunk: DocumentChunk): List[String] =
+    val fromLineage = chunk.lineage.toList.flatMap(_.headingPath.toList)
+    if fromLineage.nonEmpty then fromLineage
+    else
+      chunk.metadata
+        .get("headingPath")
+        .toList
+        .flatMap(_.split(" > ").iterator.map(_.trim).filter(_.nonEmpty).toList)
+
+  private def citationOut(citation: Citation, hit: RetrievalHit): CitationOut =
+    CitationOut(
+      citation.id,
+      citation.sourceUri,
+      citation.excerpt.take(500),
+      citation.score,
+      citation.pageNumbers,
+      hit.chunk.id,
+      hit.chunk.documentId,
+      RunCitation.publicSourceKind(hit.chunk.metadata.get("sourceType")),
+      title = hit.chunk.metadata.get("title").filter(_.trim.nonEmpty),
+      headingPath = headingPathOf(hit.chunk),
+      vectorScore = hit.signals
+        .get("vectorScore")
+        .orElse(
+          Option.when(!hit.signals.contains("textScore") && !hit.signals.contains("textRank"))(hit.score)
+        )
     )
 
   private val searchSchema: Json.Obj = Json.Obj(

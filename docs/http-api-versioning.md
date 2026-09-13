@@ -2,13 +2,14 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-22
+> 最后核验：2026-08-28
 >
 > 事实来源：对应模块源码、测试与构建定义
 
 本文说明 `zyblw-agent` 如何把内部耐久状态与对外 HTTP 协议分离，以及业务后端应该怎样安全接入和升级。当前基线是
-`/api/v1`、OpenAPI `1.2.0`；框架版本是 `0.8.0`。不保留无版本旧路径，也不为草案协议制造历史负担。加法字段包括
+`/api/v1`、OpenAPI `1.2.0`；框架版本是 `0.9.0`。不保留无版本旧路径，也不为草案协议制造历史负担。加法字段包括
 `RunView.citations` / `evidence`、`GET /api/v1/runs/{runId}/citations` 与稳定 `/api/v1/knowledge/**`。
+`CitationView.sourceKind` 为可选 allowlist 字段，缺省 JSON 兼容旧客户端。
 
 ## 1. 为什么单独建立 contract package
 

@@ -12,17 +12,16 @@ object KnowledgeReindexServiceSpec extends ZIOSpecDefault:
 
   private def countingEmbedding(
       calls: Ref[Int],
-      gate: Option[Promise[Nothing, Unit]] = None
-  ): EmbeddingService =
-    new EmbeddingService:
-      val dimension: Int                                   = 2
-      override val descriptor: EmbeddingProviderDescriptor =
-        EmbeddingProviderDescriptor("reindex-embed", "v1", 2, 100, supportsDimensions = false)
-
-      def embed(texts: Chunk[String]): IO[RetrievalError, Chunk[Embedding]] =
+      gate: Option[Promise[Nothing, Unit]] = None,
+      provider: String = "reindex-embed"
+  ): EmbeddingModel =
+    EmbeddingModel.stub(
+      provider = provider,
+      onEmbed = texts =>
         calls.update(_ + 1) *>
           gate.fold(ZIO.unit)(_.await) *>
           ZIO.succeed(texts.map(text => Embedding(Chunk(text.length.toFloat, 1.0f))))
+    )
 
   private def markdown(id: String, text: String): DocumentInput =
     DocumentInput.fromBytes(
@@ -51,14 +50,23 @@ object KnowledgeReindexServiceSpec extends ZIOSpecDefault:
     new KnowledgeSourceResolver:
       def load(tenantId: TenantId, documentId: String): IO[RetrievalError, Option[DocumentInput]] =
         val _ = tenantId
-        ZIO.succeed(texts.get(documentId).map(text => markdown(documentId, text)))
+        ZIO.succeed(
+          texts
+            .get(documentId)
+            .map(text =>
+              markdown(documentId, text).copy(
+                metadata =
+                  Map(KnowledgeSourceResolver.SourceRevisionMetadata -> KnowledgeIndexer.sha256(text))
+              )
+            )
+        )
 
   private def request: KnowledgeReindexRequest =
     KnowledgeReindexRequest(tenant, permissions, limit = 16)
 
   private def stack(
       store: InMemoryKnowledgeIndexStore,
-      embedding: EmbeddingService,
+      embedding: EmbeddingModel,
       resolver: KnowledgeSourceResolver
   ): IO[RetrievalError, (DocumentIngestionService, KnowledgeReindexService)] =
     DocumentLoaderRegistry.make(Chunk(loader)).map { registry =>
@@ -67,7 +75,8 @@ object KnowledgeReindexServiceSpec extends ZIOSpecDefault:
         KnowledgeIndexer(SlidingWindowChunker(32, 0), embedding, store),
         failureMode = DocumentIngestionFailureMode.FailFast
       )
-      val service = KnowledgeReindexService(KnowledgeIndexDirectory.inMemory(store), ingestion, resolver)
+      val service =
+        KnowledgeReindexService(KnowledgeIndexDirectory.inMemory(store), store, ingestion, resolver)
       (ingestion, service)
     }
 
@@ -94,18 +103,20 @@ object KnowledgeReindexServiceSpec extends ZIOSpecDefault:
       )
     },
     test("源可用时发布新版本，同一文档只保留一个 active") {
+      val originalPermissions = Set("knowledge:private")
       for
         store <- InMemoryKnowledgeIndexStore.make
         calls <- Ref.make(0)
         pair  <- stack(store, countingEmbedding(calls), sources(Map("doc-a" -> "阴阳者天地之道也")))
         (ingestion, service) = pair
         _ <- ingestion.ingestOne(
-          DocumentIngestionRequest(markdown("doc-a", "阴阳者天地之道"), tenant, permissions, "seed-a")
+          DocumentIngestionRequest(markdown("doc-a", "阴阳者天地之道"), tenant, originalPermissions, "seed-a")
         )
         first     <- service.reindex(request)
         second    <- service.reindex(request)
         active    <- store.active(KnowledgeDocumentKey(tenant, "doc-a"))
         manifests <- store.manifests
+        billed    <- calls.get
         actives = manifests.filter(item => item.active && item.build.key.documentId == "doc-a")
       yield assertTrue(
         first.items.map(_.documentId) == Chunk("doc-a"),
@@ -113,7 +124,12 @@ object KnowledgeReindexServiceSpec extends ZIOSpecDefault:
         second.items.map(_.documentId) == Chunk("doc-a"),
         second.items.forall(_.status == KnowledgeReindexStatus.Reindexed),
         active.exists(_.build.version >= 2L),
-        actives.length == 1
+        active.exists(_.permissions == originalPermissions),
+        billed == 2,
+        actives
+          .groupBy(item => item.build.knowledgeSpaceId -> item.build.profileId)
+          .values
+          .forall(_.length == 1)
       )
     },
     test("中断进行中的重建后重跑，不会留下两个 active") {
@@ -123,15 +139,14 @@ object KnowledgeReindexServiceSpec extends ZIOSpecDefault:
         started  <- Promise.make[Nothing, Unit]
         release  <- Promise.make[Nothing, Unit]
         registry <- DocumentLoaderRegistry.make(Chunk(loader))
-        blocked = new EmbeddingService:
-          val dimension: Int                                   = 2
-          override val descriptor: EmbeddingProviderDescriptor =
-            EmbeddingProviderDescriptor("reindex-blocked", "v1", 2, 100, supportsDimensions = false)
-          def embed(texts: Chunk[String]): IO[RetrievalError, Chunk[Embedding]] =
+        blocked = EmbeddingModel.stub(
+          provider = "reindex-blocked",
+          onEmbed = texts =>
             calls.update(_ + 1) *>
               started.succeed(()) *>
               release.await *>
               ZIO.succeed(texts.map(text => Embedding(Chunk(text.length.toFloat, 1.0f))))
+        )
         seedIngestion = DocumentIngestionService(
           registry,
           KnowledgeIndexer(SlidingWindowChunker(32, 0), HashEmbedding(2), store),
@@ -147,6 +162,7 @@ object KnowledgeReindexServiceSpec extends ZIOSpecDefault:
         )
         blockedService = KnowledgeReindexService(
           KnowledgeIndexDirectory.inMemory(store),
+          store,
           blockedIngestion,
           sources(Map("doc-a" -> "阴阳者天地之道也"))
         )
@@ -154,7 +170,11 @@ object KnowledgeReindexServiceSpec extends ZIOSpecDefault:
         _     <- started.await
         _     <- fiber.interrupt
         _     <- release.succeed(())
-        pair  <- stack(store, countingEmbedding(calls), sources(Map("doc-a" -> "阴阳者天地之道也")))
+        pair  <- stack(
+          store,
+          countingEmbedding(calls, provider = "reindex-blocked"),
+          sources(Map("doc-a" -> "阴阳者天地之道也"))
+        )
         replay = pair._2
         report    <- replay.reindex(request)
         manifests <- store.manifests
@@ -162,7 +182,10 @@ object KnowledgeReindexServiceSpec extends ZIOSpecDefault:
       yield assertTrue(
         report.items.map(_.documentId).distinct == Chunk("doc-a"),
         report.items.forall(_.status == KnowledgeReindexStatus.Reindexed),
-        actives.length == 1
+        actives
+          .groupBy(item => item.build.knowledgeSpaceId -> item.build.profileId)
+          .values
+          .forall(_.length == 1)
       )
     },
     test("并行重建同一文档不会留下两个 active") {
@@ -177,6 +200,11 @@ object KnowledgeReindexServiceSpec extends ZIOSpecDefault:
         _         <- service.reindex(request).zipPar(service.reindex(request))
         manifests <- store.manifests
         actives = manifests.filter(item => item.active && item.build.key.documentId == "doc-a")
-      yield assertTrue(actives.length == 1)
+      yield assertTrue(
+        actives
+          .groupBy(item => item.build.knowledgeSpaceId -> item.build.profileId)
+          .values
+          .forall(_.length == 1)
+      )
     }
   )

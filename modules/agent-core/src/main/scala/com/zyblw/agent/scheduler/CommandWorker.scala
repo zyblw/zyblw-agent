@@ -80,8 +80,23 @@ final class CommandWorker(
     config: WorkerHostConfig,
     runOne: RunCommandLease => IO[AgentError, Unit]
 ):
-  /** 持续处理命令，直到父 Scope 或应用被中断。 */
-  def run: IO[AgentError, Nothing] = claimOnce.forever
+  /** 持续处理命令，直到父 Scope 或应用被中断。
+    *
+    * `LeaseLost` 表示当前 command 的执行权已经被取消、抢占或新 generation 接管，只终止这一条执行；旧 owner 仍受 Runtime/Store fencing 约束，当前
+    * lane 可以继续领取其它 Run。可重试的 claim/存储错误在本 lane 内有界退避，永久 typed error、defect 与外部中断仍交给 `WorkerHost` 的结构化并发监督。
+    */
+  def run: IO[AgentError, Nothing] =
+    claimOnce
+      .foldZIO(
+        {
+          case _: AgentError.LeaseLost  => ZIO.unit
+          case error if error.retryable =>
+            ZIO.sleep(config.retryDelay)
+          case error => ZIO.fail(error)
+        },
+        _ => ZIO.unit
+      )
+      .forever
 
   /** 执行一次 claim 周期。
     * @return

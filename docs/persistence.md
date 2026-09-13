@@ -50,10 +50,9 @@ modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/m
 `harness_goals`、`harness_plans`、`harness_skills`、`harness_interactions`、`harness_goal_budgets` 与
 `harness_budget_reservations`。
 
-`0.3.0` 明确不兼容 0.2，默认 location 只有一个
-`V001__zyblw_agent_0_3_baseline.sql`，只支持空 schema/新数据库。旧环境不能通过 `repair`、手改 history 或假装 baseline
-接管；应建立新 schema、重新导入业务允许保留的数据并重建派生索引。该 V001 从 `0.3.0` 起冻结，后续 patch 只允许追加
-migration。完整操作见[PostgreSQL 迁移发布契约](database-migrations.md)与[升级到 0.3.0](upgrading-to-0.3.0.md)。
+`0.9.0` 默认 location 只有一个 `V001__zyblw_agent_0_9_baseline.sql`，只支持空 schema/新数据库。启动探针会拒绝非当前
+基线，不能通过 `repair`、手改 history 或伪造 baseline 接管。完整操作见
+[PostgreSQL 迁移发布契约](database-migrations.md)与[0.9.0 全新安装](fresh-install-0.9.0.md)。
 
 框架不会因 JAR 或普通 Store Layer 被加载而自动修改数据库。宿主可显式调用 `AgentPostgresMigrations.migrate`，也可选择
 `PostgresAgentPersistence.migratedLayer` 在服务构建前自动 migrate/validate/verify；两者都使用独立历史表

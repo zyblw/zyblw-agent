@@ -18,4 +18,4 @@ else
   echo "跳过 postgres/testFull。需要时设置 RUN_POSTGRES_INTEGRATION=1。"
 fi
 
-echo "业务接入门禁通过。可将 0.8.0-local 发布到 Maven Local，或用 KnowledgeQaHost / deploy/docker/compose.business.yml 启动。"
+echo "业务接入门禁通过。可将 0.9.0-local 发布到 Maven Local，或用 KnowledgeQaHost / deploy/docker/compose.business.yml 启动。"

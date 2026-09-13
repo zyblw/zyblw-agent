@@ -3,6 +3,7 @@ package com.zyblw.agent.integrations
 import zio.Chunk
 import zio.json.*
 import zio.test.*
+import com.zyblw.agent.integrations.openai.OpenAICompatibility
 
 /** 中转站多端点声明的静态契约：URL、密钥引用和唯一 id。 */
 object ProviderEndpointsSpec extends ZIOSpecDefault:
@@ -43,6 +44,17 @@ object ProviderEndpointsSpec extends ZIOSpecDefault:
         round.contains(config),
         valid.protocol == "relay",
         valid.models.head.capabilities.toolCalls
+      )
+    },
+    test("模型清单只覆盖可配置子集并继承 Provider 协议能力") {
+      val qwen = ProviderEndpointCapabilities(vision = true)
+        .applyTo(OpenAICompatibility.qwen.descriptor.capabilities)
+      assertTrue(
+        qwen.vision,
+        qwen.specificToolChoice,
+        qwen.toolCalls,
+        !qwen.strictToolSchema,
+        !qwen.developerRole
       )
     }
   )

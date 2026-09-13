@@ -1,5 +1,8 @@
 package com.zyblw.agent.core
 
+import com.zyblw.agent.composition.CanonicalDigest
+import zio.json.*
+
 /** 单个 Provider+Model 的单价,按每百万 token 计。
   *
   * 用每百万 token 而不是每 token,是因为主流厂商都以这个粒度公布价格,直接照抄能避免运维在录入时自己做一次除法; 用 `BigDecimal` 而不是 `Double`,是因为这个数会累加进
@@ -19,7 +22,7 @@ final case class ModelPrice(
     outputPerMillionTokens: BigDecimal,
     cachedInputPerMillionTokens: Option[BigDecimal] = None,
     currency: String = "USD"
-):
+) derives JsonCodec:
   require(inputPerMillionTokens >= 0, "输入单价不能为负数")
   require(outputPerMillionTokens >= 0, "输出单价不能为负数")
   require(cachedInputPerMillionTokens.forall(_ >= 0), "缓存输入单价不能为负数")
@@ -56,6 +59,17 @@ final case class ModelPriceBook(prices: Map[(String, String), ModelPrice]):
     prices.values.map(_.currency.trim.toUpperCase).toSet.size <= 1,
     "价格表不能混用多种计价货币"
   )
+
+  /** 内容寻址版本；同一价目不依赖 Map 顺序，历史调用另存选中单价以支持重算。 */
+  def fingerprint: String =
+    CanonicalDigest.sha256(
+      prices.toList
+        .sortBy(_._1)
+        .map { case ((provider, model), price) =>
+          (provider, model, price).toJson
+        }
+        .mkString("\n")
+    )
 
   /** 价格表的计价货币;空表返回 None。 */
   def currency: Option[String] = prices.values.headOption.map(_.currency)

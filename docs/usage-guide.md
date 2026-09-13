@@ -1,8 +1,8 @@
 # zyblw-agent 总体使用手册
 
-> 状态：0.8.0 使用契约
+> 状态：0.9.0 使用契约
 >
-> 最后核验：2026-08-23
+> 最后核验：2026-08-28
 >
 > 事实来源：公开源码、可运行示例、独立 Maven consumer、数据库 migration 与测试
 
@@ -24,10 +24,10 @@ Agent 的核心边界始终是：模型提出文本、结构化结果或工具�
 
 ## 2. 环境与依赖
 
-框架 0.8.0 的开发基线是 JDK 21、Scala 3.8.4、sbt 2.0.1、ZIO 2.1.26。业务只引入实际需要的模块：
+框架 0.9.0 的开发基线是 JDK 21、Scala 3.8.4、sbt 2.0.1、ZIO 2.1.26。业务只引入实际需要的模块：
 
 ```scala
-val zyblwAgentVersion = "0.8.0"
+val zyblwAgentVersion = "0.9.0"
 
 libraryDependencies ++= Seq(
   "io.github.zyblw" %% "zyblw-agent-core"      % zyblwAgentVersion,
@@ -62,7 +62,7 @@ sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost serve"
 ```
 
 Live 摄入 / 重建 / serve 需要 `EMBEDDING_API_KEY`、`EMBEDDING_MODEL` 与 `EMBEDDING_DIMENSION=1024`，不会回退到哈希向量。
-重建从 `ZYBLW_AGENT_BOOKS_DIR` 或 `data/books` 按 documentId 回读原文。详见 [升级到 0.8.0](upgrading-to-0.8.0.md)。
+重建从 `ZYBLW_AGENT_BOOKS_DIR` 或 `data/books` 按 documentId 回读原文。详见 [升级到 0.9.0](fresh-install-0.9.0.md)。
 
 客户支持与审批写工具仍走 `ProductionSupportHost`：
 
@@ -337,10 +337,10 @@ artifact。Provider 类型不能进入 core，数据库 DTO 不能成为 HTTP wi
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.8.0-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.9.0-local"; publishM2'
 
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.8.0-local sbt -batch 'clean; compile'
+ZYBLW_AGENT_VERSION=0.9.0-local sbt -batch 'clean; compile'
 ```
 
 业务还必须补充自己的权限、质量、成本、容量、数据库重启、Worker kill、Provider 断流、备份恢复和数据删除验证。框架测试

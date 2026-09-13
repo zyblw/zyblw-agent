@@ -65,6 +65,13 @@ object DocumentStructureChunkerSpec extends ZIOSpecDefault:
       yield assertTrue(
         chunks.length == 2,
         chunks.head.text.contains("第一段\n\n第二段"),
+        chunks.head.text.startsWith("章\n\n"),
+        !chunks.head.text.contains("# 章"),
+        chunks(1).text.startsWith("章 · 节\n\n"),
+        !chunks(1).text.contains("# 章"),
+        !chunks(1).text.contains("## 节"),
+        chunks.head.lineage.exists(_.headingPath == Chunk("章")),
+        chunks(1).lineage.exists(_.headingPath == Chunk("章", "节")),
         chunks.head.lineage.exists(_.blockIds == Chunk("#/texts/1", "#/texts/2")),
         chunks.head.lineage.exists(_.origins == Chunk(firstOrigin, secondOrigin)),
         chunks.head.lineage.exists(_.pageNumbers == Chunk(1, 2)),

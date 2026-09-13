@@ -351,5 +351,5 @@ object PostgresAdminStoresIntegrationSpec extends ZIOSpecDefault:
         result <- stores.jobs.transition(UUID.randomUUID().toString, IngestionJobStatus.Loading).exit
       yield assertTrue(result.isFailure)).provideLayer(storesLayer)
     }
-  ) @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@ TestAspect.withLiveClock @@
+  ) @@ PostgresIntegrationAspect.enabled @@ TestAspect.withLiveClock @@
     TestAspect.timeout(5.minutes) @@ TestAspect.sequential

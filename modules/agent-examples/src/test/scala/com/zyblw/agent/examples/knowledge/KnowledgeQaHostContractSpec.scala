@@ -66,7 +66,7 @@ object KnowledgeQaHostContractSpec extends ZIOSpecDefault:
         .require1024(OpenAICompatibleEmbeddingConfig.openAI("test-key", dimension = 1536))
         .either
         .map { result =>
-          assertTrue(result.left.exists(_.message.contains("EMBEDDING_DIMENSION=1024")))
+          assertTrue(result.left.exists(_.message.contains("1024")))
         }
     },
     test("live Embedding 接受 1024 维配置") {

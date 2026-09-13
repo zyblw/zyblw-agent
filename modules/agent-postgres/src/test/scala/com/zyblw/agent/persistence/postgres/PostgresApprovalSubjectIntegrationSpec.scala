@@ -199,5 +199,5 @@ object PostgresApprovalSubjectIntegrationSpec extends ZIOSpecDefault:
             case _                                               => false
         yield assertTrue(rejected)).provideLayer(fixtureLayer)
       }
-    ) @@ TestAspect.withLiveEnvironment @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@
+    ) @@ TestAspect.withLiveEnvironment @@ PostgresIntegrationAspect.enabled @@
       TestAspect.timeout(2.minutes)

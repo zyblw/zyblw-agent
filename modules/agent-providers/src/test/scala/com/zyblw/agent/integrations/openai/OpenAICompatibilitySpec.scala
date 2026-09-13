@@ -1,6 +1,6 @@
 package com.zyblw.agent.integrations.openai
 
-// 以纯编解码方式验证 OpenAI、DeepSeek、GLM 的字段兼容矩阵，不依赖真实 API Key 和网络。
+// 以纯编解码方式验证 OpenAI、DeepSeek、GLM、Qwen 的字段兼容矩阵，不依赖真实 API Key 和网络。
 
 import com.zyblw.agent.core.*
 import zio.*
@@ -60,6 +60,26 @@ object OpenAICompatibilitySpec extends ZIOSpecDefault:
       val encoded =
         OpenAIWire.encodeRequest(request, ProviderPresets.GlmDefaultModel, OpenAICompatibility.glm)
       assertTrue(encoded.left.exists(_.isInstanceOf[AgentError.UnsupportedModelCapability]))
+    },
+    test("Qwen maps developer role, omits strict schema and supports explicit tool choice") {
+      val autoRequest = ChatRequest(
+        Chunk(AgentMessage.developer("rule"), AgentMessage.user("question")),
+        Chunk(tool)
+      )
+      val specificRequest =
+        autoRequest.copy(settings = ModelSettings(toolChoice = ToolChoice.Specific("lookup")))
+      val encoded = OpenAIWire
+        .encodeRequest(autoRequest, "qwen-test", OpenAICompatibility.qwen)
+        .map(_.toString)
+      val specific = OpenAIWire
+        .encodeRequest(specificRequest, "qwen-test", OpenAICompatibility.qwen)
+        .map(_.toString)
+      assertTrue(
+        encoded.exists(_.contains("\"role\":\"system\"")),
+        encoded.exists(_.contains("\"tool_choice\":\"auto\"")),
+        encoded.forall(!_.contains("\"strict\"")),
+        specific.exists(_.contains("\"name\":\"lookup\""))
+      )
     },
     test("OpenAI keeps strict schema and uses max_completion_tokens") {
       val request = ChatRequest(

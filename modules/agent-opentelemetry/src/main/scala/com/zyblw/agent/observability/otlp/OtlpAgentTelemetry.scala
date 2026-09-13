@@ -74,7 +74,7 @@ object OtlpAgentObservability:
         .meterBuilder(InstrumentationScope)
         .setInstrumentationVersion(validated.serviceVersion)
         .build()
-      rawTrace  = OpenTelemetryAgentTelemetry(tracer)
+      rawTrace <- OpenTelemetryAgentTelemetry.make(tracer)
       safeTrace = SanitizingTelemetry.make(rawTrace, contentPolicy, redactor)
       metrics   = OpenTelemetryAgentMetrics.make(meter, metricPolicy)
     yield safeTrace -> metrics
@@ -112,6 +112,7 @@ object OtlpAgentObservability:
       .builder()
       .setResource(resource)
       .setSampler(Sampler.traceIdRatioBased(config.sampleRatio))
+      .setIdGenerator(AgentTelemetryIdGenerator)
       .addSpanProcessor(processor)
       .build()
 
@@ -188,3 +189,18 @@ object LangfuseTelemetry:
     ZLayer
       .fromZIO(config.toOtlp)
       .flatMap(environment => OtlpAgentTelemetry.layer(environment.get[OtlpTelemetryConfig], contentPolicy))
+
+/** Emit a real run root with the same deterministic trace ID used by durable events and Scores. */
+private[otlp] object AgentTelemetryIdGenerator extends io.opentelemetry.sdk.trace.IdGenerator:
+  private val random            = io.opentelemetry.sdk.trace.IdGenerator.random()
+  def generateTraceId(): String =
+    TelemetrySpanIdentity.event
+      .flatMap(_.traceId)
+      .map(_.replace("-", "").toLowerCase)
+      .filter(id => id.matches("[0-9a-f]{32}") && id.exists(_ != '0'))
+      .getOrElse(random.generateTraceId())
+  def generateSpanId(): String =
+    TelemetrySpanIdentity.event
+      .flatMap(e => if e.name == "agent.run" then Some(TelemetrySpanIdentity.RunRoot) else e.spanId)
+      .filter(id => id.matches("[0-9a-f]{16}") && id.exists(_ != '0'))
+      .getOrElse(random.generateSpanId())

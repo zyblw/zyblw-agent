@@ -2,11 +2,11 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-23
+> 最后核验：2026-09-11
 >
 > 事实来源：对应模块源码、测试与构建定义
 
-> **下一阶段：** [ADR-0018](architecture/0018-next-generation-runtime-kernel.md)、[ADR-0019](architecture/0019-typed-extensions-and-constrained-execution.md) 与 [下一代 Runtime 开发手册](architecture/next-generation-runtime.md)。P0 Kernel、P1 Composition 与 P2 Harness 已落地；Wave 1 与 Wave 2 第一刀已在 `0.8.0` 落地。后续：Wave 3 Tree/Fork/Replay 与编排（仍为 Proposed，需 Eval 门禁）。Wave 0 的宿主环境 soak/主备切换仍待。下面正文描述含已落地切片的现行架构。
+> **下一阶段：** [ADR-0018](architecture/0018-next-generation-runtime-kernel.md)、[ADR-0019](architecture/0019-typed-extensions-and-constrained-execution.md) 与 [下一代 Runtime 开发手册](architecture/next-generation-runtime.md)。P0 Kernel、P1 Composition 与 P2 Harness 已落地；Wave 1 与 Wave 2 第一刀已纳入当前 `0.9.0`。后续：Wave 3 Tree/Fork/Replay 与编排（仍为 Proposed，需 Eval 门禁）。Wave 0 的宿主环境 soak/主备切换仍待。[Model Runtime 现状审计](architecture/model-runtime-current-state.md) 与 [目标架构](architecture/model-runtime-target.md) 是 Phase 0 文档，编码尚未开始。下面正文描述含已落地切片的现行架构。
 
 ## 设计边界
 
@@ -21,7 +21,9 @@ Artifact、Skill、Context 和 Sandbox 等长任务支架；Workflow 负责显�
 `AgentRuntime/AgentCommandService/WorkerHost` 及其稳定 SPI。它不会定义
 第二套状态、隐藏数据库 fallback 或把 Provider 类型引入 core；生产 `durable` 入口要求业务显式提供持久化、Context、
 Guardrail 和 Observer。WorkerHost 在单个父 effect 下运行有界 claim lane：不同 Run 可以并行，同一 Run 仍由 dispatcher
-严格串行；任一 lane 失败会中断其余 lane 并交给外层 Supervisor，避免形成部分失效进程。
+严格串行；正常取消、抢占或 generation 接管产生的 `LeaseLost` 收敛在当前命令，可重试存储错误在 lane 内退避；无法由
+命令 dead-letter 协议收敛的永久 Worker/Store 错误、defect 或意外结束才会中断其余 lane 并交给外层 Supervisor，避免
+形成部分失效进程。
 
 `zyblw-agent-zio-http` artifact 位于最外层传输边界；其中 `http.host` package 只把 `AgentHttpApi` routes、command
 worker、健康探针与 ZIO HTTP Server 放入同一个子 Scope。它不反向进入 Runtime，也不创建 DataSource、认证或 Provider
@@ -62,9 +64,9 @@ flowchart LR
   Loader --> Document["SourceDocument + blocks/page/bbox"]
   Document --> Chunker["DocumentStructureChunker / Markdown fallback"]
   Chunker --> Chunks["DocumentChunk + parent/neighbor lineage"]
-  Chunks --> Embed["GovernedEmbeddingService"]
-  Embed --> Staging["KnowledgeIndexStore staging"]
-  Staging --> Active["原子 activate"]
+  Chunks -->   Embed["GovernedEmbeddingModel"]
+  Embed --> Staging["Profile census / chunks"]
+  Staging --> Active["CAS activeProfileId"]
   Active --> Knowledge[("zyblw_agent_knowledge schema")]
   Query["RetrievalScope + query"] --> Hybrid["ACL-first vector + FTS + RRF"]
   Knowledge --> Hybrid
@@ -191,4 +193,17 @@ sequenceDiagram
 - [0018 下一代 Runtime Kernel（Proposed）](architecture/0018-next-generation-runtime-kernel.md)
 - [0019 Typed Extensions 与 Constrained Execution](architecture/0019-typed-extensions-and-constrained-execution.md)
 - [0020 现代化基线、死合同清理与无损迁移](architecture/0020-modernization-baseline.md)
+- [0021 Provider-neutral Model Protocol](architecture/0021-provider-neutral-model-protocol.md)
+- [0022 Model Profile 与确定性路由](architecture/0022-model-profile-and-routing.md)
+- [0023 Retry / Fallback / Escalation](architecture/0023-retry-fallback-escalation.md)
+- [0024 Planner 与耐久执行（Deferred）](architecture/0024-planner-and-durable-execution.md)
+- [0025 模型成本与预算](architecture/0025-model-cost-and-budget.md)
+- [0026 Provider Capability 模型](architecture/0026-provider-capability-model.md)
+- [0027 RAG Retrieval Runtime 绿场基线](architecture/0027-rag-retrieval-runtime.md)
+- [Model Runtime 现状审计（Phase 0）](architecture/model-runtime-current-state.md)
+- [Model Runtime 目标架构](architecture/model-runtime-target.md)
+- [模型路由](architecture/model-routing.md)
+- [Provider 契约与 Adapter](architecture/model-provider-contract.md)
+- [模型预算与成本](architecture/model-budget-and-cost.md)
+- [多模型执行](architecture/multi-model-execution.md)
 - [下一代 Runtime 开发手册（Proposed）](architecture/next-generation-runtime.md)

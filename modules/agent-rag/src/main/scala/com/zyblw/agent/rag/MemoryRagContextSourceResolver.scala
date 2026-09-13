@@ -23,7 +23,7 @@ enum LowEvidenceResponse derives JsonCodec:
   * @param includeUserMemory
   *   是否在 tenant+user scope 读取长期用户记忆
   * @param minimumRetrievalScore
-  *   低于阈值的候选不会进入模型上下文
+  *   注入上下文前 seed 的最低余弦 `vectorScore`；有词法命中时不受此阈值约束。RRF fused score 只排序。
   */
 final case class MemoryRagContextPolicy(
     memoryLimit: Int = 8,
@@ -74,7 +74,7 @@ final class MemoryRagContextSourceResolver(
     yield ContextSources(
       memories = selected,
       retrieval = result.hits.map { case (hit, citation) =>
-        ContextDocument(citation.id, hit.chunk.text, citation.sourceUri, Some(hit.score))
+        ContextDocument(citation.id, hit.chunk.displayText, citation.sourceUri, Some(hit.score))
       },
       safetyInstructions =
         if result.insufficient && policy.lowEvidenceResponse == LowEvidenceResponse.RequireExplicitRefusal
@@ -88,7 +88,9 @@ final class MemoryRagContextSourceResolver(
           citation.score,
           citation.pageNumbers,
           Some(hit.chunk.id),
-          Some(hit.chunk.documentId)
+          Some(hit.chunk.documentId),
+          CitationSourceType.Site,
+          RunCitation.publicSourceKind(hit.chunk.metadata.get("sourceType"))
         )
       },
       retrievalEvidence = Some(
@@ -144,14 +146,22 @@ final class MemoryRagContextSourceResolver(
     (state.runContext.tenantId, query.nonEmpty, policy.retrievalLimit > 0) match
       case (Some(tenant), true, true) =>
         val retrieval = retriever
-          .retrieve(query, RetrievalScope(TenantId(tenant), state.runContext.scopes), policy.retrievalLimit)
+          .retrieve(
+            query,
+            RetrievalScope(TenantId(tenant), state.runContext.scopes, runId = Some(state.runId)),
+            policy.retrievalLimit
+          )
         operationTelemetry
           .fold(retrieval)(_.retrieval(state.runId, "retrieve")(retrieval)(_.hits.length.toLong))
           .mapError(retrievalError)
           .map { result =>
             val accepted =
               if result.evidence.supportsGroundedAnswer then
-                result.hits.zip(result.citations).filter(_._1.score >= policy.minimumRetrievalScore)
+                result.hits.zip(result.citations).filter { (hit, _) =>
+                  hit.chunk.lineage
+                    .flatMap(_.seedChunkId)
+                    .nonEmpty || DefaultRetriever.acceptsSeed(hit, policy.minimumRetrievalScore)
+                }
               else Chunk.empty
             ResolvedRetrieval(
               accepted,
@@ -159,7 +169,7 @@ final class MemoryRagContextSourceResolver(
               evidenceStatus = result.evidence.status.toString,
               candidateCount = result.evidence.candidateCount.max(result.hits.length).max(accepted.length),
               acceptedCount = accepted.length,
-              topScore = accepted.map(_._1.score).maxOption
+              topScore = accepted.map(_._1).map(DefaultRetriever.relevanceScore).maxOption
             )
           }
       case _ => ZIO.succeed(ResolvedRetrieval(Chunk.empty, insufficient = false))

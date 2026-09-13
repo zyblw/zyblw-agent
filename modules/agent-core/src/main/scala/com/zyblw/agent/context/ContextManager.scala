@@ -57,7 +57,9 @@ final case class ContextSources(
     /** 可选 world-state section；指纹相同则本回合可不重复发给模型。 */
     sections: Chunk[ContextSectionSnapshot] = Chunk.empty,
     citations: Chunk[RunCitation] = Chunk.empty,
-    retrievalEvidence: Option[RunRetrievalEvidence] = None
+    retrievalEvidence: Option[RunRetrievalEvidence] = None,
+    /** 上一会话注入的 user/assistant 工作记忆；进入 recentMessages 分区，不是 RAG 或 System 策略。 */
+    priorTurns: Chunk[AgentMessage] = Chunk.empty
 )
 
 /** 在每个模型回合之前解析动态上下文来源。 */
@@ -106,7 +108,8 @@ object ContextSourceResolver:
             existingSummary = right.existingSummary.orElse(left.existingSummary),
             sections = left.sections ++ right.sections,
             citations = left.citations ++ right.citations,
-            retrievalEvidence = right.retrievalEvidence.orElse(left.retrievalEvidence)
+            retrievalEvidence = right.retrievalEvidence.orElse(left.retrievalEvidence),
+            priorTurns = left.priorTurns ++ right.priorTurns
           )
         }
       }
@@ -374,7 +377,7 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
       retrievalSelection <- selectSection(retrievalCandidates, budget.retrieval)
       recentPlan         <- planRecent(
         state,
-        normalized.messages,
+        sources.priorTurns ++ normalized.messages,
         sources.existingSummary,
         policy,
         compressionCallBudget - normalized.compressionCalls

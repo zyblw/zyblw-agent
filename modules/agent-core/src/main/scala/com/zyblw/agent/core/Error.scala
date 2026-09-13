@@ -10,7 +10,15 @@ enum ErrorCategory:
 sealed trait AgentError extends Throwable:
   def message: String
   def category: ErrorCategory
-  def retryable: Boolean                = false
+  def retryable: Boolean = false
+
+  /** 只表达故障切换资格，不授权自动调用；预算、可见流和 Unknown 仍由 Runtime 决定。 */
+  def fallbackable: Boolean = this match
+    case _: ModelError =>
+      retryable && Set(ErrorCategory.Timeout, ErrorCategory.RateLimit, ErrorCategory.Unavailable).contains(
+        category
+      )
+    case _ => false
   def safeToExpose: Boolean             = false
   def diagnostic: Map[String, String]   = Map.empty
   final override def getMessage: String = message

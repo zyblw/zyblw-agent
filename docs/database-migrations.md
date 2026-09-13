@@ -1,7 +1,7 @@
 # PostgreSQL 自动迁移、结构校验与知识库基线
 
-> 状态：0.8.0 单文件全新基线；无 0.6.x 原地升级
-> 最后核验：2026-08-23
+> 状态：0.9.0 单文件全新基线
+> 最后核验：2026-08-28
 > 事实来源：`AgentPostgresMigrations.scala`、migration resource、PostgreSQL 16 集成测试
 
 ## 默认模型
@@ -15,9 +15,9 @@ shutdown` 路径见 [PostgreSQL 独立宿主快速接入](postgres-quickstart.md
 classpath:com/zyblw/agent/persistence/postgres/migration
 ```
 
-核心 location 只包含 `V001__zyblw_agent_0_8_baseline.sql` 与每次覆盖写入的
-`R__zyblw_agent_schema_comments.sql`。知识 location 是 `optional/pgvector_1024/V001__agent_knowledge_0_8_baseline.sql`。
-旧的 V001–V013 增量脚本已折叠进 0.8.0 基线，不再作为升级路径保留。`AgentPostgresMigrations.resetAll`
+核心 location 只包含 `V001__zyblw_agent_0_9_baseline.sql` 与每次覆盖写入的
+`R__zyblw_agent_schema_comments.sql`。知识 location 是 `optional/pgvector_1024/V001__agent_knowledge_0_9_baseline.sql`。
+当前 0.9.0 只提供折叠后的全新基线，不提供历史升级路径。`AgentPostgresMigrations.resetAll`
 会丢弃两个 schema 与两份 Flyway history。框架不会因为 JAR 或 `DataSource` 出现在 classpath 就修改数据库；宿主需要在受控启动阶段选择
 下面一种模式。
 
@@ -52,7 +52,7 @@ val rag  = PostgresAgentPersistence.migratedKnowledge1024()
 
 核心 history table 位于宿主当前 schema，名为 `flyway_zyblw_agent_schema_history`。新库的 1024 维知识库使用独立 location，固定管理
 `zyblw_agent_knowledge` schema，并把独立 `flyway_zyblw_agent_knowledge_1024_history` 放在其中；实际 location 只有一份
-`V001__agent_knowledge_0_8_baseline.sql`，已一次性包含 manifest、staging、active chunks、FTS、HNSW、parent/neighbor、
+`V001__agent_knowledge_0_9_baseline.sql`，已一次性包含 Space/Profile/census/chunks/audit/withdrawn、FTS、HNSW、parent/neighbor、
 heading/page/bbox/block lineage；`R__agent_knowledge_1024_comments.sql` 幂等维护中文表/字段数据字典。核心与知识库都有 V001，绝不能放进同一个 Flyway history，也不能让两个 Flyway 实例共同管理
 同一个非空 schema。通用 `migrate(config)` 会拒绝 1024 knowledge location，防止调用方绕过专属 schema；知识库必须使用
 `migrateKnowledge1024` 或 `migrateCoreAndKnowledge1024`。
@@ -65,10 +65,10 @@ heading/page/bbox/block lineage；`R__agent_knowledge_1024_comments.sql` 幂等�
 迁移完成后框架还会检查：
 
 - 核心 32 张权威表是否存在于当前 schema，避免临时表或其他 schema 的同名对象蒙混通过；
-- 知识库三张表是否确实位于 `zyblw_agent_knowledge`，且 `parent/ordinal/previous/next/heading/page/origin/block` 列完整；
+- 知识库七张 Space/Profile/census/chunk/audit/withdrawn 权威表是否确实位于 `zyblw_agent_knowledge`，且 `parent/ordinal/previous/next/heading/page/origin/block` 列完整；
 - `vector` 扩展是否位于 `public` 且版本至少为 0.8.0；
 - staging/active 两张表的 embedding 是否真实为 `vector(1024)`。
-- 三张知识表与所有业务字段是否拥有非空、非泛化的中文数据字典说明。
+- 七张知识表与所有业务字段是否拥有非空、非泛化的中文数据字典说明。
 - 核心 32 张权威表的全部字段是否同样拥有专属中文说明（由 `R__zyblw_agent_schema_comments.sql` 每次覆盖写入）。
 
 Flyway checksum 负责发现已执行脚本被修改；结构探针负责发现 history 仍在但关键表/列被人工删除。这不是通用 schema diff，生产仍应禁止手工 DDL并监控

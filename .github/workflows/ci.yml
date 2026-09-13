@@ -40,17 +40,13 @@ jobs:
       - name: Validate production evidence manifest
         run: .github/scripts/verify-local-evidence.sh --manifest
 
-      - name: Audit historical artifact compatibility
-        env:
-          COMPAT_BASELINE_VERSION: "0.6.2"
+      - name: RAG runtime security and eval gates
         run: >-
           sbt -batch
-          'set ThisBuild / version := "0.7.0-SNAPSHOT";
-          show versionPolicyAssessCompatibility'
+          'evals/testOnly com.zyblw.agent.evals.RagRuntimeEvalSpec;
+          rag/testOnly com.zyblw.agent.rag.RagSecuritySpec com.zyblw.agent.rag.RagRuntimeSpineSpec'
 
-      # 版本号只是 Maven-local 往返验证的标签，与发布版本线无关；固定为 0.0.0-local
-      # 可避免它每次发布后变成一个看起来在验证旧版本的过期字面量。
-      - name: Format, test, and publish to Maven-local
+      - name: Format, test, and publish the current candidate to Maven-local
         run: sbt -batch 'set ThisBuild / version := "0.0.0-local"; scalafmtCheckAll; scalafmtSbtCheck; testFull; publishM2'
 
       - name: Generate stable OpenAPI revision
@@ -88,7 +84,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "24"
+          node-version: "26.8.1"
           cache: npm
           cache-dependency-path: modules/agent-dashboard/package-lock.json
 

@@ -51,19 +51,24 @@ final class InMemoryKnowledgeIndexStore private (
       query: Embedding,
       scope: RetrievalScope,
       filter: RetrievalFilter,
-      limit: Int
+      limit: Int,
+      sparseQuery: Option[SparseEmbedding] = None
   ): UIO[Chunk[RetrievalHit]] =
     if limit <= 0 then ZIO.succeed(Chunk.empty)
     else
       state.get.map { current =>
+        val pin        = pinnedProfile(current, scope)
         val authorized = current.published.valuesIterator
           .flatMap(_.iterator)
           .filter(item =>
             item.chunk.tenantId == scope.tenantId &&
               item.chunk.permissions.subsetOf(scope.permissions) &&
+              item.chunk.knowledgeSpaceId.forall(_ == scope.spaceId) &&
+              matchesPinnedProfile(item.chunk, pin) &&
+              !current.withdrawn.contains(item.chunk.documentId -> item.chunk.tenantId) &&
               filter.matches(item.chunk)
           )
-        Chunk.fromIterable(RetrievalScoring.rank(mode, queryText, query, authorized).take(limit))
+        Chunk.fromIterable(RetrievalScoring.rank(mode, queryText, query, authorized, sparseQuery).take(limit))
       }
 
   override def fetchChunks(
@@ -80,7 +85,10 @@ final class InMemoryKnowledgeIndexStore private (
             .filter(chunk =>
               chunkIds.contains(chunk.id) &&
                 chunk.tenantId == scope.tenantId &&
-                chunk.permissions.subsetOf(scope.permissions)
+                chunk.permissions.subsetOf(scope.permissions) &&
+                chunk.knowledgeSpaceId.forall(_ == scope.spaceId) &&
+                matchesPinnedProfile(chunk, pinnedProfile(current, scope)) &&
+                !current.withdrawn.contains(chunk.documentId -> chunk.tenantId)
             )
             .toVector
             .sortBy(_.id)
@@ -137,7 +145,13 @@ final class InMemoryKnowledgeIndexStore private (
             )
           case None =>
             val activeVersion = current.manifests.values
-              .find(manifest => manifest.build.key == request.key && manifest.active)
+              .find(manifest =>
+                manifest.build.key == request.key && manifest.active &&
+                  current.spaces
+                    .get(request.key.tenantId -> request.knowledgeSpaceId.value)
+                    .flatMap(_.activeProfileId)
+                    .contains(manifest.build.profileId.value)
+              )
               .map(_.build.version)
             if !matchesExpectation(request.expectation, activeVersion) then
               ZIO.fail(
@@ -150,13 +164,45 @@ final class InMemoryKnowledgeIndexStore private (
                 .collect { case (key, version) if key == request.key => version }
                 .maxOption
                 .getOrElse(0L) + 1L
+              val incoming = DenseIndexIdentity(
+                request.embedding.provider,
+                request.embedding.model,
+                request.embedding.dimension
+              )
+              val spaceKey = request.key.tenantId -> request.knowledgeSpaceId.value
+              val space    = current.spaces.getOrElse(spaceKey, InMemoryKnowledgeIndexStore.SpaceRecord())
+              val active   =
+                space.activeProfileId.map { id =>
+                  val stored = current.profiles.getOrElse(
+                    (request.key.tenantId, request.knowledgeSpaceId.value, id),
+                    incoming -> request.indexingStrategy
+                  )
+                  (IndexProfileId(id), stored._1, stored._2)
+                }
+              val plan = request.targetProfileId match
+                case Some(forced) if space.activeProfileId.isEmpty =>
+                  ProfileWritePlan.CreateAndActivate(forced)
+                case Some(forced) if space.activeProfileId.contains(forced.value) =>
+                  ProfileWritePlan.UseActive(forced)
+                case Some(forced) => ProfileWritePlan.BuildParallel(forced)
+                case None         => ProfileWritePlan.decide(active, incoming, request.indexingStrategy)
+              val writeProfile = plan match
+                case ProfileWritePlan.CreateAndActivate(id) => id
+                case ProfileWritePlan.UseActive(id)         => id
+                case ProfileWritePlan.BuildParallel(id)     => id
+              val cas = plan match
+                case ProfileWritePlan.CreateAndActivate(_) => true
+                case _                                     => false
               val build = KnowledgeIndexBuild(
                 request.key,
                 nextVersion,
                 request.ingestionId,
                 request.contentHash,
                 request.embedding,
-                request.indexingStrategy
+                request.indexingStrategy,
+                request.knowledgeSpaceId,
+                writeProfile,
+                cas
               )
               val manifest = KnowledgeIndexManifest(
                 build,
@@ -168,11 +214,25 @@ final class InMemoryKnowledgeIndexStore private (
                 chunkCount = 0,
                 failureCode = None,
                 createdAt = now,
-                updatedAt = now
+                updatedAt = now,
+                checkpoint = IngestCheckpoint.Resolved
               )
-              val updated =
-                current.copy(manifests = current.manifests.updated(request.key -> nextVersion, manifest))
-              ZIO.succeed(build -> updated)
+              val updated = current.copy(
+                manifests = current.manifests.updated(request.key -> nextVersion, manifest),
+                profiles = current.profiles.updated(
+                  (request.key.tenantId, request.knowledgeSpaceId.value, writeProfile.value),
+                  incoming -> request.indexingStrategy
+                ),
+                spaces = current.spaces.updated(spaceKey, space)
+              )
+              if current.sealedProfiles.contains(
+                  (request.key.tenantId, request.knowledgeSpaceId.value, writeProfile.value)
+                )
+              then
+                ZIO.fail(
+                  AgentError.RetrievalFailed("Published profile is sealed; build a new target profile")
+                )
+              else ZIO.succeed(build -> updated)
       }
     }
 
@@ -188,7 +248,7 @@ final class InMemoryKnowledgeIndexStore private (
             val chunk = indexed.chunk
             chunk.tenantId != build.key.tenantId ||
             chunk.documentId != build.key.documentId ||
-            chunk.indexVersion != build.version ||
+            chunk.catalogVersion != build.version ||
             indexed.embedding.values.length != build.embedding.dimension
           }
           invalid match
@@ -227,7 +287,8 @@ final class InMemoryKnowledgeIndexStore private (
                 )
               else
                 val superseded = current.manifests.map { case (manifestKey, value) =>
-                  if value.build.key == build.key && value.active then
+                  if value.build.key == build.key && value.build.profileId == build.profileId && value.build.knowledgeSpaceId == build.knowledgeSpaceId && value.active
+                  then
                     manifestKey -> value.copy(
                       status = KnowledgeIndexStatus.Superseded,
                       active = false,
@@ -235,18 +296,40 @@ final class InMemoryKnowledgeIndexStore private (
                     )
                   else manifestKey -> value
                 }
+                val stamped = staged.values.toList
+                  .map { indexed =>
+                    indexed.copy(chunk =
+                      indexed.chunk.copy(
+                        knowledgeSpaceId = Some(build.knowledgeSpaceId),
+                        profileId = Some(build.profileId)
+                      )
+                    )
+                  }
+                  .sortBy(_.chunk.id)
+                val existingPublished = current.published.getOrElse(build.key, Chunk.empty)
+                val retainedPublished =
+                  existingPublished.filterNot(item => item.chunk.profileId.contains(build.profileId))
+                val spaceKey  = build.key.tenantId -> build.knowledgeSpaceId.value
+                val space     = current.spaces.getOrElse(spaceKey, InMemoryKnowledgeIndexStore.SpaceRecord())
+                val nextSpace =
+                  if build.casActiveProfile && space.activeProfileId.isEmpty then
+                    space.copy(activeProfileId = Some(build.profileId.value), revision = space.revision + 1L)
+                  else space
                 val ready = manifest.copy(
                   status = KnowledgeIndexStatus.Ready,
                   active = true,
                   chunkCount = staged.size,
                   failureCode = None,
-                  updatedAt = now
+                  updatedAt = now,
+                  checkpoint = IngestCheckpoint.Ready
                 )
                 val updated = current.copy(
                   manifests = superseded.updated(key, ready),
                   staged = current.staged - key,
-                  published = current.published
-                    .updated(build.key, Chunk.fromIterable(staged.values.toList.sortBy(_.chunk.id)))
+                  published =
+                    current.published.updated(build.key, retainedPublished ++ Chunk.fromIterable(stamped)),
+                  spaces = current.spaces.updated(spaceKey, nextSpace),
+                  cacheEpoch = current.cacheEpoch
                 )
                 ZIO.succeed(ready -> updated)
         }
@@ -276,7 +359,15 @@ final class InMemoryKnowledgeIndexStore private (
 
   /** 查找当前 active manifest。 */
   def active(key: KnowledgeDocumentKey): UIO[Option[KnowledgeIndexManifest]] =
-    state.get.map(_.manifests.values.find(manifest => manifest.build.key == key && manifest.active))
+    state.get.map(current =>
+      current.manifests.values.find(manifest =>
+        manifest.build.key == key && manifest.active &&
+          current.spaces
+            .get(key.tenantId -> manifest.build.knowledgeSpaceId.value)
+            .flatMap(_.activeProfileId)
+            .contains(manifest.build.profileId.value)
+      )
+    )
 
   /** 按业务幂等键查找任意状态 manifest。 */
   def find(key: KnowledgeDocumentKey, ingestionId: String): UIO[Option[KnowledgeIndexManifest]] =
@@ -297,7 +388,14 @@ final class InMemoryKnowledgeIndexStore private (
       Clock.instant.flatMap { now =>
         state.modifyZIO { current =>
           val versionKey = key -> expectedActiveVersion
-          val active = current.manifests.values.find(manifest => manifest.build.key == key && manifest.active)
+          val active     = current.manifests.values.find(manifest =>
+            manifest.build.key == key &&
+              manifest.active &&
+              current.spaces
+                .get(key.tenantId -> manifest.build.knowledgeSpaceId.value)
+                .flatMap(_.activeProfileId)
+                .contains(manifest.build.profileId.value)
+          )
           active match
             case Some(manifest) if manifest.build.version != expectedActiveVersion =>
               ZIO.fail(AgentError.RetrievalFailed("knowledge retire active version 前置条件失败"))
@@ -310,7 +408,14 @@ final class InMemoryKnowledgeIndexStore private (
               ZIO.succeed(
                 retired -> current.copy(
                   manifests = current.manifests.updated(versionKey, retired),
-                  published = current.published - key
+                  published = current.published.updatedWith(key)(
+                    _.map(
+                      _.filterNot(chunk =>
+                        chunk.chunk.knowledgeSpaceId.contains(manifest.build.knowledgeSpaceId) &&
+                          chunk.chunk.profileId.contains(manifest.build.profileId)
+                      )
+                    ).filter(_.nonEmpty)
+                  )
                 )
               )
             case None =>
@@ -322,13 +427,19 @@ final class InMemoryKnowledgeIndexStore private (
       }
 
   /** 按 updatedAt/version 稳定选择非活动终态，模拟 PostgreSQL 的有界 retention。 */
-  def purgeInactive(updatedBefore: Instant, limit: Int): UIO[Long] =
+  def purgeInactive(
+      updatedBefore: Instant,
+      limit: Int,
+      excludeDocumentIds: Set[String] = Set.empty
+  ): UIO[Long] =
     if limit <= 0 then ZIO.succeed(0L)
     else
       state.modify { current =>
         val removable = current.manifests.iterator
-          .filter { case (_, manifest) =>
-            !manifest.active && manifest.updatedAt.isBefore(updatedBefore) && Set(
+          .filter { case ((key, _), manifest) =>
+            !manifest.active &&
+            !excludeDocumentIds.contains(key.documentId) &&
+            manifest.updatedAt.isBefore(updatedBefore) && Set(
               KnowledgeIndexStatus.Superseded,
               KnowledgeIndexStatus.Failed,
               KnowledgeIndexStatus.Retired
@@ -347,6 +458,107 @@ final class InMemoryKnowledgeIndexStore private (
         )
       }
 
+  override def setCheckpoint(build: KnowledgeIndexBuild, checkpoint: IngestCheckpoint): UIO[Unit] =
+    Clock.instant.flatMap { now =>
+      state.update { current =>
+        val key = build.key -> build.version
+        current.manifests.get(key) match
+          case Some(manifest) =>
+            current.copy(
+              manifests = current.manifests.updated(
+                key,
+                manifest.copy(
+                  checkpoint = checkpoint,
+                  metadata = manifest.metadata.updated("ingest.checkpoint", checkpoint.toString),
+                  updatedAt = now
+                )
+              )
+            )
+          case None => current
+      }
+    }
+
+  override def resolveActiveProfile(
+      tenantId: TenantId,
+      spaceId: KnowledgeSpaceId
+  ): UIO[Option[IndexProfileId]] =
+    state.get.map(_.spaces.get(tenantId -> spaceId.value).flatMap(_.activeProfileId).map(IndexProfileId(_)))
+
+  override def activateProfile(
+      tenantId: TenantId,
+      spaceId: KnowledgeSpaceId,
+      profileId: IndexProfileId,
+      expectedRevision: Long,
+      reason: String,
+      publication: Option[ProfilePublication] = None
+  ): IO[RetrievalError, Long] =
+    if !reason.matches("[A-Za-z0-9._:-]{1,160}") then
+      ZIO.fail(AgentError.RetrievalFailed("Invalid profile activation reason"))
+    else
+      Clock.instant.flatMap { _ =>
+        state.modifyZIO { current =>
+          val spaceKey  = tenantId -> spaceId.value
+          val space     = current.spaces.getOrElse(spaceKey, InMemoryKnowledgeIndexStore.SpaceRecord())
+          val documents = Chunk.fromIterable(
+            current.manifests.values.filter(m =>
+              m.build.key.tenantId == tenantId && m.build.knowledgeSpaceId == spaceId && m.build.profileId == profileId
+            )
+          )
+          val gate = publication
+            .toRight(AgentError.RetrievalFailed("Profile publication evidence is required"))
+            .flatMap(_.validate(documents))
+          val activeDocuments = space.activeProfileId.fold(Chunk.empty[ProfileDocument]) { activeId =>
+            Chunk.fromIterable(
+              current.manifests.values
+                .filter(manifest =>
+                  manifest.build.key.tenantId == tenantId &&
+                    manifest.build.knowledgeSpaceId == spaceId &&
+                    manifest.build.profileId.value == activeId &&
+                    manifest.status == KnowledgeIndexStatus.Ready &&
+                    manifest.active
+                )
+                .map(ProfileDocument.fromManifest)
+            )
+          }
+          val corpusMatches =
+            space.activeProfileId.forall(_ == profileId.value) ||
+              publication.exists(value =>
+                ProfilePublication.logicalCorpus(value.documents) ==
+                  ProfilePublication.logicalCorpus(activeDocuments)
+              )
+          if gate.isLeft then ZIO.fail(gate.swap.toOption.get)
+          else if !corpusMatches then
+            ZIO.fail(AgentError.RetrievalFailed("Target profile corpus does not match the active profile"))
+          else if space.revision != expectedRevision then
+            ZIO.fail(AgentError.RetrievalFailed("knowledge space profile CAS 失败"))
+          else if !current.profiles.contains((tenantId, spaceId.value, profileId.value)) then
+            ZIO.fail(AgentError.RetrievalFailed("activateProfile 目标 Profile 不存在"))
+          else
+            val next     = space.copy(activeProfileId = Some(profileId.value), revision = space.revision + 1L)
+            val previous = space.activeProfileId.map(id => (tenantId, spaceId.value, id)).toSet
+            val target   = (tenantId, spaceId.value, profileId.value)
+            ZIO.succeed(
+              next.revision -> current.copy(
+                spaces = current.spaces.updated(spaceKey, next),
+                sealedProfiles = current.sealedProfiles ++ previous + target
+              )
+            )
+        }
+      }
+
+  override def withdraw(
+      key: KnowledgeDocumentKey,
+      documentRevisionId: String
+  ): IO[RetrievalError, Unit] =
+    val _ = documentRevisionId
+    state.update { current =>
+      current.copy(
+        published = current.published - key,
+        withdrawn = current.withdrawn + (key.documentId -> key.tenantId),
+        cacheEpoch = current.cacheEpoch + 1L
+      )
+    }
+
   /** 返回某文档最近一次发布的确定性块快照，仅供测试断言和本地调试。 */
   def published(key: KnowledgeDocumentKey): UIO[Chunk[IndexedChunk]] =
     state.get.map(_.published.getOrElse(key, Chunk.empty))
@@ -361,12 +573,16 @@ final class InMemoryKnowledgeIndexStore private (
 
   /** 比较幂等请求的所有不可变字段，防止复用 ingestionId 覆盖另一份内容。 */
   private def sameRequest(manifest: KnowledgeIndexManifest, request: BeginKnowledgeIndex): Boolean =
-    manifest.build.contentHash == request.contentHash &&
+    manifest.build.knowledgeSpaceId == request.knowledgeSpaceId &&
+      request.targetProfileId.forall(_ == manifest.build.profileId) &&
+      manifest.build.contentHash == request.contentHash &&
       manifest.build.embedding == request.embedding &&
       manifest.build.indexingStrategy == request.indexingStrategy &&
       manifest.sourceUri == request.sourceUri &&
       manifest.permissions == request.permissions &&
-      manifest.metadata == request.metadata
+      KnowledgeIndexer.requestMetadata(manifest.metadata) == KnowledgeIndexer.requestMetadata(
+        request.metadata
+      )
 
   /** 判断当前 active 版本是否满足调用方前置条件。 */
   private def matchesExpectation(expectation: ActiveVersionExpectation, active: Option[Long]): Boolean =
@@ -375,12 +591,31 @@ final class InMemoryKnowledgeIndexStore private (
       case ActiveVersionExpectation.NoActiveVersion => active.isEmpty
       case ActiveVersionExpectation.Exact(version)  => active.contains(version)
 
+  private def pinnedProfile(
+      current: InMemoryKnowledgeIndexStore.State,
+      scope: RetrievalScope
+  ): String =
+    scope.pinnedProfileId
+      .map(_.value)
+      .orElse(current.spaces.get(scope.tenantId -> scope.spaceId.value).flatMap(_.activeProfileId))
+      .getOrElse("default")
+
+  private def matchesPinnedProfile(chunk: DocumentChunk, pin: String): Boolean =
+    chunk.profileId.forall(_.value == pin) || (chunk.profileId.isEmpty && pin == "default")
+
 object InMemoryKnowledgeIndexStore:
+  final private case class SpaceRecord(activeProfileId: Option[String] = None, revision: Long = 0L)
+
   /** 内部状态把 manifest、暂存块和已发布快照分开，模拟 PostgreSQL 三类表的可见性边界。 */
   final private case class State(
       manifests: Map[(KnowledgeDocumentKey, Long), KnowledgeIndexManifest] = Map.empty,
       staged: Map[(KnowledgeDocumentKey, Long), Map[String, IndexedChunk]] = Map.empty,
-      published: Map[KnowledgeDocumentKey, Chunk[IndexedChunk]] = Map.empty
+      published: Map[KnowledgeDocumentKey, Chunk[IndexedChunk]] = Map.empty,
+      withdrawn: Set[(String, TenantId)] = Set.empty,
+      cacheEpoch: Long = 0L,
+      spaces: Map[(TenantId, String), SpaceRecord] = Map.empty,
+      profiles: Map[(TenantId, String, String), (DenseIndexIdentity, String)] = Map.empty,
+      sealedProfiles: Set[(TenantId, String, String)] = Set.empty
   )
 
   /** 创建可直接在测试中检查 `published` 的具体实现。 */

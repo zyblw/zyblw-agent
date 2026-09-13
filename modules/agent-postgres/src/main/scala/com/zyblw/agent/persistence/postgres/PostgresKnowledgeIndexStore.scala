@@ -34,6 +34,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
     else
       withTransaction { connection =>
         for
+          _        <- lockSpace(connection, request.key.tenantId, request.knowledgeSpaceId)
           _        <- lockDocument(connection, request.key)
           existing <- selectByIngestion(connection, request.key, request.ingestionId, forUpdate = true)
           build    <- existing match
@@ -102,6 +103,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
     else
       withTransaction { connection =>
         for
+          _        <- lockSpace(connection, build.key.tenantId, build.knowledgeSpaceId)
           _        <- lockDocument(connection, build.key)
           manifest <- selectExact(connection, build, forUpdate = true).someOrFail(
             AgentError.RetrievalFailed("knowledge build 不存在")
@@ -125,7 +127,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
     withConnection { connection =>
       jdbc("mark failed") {
         val statement = connection.prepareStatement(
-          """UPDATE zyblw_agent_knowledge.agent_knowledge_documents
+          """UPDATE zyblw_agent_knowledge.agent_knowledge_profile_documents
             |SET status = 'failed', active = FALSE, failure_code = ?, updated_at = now()
             |WHERE tenant_id = ? AND document_id = ? AND index_version = ? AND status = 'building'""".stripMargin
         )
@@ -145,7 +147,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
     withConnection(connection =>
       selectOne(
         connection,
-        s"$manifestSelect WHERE tenant_id = ? AND document_id = ? AND active = TRUE",
+        s"$manifestSelect WHERE tenant_id = ? AND document_id = ? AND active = TRUE AND (knowledge_space_id, profile_id) IN (SELECT knowledge_space_id, active_profile_id FROM zyblw_agent_knowledge.agent_knowledge_spaces WHERE tenant_id = zyblw_agent_knowledge.agent_knowledge_profile_documents.tenant_id)",
         statement =>
           statement.setString(1, key.tenantId.value)
           statement.setString(2, key.documentId)
@@ -175,12 +177,17 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
           retired <- active match
             case Some(manifest) if manifest.build.version != expectedActiveVersion =>
               ZIO.fail(AgentError.RetrievalFailed("knowledge retire active version 前置条件失败"))
-            case Some(_) =>
+            case Some(manifest) =>
               for
-                _ <- deletePublished(connection, key)
+                _ <- deletePublished(
+                  connection,
+                  key,
+                  manifest.build.knowledgeSpaceId,
+                  manifest.build.profileId
+                )
                 _ <- jdbc("retire manifest") {
                   val statement = connection.prepareStatement(
-                    """UPDATE zyblw_agent_knowledge.agent_knowledge_documents
+                    """UPDATE zyblw_agent_knowledge.agent_knowledge_profile_documents
                                     |SET status = 'retired', active = FALSE, updated_at = CURRENT_TIMESTAMP
                                     |WHERE tenant_id = ? AND document_id = ? AND index_version = ?
                                     |  AND status = 'ready' AND active = TRUE""".stripMargin
@@ -208,23 +215,29 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
 
   /** 使用稳定顺序和 SKIP LOCKED 有界删除非活动终态 manifest；staging 由外键级联清理。 Ready 与 Building 不在候选状态中，避免 retention 与发布/恢复竞争。
     */
-  def purgeInactive(updatedBefore: java.time.Instant, limit: Int): IO[RetrievalError, Long] =
+  def purgeInactive(
+      updatedBefore: java.time.Instant,
+      limit: Int,
+      excludeDocumentIds: Set[String] = Set.empty
+  ): IO[RetrievalError, Long] =
     if limit <= 0 then ZIO.succeed(0L)
     else
       withTransaction { connection =>
         jdbc("purge inactive manifests") {
+          val excluded  = excludeDocumentIds.toArray
           val statement = connection.prepareStatement(
             """WITH candidates AS (
             |  SELECT tenant_id, document_id, index_version
-            |  FROM zyblw_agent_knowledge.agent_knowledge_documents
+            |  FROM zyblw_agent_knowledge.agent_knowledge_profile_documents
             |  WHERE active = FALSE
             |    AND status IN ('superseded', 'failed', 'retired')
             |    AND updated_at < ?
+            |    AND NOT (document_id = ANY(?))
             |  ORDER BY updated_at, tenant_id, document_id, index_version
             |  FOR UPDATE SKIP LOCKED
             |  LIMIT ?
             |)
-            |DELETE FROM zyblw_agent_knowledge.agent_knowledge_documents document
+            |DELETE FROM zyblw_agent_knowledge.agent_knowledge_profile_documents document
             |USING candidates candidate
             |WHERE document.tenant_id = candidate.tenant_id
             |  AND document.document_id = candidate.document_id
@@ -232,11 +245,216 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
           )
           try
             statement.setTimestamp(1, Timestamp.from(updatedBefore))
-            statement.setInt(2, limit)
+            statement.setArray(2, connection.createArrayOf("text", excluded.asInstanceOf[Array[AnyRef]]))
+            statement.setInt(3, limit)
             statement.executeUpdate().toLong
           finally statement.close()
         }
       }
+
+  override def setCheckpoint(
+      build: KnowledgeIndexBuild,
+      checkpoint: IngestCheckpoint
+  ): IO[RetrievalError, Unit] =
+    withConnection { connection =>
+      jdbc("set ingest checkpoint") {
+        val statement = connection.prepareStatement(
+          """UPDATE zyblw_agent_knowledge.agent_knowledge_profile_documents
+            |SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('ingest.checkpoint', ?),
+            |    updated_at = now()
+            |WHERE tenant_id = ? AND document_id = ? AND index_version = ?""".stripMargin
+        )
+        try
+          statement.setString(1, checkpoint.toString)
+          statement.setString(2, build.key.tenantId.value)
+          statement.setString(3, build.key.documentId)
+          statement.setLong(4, build.version)
+          statement.executeUpdate()
+          ()
+        finally statement.close()
+      }
+    }
+
+  override def resolveActiveProfile(
+      tenantId: TenantId,
+      spaceId: KnowledgeSpaceId
+  ): IO[RetrievalError, Option[IndexProfileId]] =
+    withConnection { connection =>
+      jdbc("resolve active profile") {
+        val statement = connection.prepareStatement(
+          """SELECT active_profile_id FROM zyblw_agent_knowledge.agent_knowledge_spaces
+            |WHERE tenant_id = ? AND knowledge_space_id = ?""".stripMargin
+        )
+        try
+          statement.setString(1, tenantId.value)
+          statement.setString(2, spaceId.value)
+          val result = statement.executeQuery()
+          try
+            if result.next() then Option(result.getString(1)).filter(_.trim.nonEmpty).map(IndexProfileId(_))
+            else None
+          finally result.close()
+        finally statement.close()
+      }
+    }
+
+  override def activateProfile(
+      tenantId: TenantId,
+      spaceId: KnowledgeSpaceId,
+      profileId: IndexProfileId,
+      expectedRevision: Long,
+      reason: String,
+      publication: Option[ProfilePublication] = None
+  ): IO[RetrievalError, Long] =
+    for
+      gate <- ZIO
+        .fromOption(publication)
+        .orElseFail(AgentError.RetrievalFailed("Profile publication evidence is required"))
+      _ <- ZIO
+        .fail(AgentError.RetrievalFailed("Invalid profile activation reason"))
+        .unless(reason.matches("[A-Za-z0-9._:-]{1,160}"))
+      revision <- withTransaction { connection =>
+        for
+          _          <- lockSpace(connection, tenantId, spaceId)
+          spaceState <- jdbc("read knowledge space activation state") {
+            val statement = connection.prepareStatement(
+              """SELECT active_profile_id, revision
+                |FROM zyblw_agent_knowledge.agent_knowledge_spaces
+                |WHERE tenant_id = ? AND knowledge_space_id = ?
+                |FOR UPDATE""".stripMargin
+            )
+            try
+              statement.setString(1, tenantId.value)
+              statement.setString(2, spaceId.value)
+              val rs = statement.executeQuery()
+              if !rs.next() then throw IllegalStateException("knowledge space does not exist")
+              Option(rs.getString(1)).filter(_.trim.nonEmpty).map(IndexProfileId(_)) -> rs.getLong(2)
+            finally statement.close()
+          }
+          (activeProfileId, actualRevision) = spaceState
+          _ <- ZIO
+            .fail(AgentError.RetrievalFailed("knowledge space profile CAS 失败"))
+            .unless(actualRevision == expectedRevision)
+          documents <- jdbc("read profile census") {
+            val statement = connection.prepareStatement(
+              s"$manifestSelect WHERE tenant_id = ? AND knowledge_space_id = ? AND profile_id = ? FOR UPDATE"
+            )
+            try
+              statement.setString(1, tenantId.value)
+              statement.setString(2, spaceId.value)
+              statement.setString(3, profileId.value)
+              val rs   = statement.executeQuery()
+              val rows = ChunkBuilder.make[KnowledgeIndexManifest]()
+              while rs.next() do rows += readManifest(rs)
+              rows.result()
+            finally statement.close()
+          }
+          _               <- ZIO.fromEither(gate.validate(documents))
+          activeDocuments <- activeProfileId match
+            case Some(activeId) if activeId != profileId =>
+              jdbc("read active profile census") {
+                val statement = connection.prepareStatement(
+                  s"""$manifestSelect
+                     |WHERE tenant_id = ? AND knowledge_space_id = ? AND profile_id = ?
+                     |  AND status = 'ready' AND active = TRUE
+                     |FOR UPDATE""".stripMargin
+                )
+                try
+                  statement.setString(1, tenantId.value)
+                  statement.setString(2, spaceId.value)
+                  statement.setString(3, activeId.value)
+                  val rs   = statement.executeQuery()
+                  val rows = ChunkBuilder.make[ProfileDocument]()
+                  while rs.next() do rows += ProfileDocument.fromManifest(readManifest(rs))
+                  rows.result()
+                finally statement.close()
+              }
+            case _ => ZIO.succeed(Chunk.empty)
+          _ <- ZIO
+            .fail(AgentError.RetrievalFailed("Target profile corpus does not match the active profile"))
+            .unless(
+              activeProfileId.forall(_ == profileId) ||
+                ProfilePublication.logicalCorpus(gate.documents) ==
+                ProfilePublication.logicalCorpus(activeDocuments)
+            )
+          next <- jdbc("activate evaluated profile CAS") {
+            val audit = connection.prepareStatement(
+              """INSERT INTO zyblw_agent_knowledge.agent_knowledge_profile_activation_audit
+                |(tenant_id, knowledge_space_id, old_profile_id, new_profile_id, expected_space_revision,
+                | reason, evaluation_id, evaluated_census_sha256, document_count)
+                |SELECT tenant_id, knowledge_space_id, active_profile_id, ?, revision, ?, ?, ?, ?
+                |FROM zyblw_agent_knowledge.agent_knowledge_spaces
+                |WHERE tenant_id = ? AND knowledge_space_id = ? AND revision = ?""".stripMargin
+            )
+            try
+              audit.setString(1, profileId.value)
+              audit.setString(2, reason)
+              audit.setString(3, gate.evaluationId)
+              audit.setString(4, gate.evaluatedCensusSha256)
+              audit.setInt(5, gate.documents.length)
+              audit.setString(6, tenantId.value)
+              audit.setString(7, spaceId.value)
+              audit.setLong(8, expectedRevision)
+              if audit.executeUpdate() != 1 then throw IllegalStateException("knowledge space profile CAS 失败")
+            finally audit.close()
+            activeProfileId.filter(_ != profileId).foreach { previous =>
+              val supersede = connection.prepareStatement(
+                """UPDATE zyblw_agent_knowledge.agent_knowledge_profiles
+                  |SET status = 'superseded'
+                  |WHERE tenant_id = ? AND knowledge_space_id = ? AND profile_id = ? AND status = 'active'""".stripMargin
+              )
+              try
+                supersede.setString(1, tenantId.value)
+                supersede.setString(2, spaceId.value)
+                supersede.setString(3, previous.value)
+                if supersede.executeUpdate() != 1 then
+                  throw IllegalStateException("Active profile state changed during cutover")
+              finally supersede.close()
+            }
+            val seal = connection.prepareStatement("""UPDATE zyblw_agent_knowledge.agent_knowledge_profiles
+                |SET status = 'active', ready_at = COALESCE(ready_at, now()), activated_at = now(),
+                |    publication_evaluation_id = ?, publication_census_sha256 = ?,
+                |    publication_document_count = ?, failure_code = NULL
+                |WHERE tenant_id = ? AND knowledge_space_id = ? AND profile_id = ?
+                |  AND status IN ('building','ready','active','superseded')""".stripMargin)
+            try
+              seal.setString(1, gate.evaluationId)
+              seal.setString(2, gate.evaluatedCensusSha256)
+              seal.setInt(3, gate.documents.length)
+              seal.setString(4, tenantId.value)
+              seal.setString(5, spaceId.value)
+              seal.setString(6, profileId.value)
+              if seal.executeUpdate() != 1 then throw IllegalStateException("Profile is not publishable")
+            finally seal.close()
+            val cas = connection.prepareStatement(
+              """UPDATE zyblw_agent_knowledge.agent_knowledge_spaces SET active_profile_id = ?, revision = revision + 1, updated_at = now()
+                |WHERE tenant_id = ? AND knowledge_space_id = ? AND revision = ?""".stripMargin
+            )
+            try
+              cas.setString(1, profileId.value)
+              cas.setString(2, tenantId.value)
+              cas.setString(3, spaceId.value)
+              cas.setLong(4, expectedRevision)
+              if cas.executeUpdate() != 1 then throw IllegalStateException("knowledge space profile CAS 失败")
+            finally cas.close()
+            expectedRevision + 1L
+          }
+        yield next
+      }
+    yield revision
+
+  private def lockSpace(
+      connection: Connection,
+      tenant: TenantId,
+      space: KnowledgeSpaceId
+  ): IO[RetrievalError, Unit] =
+    jdbc("lock knowledge space") {
+      val statement = connection.prepareStatement("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))")
+      try
+        statement.setString(1, s"knowledge-space:${tenant.value.length}:${tenant.value}:${space.value}")
+        statement.execute()
+        ()
+      finally statement.close()
+    }
 
   /** 在文档级 advisory lock 下校验 active 前置条件、计算下一版本并插入 Building manifest。 */
   private def createBuild(
@@ -252,39 +470,48 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
           )
         )
         .unless(matchesExpectation(request.expectation, current))
-      next <- nextVersion(connection, request.key)
+      next       <- nextVersion(connection, request.key)
+      assignment <- assignWriteProfile(connection, request)
       build = KnowledgeIndexBuild(
         request.key,
         next,
         request.ingestionId,
         request.contentHash,
         request.embedding,
-        request.indexingStrategy
+        request.indexingStrategy,
+        request.knowledgeSpaceId,
+        assignment.profileId,
+        assignment.cas
       )
       _ <- jdbc("insert manifest") {
         val statement = connection.prepareStatement(
-          """INSERT INTO zyblw_agent_knowledge.agent_knowledge_documents
-                 |(tenant_id, document_id, index_version, ingestion_id, source_uri, content_hash,
+          """INSERT INTO zyblw_agent_knowledge.agent_knowledge_profile_documents
+                 |(tenant_id, knowledge_space_id, profile_id, document_id, index_version, ingestion_id, source_uri, content_hash,
                  | permissions, metadata, embedding_provider, embedding_model, embedding_dimension,
                  | embedding_max_batch_size, embedding_supports_dimensions, indexing_strategy,
                  | status, active, chunk_count)
-                 |VALUES (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, 'building', FALSE, 0)""".stripMargin
+                 |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, 'building', FALSE, 0)""".stripMargin
         )
         try
           statement.setString(1, request.key.tenantId.value)
-          statement.setString(2, request.key.documentId)
-          statement.setLong(3, next)
-          statement.setString(4, request.ingestionId)
-          statement.setString(5, request.sourceUri)
-          statement.setString(6, request.contentHash)
-          statement.setArray(7, connection.createArrayOf("text", request.permissions.toArray))
-          statement.setString(8, request.metadata.toJson)
-          statement.setString(9, request.embedding.provider)
-          statement.setString(10, request.embedding.model)
-          statement.setInt(11, request.embedding.dimension)
-          statement.setInt(12, request.embedding.maxBatchSize)
-          statement.setBoolean(13, request.embedding.supportsDimensions)
-          statement.setString(14, request.indexingStrategy)
+          statement.setString(2, request.knowledgeSpaceId.value)
+          statement.setString(3, assignment.profileId.value)
+          statement.setString(4, request.key.documentId)
+          statement.setLong(5, next)
+          statement.setString(6, request.ingestionId)
+          statement.setString(7, request.sourceUri)
+          statement.setString(8, request.contentHash)
+          statement.setArray(9, connection.createArrayOf("text", request.permissions.toArray))
+          statement.setString(
+            10,
+            (request.metadata + ("ingest.casActiveProfile" -> assignment.cas.toString)).toJson
+          )
+          statement.setString(11, request.embedding.provider)
+          statement.setString(12, request.embedding.model)
+          statement.setInt(13, request.embedding.dimension)
+          statement.setInt(14, request.embedding.maxBatchSize)
+          statement.setBoolean(15, request.embedding.supportsDimensions)
+          statement.setString(16, request.indexingStrategy)
           statement.executeUpdate()
           ()
         finally statement.close()
@@ -308,39 +535,44 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
         .unless(count == expectedChunkCount)
       _ <- jdbc("supersede active manifest") {
         val statement = connection.prepareStatement(
-          """UPDATE zyblw_agent_knowledge.agent_knowledge_documents
+          """UPDATE zyblw_agent_knowledge.agent_knowledge_profile_documents
                  |SET status = 'superseded', active = FALSE, updated_at = now()
-                 |WHERE tenant_id = ? AND document_id = ? AND active = TRUE AND index_version <> ?""".stripMargin
+                 |WHERE tenant_id = ? AND document_id = ? AND active = TRUE AND index_version <> ? AND knowledge_space_id = ? AND profile_id = ?""".stripMargin
         )
         try
           statement.setString(1, build.key.tenantId.value)
           statement.setString(2, build.key.documentId)
           statement.setLong(3, build.version)
+          statement.setString(4, build.knowledgeSpaceId.value)
+          statement.setString(5, build.profileId.value)
           statement.executeUpdate()
           ()
         finally statement.close()
       }
       _ <- jdbc("delete old published chunks") {
         val statement = connection.prepareStatement(
-          "DELETE FROM zyblw_agent_knowledge.agent_knowledge_chunks WHERE tenant_id = ? AND document_id = ?"
+          """DELETE FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
+            |WHERE tenant_id = ? AND document_id = ? AND knowledge_space_id = ? AND profile_id = ?""".stripMargin
         )
         try
           statement.setString(1, build.key.tenantId.value)
           statement.setString(2, build.key.documentId)
+          statement.setString(3, build.knowledgeSpaceId.value)
+          statement.setString(4, build.profileId.value)
           statement.executeUpdate()
           ()
         finally statement.close()
       }
       _ <- jdbc("publish staged chunks") {
         val statement = connection.prepareStatement(
-          """INSERT INTO zyblw_agent_knowledge.agent_knowledge_chunks
-                 |(tenant_id, chunk_id, document_id, index_version, chunk_text, search_text,
+          """INSERT INTO zyblw_agent_knowledge.agent_knowledge_profile_chunks
+                 |(tenant_id, knowledge_space_id, profile_id, chunk_id, document_id, index_version, chunk_text, search_text,
                  | source_uri, permissions, metadata, embedding, parent_id, lineage_ordinal,
                  | previous_chunk_id, next_chunk_id, heading_path, page_numbers, origins, block_ids)
-                 |SELECT tenant_id, chunk_id, document_id, index_version, chunk_text, search_text,
+                 |SELECT tenant_id, knowledge_space_id, profile_id, chunk_id, document_id, index_version, chunk_text, search_text,
                  |       source_uri, permissions, metadata, embedding, parent_id, lineage_ordinal,
                  |       previous_chunk_id, next_chunk_id, heading_path, page_numbers, origins, block_ids
-                 |FROM zyblw_agent_knowledge.agent_knowledge_chunk_staging
+                 |FROM zyblw_agent_knowledge.agent_knowledge_profile_chunk_staging
                  |WHERE tenant_id = ? AND document_id = ? AND index_version = ?""".stripMargin
         )
         try
@@ -355,6 +587,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
       }
       _     <- updateStatus(connection, build, "ready", active = true, None, expectedChunkCount)
       _     <- clearStaging(connection, build)
+      _     <- ensureActiveProfile(connection, build)
       ready <- selectExact(connection, build, forUpdate = false).someOrFail(
         AgentError.RetrievalFailed("发布后 manifest 丢失")
       )
@@ -370,12 +603,14 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
     else
       jdbc("stage chunks") {
         val statement = connection.prepareStatement(
-          """INSERT INTO zyblw_agent_knowledge.agent_knowledge_chunk_staging
-          |(tenant_id, document_id, index_version, chunk_id, chunk_text, search_text,
+          """INSERT INTO zyblw_agent_knowledge.agent_knowledge_profile_chunk_staging
+          |(tenant_id, knowledge_space_id, profile_id, document_id, index_version, chunk_id, chunk_text, search_text,
           | source_uri, permissions, metadata, embedding, parent_id, lineage_ordinal,
           | previous_chunk_id, next_chunk_id, heading_path, page_numbers, origins, block_ids)
-          |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::public.vector, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+          |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::public.vector, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
           |ON CONFLICT (tenant_id, document_id, index_version, chunk_id) DO UPDATE SET
+          |knowledge_space_id = EXCLUDED.knowledge_space_id,
+          |profile_id = EXCLUDED.profile_id,
           |chunk_text = EXCLUDED.chunk_text,
           |search_text = EXCLUDED.search_text,
           |source_uri = EXCLUDED.source_uri,
@@ -396,16 +631,18 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
           chunks.foreach { indexed =>
             val chunk = indexed.chunk
             statement.setString(1, build.key.tenantId.value)
-            statement.setString(2, build.key.documentId)
-            statement.setLong(3, build.version)
-            statement.setString(4, chunk.id)
-            statement.setString(5, chunk.text)
-            statement.setString(6, chunk.searchText.getOrElse(chunk.text))
-            statement.setString(7, chunk.sourceUri)
-            statement.setArray(8, connection.createArrayOf("text", chunk.permissions.toArray))
-            statement.setString(9, chunk.metadata.toJson)
-            statement.setString(10, vectorLiteral(indexed.embedding))
-            bindLineage(statement, connection, 11, chunk.lineage)
+            statement.setString(2, build.knowledgeSpaceId.value)
+            statement.setString(3, build.profileId.value)
+            statement.setString(4, build.key.documentId)
+            statement.setLong(5, build.version)
+            statement.setString(6, chunk.id)
+            statement.setString(7, chunk.displayText)
+            statement.setString(8, chunk.searchText.getOrElse(chunk.displayText))
+            statement.setString(9, chunk.sourceUri)
+            statement.setArray(10, connection.createArrayOf("text", chunk.permissions.toArray))
+            statement.setString(11, chunk.metadata.toJson)
+            statement.setString(12, vectorLiteral(indexed.embedding))
+            bindLineage(statement, connection, 13, chunk.lineage)
             statement.addBatch()
           }
           statement.executeBatch()
@@ -422,7 +659,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
       val chunk = indexed.chunk
       chunk.tenantId != build.key.tenantId ||
       chunk.documentId != build.key.documentId ||
-      chunk.indexVersion != build.version ||
+      chunk.catalogVersion != build.version ||
       indexed.embedding.values.length != dimension
     } match
       case Some(value) =>
@@ -462,7 +699,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
   private def clearStaging(connection: Connection, build: KnowledgeIndexBuild): IO[RetrievalError, Unit] =
     jdbc("clear staging") {
       val statement = connection.prepareStatement(
-        "DELETE FROM zyblw_agent_knowledge.agent_knowledge_chunk_staging WHERE tenant_id = ? AND document_id = ? AND index_version = ?"
+        "DELETE FROM zyblw_agent_knowledge.agent_knowledge_profile_chunk_staging WHERE tenant_id = ? AND document_id = ? AND index_version = ?"
       )
       try
         statement.setString(1, build.key.tenantId.value)
@@ -483,7 +720,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
       chunkCount: Int = 0
   ): IO[RetrievalError, Unit] = jdbc("update manifest status") {
     val statement = connection.prepareStatement(
-      """UPDATE zyblw_agent_knowledge.agent_knowledge_documents
+      """UPDATE zyblw_agent_knowledge.agent_knowledge_profile_documents
         |SET status = ?, active = ?, failure_code = ?, chunk_count = ?, updated_at = now()
         |WHERE tenant_id = ? AND document_id = ? AND index_version = ?""".stripMargin
     )
@@ -504,7 +741,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
   private def touchBuild(connection: Connection, build: KnowledgeIndexBuild): IO[RetrievalError, Unit] =
     jdbc("touch build") {
       val statement = connection.prepareStatement(
-        """UPDATE zyblw_agent_knowledge.agent_knowledge_documents SET updated_at = now()
+        """UPDATE zyblw_agent_knowledge.agent_knowledge_profile_documents SET updated_at = now()
         |WHERE tenant_id = ? AND document_id = ? AND index_version = ? AND status = 'building'""".stripMargin
       )
       try
@@ -521,7 +758,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
   private def stagedCount(connection: Connection, build: KnowledgeIndexBuild): IO[RetrievalError, Int] =
     jdbc("count staging") {
       val statement = connection.prepareStatement(
-        """SELECT count(*) FROM zyblw_agent_knowledge.agent_knowledge_chunk_staging
+        """SELECT count(*) FROM zyblw_agent_knowledge.agent_knowledge_profile_chunk_staging
         |WHERE tenant_id = ? AND document_id = ? AND index_version = ?""".stripMargin
       )
       try
@@ -553,7 +790,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
   ): IO[RetrievalError, Option[Long]] =
     jdbc("select active version") {
       val statement = connection.prepareStatement(
-        "SELECT index_version FROM zyblw_agent_knowledge.agent_knowledge_documents WHERE tenant_id = ? AND document_id = ? AND active = TRUE"
+        "SELECT index_version FROM zyblw_agent_knowledge.agent_knowledge_profile_documents WHERE tenant_id = ? AND document_id = ? AND active = TRUE AND (knowledge_space_id, profile_id) IN (SELECT knowledge_space_id, active_profile_id FROM zyblw_agent_knowledge.agent_knowledge_spaces WHERE tenant_id = zyblw_agent_knowledge.agent_knowledge_profile_documents.tenant_id)"
       )
       try
         statement.setString(1, key.tenantId.value)
@@ -567,7 +804,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
   private def nextVersion(connection: Connection, key: KnowledgeDocumentKey): IO[RetrievalError, Long] =
     jdbc("next version") {
       val statement = connection.prepareStatement(
-        "SELECT COALESCE(max(index_version), 0) + 1 FROM zyblw_agent_knowledge.agent_knowledge_documents WHERE tenant_id = ? AND document_id = ?"
+        "SELECT COALESCE(max(index_version), 0) + 1 FROM zyblw_agent_knowledge.agent_knowledge_profile_documents WHERE tenant_id = ? AND document_id = ?"
       )
       try
         statement.setString(1, key.tenantId.value)
@@ -637,21 +874,29 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
     val lock = if forUpdate then " FOR UPDATE" else ""
     selectOne(
       connection,
-      s"$manifestSelect WHERE tenant_id = ? AND document_id = ? AND active = TRUE$lock",
+      s"$manifestSelect WHERE tenant_id = ? AND document_id = ? AND active = TRUE AND (knowledge_space_id, profile_id) IN (SELECT knowledge_space_id, active_profile_id FROM zyblw_agent_knowledge.agent_knowledge_spaces WHERE tenant_id = zyblw_agent_knowledge.agent_knowledge_profile_documents.tenant_id)$lock",
       statement =>
         statement.setString(1, key.tenantId.value)
         statement.setString(2, key.documentId)
     )
 
-  /** 删除某租户文档当前正式块；调用者已持有文档 advisory lock。 */
-  private def deletePublished(connection: Connection, key: KnowledgeDocumentKey): IO[RetrievalError, Unit] =
+  /** 删除某租户文档在当前 active Profile 中的正式块；调用者已持有文档 advisory lock。 */
+  private def deletePublished(
+      connection: Connection,
+      key: KnowledgeDocumentKey,
+      spaceId: KnowledgeSpaceId,
+      profileId: IndexProfileId
+  ): IO[RetrievalError, Unit] =
     jdbc("delete published chunks") {
       val statement = connection.prepareStatement(
-        "DELETE FROM zyblw_agent_knowledge.agent_knowledge_chunks WHERE tenant_id = ? AND document_id = ?"
+        """DELETE FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
+          |WHERE tenant_id = ? AND knowledge_space_id = ? AND profile_id = ? AND document_id = ?""".stripMargin
       )
       try
         statement.setString(1, key.tenantId.value)
-        statement.setString(2, key.documentId)
+        statement.setString(2, spaceId.value)
+        statement.setString(3, profileId.value)
+        statement.setString(4, key.documentId)
         statement.executeUpdate()
         ()
       finally statement.close()
@@ -677,19 +922,23 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
 
   /** 同 ingestionId 的所有不可变字段都必须一致。 */
   private def sameRequest(manifest: KnowledgeIndexManifest, request: BeginKnowledgeIndex): Boolean =
-    manifest.build.contentHash == request.contentHash &&
+    manifest.build.knowledgeSpaceId == request.knowledgeSpaceId &&
+      request.targetProfileId.forall(_ == manifest.build.profileId) &&
+      manifest.build.contentHash == request.contentHash &&
       manifest.build.embedding == request.embedding &&
       manifest.build.indexingStrategy == request.indexingStrategy &&
       manifest.sourceUri == request.sourceUri &&
       manifest.permissions == request.permissions &&
-      manifest.metadata == request.metadata
+      KnowledgeIndexer.requestMetadata(manifest.metadata) == KnowledgeIndexer.requestMetadata(
+        request.metadata
+      )
 
   /** 防止调用方用同版本号但不同内容伪造 build。 */
   private def ensureSameBuild(
       actual: KnowledgeIndexBuild,
       supplied: KnowledgeIndexBuild
   ): IO[RetrievalError, Unit] =
-    if actual == supplied then ZIO.unit
+    if actual.copy(casActiveProfile = supplied.casActiveProfile) == supplied then ZIO.unit
     else ZIO.fail(AgentError.RetrievalFailed("knowledge build 内容与存储不一致"))
 
   /** 校验 active 乐观前置条件。 */
@@ -698,6 +947,221 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
       case ActiveVersionExpectation.AnyVersion      => true
       case ActiveVersionExpectation.NoActiveVersion => active.isEmpty
       case ActiveVersionExpectation.Exact(version)  => active.contains(version)
+
+  final private case class WriteAssignment(profileId: IndexProfileId, cas: Boolean)
+
+  /** 按当前空间指针与 incoming identity 决定写入哪个 Profile。 */
+  private def assignWriteProfile(
+      connection: Connection,
+      request: BeginKnowledgeIndex
+  ): IO[RetrievalError, WriteAssignment] =
+    jdbc("assign write profile") {
+      val tenant   = request.key.tenantId.value
+      val spaceId  = request.knowledgeSpaceId.value
+      val incoming = DenseIndexIdentity(
+        request.embedding.provider,
+        request.embedding.model,
+        request.embedding.dimension
+      )
+      val space = connection.prepareStatement(
+        """INSERT INTO zyblw_agent_knowledge.agent_knowledge_spaces
+          |(tenant_id, knowledge_space_id, active_profile_id, revision)
+          |VALUES (?, ?, NULL, 0)
+          |ON CONFLICT (tenant_id, knowledge_space_id) DO NOTHING""".stripMargin
+      )
+      try
+        space.setString(1, tenant)
+        space.setString(2, spaceId)
+        space.executeUpdate()
+      finally space.close()
+      val lookup = connection.prepareStatement(
+        """SELECT s.active_profile_id, p.embedding_provider, p.embedding_model, p.embedding_dimension,
+          |       p.chunking_strategy_id
+          |FROM zyblw_agent_knowledge.agent_knowledge_spaces s
+          |LEFT JOIN zyblw_agent_knowledge.agent_knowledge_profiles p
+          |  ON p.tenant_id = s.tenant_id AND p.knowledge_space_id = s.knowledge_space_id
+          | AND p.profile_id = s.active_profile_id
+          |WHERE s.tenant_id = ? AND s.knowledge_space_id = ?""".stripMargin
+      )
+      val active =
+        try
+          lookup.setString(1, tenant)
+          lookup.setString(2, spaceId)
+          val result = lookup.executeQuery()
+          try
+            if result.next() then
+              Option(result.getString(1)).filter(_.trim.nonEmpty).map { id =>
+                val identity =
+                  if result.getString(2) != null then
+                    DenseIndexIdentity(result.getString(2), result.getString(3), result.getInt(4))
+                  else incoming
+                (IndexProfileId(id), identity, result.getString(5))
+              }
+            else None
+          finally result.close()
+        finally lookup.close()
+      val plan = request.targetProfileId match
+        case Some(forced) if active.isEmpty => ProfileWritePlan.CreateAndActivate(forced)
+        case Some(forced) if active.exists(_._1.value == forced.value) =>
+          ProfileWritePlan.UseActive(forced)
+        case Some(forced) => ProfileWritePlan.BuildParallel(forced)
+        case None         => ProfileWritePlan.decide(active, incoming, request.indexingStrategy)
+      val write = plan match
+        case ProfileWritePlan.CreateAndActivate(id) => WriteAssignment(id, cas = true)
+        case ProfileWritePlan.UseActive(id)         => WriteAssignment(id, cas = false)
+        case ProfileWritePlan.BuildParallel(id)     => WriteAssignment(id, cas = false)
+      val guard = connection.prepareStatement(
+        """SELECT status, embedding_provider, embedding_model, embedding_dimension, chunking_strategy_id,
+          |       publication_census_sha256
+          |FROM zyblw_agent_knowledge.agent_knowledge_profiles WHERE tenant_id = ? AND knowledge_space_id = ? AND profile_id = ?""".stripMargin
+      )
+      try
+        guard.setString(1, tenant)
+        guard.setString(2, spaceId)
+        guard.setString(3, write.profileId.value)
+        val rs = guard.executeQuery()
+        if rs.next() then
+          if Set("superseded", "failed", "retired", "cancelled").contains(rs.getString(1)) then
+            throw IllegalStateException("Inactive profile is sealed; build a new target profile")
+          if rs.getString(6) != null then
+            throw IllegalStateException("Published profile is sealed; build a new target profile")
+          if rs.getString(2) != incoming.provider || rs.getString(3) != incoming.model ||
+            rs.getInt(4) != incoming.dimension || rs.getString(5) != request.indexingStrategy
+          then throw IllegalStateException("Profile identity drift; build a new target profile")
+      finally guard.close()
+      val nextProfileVersion = {
+        val versions = connection.prepareStatement(
+          """SELECT COALESCE(MAX(profile_version), 0) + 1
+            |FROM zyblw_agent_knowledge.agent_knowledge_profiles
+            |WHERE tenant_id = ? AND knowledge_space_id = ?""".stripMargin
+        )
+        try
+          versions.setString(1, tenant)
+          versions.setString(2, spaceId)
+          val result = versions.executeQuery()
+          try
+            result.next()
+            result.getLong(1)
+          finally result.close()
+        finally versions.close()
+      }
+      val upsertProfile = connection.prepareStatement(
+        """INSERT INTO zyblw_agent_knowledge.agent_knowledge_profiles
+          |(tenant_id, knowledge_space_id, profile_id, profile_version, status,
+          | embedding_provider, embedding_model, embedding_dimension, embedding_max_batch_size,
+          | embedding_supports_dimensions, chunking_strategy_id)
+          |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          |ON CONFLICT (tenant_id, knowledge_space_id, profile_id) DO NOTHING""".stripMargin
+      )
+      try
+        upsertProfile.setString(1, tenant)
+        upsertProfile.setString(2, spaceId)
+        upsertProfile.setString(3, write.profileId.value)
+        upsertProfile.setLong(4, nextProfileVersion)
+        upsertProfile.setString(5, "building")
+        upsertProfile.setString(6, request.embedding.provider)
+        upsertProfile.setString(7, request.embedding.model)
+        upsertProfile.setInt(8, request.embedding.dimension)
+        upsertProfile.setInt(9, request.embedding.maxBatchSize)
+        upsertProfile.setBoolean(10, request.embedding.supportsDimensions)
+        upsertProfile.setString(11, request.indexingStrategy)
+        upsertProfile.executeUpdate()
+      finally upsertProfile.close()
+      write
+    }
+
+  /** 首次发布时原子激活 Profile；普通 active Profile 文档更新和并行 building Profile 均不改指针。 */
+  private def ensureActiveProfile(
+      connection: Connection,
+      build: KnowledgeIndexBuild
+  ): IO[RetrievalError, Unit] =
+    jdbc("ensure active profile") {
+      val tenant    = build.key.tenantId.value
+      val spaceId   = build.knowledgeSpaceId.value
+      val profile   = build.profileId.value
+      val shouldCas = {
+        val lookup = connection.prepareStatement(
+          """SELECT active_profile_id FROM zyblw_agent_knowledge.agent_knowledge_spaces
+            |WHERE tenant_id = ? AND knowledge_space_id = ?""".stripMargin
+        )
+        try
+          lookup.setString(1, tenant)
+          lookup.setString(2, spaceId)
+          val result = lookup.executeQuery()
+          try !result.next() || Option(result.getString(1)).forall(_.trim.isEmpty)
+          finally result.close()
+        finally lookup.close()
+      }
+      if shouldCas || build.casActiveProfile then
+        val activate = connection.prepareStatement(
+          """UPDATE zyblw_agent_knowledge.agent_knowledge_profiles
+            |SET status = 'active', ready_at = COALESCE(ready_at, now()), activated_at = COALESCE(activated_at, now())
+            |WHERE tenant_id = ? AND knowledge_space_id = ? AND profile_id = ? AND status = 'building'""".stripMargin
+        )
+        try
+          activate.setString(1, tenant)
+          activate.setString(2, spaceId)
+          activate.setString(3, profile)
+          if activate.executeUpdate() != 1 then
+            throw IllegalStateException("Initial profile is not publishable")
+        finally activate.close()
+        val cas = connection.prepareStatement(
+          """UPDATE zyblw_agent_knowledge.agent_knowledge_spaces
+            |SET active_profile_id = ?, revision = revision + 1, updated_at = now()
+            |WHERE tenant_id = ? AND knowledge_space_id = ?
+            |  AND (active_profile_id IS NULL OR active_profile_id = ?)""".stripMargin
+        )
+        try
+          cas.setString(1, profile)
+          cas.setString(2, tenant)
+          cas.setString(3, spaceId)
+          cas.setString(4, profile)
+          val updated = cas.executeUpdate()
+          if updated == 1 then
+            val audit = connection.prepareStatement(
+              """INSERT INTO zyblw_agent_knowledge.agent_knowledge_profile_activation_audit
+                |(tenant_id, knowledge_space_id, old_profile_id, new_profile_id, expected_space_revision, reason)
+                |VALUES (?, ?, NULL, ?, 0, 'ingest-activate')""".stripMargin
+            )
+            try
+              audit.setString(1, tenant)
+              audit.setString(2, spaceId)
+              audit.setString(3, profile)
+              audit.executeUpdate()
+              ()
+            finally audit.close()
+        finally cas.close()
+    }
+
+  override def withdraw(
+      key: KnowledgeDocumentKey,
+      documentRevisionId: String
+  ): IO[RetrievalError, Unit] =
+    withTransaction { connection =>
+      jdbc("withdraw document") {
+        val tombstone = connection.prepareStatement(
+          """INSERT INTO zyblw_agent_knowledge.agent_knowledge_withdrawn
+            |(tenant_id, knowledge_space_id, document_id, document_revision_id)
+            |VALUES (?, 'default', ?, ?)
+            |ON CONFLICT DO NOTHING""".stripMargin
+        )
+        try
+          tombstone.setString(1, key.tenantId.value)
+          tombstone.setString(2, key.documentId)
+          tombstone.setString(3, Option(documentRevisionId).filter(_.nonEmpty).getOrElse("*"))
+          tombstone.executeUpdate()
+        finally tombstone.close()
+        val hide = connection.prepareStatement(
+          "UPDATE zyblw_agent_knowledge.agent_knowledge_profile_documents SET active = FALSE, status = 'retired', updated_at = now() WHERE tenant_id = ? AND document_id = ? AND active = TRUE AND (knowledge_space_id, profile_id) IN (SELECT knowledge_space_id, active_profile_id FROM zyblw_agent_knowledge.agent_knowledge_spaces WHERE tenant_id = zyblw_agent_knowledge.agent_knowledge_profile_documents.tenant_id)"
+        )
+        try
+          hide.setString(1, key.tenantId.value)
+          hide.setString(2, key.documentId)
+          hide.executeUpdate()
+          ()
+        finally hide.close()
+      }
+    }
 
   /** 将 Float 向量编码为 pgvector 的受控文本输入格式。 */
   private def vectorLiteral(embedding: Embedding): String = embedding.values.mkString("[", ",", "]")
@@ -756,8 +1220,9 @@ private object KnowledgeManifestRow:
     """SELECT tenant_id, document_id, index_version, ingestion_id, source_uri, content_hash,
       |       permissions, metadata::text, embedding_provider, embedding_model, embedding_dimension,
       |       embedding_max_batch_size, embedding_supports_dimensions, indexing_strategy,
-      |       status, active, chunk_count, failure_code, created_at, updated_at
-      |FROM zyblw_agent_knowledge.agent_knowledge_documents""".stripMargin
+      |       status, active, chunk_count, failure_code, created_at, updated_at,
+      |       knowledge_space_id, profile_id
+      |FROM zyblw_agent_knowledge.agent_knowledge_profile_documents""".stripMargin
 
   /** 08/40/53 与数据库重启 SQLSTATE 可重试；约束和协议错误保持不可重试。 */
   def databaseError(operation: String, error: Throwable): RetrievalError =
@@ -778,23 +1243,30 @@ private object KnowledgeManifestRow:
       result.getInt(12),
       result.getBoolean(13)
     )
-    val build = KnowledgeIndexBuild(
-      key,
-      result.getLong(3),
-      result.getString(4),
-      result.getString(6),
-      descriptor,
-      result.getString(14)
-    )
-    val permissions = result.getArray(7).getArray.asInstanceOf[Array[AnyRef]].iterator.map(_.toString).toSet
-    val metadata    = result
+    val metadata = result
       .getString(8)
       .fromJson[Map[String, String]]
       .fold(
         error => throw IllegalStateException(s"knowledge manifest metadata 解码失败: $error"),
         identity
       )
-    val status = result.getString(15) match
+    val checkpoint = metadata
+      .get("ingest.checkpoint")
+      .flatMap(name => IngestCheckpoint.values.find(_.toString == name))
+      .getOrElse(IngestCheckpoint.Resolved)
+    val build = KnowledgeIndexBuild(
+      key,
+      result.getLong(3),
+      result.getString(4),
+      result.getString(6),
+      descriptor,
+      result.getString(14),
+      KnowledgeSpaceId(Option(result.getString(21)).filter(_.nonEmpty).getOrElse("default")),
+      IndexProfileId(Option(result.getString(22)).filter(_.nonEmpty).getOrElse("default")),
+      casActiveProfile = metadata.get("ingest.casActiveProfile").contains("true")
+    )
+    val permissions = result.getArray(7).getArray.asInstanceOf[Array[AnyRef]].iterator.map(_.toString).toSet
+    val status      = result.getString(15) match
       case "building"   => KnowledgeIndexStatus.Building
       case "ready"      => KnowledgeIndexStatus.Ready
       case "superseded" => KnowledgeIndexStatus.Superseded
@@ -811,7 +1283,8 @@ private object KnowledgeManifestRow:
       result.getInt(17),
       Option(result.getString(18)),
       result.getTimestamp(19).toInstant,
-      result.getTimestamp(20).toInstant
+      result.getTimestamp(20).toInstant,
+      checkpoint
     )
 
 /** 知识索引清单目录的 PostgreSQL 实现。

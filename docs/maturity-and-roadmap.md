@@ -1,7 +1,7 @@
 # zyblw-agent 成熟度、取舍与路线
 
 > 状态：路线图
-> 最后核验：2026-08-22
+> 最后核验：2026-09-10
 > 事实来源：`build.sbt`、模块源码、测试、发布工作流、迁移与当前文档
 
 ## 成熟度语义
@@ -34,7 +34,7 @@
 | Artifact | core / `artifacts`；postgres | Beta | session/user 隔离、不可变版本、容量与 metadata 限制；内存与 `PostgresArtifactStore`（V011）共用删除/过期/审计 conformance；Goal/Plan/Todo 保存有界 typed reference，Context 不加载正文；`ImageArtifact` + tenant grant | 真实对象存储 Adapter、线上保留期与容量演练 |
 | 模型辅助压缩 | core / `context.llm` | Beta | evidence 校验和 eval | 多 Provider 质量/成本基线 |
 | Memory | core / `memory`,`memory.llm` | Beta | Store/SPI 与治理设计 | 用户查看/删除 UX、长期质量 |
-| RAG | rag、document-loaders、rerank | Beta | `RagApplication`、目录 Source、`loadById` 重建、Docling Markdown+JSON、提取质量门禁、Tika→OCR→VLM 级联、可选逐页视觉转录（JPEG 经 Artifact 绑定）、page/bbox lineage、cl100k 结构切分、版本摄取、hybrid/vector/lexical/phrase + ACL 后过滤、rerank/谱系扩展、state v7 citation、稳定 `/api/v1/knowledge/**`、`KnowledgeQaHost`、book-corpus eval；OCR 抽出注入按检索资料拦截 | 真实 Tesseract/Docling smoke、对象存储 Source resolver、容量与线上质量 |
+| RAG | rag、document-loaders、rerank | Beta | `RagApplication`、宿主 Source resolver、稳定幂等重建、Docling Markdown+JSON、提取质量门禁、Tika→OCR→VLM 级联、可选逐页视觉转录（JPEG 经 Artifact 绑定）、page/bbox lineage、cl100k 结构切分、hybrid/vector/lexical/phrase + ACL 前置过滤、rerank/谱系扩展、完整评测 census + Space CAS Profile 切换/回滚、EvidenceBundle 到工具/管理 API/Inspector、阶段 span、state v7 citation、稳定 `/api/v1/knowledge/**`、`KnowledgeQaHost`、book-corpus eval；OCR 抽出注入按检索资料拦截 | 真实 Tesseract/Docling smoke、100–300 条领域金标与人工校准、容量/故障/线上质量和 SLO |
 | PostgreSQL | postgres | Beta | Testcontainers、迁移、并发、连接耗尽、pause/recover、command/Workflow 同实例 restart、Worker JVM `SIGKILL` 恢复、pg_dump/restore | 大库升级、主备切换、节点级故障、性能/RTO |
 | OpenAI-compatible | providers / `integrations.openai` | Beta | stream/tool/error stub 与 smoke | 长期真实 Provider 观测 |
 | Anthropic/Gemini | providers / 对应 package | Beta | Provider contract tests | zyblw QA 业务尚未启用 |

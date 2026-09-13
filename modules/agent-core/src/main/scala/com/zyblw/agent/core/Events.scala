@@ -107,5 +107,7 @@ final case class TelemetryEvent(
     /** 持续时间 observation 的开始时间。None 表示离散事件；Some 时 exporter 以该时间开始、以 atEpochMilli 结束。
       * 该字段只保存运行时钟，不保存业务正文，也不承担崩溃恢复职责。
       */
-    startedAtEpochMilli: Option[Long] = None
+    startedAtEpochMilli: Option[Long] = None,
+    spanId: Option[String] = None,
+    parentSpanId: Option[String] = None
 ) derives JsonCodec

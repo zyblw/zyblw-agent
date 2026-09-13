@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-22
+> 最后核验：2026-09-05
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -10,14 +10,14 @@
 
 `ChatModel` 提供 `complete`、`stream` 和 `capabilities`。流式结束必须产生 `ModelStreamEvent.Completed`；否则 runtime 以类型化错误失败。
 
-| 能力 | OpenAI Responses | Anthropic Messages | OpenAI-compatible | DeepSeek 档案 | GLM 档案 |
-|---|---:|---:|---:|---:|---:|
-| Tool Calling | 是 | 是 | 是 | 是 | 是 |
-| Strict Tool Schema | 是 | 否 | 是 | 否 | 否 |
-| 指定单个 Tool Choice | 是 | 是 | 是 | 否 | 仅 auto |
-| Developer role | 原生 | 合并到顶层 system | 原生 | 映射 system | 映射 system |
-| 推理状态回放 | 原始 output items | content blocks/signature | `reasoning_content` | `reasoning_content` | 依模型能力 |
-| SSE streaming | typed event | typed event | choices/delta | choices/delta | choices/delta |
+| 能力 | OpenAI Responses | Anthropic Messages | OpenAI-compatible | DeepSeek 档案 | GLM 档案 | Qwen 档案 |
+|---|---:|---:|---:|---:|---:|---:|
+| Tool Calling | 是 | 是 | 是 | 是 | 是 | 是 |
+| Strict Tool Schema | 是 | 否 | 是 | 否 | 否 | 否 |
+| 指定单个 Tool Choice | 是 | 是 | 是 | 否 | 仅 auto | 是 |
+| Developer role | 原生 | 合并到顶层 system | 原生 | 映射 system | 映射 system | 映射 system |
+| 推理状态回放 | 原始 output items | content blocks/signature | `reasoning_content` | `reasoning_content` | 依模型能力 | 依模型能力 |
+| SSE streaming | typed event | typed event | choices/delta | choices/delta | choices/delta | choices/delta |
 
 能力表是配置基线，具体模型仍可通过 `ProviderDescriptor.models` 覆盖。
 
@@ -27,8 +27,9 @@
 val configs = for
   deepSeek <- ProviderPresets.deepSeekFromEnvironment
   glm      <- ProviderPresets.glmFromEnvironment
+  qwen     <- ProviderPresets.qwenFromEnvironment
   openAI   <- ProviderPresets.openAIFromEnvironment
-yield List(deepSeek, glm, openAI)
+yield List(deepSeek, glm, qwen, openAI)
 
 val layer = configs.map(MultiProviderChatModel.layer("deepseek", _))
 ```
@@ -70,11 +71,16 @@ GLM、OpenAI Chat/Responses、Anthropic、Gemini 的统一 CLI，并提供 Memor
 | OpenAI Responses | `OpenAIResponsesConfig.fromEnvironment` | `OPENAI_API_KEY`、`OPENAI_MODEL` |
 | DeepSeek | `ProviderPresets.deepSeekFromEnvironment` | `DEEPSEEK_API_KEY` |
 | GLM | `ProviderPresets.glmFromEnvironment` | `GLM_API_KEY` |
+| Qwen | `ProviderPresets.qwenFromEnvironment` | `QWEN_API_KEY`、`QWEN_BASE_URL`、`QWEN_MODEL` |
 | Anthropic Messages | `AnthropicMessagesConfig.fromEnvironment` | `ANTHROPIC_API_KEY`、`ANTHROPIC_MODEL` |
 | Gemini Interactions | `GeminiInteractionsConfig.fromEnvironment` | `GEMINI_API_KEY`、`GEMINI_MODEL` |
 
 模型、base URL、协议版本和 timeout 的完整默认值见 `.env.example`。厂商模型 ID 会变化，因此示例默认值只代表部署配置
 占位，不是框架对“最新模型”的永久承诺。
+
+Qwen 不提供编译期默认模型或默认区域端点。部署必须让 `QWEN_BASE_URL` 与 API Key 的 Model Studio 区域保持一致，并通过
+`QWEN_MODEL` 明确选择已开通的模型。其一级兼容档案声明 tool calling、完整 tool choice、streaming 和 usage；视觉与思考能力应在多端点
+模型清单中逐模型声明并经真实 smoke 验证。
 
 ## 中转站与多端点
 
@@ -152,7 +158,7 @@ val prices = ModelPriceBook.of(
 
 ## Embedding Provider
 
-Embedding 使用独立 `EmbeddingService`，不会和 `ChatModel` 共用一份模糊能力声明。真实 Adapter 通过
+Embedding 使用独立 `EmbeddingModel`，不会和 `ChatModel` 共用一份模糊能力声明。真实 Adapter 通过
 `EmbeddingProviderDescriptor(provider, model, dimension, maxBatchSize, supportsDimensions)` 固化索引契约：
 
 ```scala

@@ -393,13 +393,22 @@ final class AgentRuntimeLive(
       allowed = agent.allowedTools.map(ToolName(_))
       definitions <- registry.definitions(allowed)
       // 每个调用捕获一次 live 工作点并与创建时组合比较；同一份值随后用于能力校验、账本和 dispatch，消除检查后再次读取造成的漂移窗口。
-      settings <- effectiveModelSettings(contextState, agent)
-      request = ChatRequest(prepared.messages, definitions, settings)
-      capabilities <- model.capabilities(settings.model)
-      _            <- CapabilityValidator.validate(request, capabilities)
-      startedAt    <- Clock.currentTime(TimeUnit.MILLISECONDS)
-      resolvedProvider = settings.provider.getOrElse(model.provider)
-      resolvedModel    = settings.model.getOrElse("default")
+      prices = modelPolicies.prices
+      settings <- effectiveModelSettings(contextState, agent, prices)
+      routed   <- routeModel(
+        contextState,
+        ChatRequest(prepared.messages, definitions, settings),
+        prepared.usage.estimatedTokens + (if definitions.nonEmpty then agent.contextPolicy.budget.tools
+                                          else 0L),
+        prices
+      )
+      (request, selectedAdapter, routeDecision) = routed
+      _ <- ZIO.when(routeDecision.isEmpty)(
+        selectedAdapter.capabilities(request.settings.model).flatMap(CapabilityValidator.validate(request, _))
+      )
+      startedAt <- Clock.currentTime(TimeUnit.MILLISECONDS)
+      resolvedProvider = request.settings.provider.getOrElse(model.provider)
+      resolvedModel    = request.settings.model.getOrElse("default")
       _          <- emit(AgentEvent.StepStarted(contextState.runId, contextState.budget.steps + 1, startedAt))
       dispatched <- persistAndInvokeModel(
         contextState,
@@ -408,7 +417,9 @@ final class AgentRuntimeLive(
         request,
         resolvedProvider,
         resolvedModel,
-        startedAt
+        startedAt,
+        selectedAdapter,
+        routeDecision
       )
       (invokedState, response, modelRecord) = dispatched
       _ <- ZIO
@@ -417,7 +428,7 @@ final class AgentRuntimeLive(
       now <- Clock.instant
       step = AgentStep.ModelStep(
         invokedState.steps.length + 1,
-        model.provider,
+        resolvedProvider,
         resolvedModel,
         response.usage,
         response.finishReason,
@@ -425,11 +436,13 @@ final class AgentRuntimeLive(
       )
       // 用实际路由到的 provider/model 查价，而不是 ChatModel.provider——后者在多 Provider 部署里是 "router"，
       // 拿它查价会永远查不到条目，让成本看板静默停留在零。
-      usage = invokedState.usage.addModel(
+      usageBase =
+        if routeDecision.nonEmpty then invokedState.usage.copy(modelCalls = invokedState.usage.modelCalls - 1)
+        else invokedState.usage
+      usage = usageBase.addModel(
         response.usage,
-        modelPolicies.prices.estimate(resolvedProvider, resolvedModel, response.usage)
+        prices.estimate(resolvedProvider, resolvedModel, response.usage)
       )
-      _ <- ensureUsageBudget(invokedState.budget.limits, usage)
       _ <- ZIO
         .fail(AgentError.BudgetExceeded("toolCalls", invokedState.budget.limits.maxToolCalls))
         .when(usage.toolCalls + response.message.toolCalls.length > invokedState.budget.limits.maxToolCalls)
@@ -469,10 +482,92 @@ final class AgentRuntimeLive(
       }
       updated <- saveEvents(invokedState, updated0, events, settled)
       _       <- emit(AgentEvent.UsageUpdated(contextState.runId, usage, now.toEpochMilli))
+      _       <- ensureUsageBudget(updated.budget.limits, usage)
       outcome <-
         if response.message.toolCalls.isEmpty then complete(updated, response.message)
         else processToolPlan(updated)
     yield outcome
+
+  /** 路由只准备单次调用；账本和结算仍由当前 Runtime 的同一事务控制。 */
+  private def routeModel(
+      state: AgentState,
+      request: ChatRequest,
+      estimatedInputTokens: Long,
+      prices: ModelPriceBook
+  ): IO[AgentError, (ChatRequest, ChatModel, Option[RouteDecision])] =
+    profile.modelRouting match
+      case None =>
+        ZIO
+          .fail(AgentError.InvalidConfiguration("ModelRequirement 需要显式启用 modelRouting"))
+          .when(request.settings.requirement.nonEmpty)
+          .as((request, model, None))
+      case Some(policy) =>
+        val declared    = request.settings.requirement.getOrElse(ModelRequirement())
+        val requirement = declared.copy(sensitivity =
+          if declared.sensitivity.ordinal >= policy.sensitivityFloor.ordinal then declared.sensitivity
+          else policy.sensitivityFloor
+        )
+        val explicit   = request.settings.provider.nonEmpty || request.settings.model.nonEmpty
+        val candidates =
+          if explicit then
+            policy.candidates.filter(c =>
+              request.settings.provider.contains(c.ref.provider) && request.settings.model
+                .contains(c.ref.model)
+            )
+          else policy.candidates.filter(_.profiles.contains(requirement.profile))
+        val output = request.settings.maxOutputTokens.getOrElse(policy.defaultMaxOutputTokens)
+        for
+          agent <- definition(state)
+          _     <- ZIO
+            .fail(AgentError.InvalidConfiguration("候选路由第一版要求 FullSnapshot 上下文"))
+            .when(agent.contextPolicy.worldStateDelivery != WorldStateDelivery.FullSnapshot)
+          _ <- ZIO
+            .fail(AgentError.InvalidConfiguration("Provider 原生选项要求显式 provider/model"))
+            .when(!explicit && request.settings.providerOptions.nonEmpty)
+          _ <- ZIO
+            .fail(AgentError.InvalidConfiguration("路由要求显式 provider/model 成对出现且在候选目录中注册"))
+            .when(explicit && candidates.isEmpty)
+          evaluated <- ZIO.foreach(candidates) { candidate =>
+            val next = request.copy(settings =
+              request.settings.copy(
+                provider = Some(candidate.ref.provider),
+                model = Some(candidate.ref.model),
+                maxOutputTokens = Some(output)
+              )
+            )
+            for
+              adapter <- ZIO.fromEither(ModelRouter.adapter(model, candidate.ref))
+              caps    <- adapter.capabilities(Some(candidate.ref.model))
+              codes = ModelRouter.rejectionCodes(
+                candidate,
+                requirement,
+                next,
+                caps,
+                estimatedInputTokens,
+                state.budget,
+                prices.price(candidate.ref.provider, candidate.ref.model)
+              )
+            yield (ModelCandidateDecision(candidate.ref, codes), adapter, next)
+          }
+          selected <- ZIO.fromEither(ModelRouter.select(evaluated.map(_._1), state.budget.limits))
+          chosen   <- ZIO
+            .fromOption(evaluated.find(_._1.ref == selected))
+            .orElseFail(AgentError.InvalidConfiguration("路由选中项不在冻结候选中"))
+          price    = prices.price(selected.provider, selected.model)
+          decision = RouteDecision(
+            requirement,
+            selected,
+            policy.version,
+            policy.fingerprint,
+            evaluated.map(_._1),
+            explicit,
+            estimatedInputTokens,
+            output,
+            prices.fingerprint,
+            price,
+            price.map(_.estimate(TokenUsage(estimatedInputTokens, output.toLong)))
+          )
+        yield (chosen._3, chosen._2, Some(decision))
 
   /** TX1 持久化 Intent，再按 CapturePolicy 重建请求并调用 Provider。Disabled 保持 0.6.2 的即时调用。 */
   private def persistAndInvokeModel(
@@ -482,12 +577,17 @@ final class AgentRuntimeLive(
       request: ChatRequest,
       provider: String,
       modelName: String,
-      startedAt: Long
+      startedAt: Long,
+      selectedAdapter: ChatModel,
+      routeDecision: Option[RouteDecision]
   ): IO[AgentError, (AgentState, ChatResponse, Option[ModelCallExecutionRecord])] =
-    capturePolicy match
+    val effectiveCapture =
+      if routeDecision.nonEmpty && capturePolicy == CapturePolicy.Disabled then CapturePolicy.MetadataOnly
+      else capturePolicy
+    effectiveCapture match
       case CapturePolicy.Disabled =>
         emit(AgentEvent.ModelCallStarted(state.runId, provider, modelName, startedAt)) *>
-          invokeModel(state, request).map(response => (state, response, None))
+          invokeModel(state, request, selectedAdapter).map(response => (state, response, None))
       case policy =>
         for
           requestId <- ModelRequestId.random
@@ -525,7 +625,8 @@ final class AgentRuntimeLive(
             lineage = lineage,
             instructionFingerprint = instructionFp,
             canonicalRequest = Option.when(policy == CapturePolicy.Replayable)(canonical),
-            updatedAtEpochMilli = now
+            updatedAtEpochMilli = now,
+            routeDecision = routeDecision
           )
           pending       = PendingModelCall(requestId, 1, fingerprint, policy, provider, modelName)
           preparedEvent = AgentEvent.ModelCallPrepared(
@@ -539,9 +640,14 @@ final class AgentRuntimeLive(
             request.tools.length,
             now
           )
+          dispatchedUsage =
+            if routeDecision.nonEmpty then state.usage.copy(modelCalls = state.usage.modelCalls + 1)
+            else state.usage
           intentState <- saveEvents(
             state,
             state.copy(
+              usage = dispatchedUsage,
+              budget = state.budget.copy(consumed = dispatchedUsage),
               pendingModelCall = Some(pending),
               updatedAt = java.time.Instant.ofEpochMilli(now)
             ),
@@ -555,7 +661,7 @@ final class AgentRuntimeLive(
                 .fromEither(record.toChatRequest)
                 .mapError(message => AgentError.InvalidConfiguration(message))
             else ZIO.succeed(request)
-          response <- invokeModel(intentState, dispatch).catchAllCause { cause =>
+          response <- invokeModel(intentState, dispatch, selectedAdapter).catchAllCause { cause =>
             settleInterruptedModelCall(intentState, record, cause).uninterruptible *> ZIO.failCause(cause)
           }
         yield (intentState, response, Some(record))
@@ -568,9 +674,11 @@ final class AgentRuntimeLive(
   ): IO[AgentError, Unit] =
     Clock.currentTime(TimeUnit.MILLISECONDS).flatMap { now =>
       val interrupted = cause.isInterrupted
-      val status      = if interrupted then ModelCallStatus.Unknown else ModelCallStatus.Failed
-      val category    = cause.failureOption.map(_.category.toString)
-      val next        = record.copy(
+      val status      =
+        if interrupted || record.routeDecision.nonEmpty then ModelCallStatus.Unknown
+        else ModelCallStatus.Failed
+      val category = cause.failureOption.map(_.category.toString)
+      val next     = record.copy(
         status = status,
         errorCategory = category,
         updatedAtEpochMilli = now
@@ -1364,12 +1472,13 @@ final class AgentRuntimeLive(
           openUncertainModelCall(calls) match
             case Some(record) => recoverUncertainModelCall(state, pendingFrom(record))
             case None         =>
-              state.pendingToolPlan match
-                case Some(_) => recoverToolPlan(state)
-                case None    =>
-                  settledFinalAnswer(state) match
-                    case Some(answer) => complete(state, answer)
-                    case None         => loop(state)
+              ensureUsageBudget(state.budget.limits, state.usage).tapError(markFailed(state.runId, _)) *>
+                (state.pendingToolPlan match
+                  case Some(_) => recoverToolPlan(state)
+                  case None    =>
+                    settledFinalAnswer(state) match
+                      case Some(answer) => complete(state, answer)
+                      case None         => loop(state))
         }
 
   /** 在门禁、审批或副作用之前核对计划创建时冻结的工具契约。
@@ -1659,7 +1768,7 @@ final class AgentRuntimeLive(
         current,
         current.copy(status = status, updatedAt = now),
         event
-      ).when(settledFinalAnswer(current).isEmpty)
+      ).when(settledFinalAnswer(current).isEmpty || error.isInstanceOf[AgentError.BudgetExceeded])
     yield ()).ignore
 
   /** 消费 Provider 的语义流并实时转发安全增量。
@@ -1672,10 +1781,14 @@ final class AgentRuntimeLive(
     * @param request
     *   已经过上下文构建和能力校验的模型请求
     */
-  private def invokeModel(state: AgentState, request: ChatRequest): IO[AgentError, ChatResponse] =
+  private def invokeModel(
+      state: AgentState,
+      request: ChatRequest,
+      selectedAdapter: ChatModel
+  ): IO[AgentError, ChatResponse] =
     for
       completed <- Ref.make(Option.empty[ChatResponse])
-      _         <- model
+      _         <- selectedAdapter
         .stream(request)
         .mapZIO {
           case ModelStreamEvent.ResponseStarted(_) => ZIO.unit
@@ -1969,7 +2082,8 @@ final class AgentRuntimeLive(
   /** 捕获本次调用的生效模型设置，并阻止连续运行中的管理面覆盖绕过 Run 创建时组合冻结。 */
   private def effectiveModelSettings(
       state: AgentState,
-      agent: AgentDefinition
+      agent: AgentDefinition,
+      prices: ModelPriceBook
   ): IO[AgentError, ModelSettings] =
     val effective = modelPolicies.current().applyTo(agent.modelSettings)
     state.composition match
@@ -1982,7 +2096,8 @@ final class AgentRuntimeLive(
           contextSources.sourceIds,
           extensions.sourceIds,
           extensions.environment.id.value,
-          extensions.environment.permissions.fingerprint
+          extensions.environment.permissions.fingerprint,
+          Option.when(profile.modelRouting.nonEmpty)(prices.fingerprint)
         )
         RuntimeComposition.compare(frozen, live) match
           case CompositionDrift.Compatible                   => ZIO.succeed(effective)

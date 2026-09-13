@@ -13,7 +13,8 @@ import zio.json.ast.Json
 /** 一次部署的运行组合。它描述装配，不授予权限，也不能绕过 ToolPolicy / Guardrail / 审批。 */
 final case class RuntimeProfile(
     id: String = "default",
-    capturePolicy: CapturePolicy = CapturePolicy.MetadataOnly
+    capturePolicy: CapturePolicy = CapturePolicy.MetadataOnly,
+    modelRouting: Option[com.zyblw.agent.model.ModelRoutingPolicy] = None
 ) derives JsonCodec:
   require(id.trim.nonEmpty && id.length <= 64, "RuntimeProfile.id 必须为 1..64 个字符")
 
@@ -48,7 +49,9 @@ final case class RuntimeCompositionFingerprint(
     /** 执行环境身份；缺省 `local`。不进入 `value` 哈希，比较时单独判定。 */
     executionEnvironmentId: String = "local",
     /** 权限剖面摘要；缺省视为宿主权限。不进入 `value` 哈希，比较时单独判定。 */
-    permissionProfileFingerprint: String = ""
+    permissionProfileFingerprint: String = "",
+    modelRoutingFingerprint: Option[String] = None,
+    modelPricingFingerprint: Option[String] = None
 ) derives JsonCodec:
   require(value.matches("[0-9a-f]{64}"), "组合指纹必须是 SHA-256 十六进制")
 
@@ -144,7 +147,8 @@ object RuntimeComposition:
       sourceIds,
       extensionIds,
       executionEnvironmentId,
-      permissionProfileFingerprint
+      permissionProfileFingerprint,
+      Option.when(profile.modelRouting.nonEmpty)(modelPolicies.prices.fingerprint)
     )
 
   /** 从已冻结的 Agent 定义、生效模型设置和 Profile 计算组合指纹。不读取用户消息。 */
@@ -155,7 +159,8 @@ object RuntimeComposition:
       sourceIds: Chunk[String] = Chunk.empty,
       extensionIds: Chunk[String] = Chunk.empty,
       executionEnvironmentId: String = "local",
-      permissionProfileFingerprint: String = ""
+      permissionProfileFingerprint: String = "",
+      modelPricingFingerprint: Option[String] = None
   ): RuntimeCompositionFingerprint =
     val tools         = Chunk.fromIterable(agent.allowedTools.toList.sorted)
     val sources       = Chunk.fromIterable(sourceIds.map(_.trim).filter(_.nonEmpty).toList.distinct.sorted)
@@ -184,7 +189,9 @@ object RuntimeComposition:
       permissionProfileFingerprint = Option(permissionProfileFingerprint)
         .map(_.trim)
         .filter(_.nonEmpty)
-        .getOrElse(PermissionProfile.hostFingerprint)
+        .getOrElse(PermissionProfile.hostFingerprint),
+      modelRoutingFingerprint = profile.modelRouting.map(_.fingerprint),
+      modelPricingFingerprint = modelPricingFingerprint
     )
 
   /** 比较冻结组合与当前进程组合。指令/模型/允许工具集合变化视为不兼容。
@@ -209,6 +216,10 @@ object RuntimeComposition:
       CompositionDrift.Incompatible("执行环境已变化，拒绝按原 Run 静默继续")
     else if permissionsOf(frozen) != permissionsOf(live) then
       CompositionDrift.Incompatible("权限剖面已变化，拒绝按原 Run 静默继续")
+    else if frozen.modelRoutingFingerprint != live.modelRoutingFingerprint then
+      CompositionDrift.Incompatible("模型路由配置已变化，拒绝按原 Run 静默继续")
+    else if frozen.modelPricingFingerprint != live.modelPricingFingerprint then
+      CompositionDrift.Incompatible("模型价格表已变化，拒绝在同一 Run 混用计价合同")
     else if frozen.value == live.value then CompositionDrift.Compatible
     else if frozen.instructionFingerprint != live.instructionFingerprint then
       CompositionDrift.Incompatible("指令指纹已变化，拒绝按原 Run 静默继续")
@@ -243,7 +254,11 @@ object RuntimeComposition:
         )
       )
     )
-    CanonicalDigest.sha256(material.toJson)
+    // 未声明 requirement 时保持旧指纹字节不变。
+    val routed = settings.requirement.fold(material)(requirement =>
+      Json.Obj(material.fields :+ ("requirement" -> Json.Str(requirement.toJson)))
+    )
+    CanonicalDigest.sha256(routed.toJson)
 
   /** 低敏能力目录，供 DX / 运维 introspection。 */
   def catalog(

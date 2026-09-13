@@ -55,157 +55,210 @@ final class AgentHttpApi(
     contexts: AgentRequestContextResolver,
     durableEvents: DurableRunEventStream
 ):
-  /** Runtime 的 ZIO HTTP 路由集合：异步创建、状态、取消、审批恢复、崩溃恢复和持久事件查询。 Handler 只处理协议转换；所有状态推进仍委托给注入的 `runtime`。
-    */
-  val routes: Routes[Any, Nothing] = (Routes(
-    AgentHttpContract.createRunPattern -> handler { (agentId: String, request: Request) =>
-      (for
-        body  <- HttpRequestBody.readJson(request)
-        input <- ZIO.fromEither(body.fromJson[CreateRunRequest]).mapError(AgentError.InvalidConfiguration(_))
-        _     <- validateText("agentId", agentId, AgentHttpLimits.AgentIdChars)
-        parsedAgentId <- ZIO
-          .fromEither(AgentId.fromString(agentId))
-          .mapError(AgentError.InvalidConfiguration(_))
-        _        <- validateText("threadId", input.threadId, AgentHttpLimits.ThreadIdChars)
-        _        <- validateText("input", input.input, AgentHttpLimits.InputChars)
-        threadId <- ZIO
-          .fromEither(ThreadId.fromString(input.threadId))
-          .mapError(AgentError.InvalidConfiguration(_))
-        agent          <- agents.get(parsedAgentId)
-        context        <- contexts.resolve(request)
-        idempotencyKey <- ZIO
-          .fromOption(request.rawHeader("Idempotency-Key").map(_.trim).filter(_.nonEmpty))
-          .orElseFail(AgentError.InvalidConfiguration("缺少 Idempotency-Key 请求头"))
-        _ <- validateText("Idempotency-Key", idempotencyKey, AgentHttpLimits.IdempotencyKeyChars)
-        runRequest = RunRequest(threadId, AgentMessage.user(input.input), context)
-        record <- commands.submitStart(agent, runRequest, idempotencyKey)
-      yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
-    },
-    AgentHttpContract.getRunPattern -> handler { (runId: String, request: Request) =>
-      (for
-        parsed     <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
-        state      <- runtime.inspect(parsed)
-        actor      <- contexts.resolve(request)
-        authorized <- RunAuthorization.read(state, actor)
-        _ <- ZIO.fromOption(authorized.threadId).orElseFail(AgentError.PersistenceFailure("Run 缺少 threadId"))
-      yield Response.json(AgentHttpProjection.run(authorized).toJson))
-        .catchAll(error => ZIO.succeed(errorResponse(error)))
-    },
-    AgentHttpContract.getRunCitationsPattern -> handler { (runId: String, request: Request) =>
-      (for
-        parsed     <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
-        state      <- runtime.inspect(parsed)
-        actor      <- contexts.resolve(request)
-        authorized <- RunAuthorization.read(state, actor)
-      yield Response.json(AgentHttpProjection.run(authorized).toJson))
-        .catchAll(error => ZIO.succeed(errorResponse(error)))
-    },
-    AgentHttpContract.cancelRunPattern -> handler { (runId: String, request: Request) =>
-      (for
-        parsed  <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
-        actor   <- contexts.resolve(request)
-        body    <- HttpRequestBody.readJson(request)
-        command <- ZIO.fromEither(body.fromJson[CancelCommand]).mapError(AgentError.InvalidConfiguration(_))
-        _       <- ZIO.foreachDiscard(command.reason)(reason =>
-          validateText("reason", reason, AgentHttpLimits.ReasonChars)
-        )
-        record <- commands.submitCancel(parsed, command.reason, actor)
-      yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
-    },
-    AgentHttpContract.approveRunPattern -> handler { (runId: String, request: Request) =>
-      (for
-        parsed  <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
-        body    <- HttpRequestBody.readJson(request)
-        command <- ZIO.fromEither(body.fromJson[ApprovalCommand]).mapError(AgentError.InvalidConfiguration(_))
-        _       <- ZIO.foreachDiscard(command.reason)(reason =>
-          validateText("reason", reason, AgentHttpLimits.ReasonChars)
-        )
-        decision <- command.decision.toLowerCase match
-          case "approve" => ZIO.succeed(ApprovalDecision.Approve)
-          case "reject"  => ZIO.succeed(ApprovalDecision.Reject(command.reason.getOrElse("rejected")))
-          case other     => ZIO.fail(AgentError.InvalidConfiguration(s"未知审批决定: $other"))
-        actor  <- contexts.resolve(request)
-        record <- commands.submitApproval(parsed, decision, actor)
-      yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
-    },
-    AgentHttpContract.recoverRunPattern -> handler { (runId: String, request: Request) =>
-      (for
-        parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
-        actor  <- contexts.resolve(request)
-        record <- commands.submitRecover(parsed, actor)
-      yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
-    },
-    AgentHttpContract.retryRunPattern -> handler { (runId: String, request: Request) =>
-      (for
-        parsed  <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
-        body    <- HttpRequestBody.readJson(request)
-        command <- ZIO.fromEither(body.fromJson[RetryRunCommand]).mapError(AgentError.InvalidConfiguration(_))
-        _       <- validateText("requestId", command.requestId, AgentHttpLimits.RequestIdChars)
-        _       <- validateText("reason", command.reason, AgentHttpLimits.ReasonChars)
-        actor   <- contexts.resolve(request)
-        record  <- commands.submitRetry(parsed, command.requestId, command.reason, actor)
-      yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
-    },
-    AgentHttpContract.getCommandPattern -> handler { (commandId: String, request: Request) =>
-      (for
-        parsed <- ZIO.fromEither(CommandId.fromString(commandId)).mapError(AgentError.InvalidConfiguration(_))
-        actor  <- contexts.resolve(request)
-        record <- commands.inspect(parsed, actor)
-      yield Response.json(view(record).toJson)).catchAll(error => ZIO.succeed(errorResponse(error)))
-    },
-    AgentHttpContract.retryCommandPattern -> handler { (commandId: String, request: Request) =>
-      (for
-        parsed <- ZIO.fromEither(CommandId.fromString(commandId)).mapError(AgentError.InvalidConfiguration(_))
-        actor  <- contexts.resolve(request)
-        record <- commands.retryDeadLetter(parsed, actor)
-      yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
-    },
-    AgentHttpContract.listRunCommandsPattern -> handler { (runId: String, request: Request) =>
-      (for
-        parsed  <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
-        actor   <- contexts.resolve(request)
-        records <- commands.list(parsed, actor)
-      yield Response.json(records.map(view).toList.toJson))
-        .catchAll(error => ZIO.succeed(errorResponse(error)))
-    },
-    AgentHttpContract.inspectRunPattern -> handler { (runId: String, request: Request) =>
-      (for
-        parsed     <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
-        cursor     <- parseLastEventId(request)
-        actor      <- contexts.resolve(request)
-        state      <- runtime.inspect(parsed)
-        authorized <- RunAuthorization.read(state, actor)
-        _          <- validateCursor(cursor, authorized)
-        events     <- runtime.persistedEvents(parsed, cursor)
-      yield Response.json(AgentHttpProjection.inspection(authorized, events, cursor).toJson))
-        .catchAll(error => ZIO.succeed(errorResponse(error)))
-    },
-    AgentHttpContract.streamRunEventsPattern -> handler { (runId: String, request: Request) =>
-      (for
-        parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
-        cursor <- parseLastEventId(request)
-        actor  <- contexts.resolve(request)
-        state  <- runtime.inspect(parsed)
-        _      <- RunAuthorization.read(state, actor)
-        _      <- validateCursor(cursor, state)
-      yield durableEventResponse(parsed, cursor)).catchAll(error => ZIO.succeed(errorResponse(error)))
-    },
-    AgentHttpContract.listRunEventsPattern -> handler { (runId: String, request: Request) =>
-      (for
-        parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
-        cursor <- parseLastEventId(request)
-        actor  <- contexts.resolve(request)
-        state  <- runtime.inspect(parsed)
-        _      <- RunAuthorization.read(state, actor)
-        _      <- validateCursor(cursor, state)
-        events <- runtime.persistedEvents(parsed, cursor)
-      yield Response.json(events.map(AgentHttpProjection.event).toList.toJson))
-        .catchAll(error => ZIO.succeed(errorResponse(error)))
-    },
-    Method.GET / "api" / "v1" / "openapi.json" -> handler {
-      ZIO.succeed(Response.json(AgentHttpContract.openApiJson).addHeader("Cache-Control", "no-store"))
-    }
-  )) @@ HandlerAspect.addHeader(AgentHttpProtocol.ApiVersionHeader, AgentHttpProtocol.ApiVersionHeaderValue)
+  private def versioned(routes: Routes[Any, Nothing]): Routes[Any, Nothing] =
+    routes @@ HandlerAspect.addHeader(
+      AgentHttpProtocol.ApiVersionHeader,
+      AgentHttpProtocol.ApiVersionHeaderValue
+    )
+
+  /** 异步提交新 Run；只负责协议转换，实际执行仍由耐久命令 Worker 推进。 */
+  val submissionRoutes: Routes[Any, Nothing] = versioned(
+    Routes(
+      AgentHttpContract.createRunPattern -> handler { (agentId: String, request: Request) =>
+        (for
+          body  <- HttpRequestBody.readJson(request)
+          input <- ZIO
+            .fromEither(body.fromJson[CreateRunRequest])
+            .mapError(AgentError.InvalidConfiguration(_))
+          _             <- validateText("agentId", agentId, AgentHttpLimits.AgentIdChars)
+          parsedAgentId <- ZIO
+            .fromEither(AgentId.fromString(agentId))
+            .mapError(AgentError.InvalidConfiguration(_))
+          _        <- validateText("threadId", input.threadId, AgentHttpLimits.ThreadIdChars)
+          _        <- validateText("input", input.input, AgentHttpLimits.InputChars)
+          threadId <- ZIO
+            .fromEither(ThreadId.fromString(input.threadId))
+            .mapError(AgentError.InvalidConfiguration(_))
+          agent          <- agents.get(parsedAgentId)
+          context        <- contexts.resolve(request)
+          idempotencyKey <- ZIO
+            .fromOption(request.rawHeader("Idempotency-Key").map(_.trim).filter(_.nonEmpty))
+            .orElseFail(AgentError.InvalidConfiguration("缺少 Idempotency-Key 请求头"))
+          _ <- validateText("Idempotency-Key", idempotencyKey, AgentHttpLimits.IdempotencyKeyChars)
+          runRequest = RunRequest(threadId, AgentMessage.user(input.input), context)
+          record <- commands.submitStart(agent, runRequest, idempotencyKey)
+        yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
+      }
+    )
+  )
+
+  /** 读取 Run 状态、引用和低敏检查视图。 */
+  val runReadRoutes: Routes[Any, Nothing] = versioned(
+    Routes(
+      AgentHttpContract.getRunPattern -> handler { (runId: String, request: Request) =>
+        (for
+          parsed     <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+          state      <- runtime.inspect(parsed)
+          actor      <- contexts.resolve(request)
+          authorized <- RunAuthorization.read(state, actor)
+          _          <- ZIO
+            .fromOption(authorized.threadId)
+            .orElseFail(AgentError.PersistenceFailure("Run 缺少 threadId"))
+        yield Response.json(AgentHttpProjection.run(authorized).toJson))
+          .catchAll(error => ZIO.succeed(errorResponse(error)))
+      },
+      AgentHttpContract.getRunCitationsPattern -> handler { (runId: String, request: Request) =>
+        (for
+          parsed     <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+          state      <- runtime.inspect(parsed)
+          actor      <- contexts.resolve(request)
+          authorized <- RunAuthorization.read(state, actor)
+        yield Response.json(AgentHttpProjection.run(authorized).toJson))
+          .catchAll(error => ZIO.succeed(errorResponse(error)))
+      },
+      AgentHttpContract.inspectRunPattern -> handler { (runId: String, request: Request) =>
+        (for
+          parsed     <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+          cursor     <- parseLastEventId(request)
+          actor      <- contexts.resolve(request)
+          state      <- runtime.inspect(parsed)
+          authorized <- RunAuthorization.read(state, actor)
+          _          <- validateCursor(cursor, authorized)
+          events     <- runtime.persistedEvents(parsed, cursor)
+        yield Response.json(AgentHttpProjection.inspection(authorized, events, cursor).toJson))
+          .catchAll(error => ZIO.succeed(errorResponse(error)))
+      }
+    )
+  )
+
+  /** 取消、审批、恢复和 Run 级显式重试。 */
+  val controlRoutes: Routes[Any, Nothing] = versioned(
+    Routes(
+      AgentHttpContract.cancelRunPattern -> handler { (runId: String, request: Request) =>
+        (for
+          parsed  <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+          actor   <- contexts.resolve(request)
+          body    <- HttpRequestBody.readJson(request)
+          command <- ZIO.fromEither(body.fromJson[CancelCommand]).mapError(AgentError.InvalidConfiguration(_))
+          _       <- ZIO.foreachDiscard(command.reason)(reason =>
+            validateText("reason", reason, AgentHttpLimits.ReasonChars)
+          )
+          record <- commands.submitCancel(parsed, command.reason, actor)
+        yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
+      },
+      AgentHttpContract.approveRunPattern -> handler { (runId: String, request: Request) =>
+        (for
+          parsed  <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+          body    <- HttpRequestBody.readJson(request)
+          command <- ZIO
+            .fromEither(body.fromJson[ApprovalCommand])
+            .mapError(AgentError.InvalidConfiguration(_))
+          _ <- ZIO.foreachDiscard(command.reason)(reason =>
+            validateText("reason", reason, AgentHttpLimits.ReasonChars)
+          )
+          decision <- command.decision.toLowerCase match
+            case "approve" => ZIO.succeed(ApprovalDecision.Approve)
+            case "reject"  => ZIO.succeed(ApprovalDecision.Reject(command.reason.getOrElse("rejected")))
+            case other     => ZIO.fail(AgentError.InvalidConfiguration(s"未知审批决定: $other"))
+          actor  <- contexts.resolve(request)
+          record <- commands.submitApproval(parsed, decision, actor)
+        yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
+      },
+      AgentHttpContract.recoverRunPattern -> handler { (runId: String, request: Request) =>
+        (for
+          parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+          actor  <- contexts.resolve(request)
+          record <- commands.submitRecover(parsed, actor)
+        yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
+      },
+      AgentHttpContract.retryRunPattern -> handler { (runId: String, request: Request) =>
+        (for
+          parsed  <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+          body    <- HttpRequestBody.readJson(request)
+          command <- ZIO
+            .fromEither(body.fromJson[RetryRunCommand])
+            .mapError(AgentError.InvalidConfiguration(_))
+          _      <- validateText("requestId", command.requestId, AgentHttpLimits.RequestIdChars)
+          _      <- validateText("reason", command.reason, AgentHttpLimits.ReasonChars)
+          actor  <- contexts.resolve(request)
+          record <- commands.submitRetry(parsed, command.requestId, command.reason, actor)
+        yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
+      }
+    )
+  )
+
+  /** 查询、列举和人工重试耐久命令。 */
+  val commandRoutes: Routes[Any, Nothing] = versioned(
+    Routes(
+      AgentHttpContract.getCommandPattern -> handler { (commandId: String, request: Request) =>
+        (for
+          parsed <- ZIO
+            .fromEither(CommandId.fromString(commandId))
+            .mapError(AgentError.InvalidConfiguration(_))
+          actor  <- contexts.resolve(request)
+          record <- commands.inspect(parsed, actor)
+        yield Response.json(view(record).toJson)).catchAll(error => ZIO.succeed(errorResponse(error)))
+      },
+      AgentHttpContract.retryCommandPattern -> handler { (commandId: String, request: Request) =>
+        (for
+          parsed <- ZIO
+            .fromEither(CommandId.fromString(commandId))
+            .mapError(AgentError.InvalidConfiguration(_))
+          actor  <- contexts.resolve(request)
+          record <- commands.retryDeadLetter(parsed, actor)
+        yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
+      },
+      AgentHttpContract.listRunCommandsPattern -> handler { (runId: String, request: Request) =>
+        (for
+          parsed  <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+          actor   <- contexts.resolve(request)
+          records <- commands.list(parsed, actor)
+        yield Response.json(records.map(view).toList.toJson))
+          .catchAll(error => ZIO.succeed(errorResponse(error)))
+      }
+    )
+  )
+
+  /** 只公开耐久事件列表与 SSE；嵌入式业务宿主可仅挂载这一最小读取面。 */
+  val eventRoutes: Routes[Any, Nothing] = versioned(
+    Routes(
+      AgentHttpContract.streamRunEventsPattern -> handler { (runId: String, request: Request) =>
+        (for
+          parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+          cursor <- parseLastEventId(request)
+          actor  <- contexts.resolve(request)
+          state  <- runtime.inspect(parsed)
+          _      <- RunAuthorization.read(state, actor)
+          _      <- validateCursor(cursor, state)
+        yield durableEventResponse(parsed, cursor)).catchAll(error => ZIO.succeed(errorResponse(error)))
+      },
+      AgentHttpContract.listRunEventsPattern -> handler { (runId: String, request: Request) =>
+        (for
+          parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+          cursor <- parseLastEventId(request)
+          actor  <- contexts.resolve(request)
+          state  <- runtime.inspect(parsed)
+          _      <- RunAuthorization.read(state, actor)
+          _      <- validateCursor(cursor, state)
+          events <- runtime.persistedEvents(parsed, cursor)
+        yield Response.json(events.map(AgentHttpProjection.event).toList.toJson))
+          .catchAll(error => ZIO.succeed(errorResponse(error)))
+      }
+    )
+  )
+
+  /** 稳定公共协议的元数据端点。 */
+  val metadataRoutes: Routes[Any, Nothing] = versioned(
+    Routes(
+      Method.GET / "api" / "v1" / "openapi.json" -> handler {
+        ZIO.succeed(Response.json(AgentHttpContract.openApiJson).addHeader("Cache-Control", "no-store"))
+      }
+    )
+  )
+
+  /** Runtime 的完整 ZIO HTTP 表面；保持原有端点、OpenAPI 和版本响应头不变。 */
+  val routes: Routes[Any, Nothing] =
+    submissionRoutes ++ runReadRoutes ++ eventRoutes ++ controlRoutes ++ commandRoutes ++ metadataRoutes
 
   /** 构造跨节点可恢复的 SSE Response。
     *

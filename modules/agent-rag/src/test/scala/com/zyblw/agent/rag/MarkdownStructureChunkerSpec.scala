@@ -36,10 +36,13 @@ object MarkdownStructureChunkerSpec extends ZIOSpecDefault:
         chunks.length == 2,
         chunks.head.metadata.get("headingPath").contains("ZIO"),
         chunks(1).metadata.get("headingPath").contains("ZIO > Runtime"),
-        chunks(1).text.contains("# ZIO\n## Runtime"),
+        chunks(1).text.contains("ZIO · Runtime"),
+        !chunks(1).text.contains("# ZIO"),
+        !chunks(1).text.contains("## Runtime"),
+        chunks(1).lineage.exists(_.headingPath == Chunk("ZIO", "Runtime")),
         chunks(1).text.contains("| 能力 | 说明 |\n| --- | --- |"),
         chunks.forall(
-          _.metadata("chunkerId") == "markdown-structure-v1:max=1200:overlap=120:depth=6"
+          _.metadata("chunkerId") == "markdown-structure-v2:max=1200:overlap=120:depth=6"
         ),
         chunks.forall(_.metadata("contentFormat") == "markdown")
       )

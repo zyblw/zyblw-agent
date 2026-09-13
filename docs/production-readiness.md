@@ -2,9 +2,9 @@
 
 > 状态：当前运行手册
 >
-> 最后核验：2026-08-23
+> 最后核验：2026-08-29
 >
-> 事实来源：源码、测试、0.3 core baseline、0.5 admin V002、0.6 knowledge baseline、CI/发布工作流与本项目成熟度矩阵
+> 事实来源：源码、测试、0.9 空库 V001、CI/发布工作流与本项目成熟度矩阵
 
 本文面向准备基于 `zyblw-agent` 开发真实业务的团队。它把“框架可以被使用”“某个业务可以小流量上线”和“已经经过
 通用大规模生产验证”分开，避免用单元测试数量或功能清单替代上线证据。
@@ -13,22 +13,22 @@
 
 当前源码已经具备开发真实业务的主干：耐久提交、异步 Worker、有界多 Run 并发、lease/fencing、类型化工具与权限、
 审批/取消/恢复、PostgreSQL、HTTP/SSE、低敏观测、RAG 和 Eval。**当前支持的接入拓扑是 Docker 启动 + 自管
-PostgreSQL 直连**；7 项宿主环境证据已延期。新业务统一基于 `0.8.0` 构建垂直切片，
+PostgreSQL 直连**；7 项宿主环境证据已延期。新业务统一基于当前 **0.9 空库基线**（源码或 `0.9.0-local`）构建垂直切片；平台以固定 commit 消费同一份 0.9 源码。
 不需要等待 Harness、多 Agent、Graph Studio 或完整 GraphRAG。
 
-**`0.8.0` 是全新安装基线**：核心与 1024 知识各一份 V001；适合从 staging
-进入受限生产验收，而不是已经通过任意规模验证的通用 GA：
+**`0.9.0` 是当前全新安装基线（尚未推 Central）**：核心与 1024 知识各一份 V001；适合本机 Compose 演练后进入
+受限生产验收，而不是已经通过任意规模验证的通用 GA：
 
-- 核心与 1024 知识各一份 0.8 V001；业务 HTTP v1 / OpenAPI 1.2.0、state v7 与知识检索 mode 是当前契约；
+- 核心与 1024 知识各一份 0.9 V001；业务 HTTP v1 / OpenAPI 1.2.0、state v7 与知识检索 mode 是当前契约；
 - RAG 固定使用独立 1024 knowledge schema/history；所有新索引都按同一模型身份、维度与 lexical strategy 建立；
 - 稳定知识面是 `/api/v1/knowledge/**`；管理面（`/api/v1/admin/**`）与控制台是 **Beta 且完全可选**；
-- 业务先在 staging 和受限流量使用精确 `0.8.0`，完成自己的数据、权限、Provider、容量和恢复验收后再扩大流量；
+- 投产前用本机 bundled Postgres（`compose.staging.yml`）或生产小流量验收 sibling 源码 / 精确 `0.9.0-local`；不要求常开产品 Test 站；
 - Workflow、Harness、MCP/Sandbox 等标记为 Experimental 的能力不自动继承核心主线的成熟度。Artifact 元数据
-  存储已升为 Beta，仍需业务侧验收附件路径。平台切换顺序见
-  [升级到 0.8.0](upgrading-to-0.8.0.md)。
+  存储已升为 Beta，仍需业务侧验收附件路径。全新空库接入见
+  [0.9.0 全新安装](fresh-install-0.9.0.md)。
 
-业务仓库应固定精确 `0.8.0`，不要使用移动分支、版本范围或 `latest.release`。验证未发布提交时才使用唯一的内部
-`0.8.0-local` 候选，且不得上传 Central。
+业务仓库不要使用移动分支、版本范围或 `latest.release`。验证未发布提交时才使用唯一的内部
+`0.9.0-local` 候选，且不得上传 Central。
 
 启用管理面时，它本身也是一条需要单独验收的暴露面：管理路由必须只对运维身份开放，`agent:admin:debug` 会产生真实
 Provider 费用，管理台的地址不应与业务 API 共用同一条公网入口和限流策略。
@@ -143,8 +143,8 @@ Worker、节点逻辑或数据库；该快照按定义聚合且不含业务身�
 
 ### 6. 发布与升级
 
-- 空核心 schema 执行冻结的 core V001、V002 与 V003（V002 生成列会重写 `agent_runs`，大表需安排窗口）；需要 RAG 时在
-  `zyblw_agent_knowledge` 专属 schema/history 执行唯一 0.6 的 1024 knowledge V001；
+- `0.9.0` 从空核心 schema 执行唯一 core V001；需要 RAG 时在 `zyblw_agent_knowledge` 专属 schema/history
+  执行唯一 1024 Space/Profile knowledge V001。启动只接受当前空库基线，业务数据和知识均从最新来源创建；
 - 格式、`testFull`、PostgreSQL 16、`publishM2` 和独立 Maven consumer 全部通过；启用控制台时另加类型检查、lint、
   生产构建与 Playwright 浏览器契约；
 - CHANGELOG、升级指南、tag、远端 main 和 Maven 制品来自同一提交；
@@ -156,7 +156,7 @@ Worker、节点逻辑或数据库；该快照按定义聚合且不含业务身�
 
 ```bash
 ./scripts/verify-business-ready.sh
-sbt -batch 'set ThisBuild / version := "0.8.0-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.9.0-local"; publishM2'
 ```
 
 公开 Central 发布仍走 tag 触发的 release workflow。kill-recovery 与有界 soak 属于仓库机制证据，不是当前单库 Docker
@@ -167,16 +167,19 @@ sbt -batch 'set ThisBuild / version := "0.8.0-local"; publishM2'
 ```bash
 ./scripts/verify-business-ready.sh
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.8.0-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.9.0-local"; publishM2'
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.8.0-local sbt -batch 'clean; compile'
+ZYBLW_AGENT_VERSION=0.9.0-local sbt -batch 'clean; compile'
 ```
 
 使用控制台的部署还需在 `modules/agent-dashboard` 执行：
 
 ```bash
+npm ci
 npm run typecheck && npm run lint && npm run build
+npx playwright install --with-deps chromium
 npm run test:e2e
+npm run test:e2e:host
 ```
 
 这些命令证明可构建、可迁移、可发布和可被独立 Scala 项目消费；它们不能替代业务数据集、容量、攻击、备份恢复和
@@ -187,7 +190,7 @@ npm run test:e2e
 | 阶段 | 允许能力 | 退出条件 |
 |---|---|---|
 | 开发 | Fake Provider、内存 Store、只读工具 | 垂直切片和确定性业务测试通过 |
-| Staging | PostgreSQL、真实 Provider、小额度、只读 RAG | 权限、质量、恢复、容量与低敏观测通过 |
+| Pre-production validation | 本机 Compose 或生产小流量；PostgreSQL、真实 Provider、小额度、只读 RAG | 权限、质量、恢复、容量与低敏观测通过 |
 | Limited Production | 小流量、单租户/白名单、受控审批写工具 | SLO 稳定、无高风险泄漏、值班与回滚演练通过 |
 | 扩大流量 | 经验证的 Agent/Tool/RAG 组合 | 趋势 Eval、成本、故障率和人工反馈持续达标 |
 

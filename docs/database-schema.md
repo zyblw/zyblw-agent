@@ -64,9 +64,13 @@ migration 下进行。
 
 | 表 | 事实与用途 | 可见性规则 |
 |---|---|---|
-| `agent_knowledge_documents` | ingestion 幂等键、内容 hash、Embedding/切分策略、版本状态和 active manifest | 每个 tenant/document 至多一个 `ready + active` |
-| `agent_knowledge_chunk_staging` | Building 版本的可重放暂存向量与 parent/neighbor/heading/page/bbox/block 谱系 | Retriever 永远不查询该表 |
-| `agent_knowledge_chunks` | 当前正式发布的文档块快照、FTS、pgvector 和结构谱系 | 复合主键为 tenant/document/chunk；activate 短事务整体替换，谱系扩展再次校验 ACL |
+| `agent_knowledge_spaces` | 知识空间与 CAS `active_profile_id` | 检索只读 pinned Profile |
+| `agent_knowledge_profiles` | 不可变 dense/lexical/fusion 身份 | 换模必须新建 Profile |
+| `agent_knowledge_profile_documents` | Profile 内文档 census 与幂等摄取身份 | 每个 space/document 至多一个 active 修订 |
+| `agent_knowledge_profile_chunk_staging` | Building 文档的可重放暂存块 | Retriever 永远不查询该表 |
+| `agent_knowledge_profile_chunks` | 不可变 Profile 块：display/lexical、dense 1024、可选 sparse、ACL、谱系 | 查询排除 withdrawn；只读 active Profile |
+| `agent_knowledge_profile_activation_audit` | Space 指针 CAS 审计 | 回滚也追加一行 |
+| `agent_knowledge_withdrawn` | Space 级 tombstone | 回滚不得复活已撤回修订 |
 
 知识 manifest 状态为 Building/Ready/Superseded/Failed/Retired。三张知识表的中文说明由
 `R__agent_knowledge_1024_comments.sql` 覆盖写入。`retire` 在文档 advisory lock 和 active-version 乐观条件下
@@ -211,13 +215,14 @@ Agent Run 时级联删除仍需投递或审计的业务事实。宿主必须为�
 
 ## pgvector
 
-新库的 0.8 知识 baseline 位于：
+新库的 0.9 知识 baseline 位于：
 
-`modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/optional/pgvector_1024/V001__agent_knowledge_0_8_baseline.sql`
+`modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/optional/pgvector_1024/V001__agent_knowledge_0_9_baseline.sql`
 
-三张表的完整名称是 `zyblw_agent_knowledge.agent_knowledge_documents`、
-`zyblw_agent_knowledge.agent_knowledge_chunk_staging` 和 `zyblw_agent_knowledge.agent_knowledge_chunks`。业务 SQL 不应在
-`public` 创建同名替代物，也不应依赖 `search_path` 省略 schema。
+完整名称位于 `zyblw_agent_knowledge` schema：`agent_knowledge_spaces`、`agent_knowledge_profiles`、
+`agent_knowledge_profile_documents`、`agent_knowledge_profile_chunk_staging`、`agent_knowledge_profile_chunks`、
+`agent_knowledge_profile_activation_audit` 与 `agent_knowledge_withdrawn`。业务 SQL 不应在
+`public` 创建同名替代物，也不应依赖 `search_path` 省略 schema。空库 `migrateKnowledge1024` 只得到这一份基线。
 
 它固定使用 `vector(1024)`。维度是表和索引契约，必须与 Embedding Provider 一致，不能在同一列混用不同维度。
 `PostgresPgVectorStore` 的查询先执行 tenant 与权限包含关系，再进行 cosine/全文排序。`searchHybrid` 使用
@@ -253,7 +258,7 @@ HNSW 的参数不是通用最优值；应使用自己的中医文档、引用正
 
 - 正式环境优先让 Flyway 执行 classpath 下的默认 migration。
 - 必需表只有一个可执行事实源：
-  [`V001__zyblw_agent_0_3_baseline.sql`](../modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/migration/V001__zyblw_agent_0_3_baseline.sql)。
+  [`V001__zyblw_agent_0_9_baseline.sql`](../modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/migration/V001__zyblw_agent_0_9_baseline.sql)。
   已发布 V001 不改 checksum，后续中文目录说明由 repeatable COMMENT migration 每次覆盖维护；新增列必须先补中文映射。
 - 新建 RAG 库时，确认 extension 权限后调用 `migrateKnowledge1024`；不要复制一份手工 SQL 到业务仓库。
 - 不要把数据库密码写入 SQL、README 或 Git；通过部署平台 Secret 注入 DataSource 配置。

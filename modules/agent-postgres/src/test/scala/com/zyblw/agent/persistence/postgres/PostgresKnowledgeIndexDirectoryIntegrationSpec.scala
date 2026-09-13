@@ -70,7 +70,7 @@ object PostgresKnowledgeIndexDirectoryIntegrationSpec extends ZIOSpecDefault:
   )
 
   private def chunk(build: KnowledgeIndexBuild, slot: Int): IndexedChunk = IndexedChunk(
-    DocumentChunk(
+    DocumentChunk.fromText(
       s"${build.key.documentId}-v${build.version}-c0",
       build.key.documentId,
       "正文",
@@ -210,5 +210,5 @@ object PostgresKnowledgeIndexDirectoryIntegrationSpec extends ZIOSpecDefault:
         page <- harness.directory.list(Some(TenantId("tenant-missing")), 10, None)
       yield assertTrue(page.items.isEmpty, !page.hasMore, page.nextCursor.isEmpty)).provideLayer(harnessLayer)
     }
-  ) @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@ TestAspect.withLiveClock @@
+  ) @@ PostgresIntegrationAspect.enabled @@ TestAspect.withLiveClock @@
     TestAspect.timeout(5.minutes) @@ TestAspect.sequential

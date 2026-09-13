@@ -77,7 +77,7 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
 
     def retrieve(request: KnowledgeRetrievalRequest): IO[AgentError, KnowledgeRetrievalResult] =
       calls
-        .update(_ :+ "retrieve")
+        .update(_ :+ s"retrieve:${request.tenantId}")
         .as(
           KnowledgeRetrievalResult(
             elapsedMillis = 1L,
@@ -325,7 +325,7 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
           view  <- ZIO.fromEither(body.fromJson[RuntimeConfigView]).mapError(new RuntimeException(_))
         yield assertTrue(rejected.status == Status.Forbidden, view.overrideVersion == 0L)
       },
-      test("管理面不再挂载知识路由，即使装配了知识后端") {
+      test("管理面不再挂载知识 CRUD 路由，即使装配了知识后端") {
         for
           tuple <- fullApi
           (api, calls) = tuple
@@ -344,6 +344,73 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
           documents.status == Status.NotFound,
           recorded.isEmpty
         )
+      },
+      test("检索沙盒在 debug 且 knowledge:read 时到达适配器") {
+        val body = KnowledgeDebugRetrieveRequest(
+          query = "阴阳",
+          tenantId = "acme",
+          permissions = List("knowledge:public"),
+          limit = Some(3),
+          rerank = Some(false),
+          expandContext = Some(true),
+          mode = Some("hybrid")
+        )
+        for
+          tuple <- fullApi
+          (api, calls) = tuple
+          response <- api.routes.runZIO(
+            withScopes(
+              Request.post(admin / "debug" / "retrieve", Body.fromString(body.toJson)),
+              AdminAuthorization.DebugScope,
+              KnowledgeAuthorization.ReadScope
+            )
+          )
+          recorded <- calls.get
+        yield assertTrue(response.status == Status.Ok, recorded == Chunk("retrieve:acme"))
+      },
+      test("检索沙盒缺少 debug 或 knowledge:read 时 403 且不触达适配器") {
+        val body = KnowledgeDebugRetrieveRequest(query = "阴阳", tenantId = "acme").toJson
+        for
+          tuple <- fullApi
+          (api, calls) = tuple
+          debugOnly <- api.routes.runZIO(
+            withScopes(
+              Request.post(admin / "debug" / "retrieve", Body.fromString(body)),
+              AdminAuthorization.DebugScope
+            )
+          )
+          readOnly <- api.routes.runZIO(
+            withScopes(
+              Request.post(admin / "debug" / "retrieve", Body.fromString(body)),
+              KnowledgeAuthorization.ReadScope
+            )
+          )
+          writeOnly <- api.routes.runZIO(
+            withScopes(
+              Request.post(admin / "debug" / "retrieve", Body.fromString(body)),
+              AdminAuthorization.WriteScope
+            )
+          )
+          recorded <- calls.get
+        yield assertTrue(
+          debugOnly.status == Status.Forbidden,
+          readOnly.status == Status.Forbidden,
+          writeOnly.status == Status.Forbidden,
+          recorded.isEmpty
+        )
+      },
+      test("未装配知识后端时检索沙盒不挂载") {
+        for response <- bareApi.routes.runZIO(
+            withScopes(
+              Request.post(
+                admin / "debug" / "retrieve",
+                Body.fromString(KnowledgeDebugRetrieveRequest(query = "阴阳", tenantId = "acme").toJson)
+              ),
+              AdminAuthorization.DebugScope,
+              KnowledgeAuthorization.ReadScope
+            )
+          )
+        yield assertTrue(response.status == Status.NotFound)
       },
       test("业务侧 scope 不会被误认为管理 scope") {
         for

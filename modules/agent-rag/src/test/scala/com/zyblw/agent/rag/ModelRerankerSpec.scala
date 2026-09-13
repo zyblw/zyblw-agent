@@ -98,6 +98,10 @@ object ModelRerankerSpec extends ZIOSpecDefault:
         _        <- shouldBlock.set(true)
         fiber    <- reranker.rerank("查询", original, 1).fork
         exit     <- fiber.interrupt
-      yield assertTrue(fallback == original.take(1), exit.isInterrupted)
+      yield assertTrue(
+        fallback.map(_.chunk) == original.take(1).map(_.chunk),
+        fallback.head.signals.get("rerankFallback").contains(1.0),
+        exit.isInterrupted
+      )
     }
   )

@@ -13,7 +13,11 @@ final case class ModelCallIncidentSummary(
     capturePolicy: String,
     fingerprintPrefix: String,
     messageCount: Int,
-    toolCount: Int
+    toolCount: Int,
+    requestedProfile: Option[String] = None,
+    routePolicyVersion: Option[String] = None,
+    routeDecisionCodes: Chunk[String] = Chunk.empty,
+    pricingFingerprintPrefix: Option[String] = None
 ) derives JsonCodec
 
 object ModelCallIncidentSummary:
@@ -26,7 +30,11 @@ object ModelCallIncidentSummary:
       capturePolicy = record.capturePolicy.toString,
       fingerprintPrefix = record.fingerprint.take(12),
       messageCount = record.messageCount,
-      toolCount = record.toolCount
+      toolCount = record.toolCount,
+      requestedProfile = record.routeDecision.map(_.requirement.profile.toString),
+      routePolicyVersion = record.routeDecision.map(_.policyVersion),
+      routeDecisionCodes = record.routeDecision.fold(Chunk.empty)(_.decisionCodes),
+      pricingFingerprintPrefix = record.routeDecision.map(_.pricingFingerprint.take(12))
     )
 
 /** 可安全导出的事故包。只含 Inspector 时间线、组合指纹和模型账本摘要。 */
@@ -41,7 +49,7 @@ final case class IncidentPack(
 ) derives JsonCodec
 
 object IncidentPack:
-  val SchemaVersion: Int = 1
+  val SchemaVersion: Int = 2
 
   def build(
       inspection: RunInspection,

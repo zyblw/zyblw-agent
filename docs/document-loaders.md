@@ -205,7 +205,9 @@ val chunker = MarkdownStructureChunker(
 )
 ```
 
-每个 chunk 都会重建标题路径，并保存 `headingPath/chunkStartLine/chunkEndLine/chunkContentSha/chunkerId`。ID 使用
+每个 chunk 在 lineage / metadata 中保存完整 `headingPath`，并写入 `chunkStartLine/chunkEndLine/chunkContentSha/chunkerId`。
+写入 embedding 的正文不再把祖先路径渲染成 `# / ## / ###` 粘在每块前面；最多加一行末 1–2 级短前缀（例如 `苍术 · 金元时期`）。
+策略版本是 `document-structure-v2` / `markdown-structure-v2`。ID 使用
 `document + heading path + exact body` 的 SHA-256 内容寻址；在前面章节插入内容不会让后面未变化章节的 ID 全部漂移。
 超长单行使用 Unicode code point 安全滑窗，不会切断 emoji 或扩展汉字代理对。
 
@@ -260,7 +262,7 @@ import zio.stream.*
 
 val ragLayer = ZLayer.make[RagApplication](
   DocumentLoaderRegistry.layer(Chunk(docling)),
-  ZLayer.succeed[EmbeddingService](embeddingService),
+  ZLayer.succeed[EmbeddingModel](embeddingService),
   InMemoryKnowledgeIndexStore.knowledge,
   DocumentStructureChunker.layer,
   KnowledgeIndexer.layer(stageBatchSize = 200),

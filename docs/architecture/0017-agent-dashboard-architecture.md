@@ -34,9 +34,11 @@
 
 | scope | 覆盖操作 | 为什么单独存在 |
 | --- | --- | --- |
-| `agent:admin:read` | Run 目录、队列积压、有效配置快照、评测趋势、索引清单、模型目录 | 泄漏面最小，可以发给值班与监控 |
-| `agent:admin:write` | 工具白名单、审批策略、死信重排、索引退役、模型切换 | 能改变部署行为，必须单独授予；蕴含读权限，因为改配置前必须先看到当前配置 |
-| `agent:admin:debug` | 检索沙盒、文档摄入、模型探活 | 会触发真实 Provider 调用并产生费用，因此**不被写权限蕴含** |
+| `agent:admin:read` | Run 目录、队列积压、有效配置快照、评测趋势、模型目录 | 泄漏面最小，可以发给值班与监控 |
+| `agent:admin:write` | 工具白名单、审批策略、死信重排、模型切换 | 能改变部署行为，必须单独授予；蕴含读权限 |
+| `agent:admin:debug` | 检索沙盒、模型探活 | 会触发真实 Provider 调用并产生费用，因此**不被写权限蕴含**；沙盒另外要求 `knowledge:read` |
+| `knowledge:read` | 索引清单、检索沙盒 | 稳定知识面；不被 `agent:admin:*` 蕴含 |
+| `knowledge:write` | 索引退役 | 稳定知识面 |
 
 框架不自带认证中间件。身份来自宿主的 `AgentRequestContextResolver`，与业务路由使用同一个解析器。
 
@@ -65,12 +67,9 @@
 | `/api/v1/admin/ops/queue` | GET | read | 队列积压快照 |
 | `/api/v1/admin/ops/dead-letters` | GET | read | 死信清单（不含命令正文） |
 | `/api/v1/admin/ops/dead-letters/{id}/retry` | POST | write | 人工重排 |
-| `/api/v1/admin/knowledge/documents` | GET | read | 索引版本清单 |
-| `/api/v1/admin/knowledge/documents/{id}/retire` | POST | write | 以 active 版本为前置条件退役 |
-| `/api/v1/admin/knowledge/retrieve` | POST | debug | 检索沙盒 |
-| `/api/v1/admin/knowledge/ingestions` | POST | debug | 提交异步摄入，返回 202 |
-| `/api/v1/admin/knowledge/ingestions` | GET | read | 摄入任务列表 |
-| `/api/v1/admin/knowledge/ingestions/{id}` | GET | read | 单个摄入任务 |
+| `/api/v1/knowledge/documents` | GET | `knowledge:read` | 会话租户的索引版本清单 |
+| `/api/v1/knowledge/documents/{id}` | DELETE | `knowledge:write` | 以 `expectedActiveVersion` 为前置条件退役 |
+| `/api/v1/admin/debug/retrieve` | POST | `agent:admin:debug` 且 `knowledge:read` | 检索沙盒；请求体显式 `tenantId` / `permissions` |
 | `/api/v1/admin/evals/suites` | GET | read | 部署声明跟踪的趋势线 |
 | `/api/v1/admin/evals/trend` | GET | read | 单条趋势线历史 |
 | `/api/v1/admin/models` | GET | read | 已注册 Provider/模型目录、凭据状态与价格覆盖 |

@@ -46,10 +46,10 @@ final class KnowledgeServiceLive(
       .map { result =>
         KnowledgeSearchResult(
           result.citations,
-          if result.citations.isEmpty then "NoAcceptedHits" else "Supported",
-          result.hits.length,
-          result.citations.length,
-          result.citations.map(_.score).maxOption
+          result.evidenceStatus,
+          result.candidateCount,
+          result.acceptedCount,
+          result.topAcceptedScore
         )
       }
 

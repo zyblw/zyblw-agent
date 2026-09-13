@@ -126,6 +126,13 @@ object OpenAICompatibleEmbeddingHttpSpec extends ZIOSpecDefault:
       )
     )
 
+  private def request(texts: Chunk[String]): EmbeddingRequest =
+    EmbeddingRequest(
+      texts,
+      EmbeddingInputRole.Query,
+      context = EmbeddingModelOps.testContext(requestId = "openai-http-spec")
+    )
+
   def spec: Spec[TestEnvironment & Scope, Any] = suite("OpenAI-compatible Embedding HTTP contract")(
     test("分批请求、乱序 data、usage 聚合、维度字段和认证均满足契约") {
       for
@@ -137,15 +144,15 @@ object OpenAICompatibleEmbeddingHttpSpec extends ZIOSpecDefault:
           _      <- TestServer.addRoutes(routes(bodies, authorization, cancelStarted, cancelClosed))
           port   <- ZIO.serviceWithZIO[Server](_.port)
           client <- ZIO.service[Client]
-          result <- service(client, port).embedDetailed(Chunk("甲", "乙乙", "丙丙丙", "丁丁丁丁", "戊戊戊戊戊"))
+          result <- service(client, port).embed(request(Chunk("甲", "乙乙", "丙丙丙", "丁丁丁丁", "戊戊戊戊戊")))
           sent   <- bodies.get
           auth   <- authorization.get
         yield (result, sent, auth)).provide(Client.default, TestServer.default)
-        firstDimensions = result._1.embeddings.map(_.values.head)
+        firstDimensions = result._1.denseEmbeddings.map(_.values.head)
       yield assertTrue(
         firstDimensions == Chunk(1.0f, 2.0f, 3.0f, 4.0f, 5.0f),
         result._1.usage.contains(EmbeddingUsage(5L, 5L)),
-        result._1.providerRequestIds.length == 3,
+        result._1.providerRequestId.nonEmpty,
         result._2.length == 3,
         result._2.forall(_.contains("\"encoding_format\":\"float\"")),
         result._2.forall(_.contains("\"dimensions\":3")),
@@ -163,9 +170,9 @@ object OpenAICompatibleEmbeddingHttpSpec extends ZIOSpecDefault:
           port   <- ZIO.serviceWithZIO[Server](_.port)
           client <- ZIO.service[Client]
           adapter = service(client, port)
-          limited <- adapter.embed(Chunk("rate-limit")).exit
-          usage   <- adapter.embed(Chunk("invalid-usage")).exit
-          drift   <- adapter.embed(Chunk("bad-dimension")).exit
+          limited <- adapter.embed(request(Chunk("rate-limit"))).exit
+          usage   <- adapter.embed(request(Chunk("invalid-usage"))).exit
+          drift   <- adapter.embed(request(Chunk("bad-dimension"))).exit
         yield (limited, usage, drift)).provide(Client.default, TestServer.default)
         limitedRetryable = exits._1 match
           case Exit.Failure(cause) => cause.failureOption.exists(_.retryable)
@@ -182,7 +189,7 @@ object OpenAICompatibleEmbeddingHttpSpec extends ZIOSpecDefault:
           _      <- TestServer.addRoutes(routes(bodies, authorization, cancelStarted, cancelClosed))
           port   <- ZIO.serviceWithZIO[Server](_.port)
           client <- ZIO.service[Client]
-          exit   <- service(client, port, 100.millis).embed(Chunk("slow")).exit
+          exit   <- service(client, port, 100.millis).embed(request(Chunk("slow"))).exit
         yield exit).provide(Client.default, TestServer.default)
         retryable = timeout match
           case Exit.Failure(cause) => cause.failureOption.exists(_.retryable)
@@ -202,7 +209,7 @@ object OpenAICompatibleEmbeddingHttpSpec extends ZIOSpecDefault:
           _      <- TestServer.addRoutes(routes(bodies, authorization, cancelStarted, cancelClosed))
           port   <- ZIO.serviceWithZIO[Server](_.port)
           client <- ZIO.service[Client]
-          fiber  <- service(client, port, 5.seconds).embed(Chunk("cancel")).fork
+          fiber  <- service(client, port, 5.seconds).embed(request(Chunk("cancel"))).fork
           _      <- cancelStarted.await.timeoutFail(new RuntimeException("cancel request did not start"))(
             5.seconds
           )

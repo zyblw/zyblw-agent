@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-23
+> 最后核验：2026-09-11
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -85,8 +85,10 @@ val program: ZIO[RunCommandStore & LeaseAwareAgentRuntime, AgentError, Nothing] 
 
 `WorkerHostConfig.parallelism` 限制单实例同时运行的 claim lane，默认 4、硬上限 256。每个 lane 一次只持有一条命令，
 `RunCommandStore` 的 dispatcher 继续保证同一 Run 严格串行，因此该并发只扩大不同 Run 的吞吐。所有 lane 由同一父 effect
-结构化监督；任一 lane 失败会中断其余 lane，并由 `AgentHttpHost` 或部署 Supervisor 重启整个实例。生产取值必须结合
-Provider rate limit、JDBC pool、工具下游、内存和 P95 排队时间压测，不应把 256 当成推荐值。
+结构化监督；取消、抢占或 generation 接管产生的 `LeaseLost` 只中断当前命令，旧 owner 继续受 fencing 约束，lane 随后
+领取其它 Run。可重试的 claim/存储错误在 lane 内按 `retryDelay` 退避；无法由命令 dead-letter 协议收敛的永久
+Worker/Store 错误、defect 或意外结束才会中断其余 lane，并由 `AgentHttpHost` 或部署 Supervisor 重启整个实例。生产取值
+必须结合 Provider rate limit、JDBC pool、工具下游、内存和 P95 排队时间压测，不应把 256 当成推荐值。
 
 `RunCommandStore.queueSnapshot` / `AgentApplication.queueSnapshot` 提供数据库时钟下的低敏运维快照：Queued、可领取 Run、
 Leased、过期 lease、DeadLetter 与最长可领取等待。快照不触发 claim/reclaim，也不包含 runId、tenant、payload 或 token，

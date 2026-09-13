@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-02
+> 最后核验：2026-09-11
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -225,6 +225,9 @@ val applicationLayer: ZLayer[Any, Throwable, AgentApplication.Services] =
 - `WorkerId` 每次进程启动唯一，不能把多个副本配置成同一个固定值。
 - `worker.parallelism` 是单实例同时推进的不同 Run 上限，默认 4、允许 1..256；同一 Run 仍由 dispatcher
   严格串行。它必须与 JDBC 连接池、Provider 配额、工具下游容量和 Pod 内存一起压测，不能只为缩短队列而盲目调大。
+- 取消、抢占或新 generation 接管导致的 `LeaseLost` 只停止当前命令并让 lane 继续领取；可重试的 claim/存储错误按
+  `retryDelay` 退避。无法由命令 dead-letter 协议收敛的永久 Worker/Store 错误、defect 或 Worker 意外结束仍传播给宿主
+  Supervisor。
 - `app.queueSnapshot` 只返回队列聚合，可直接供宿主的内部运维端点或定时指标采集使用；不要为查看 backlog 暴露命令正文或
   绕过 `AgentApplication` 读取任意 SQL。
 - `CompressionMode.Deterministic` 始终使用本地算法，即使图中存在 LLM compressor 也不产生费用；

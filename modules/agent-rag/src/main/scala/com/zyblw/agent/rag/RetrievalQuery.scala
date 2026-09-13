@@ -90,17 +90,37 @@ object RetrievalScoring:
     val normR = math.sqrt(right.values.foldLeft(0.0)((sum, value) => sum + value.toDouble * value.toDouble))
     if normL == 0.0 || normR == 0.0 then 0.0 else dot / (normL * normR)
 
+  def sparseScore(query: SparseEmbedding, document: SparseEmbedding): Double =
+    if query.dimension != document.dimension then 0.0
+    else
+      val left = query.entries.map(entry => entry.index -> entry.value.toDouble).toMap
+      val dot  = document.entries.foldLeft(0.0)((sum, entry) =>
+        sum + left.getOrElse(entry.index, 0.0) * entry.value.toDouble
+      )
+      val normQ = math.sqrt(
+        query.entries.foldLeft(0.0)((sum, entry) => sum + entry.value.toDouble * entry.value.toDouble)
+      )
+      val normD =
+        math.sqrt(
+          document.entries.foldLeft(0.0)((sum, entry) => sum + entry.value.toDouble * entry.value.toDouble)
+        )
+      if normQ == 0.0 || normD == 0.0 then 0.0 else dot / (normQ * normD)
+
   def rank(
       mode: RetrievalMode,
       queryText: String,
       query: Embedding,
-      authorized: Iterator[IndexedChunk]
+      authorized: Iterator[IndexedChunk],
+      sparseQuery: Option[SparseEmbedding] = None
   ): Vector[RetrievalHit] =
     val scored = authorized.map { item =>
-      val searchText       = item.chunk.searchText.getOrElse(item.chunk.text)
-      val vector           = cosine(query, item.embedding)
-      val lexical          = lexicalScore(queryText, searchText)
-      val phrase           = phraseScore(queryText, searchText)
+      val searchText = item.chunk.searchText.getOrElse(item.chunk.text)
+      val vector     = cosine(query, item.embedding)
+      val lexical    = lexicalScore(queryText, searchText)
+      val phrase     = phraseScore(queryText, searchText)
+      val sparse     = (sparseQuery, item.sparse) match
+        case (Some(left), Some(right)) => sparseScore(left, right)
+        case _                         => 0.0
       val (score, signals) = mode match
         case RetrievalMode.VectorOnly =>
           vector -> Map("vectorScore" -> vector)
@@ -109,8 +129,11 @@ object RetrievalScoring:
         case RetrievalMode.Phrase =>
           phrase -> Map("phraseScore" -> phrase)
         case RetrievalMode.Hybrid =>
-          val fused = vector + lexical
-          fused -> Map("vectorScore" -> vector, "textScore" -> lexical)
+          val fused =
+            if sparseQuery.isDefined then vector + lexical + sparse
+            else vector + lexical
+          val base = Map("vectorScore" -> vector, "textScore" -> lexical)
+          fused -> (if sparseQuery.isDefined then base + ("sparseScore" -> sparse) else base)
       RetrievalHit(item.chunk, score, signals)
     }.toVector
     scored.sortBy(hit => (-hit.score, hit.chunk.documentId, hit.chunk.id))

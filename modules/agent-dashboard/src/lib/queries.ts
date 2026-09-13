@@ -13,7 +13,6 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AdminApiError, adminApi } from '@/lib/adminClient';
 import { useConnection } from '@/lib/connection';
 import {
-  INGESTION_TERMINAL_STATUSES,
   evalSuiteKey,
   type EvalSuiteIdentityView,
   type ModelProbeRequest,
@@ -21,7 +20,7 @@ import {
   type RuntimeConfigUpdateRequest,
 } from '@/types/admin';
 
-/** 队列与摄入任务是活动数据，值班界面需要它自己动起来，而不是等人按刷新。 */
+/** 队列是活动数据，值班界面需要它自己动起来，而不是等人按刷新。 */
 const LIVE_REFETCH_MS = 5_000;
 
 /** Run 目录与知识清单变化较慢，用更长的间隔换取更少的数据库扫描。 */
@@ -186,9 +185,9 @@ export function useRetryDeadLetter() {
   });
 }
 
-/** 知识索引清单。 */
+/** 知识索引清单。租户来自会话，不接受客户端覆盖。 */
 export function useKnowledgeDocuments(
-  params: { tenantId?: string; limit?: number; cursor?: string },
+  params: { limit?: number; cursor?: string },
   enabled = true,
 ) {
   const { config } = useConnection();
@@ -220,51 +219,13 @@ export function useRetireDocument() {
   const { config } = useConnection();
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (input: { documentId: string; tenantId: string; expectedActiveVersion: number }) =>
+    mutationFn: (input: { documentId: string; expectedActiveVersion: number }) =>
       adminApi.knowledgeRetire(config, input.documentId, {
-        tenantId: input.tenantId,
         expectedActiveVersion: input.expectedActiveVersion,
       }),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ['knowledge-documents', config.baseUrl] });
     },
-  });
-}
-
-/** 提交摄入任务。 */
-export function useSubmitIngestion() {
-  const { config } = useConnection();
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: (input: {
-      params: Parameters<typeof adminApi.submitIngestion>[1];
-      content: Blob;
-    }) => adminApi.submitIngestion(config, input.params, input.content),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ['ingestion-jobs', config.baseUrl] });
-    },
-  });
-}
-
-/**
- * 摄入任务列表。
- *
- * 只要还有任务处于非终态就继续轮询；全部到达终态后停止。这比固定间隔轮询更好：摄入通常几分钟才发生一次，
- * 让一个空闲的管理页面每 3 秒打一次数据库没有意义。
- */
-export function useIngestionJobs(params: { tenantId?: string; limit?: number } = {}, enabled = true) {
-  const { config } = useConnection();
-  return useQuery({
-    queryKey: ['ingestion-jobs', config.baseUrl, params],
-    queryFn: () => adminApi.ingestionJobs(config, params),
-    retry: shouldRetry,
-    refetchInterval: (query) => {
-      const jobs = query.state.data;
-      if (!jobs) return false;
-      const active = jobs.some((job) => !INGESTION_TERMINAL_STATUSES.includes(job.status));
-      return active ? 3_000 : false;
-    },
-    enabled,
   });
 }
 

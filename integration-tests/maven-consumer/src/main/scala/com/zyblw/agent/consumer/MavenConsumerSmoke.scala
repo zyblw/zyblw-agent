@@ -53,7 +53,7 @@ object MavenConsumerSmoke:
     require(providerUnauthorized.category == ErrorCategory.Authentication)
     Unsafe.unsafe { implicit unsafe =>
       val embeddings = Runtime.default.unsafe
-        .run(HashEmbedding(8).embed(Chunk("consumer-contract")))
+        .run(EmbeddingModelOps.embedTexts(HashEmbedding(8), Chunk("consumer-contract")))
         .getOrThrowFiberFailure()
       require(embeddings.length == 1)
       require(embeddings.head.values.length == 8)

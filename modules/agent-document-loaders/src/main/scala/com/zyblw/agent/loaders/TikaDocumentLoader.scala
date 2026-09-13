@@ -3,6 +3,8 @@ package com.zyblw.agent.loaders
 import com.zyblw.agent.core.*
 import com.zyblw.agent.rag.*
 import java.io.ByteArrayInputStream
+import org.apache.pdfbox.Loader
+import org.apache.pdfbox.text.PDFTextStripper
 import org.apache.tika.metadata.Metadata
 import org.apache.tika.parser.{AutoDetectParser, ParseContext}
 import org.apache.tika.parser.ocr.TesseractOCRConfig
@@ -93,7 +95,11 @@ final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLo
     ZIO
       .attemptBlockingInterrupt(parseBlocking(input, bytes))
       .mapError { error =>
-        if causeChain(error).exists(_.getClass.getSimpleName.contains("WriteLimitReached")) then
+        if causeChain(error).exists(value =>
+            value.getClass.getSimpleName.contains("WriteLimitReached") ||
+              value.isInstanceOf[ExtractedTextLimitReached]
+          )
+        then
           AgentError.RetrievalFailed(
             s"文档提取正文超过 Tika 字符上限 ${config.maxExtractedCodePoints}"
           )
@@ -108,6 +114,10 @@ final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLo
     * tesseract 悄悄改变延迟、资源和数据处理语义。
     */
   private def parseBlocking(input: DocumentInput, bytes: Array[Byte]): ParsedDocument =
+    if normalizeMediaType(input.declaredMediaType) == "application/pdf" then parsePdfBlocking(bytes)
+    else parseTikaBlocking(input, bytes)
+
+  private def parseTikaBlocking(input: DocumentInput, bytes: Array[Byte]): ParsedDocument =
     val parser   = AutoDetectParser()
     val metadata = Metadata()
     metadata.set("resourceName", input.fileName)
@@ -128,9 +138,77 @@ final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLo
       ParsedDocument(
         normalize(handler.toString),
         normalizeMediaType(Option(metadata.get("Content-Type")).getOrElse(input.declaredMediaType)),
-        safeMetadata(metadata)
+        safeMetadata(metadata),
+        None
       )
     finally stream.close()
+
+  /** 数字 PDF 使用 PDFBox 逐页读取，保留精确页码。Tika 的纯文本 handler 会把分页符和页面 provenance 抹平，无法满足引用回跳契约；OCR/视觉 PDF 仍由更高成本的独立
+    * Loader 处理。
+    */
+  private def parsePdfBlocking(bytes: Array[Byte]): ParsedDocument =
+    val document = Loader.loadPDF(bytes)
+    try
+      val pageTexts = (1 to document.getNumberOfPages).map { pageNumber =>
+        val stripper = PDFTextStripper()
+        stripper.setStartPage(pageNumber)
+        stripper.setEndPage(pageNumber)
+        pageNumber -> normalize(stripper.getText(document))
+      }
+      val text = pageTexts.map(_._2).filter(_.nonEmpty).mkString("\n\n")
+      if text.codePointCount(0, text.length) > config.maxExtractedCodePoints then
+        throw ExtractedTextLimitReached()
+      var currentHeading: Option[String] = None
+      val blocks                         = Chunk.fromIterable(
+        pageTexts
+          .flatMap { case (pageNumber, pageText) =>
+            pageText.linesIterator
+              .map(normalize)
+              .filter(_.nonEmpty)
+              .zipWithIndex
+              .map { case (line, lineIndex) =>
+                val blockId = s"#/pdf/page/$pageNumber/line/${lineIndex + 1}"
+                val heading = looksLikePdfHeading(line)
+                if heading then currentHeading = Some(line)
+                DocumentBlock(
+                  id = blockId,
+                  parentId = None,
+                  ordinal = 0,
+                  kind =
+                    if heading then DocumentBlockKind.SectionHeading
+                    else DocumentBlockKind.Paragraph,
+                  text = line,
+                  headingPath = currentHeading.fold(Chunk.empty)(Chunk(_)),
+                  origins = Chunk(DocumentOrigin(pageNumber, blockId = Some(blockId)))
+                )
+              }
+          }
+          .zipWithIndex
+          .map { case (block, ordinal) => block.copy(ordinal = ordinal) }
+      )
+      val info     = document.getDocumentInformation
+      val metadata = Map(
+        "detectedMediaType" -> "application/pdf",
+        "pageCount"         -> document.getNumberOfPages.toString
+      ) ++ Option(info.getTitle)
+        .map(normalize)
+        .filter(_.nonEmpty)
+        .map(value => "title" -> value.take(1000)) ++
+        Option(info.getAuthor).map(normalize).filter(_.nonEmpty).map(value => "author" -> value.take(1000))
+      ParsedDocument(
+        text,
+        "application/pdf",
+        metadata,
+        Some(DocumentStructure("pdf-text-pages", Some("1"), blocks))
+      )
+    finally document.close()
+
+  private def looksLikePdfHeading(line: String): Boolean =
+    val normalized = line.trim
+    normalized.length <= 120 && (
+      normalized.matches("^第[一二三四五六七八九十百千万0-9]+[章节篇卷部].*") ||
+        normalized.matches("(?i)^chapter\\s+[0-9ivxlcdm]+(?:\\b|[.:：]).*")
+    )
 
   /** 检查类型兼容、非空正文和 code point 上限后建立 SourceDocument。 */
   private def validateParsed(
@@ -155,7 +233,16 @@ final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLo
       val representation =
         if input.declaredMediaType == "text/markdown" then DocumentRepresentation.Markdown
         else DocumentRepresentation.PlainText
-      ZIO.succeed(SourceDocument(input.id, parsed.text, input.sourceUri, parsed.metadata, representation))
+      ZIO.succeed(
+        SourceDocument(
+          input.id,
+          parsed.text,
+          input.sourceUri,
+          parsed.metadata,
+          representation,
+          parsed.structure
+        )
+      )
 
   /** MIME 参数不参与比较；只允许少量有明确语义的等价检测结果。 */
   private def compatible(declared: String, detected: String): Boolean =
@@ -200,8 +287,11 @@ final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLo
   final private case class ParsedDocument(
       text: String,
       detectedMediaType: String,
-      metadata: Map[String, String]
+      metadata: Map[String, String],
+      structure: Option[DocumentStructure]
   )
+
+  final private case class ExtractedTextLimitReached() extends RuntimeException
 
 object TikaDocumentLoader:
   val SupportedMediaTypes: Set[String] = Set(

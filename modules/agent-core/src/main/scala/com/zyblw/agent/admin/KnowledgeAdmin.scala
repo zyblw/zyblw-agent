@@ -89,6 +89,14 @@ final case class KnowledgeCitationView(
     pageNumbers: List[Int]
 ) derives JsonCodec
 
+/** Evidence assembler 对单个候选的低敏取舍；不包含正文、查询或权限标签。 */
+final case class KnowledgeEvidenceSelectionView(
+    documentId: String,
+    chunkId: String,
+    seedChunkId: String,
+    decision: String
+) derives JsonCodec
+
 /** 检索调试请求。
   *
   * `tenantId` 与 `permissions` 必须由管理台显式给出而不是从操作者身份推导：沙盒的价值正是“以某个业务主体的 权限视角复现一次检索”，用管理员自己的权限去查会让 ACL 问题永远无法复现。
@@ -130,7 +138,16 @@ final case class KnowledgeRetrievalResult(
     embeddingModel: String,
     embeddingDimension: Int,
     rerankApplied: Boolean,
-    contextExpanded: Boolean
+    contextExpanded: Boolean,
+    evidenceStatus: String = "NotEvaluated",
+    candidateCount: Int = 0,
+    acceptedCount: Int = 0,
+    topAcceptedScore: Option[Double] = None,
+    profileId: Option[String] = None,
+    knowledgeSpaceId: Option[String] = None,
+    degradedStages: Chunk[String] = Chunk.empty,
+    evidenceSelections: Chunk[KnowledgeEvidenceSelectionView] = Chunk.empty,
+    maxEvidenceTokens: Long = 0L
 ) derives JsonCodec
 
 /** 异步摄入任务的生命周期。

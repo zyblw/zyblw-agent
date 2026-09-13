@@ -372,4 +372,4 @@ object PostgresRunStoreIntegrationSpec extends ZIOSpecDefault:
         yield assertTrue(stateRejected, eventRejected, toolRejected, modelRejected))
           .provideLayer(fixtureLayer)
       }
-    ) @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@ TestAspect.timeout(2.minutes)
+    ) @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(2.minutes)

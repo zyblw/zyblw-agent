@@ -28,7 +28,13 @@ final case class AdminModelCallView(
     fingerprintPrefix: String,
     inputTokens: Long,
     outputTokens: Long,
-    errorCategory: Option[String]
+    errorCategory: Option[String],
+    requestedProfile: Option[String] = None,
+    routePolicyVersion: Option[String] = None,
+    routeDecisionCodes: List[String] = Nil,
+    estimatedRouteCost: Option[String] = None,
+    pricingFingerprintPrefix: Option[String] = None,
+    legacyExplicitModel: Option[Boolean] = None
 ) derives JsonCodec
 
 /** 低敏审批主体；只暴露摘要前缀和声明等级。 */
@@ -130,6 +136,7 @@ object RunInspectionAdmin:
             .sortBy(_.updatedAtEpochMilli)
             .takeRight(math.max(limit, 0))
             .map { record =>
+              val route = record.routeDecision
               AdminModelCallView(
                 record.requestId.asString,
                 record.status.toString,
@@ -139,7 +146,13 @@ object RunInspectionAdmin:
                 record.fingerprint.take(16),
                 record.usage.map(_.inputTokens).getOrElse(0L),
                 record.usage.map(_.outputTokens).getOrElse(0L),
-                record.errorCategory
+                record.errorCategory,
+                requestedProfile = route.map(_.requirement.profile.toString),
+                routePolicyVersion = route.map(_.policyVersion),
+                routeDecisionCodes = route.fold(List.empty[String])(_.decisionCodes.toList),
+                estimatedRouteCost = route.flatMap(_.estimatedCost).map(_.toString),
+                pricingFingerprintPrefix = route.map(_.pricingFingerprint.take(16)),
+                legacyExplicitModel = route.map(_.legacyExplicitModel)
               )
             }
         )

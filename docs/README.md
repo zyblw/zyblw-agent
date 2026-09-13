@@ -1,7 +1,7 @@
 # zyblw-agent 文档地图
 
 > 状态：当前
-> 最后核验：2026-08-23
+> 最后核验：2026-09-05
 > 事实来源：`build.sbt`、发布工作流、模块源码、测试与数据库迁移
 
 ## 按目标选择阅读路径
@@ -10,7 +10,7 @@
 
 1. [总体使用手册](usage-guide.md)
 2. [快速开始](getting-started.md)
-3. [PostgreSQL 生产接入](postgres-quickstart.md)、[Docker + 自管 PostgreSQL](operations-docker-vm.md) 与 [升级到 0.8.0](upgrading-to-0.8.0.md)
+3. [PostgreSQL 生产接入](postgres-quickstart.md)、[Docker + 自管 PostgreSQL](operations-docker-vm.md) 与 [升级到 0.9.0](fresh-install-0.9.0.md)
 4. [AgentApplication 与 Builder](application-builder.md)
 5. [Provider 与能力协商](providers.md)
 6. [ZIO HTTP 生产宿主](http-host.md)
@@ -31,10 +31,11 @@
 3. [Agent Application Runtime ADR](architecture/0016-agent-application-runtime.md)
 4. [agent-dashboard 与管理 API 边界 ADR](architecture/0017-agent-dashboard-architecture.md)
 5. [下一代 Runtime Kernel ADR](architecture/0018-next-generation-runtime-kernel.md)、[Typed Extensions 与 Constrained Execution ADR](architecture/0019-typed-extensions-and-constrained-execution.md)、[现代化基线 ADR](architecture/0020-modernization-baseline.md) 与 [开发手册](architecture/next-generation-runtime.md) — P0、P1 与 P2 Harness 已落地；Wave 1 与 Wave 2 安全切片已落地；后续 Wave 3 分支与编排仍为 Proposed。Wave 0 宿主环境证据仍待。
-6. [运行时](runtime.md)
-7. [工具](tools.md) 与 [可靠写工具](side-effects.md)
-8. [持久化](persistence.md) 与 [数据库 Schema](database-schema.md)
-9. [声明式 Workflow](workflow.md)
+6. [Model Runtime 现状审计](architecture/model-runtime-current-state.md) 与 [目标架构](architecture/model-runtime-target.md) — Phase 0 文档；补推理资源调度面，不另起执行内核。路由 / Provider 契约 / 预算 / 多模型执行见同目录；ADR-0021…0026 演进 ADR-0004/0018。[ADR-0027 RAG Runtime 绿场基线](architecture/0027-rag-retrieval-runtime.md)。
+7. [运行时](runtime.md)
+8. [工具](tools.md) 与 [可靠写工具](side-effects.md)
+9. [持久化](persistence.md) 与 [数据库 Schema](database-schema.md)
+10. [声明式 Workflow](workflow.md)
 
 ### 我要深入读源码和参与开发
 
@@ -50,12 +51,13 @@
 
 ### 我要接入知识库
 
-1. [Context、Memory 与 RAG](context-memory-rag.md)
-2. [PDF RAG 生产流水线](pdf-rag-pipeline.md)
-3. [文档 Loader、PDF→Markdown 与结构切分](document-loaders.md)
-4. [Embedding 治理](embedding-governance.md)
-5. [Reranker](reranker.md)
-6. [RAG 评测](rag-evaluation.md)
+1. [RAG / Knowledge Retrieval Runtime 目标架构与实施规范](architecture/rag-runtime-target.md)（Proposed，含现状审计、全流程架构、迁移、评测与 Cursor 分阶段上下文包）
+2. [Context、Memory 与 RAG](context-memory-rag.md)
+3. [PDF RAG 生产流水线](pdf-rag-pipeline.md)
+4. [文档 Loader、PDF→Markdown 与结构切分](document-loaders.md)
+5. [Embedding 治理](embedding-governance.md)
+6. [Reranker](reranker.md)
+7. [RAG 评测](rag-evaluation.md)
 
 ## 开源维护与发布
 
@@ -65,16 +67,7 @@
 - [模块与依赖选择](modules.md)
 - [版本、Maven Central 发布与回滚](releasing.md)
 - [兼容性契约与版本边界](compatibility.md)
-- [升级到 0.8.0：全新安装基线与知识问答](upgrading-to-0.8.0.md)
-- [升级到 0.6.0：1024 维 RAG 新库基线与缓存用途隔离](upgrading-to-0.6.0.md)
-- [升级到 0.6.2：可观察的 PDF 提取级联](upgrading-to-0.6.2.md)
-- [升级到 0.6.1：宿主管理台安全嵌入与动态治理装配](upgrading-to-0.6.1.md)
-- [升级到 0.5.0：管理面、运行时配置覆盖与模型治理](upgrading-to-0.5.0.md)
-- [历史升级归档](legacy/README.md)
-- [升级到 0.4.0（归档）：结构化 RAG 与独立知识 schema](upgrading-to-0.4.0.md)
-- [升级到 0.3.0：核心控制面清库重建](upgrading-to-0.3.0.md)
-- [从 0.1.0 升级到 0.2.0](upgrading-to-0.2.0.md)
-- [从 0.2.0 升级到 0.2.1](upgrading-to-0.2.1.md)
+- [0.9.0 全新安装基线与知识问答](fresh-install-0.9.0.md)
 - [宿主数据库迁移](database-migrations.md)
 - [PostgreSQL 生产接入与运维](postgres-quickstart.md)
 - [Docker/VM 安装、升级与恢复](operations-docker-vm.md)
@@ -92,6 +85,12 @@
 - [AgentApplication 与 Builder](application-builder.md)
 - [声明式 Workflow Graph](workflow.md)
 - [Provider 与能力协商](providers.md)
+- [Model Runtime 现状审计](architecture/model-runtime-current-state.md)
+- [Model Runtime 目标架构](architecture/model-runtime-target.md)
+- [模型路由](architecture/model-routing.md)
+- [Provider 契约与 Adapter](architecture/model-provider-contract.md)
+- [模型预算与成本](architecture/model-budget-and-cost.md)
+- [多模型执行](architecture/multi-model-execution.md)
 - [ProviderContract 2.0](provider-contract-2.md)
 - [真实 Provider smoke](provider-live-smoke.md)
 - [HTTP 公共协议与版本](http-api-versioning.md)
@@ -102,6 +101,7 @@
 
 ## 知识与上下文
 
+- [RAG / Knowledge Retrieval Runtime 目标架构与实施规范](architecture/rag-runtime-target.md)（Proposed）
 - [指令、Context 与成本工程](instruction-context-cost.md)
 - [Context、Memory 与 RAG](context-memory-rag.md)
 - [确定性/模型辅助 Context 压缩](context-compression.md)

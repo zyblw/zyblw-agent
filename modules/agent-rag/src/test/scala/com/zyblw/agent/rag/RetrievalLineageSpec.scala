@@ -17,7 +17,7 @@ object RetrievalLineageSpec extends ZIOSpecDefault:
       permissions: Set[String] = Set("knowledge:read"),
       documentId: String = "doc-1"
   ): DocumentChunk =
-    DocumentChunk(
+    DocumentChunk.fromText(
       id = id,
       documentId = documentId,
       text = s"原文 $id",

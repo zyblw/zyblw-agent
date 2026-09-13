@@ -49,7 +49,7 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
         )
         retriever = new Retriever:
           def retrieve(request: RetrievalRequest): IO[RetrievalError, RetrievalResult] =
-            val chunk = DocumentChunk(
+            val chunk = DocumentChunk.fromText(
               "chunk-1",
               "doc-1",
               "阴阳是描述相反相成关系的范畴。",
@@ -145,7 +145,7 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
         observer  = AgentOperationTelemetry(traceSink, metricSink)
         retriever = new Retriever:
           def retrieve(request: RetrievalRequest): IO[RetrievalError, RetrievalResult] =
-            val chunk = DocumentChunk(
+            val chunk = DocumentChunk.fromText(
               "observed-chunk",
               "doc",
               "中医私密正文",
@@ -180,5 +180,65 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
         !traces.toString.contains("阴阳是什么"),
         !traces.toString.contains("中医私密正文")
       )
-    }.provide(MemoryStore.inMemory, InMemoryTelemetry.layer, InMemoryAgentMetrics.layer)
+    }.provide(MemoryStore.inMemory, InMemoryTelemetry.layer, InMemoryAgentMetrics.layer),
+    test("词法命中低 RRF 分仍进入上下文，弱向量近邻按余弦门槛丢弃") {
+      for
+        store     <- ZIO.service[MemoryStore]
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        lexical = DocumentChunk.fromText(
+          "lex",
+          "doc-lex",
+          "阴阳相互关系",
+          "book://lex",
+          TenantId("tenant-a"),
+          Set("knowledge:read")
+        )
+        neighbor = DocumentChunk.fromText(
+          "vec",
+          "doc-vec",
+          "无关近邻",
+          "book://vec",
+          TenantId("tenant-a"),
+          Set("knowledge:read")
+        )
+        retriever = new Retriever:
+          def retrieve(request: RetrievalRequest): IO[RetrievalError, RetrievalResult] =
+            ZIO.succeed(
+              RetrievalResult(
+                Chunk(
+                  RetrievalHit(
+                    lexical,
+                    0.016,
+                    Map("vectorScore" -> 0.11, "textScore" -> 0.4, "textRank" -> 1.0, "vectorRank" -> 3.0)
+                  ),
+                  RetrievalHit(neighbor, 0.016, Map("vectorScore" -> 0.12, "vectorRank" -> 1.0))
+                ),
+                Chunk(
+                  Citation("cite-lex", lexical.sourceUri, lexical.text, 0.016),
+                  Citation("cite-vec", neighbor.sourceUri, neighbor.text, 0.016)
+                ),
+                RetrievalEvidence(
+                  RetrievalEvidenceStatus.Supported,
+                  candidateCount = 2,
+                  acceptedCount = 2,
+                  topAcceptedScore = Some(0.4),
+                  minimumScore = 0.18
+                )
+              )
+            )
+        resolver = MemoryRagContextSourceResolver(
+          store,
+          retriever,
+          MemoryRagContextPolicy(minimumRetrievalScore = 0.18)
+        )
+        sources <- resolver.resolve(
+          state(runId, sessionId, Some("tenant-a")),
+          AgentDefinition(AgentId("a"), "a", "i")
+        )
+      yield assertTrue(
+        sources.retrieval.map(_.id) == Chunk("cite-lex"),
+        sources.retrieval.head.source == "book://lex"
+      )
+    }.provide(MemoryStore.inMemory)
   )

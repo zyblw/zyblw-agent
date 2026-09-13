@@ -36,6 +36,16 @@ object TikaDocumentLoaderSpec extends ZIOSpecDefault:
         content.showText("Treatise on Cold Damage")
         content.endText()
       finally content.close()
+      val secondPage = PDPage()
+      document.addPage(secondPage)
+      val secondContent = PDPageContentStream(document, secondPage)
+      try
+        secondContent.beginText()
+        secondContent.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 12.0f)
+        secondContent.newLineAtOffset(72.0f, 720.0f)
+        secondContent.showText("Second page citation target")
+        secondContent.endText()
+      finally secondContent.close()
       document.save(output)
       Chunk.fromArray(output.toByteArray)
     finally
@@ -155,7 +165,10 @@ object TikaDocumentLoaderSpec extends ZIOSpecDefault:
         )
       yield assertTrue(
         pdf.text.contains("Treatise on Cold Damage"),
+        pdf.text.contains("Second page citation target"),
         pdf.metadata("detectedMediaType") == "application/pdf",
+        pdf.metadata.get("pageCount").contains("2"),
+        pdf.structure.exists(_.blocks.flatMap(_.origins.map(_.pageNumber)).distinct == Chunk(1, 2)),
         epub.text.contains("Materia Medica chapter"),
         epub.metadata("detectedMediaType") == "application/epub+zip"
       )

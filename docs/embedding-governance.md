@@ -14,11 +14,11 @@ Embedding 同时用于在线 query、离线知识索引和未来 Memory 提炼�
 2. 并发 Worker 先检查再累加配额，会共同越过限额；
 3. 网络重试重复计费，或相同 requestId 被错误绑定到不同正文。
 
-框架因此保留原始 `EmbeddingService` 作为 Provider SPI，并增加 `embedScoped` 生产入口。`KnowledgeIndexer` 与
-`DefaultRetriever` 已统一走该入口；`GovernedEmbeddingService` 的裸 `embed/embedDetailed` 会明确失败，防止装配了治理门面后
+框架因此保留原始 `EmbeddingModel` 作为 Provider SPI，并增加 `embedScoped` 生产入口。`KnowledgeIndexer` 与
+`DefaultRetriever` 已统一走该入口；`GovernedEmbeddingModel` 的裸 `embed/embedDetailed` 会明确失败，防止装配了治理门面后
 又无意绕过 tenant scope。
 
-`0.8.0` 知识 schema 固定 `vector(1024)`。`KnowledgeQaHost` 的 live 摄入 / 重建 / serve 通过
+`0.9.0` 知识 schema 固定 `vector(1024)`。`KnowledgeQaHost` 的 live 摄入 / 重建 / serve 通过
 `OpenAICompatibleEmbeddingConfig.fromEnvironment` 读取 `EMBEDDING_*`，并 `require1024`：维度不是 1024 会启动失败，
 不会回退到 `HashEmbedding`。`contract` 模式才使用确定性哈希向量。
 
@@ -78,11 +78,11 @@ tenant+requestId+requestHash 重试返回既有预留，不重复扣减；同 re
 单进程测试和开发可使用：
 
 ```scala
-val governed = ZLayer.make[EmbeddingService](
+val governed = ZLayer.make[EmbeddingModel](
   rawEmbeddingProviderLayer,
   EmbeddingCacheStore.inMemory,
   EmbeddingQuotaStore.inMemory,
-  GovernedEmbeddingService.layer(
+  GovernedEmbeddingModel.layer(
     quotaPolicy = EmbeddingQuotaPolicy(
       window = 1.day,
       maxRequests = 10_000,
@@ -93,16 +93,16 @@ val governed = ZLayer.make[EmbeddingService](
 )
 ```
 
-若 ZLayer 图同时需要“原始 Provider”和“治理后的 EmbeddingService”，宿主应通过小型包装类型区分两者，避免同类型服务在
+若 ZLayer 图同时需要“原始 Provider”和“治理后的 EmbeddingModel”，宿主应通过小型包装类型区分两者，避免同类型服务在
 环境中相互遮蔽。
 
 多 Worker 生产部署使用宿主的同一个 `DataSource`：
 
 ```scala
-val governed = ZLayer.make[EmbeddingService](
+val governed = ZLayer.make[EmbeddingModel](
   rawEmbeddingProviderLayer,
   PostgresAgentPersistence.embeddingGovernance,
-  GovernedEmbeddingService.layer(
+  GovernedEmbeddingModel.layer(
     quotaPolicy = EmbeddingQuotaPolicy(window = 1.day, maxRequests = 10_000)
   )
 )

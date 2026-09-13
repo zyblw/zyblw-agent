@@ -52,12 +52,12 @@ object KnowledgeQaLayers:
     }
 
   private val ragAndKnowledge: ZLayer[
-    EmbeddingService & KnowledgeIndexStore & VectorStore & KnowledgeIndexDirectory,
+    EmbeddingModel & KnowledgeIndexStore & VectorStore & KnowledgeIndexDirectory,
     RetrievalError,
     RagApplication & KnowledgeService & Retriever
   ] =
     ZLayer.makeSome[
-      EmbeddingService & KnowledgeIndexStore & VectorStore & KnowledgeIndexDirectory,
+      EmbeddingModel & KnowledgeIndexStore & VectorStore & KnowledgeIndexDirectory,
       RagApplication & KnowledgeService & Retriever
     ](
       DocumentLoaderRegistry.layer(Chunk(TikaDocumentLoader())),
@@ -77,18 +77,18 @@ object KnowledgeQaLayers:
 
   val inMemoryStack: ZLayer[Any, RetrievalError, Stack] =
     ZLayer.make[Stack](
-      ZLayer.succeed[EmbeddingService](HashEmbedding(64)),
+      ZLayer.succeed[EmbeddingModel](HashEmbedding(64)),
       KnowledgeIndexDirectory.inMemoryKnowledge,
       ragAndKnowledge
     )
 
-  val postgresStack: ZLayer[DataSource & EmbeddingService, RetrievalError, Stack] =
-    ZLayer.makeSome[DataSource & EmbeddingService, Stack](
+  val postgresStack: ZLayer[DataSource & EmbeddingModel, RetrievalError, Stack] =
+    ZLayer.makeSome[DataSource & EmbeddingModel, Stack](
       PostgresAgentPersistence.knowledge(1024),
       ragAndKnowledge
     )
 
-  val contractEmbedding: ULayer[EmbeddingService] =
+  val contractEmbedding: ULayer[EmbeddingModel] =
     ZLayer.succeed(HashEmbedding(1024))
 
   def require1024(
@@ -97,13 +97,13 @@ object KnowledgeQaLayers:
     ZIO
       .fail(
         AgentError.InvalidConfiguration(
-          s"问答知识库要求 EMBEDDING_DIMENSION=1024，实际为 ${config.dimension}"
+          s"当前知识基线要求 embedding 维度与选定 identity 一致（默认 1024），实际为 ${config.dimension}"
         )
       )
       .when(config.dimension != 1024)
       .as(config)
 
-  val liveEmbedding: ZLayer[Client, AgentError, EmbeddingService] =
+  val liveEmbedding: ZLayer[Client, AgentError, EmbeddingModel] =
     ZLayer.fromZIO {
       for
         config <- OpenAICompatibleEmbeddingConfig.fromEnvironment.flatMap(require1024)
@@ -111,7 +111,7 @@ object KnowledgeQaLayers:
       yield OpenAICompatibleEmbeddingService(client, config)
     }
 
-  def embedding(config: ProductionSupportConfig): ZLayer[Client, AgentError, EmbeddingService] =
+  def embedding(config: ProductionSupportConfig): ZLayer[Client, AgentError, EmbeddingModel] =
     config.mode match
       case ProductionSupportMode.Contract => contractEmbedding
       case ProductionSupportMode.Live     => liveEmbedding
@@ -137,7 +137,7 @@ object KnowledgeQaLayers:
     ZLayer.succeed(
       AgentHttpHostConfig(
         serviceName = "zyblw-agent-knowledge-qa",
-        serviceVersion = "0.8.0",
+        serviceVersion = "0.9.0",
         environment = config.mode.toString.toLowerCase
       )
     )

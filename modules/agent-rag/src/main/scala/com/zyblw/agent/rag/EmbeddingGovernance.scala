@@ -18,7 +18,13 @@ enum EmbeddingPurpose:
   * @param requestId
   *   网络重试必须复用的稳定幂等 ID
   */
-final case class EmbeddingRequestContext(tenantId: TenantId, purpose: EmbeddingPurpose, requestId: String):
+final case class EmbeddingRequestContext(
+    tenantId: TenantId,
+    purpose: EmbeddingPurpose,
+    requestId: String,
+    knowledgeSpaceId: Option[KnowledgeSpaceId] = None,
+    permissionFingerprint: String = "-"
+):
   require(requestId.trim.nonEmpty && requestId.length <= 500, "Embedding requestId 长度必须位于 1..500")
 
 /** 缓存键包含租户、用途、模型契约、算法版本和正文摘要，不保存原始正文。
@@ -57,6 +63,11 @@ trait EmbeddingCacheStore:
     */
   def purgeExpired(now: Instant, limit: Int): IO[RetrievalError, Long]
 
+  /** 撤回后使该租户缓存失效；默认空操作，生产实现必须按 tenant 删除。 */
+  def invalidateTenant(tenantId: TenantId): IO[RetrievalError, Unit] =
+    val _ = tenantId
+    ZIO.unit
+
 object EmbeddingCacheStore:
   /** Ref.Synchronized 参考实现，用于测试和单进程部署。 */
   val inMemory: ULayer[EmbeddingCacheStore] = ZLayer.fromZIO {
@@ -82,6 +93,8 @@ object EmbeddingCacheStore:
                 .toSet
               expired.size.toLong -> current.removedAll(expired)
             }
+        override def invalidateTenant(tenantId: TenantId): UIO[Unit] =
+          state.update(_.filterNot(_._1.tenantId == tenantId))
     }
   }
 
@@ -221,39 +234,33 @@ final case class GovernedEmbeddingConfig(
 ):
   require(cacheTtl > Duration.Zero && cacheKeyVersion.trim.nonEmpty, "Embedding cache 配置无效")
 
-/** 租户隔离、请求内去重、缓存和原子配额组成的生产 Embedding 门面。 原始 `embed/embedDetailed` 被显式拒绝，保证使用本门面时无法遗漏可信 scope。
+/** 租户隔离、请求内去重、缓存和原子配额组成的生产 Embedding 门面。
+  *
+  * 缓存键包含 space/profile/role/instruction/dimension/output/输入 hash/权限指纹，禁止跨权限复用。
   */
-final class GovernedEmbeddingService(
-    delegate: EmbeddingService,
+final class GovernedEmbeddingModel(
+    delegate: EmbeddingModel,
     cache: EmbeddingCacheStore,
     quota: EmbeddingQuotaStore,
     quotaPolicy: EmbeddingQuotaPolicy,
     config: GovernedEmbeddingConfig
-) extends EmbeddingService:
-  override val dimension: Int                                           = delegate.dimension
-  override val descriptor: EmbeddingProviderDescriptor                  = delegate.descriptor
-  def embed(texts: Chunk[String]): IO[RetrievalError, Chunk[Embedding]] =
-    ZIO.fail(AgentError.RetrievalFailed("GovernedEmbeddingService 必须使用 embedScoped 并提供租户上下文"))
-  override def embedDetailed(texts: Chunk[String]): IO[RetrievalError, EmbeddingBatchResult] =
-    ZIO.fail(AgentError.RetrievalFailed("GovernedEmbeddingService 必须使用 embedScoped 并提供租户上下文"))
+) extends EmbeddingModel:
+  override val capabilities: EmbeddingCapabilities       = delegate.capabilities
+  override val descriptor: EmbeddingProviderDescriptorV2 = delegate.descriptor
 
-  override def embedScoped(
-      context: EmbeddingRequestContext,
-      texts: Chunk[String]
-  ): IO[RetrievalError, EmbeddingBatchResult] =
-    if texts.isEmpty then ZIO.succeed(EmbeddingBatchResult(Chunk.empty))
-    else if texts.exists(_.trim.isEmpty) then ZIO.fail(AgentError.RetrievalFailed("Embedding 文本不能为空"))
-    else
+  def embed(request: EmbeddingRequest): IO[RetrievalError, EmbeddingResponse] =
+    delegate.validate(request) *> {
+      val texts = request.texts
       for
         now <- Clock.instant
-        keyed  = texts.zipWithIndex.map { case (text, index) => (index, text, key(context, text)) }
+        keyed  = texts.zipWithIndex.map { case (text, index) => (index, text, key(request, text)) }
         unique = Chunk.fromIterable(keyed.groupBy(_._3).values.map(_.minBy(_._1))).sortBy(_._1)
         cached <- cacheRead(unique.map(_._3), now)
         misses = unique.filterNot(item => cached.contains(item._3))
         generated <-
-          if misses.isEmpty then ZIO.succeed(EmbeddingBatchResult(Chunk.empty))
-          else reserveAndEmbed(context, misses, now)
-        fresh = misses.map(_._3).zip(generated.embeddings).toMap
+          if misses.isEmpty then ZIO.succeed(EmbeddingResponse(Chunk.empty, descriptor))
+          else reserveAndEmbed(request, misses, now)
+        fresh = misses.map(_._3).zip(generated.denseEmbeddings).toMap
         _ <- cacheWrite(Chunk.fromIterable(fresh.map { case (cacheKey, embedding) =>
           EmbeddingCacheEntry(cacheKey, embedding, now.plusMillis(config.cacheTtl.toMillis))
         }))
@@ -261,29 +268,45 @@ final class GovernedEmbeddingService(
         ordered <- ZIO.foreach(keyed)(item =>
           ZIO.fromOption(all.get(item._3)).orElseFail(AgentError.RetrievalFailed("Embedding 缓存重组缺失结果"))
         )
-      yield generated.copy(embeddings = ordered)
+      yield generated.copy(items = ordered.map(embedding => EmbeddingItem(Some(embedding), None)))
+    }
 
   private def reserveAndEmbed(
-      context: EmbeddingRequestContext,
+      request: EmbeddingRequest,
       misses: Chunk[(Int, String, EmbeddingCacheKey)],
       now: Instant
-  ): IO[RetrievalError, EmbeddingBatchResult] =
-    val texts = misses.map(_._2)
-    // 幂等指纹同时绑定用途和模型契约；同 requestId 即使正文相同，也不能跨用途/模型复用旧配额预留。
-    val hash = sha256(
-      s"${context.purpose}|${descriptor.provider}|${descriptor.model}|$dimension|${misses.map(_._3.contentHash).mkString("\n")}"
+  ): IO[RetrievalError, EmbeddingResponse] =
+    val texts   = misses.map(_._2)
+    val context = request.context
+    val dim     = request.dimension.getOrElse(capabilities.defaultDenseDimension)
+    val hash    = sha256(
+      s"${context.purpose}|${request.role}|${request.output}|${descriptor.provider}|${descriptor.model}|$dim|${misses.map(_._3.contentHash).mkString("\n")}"
     )
     val characters  = texts.foldLeft(0L)((sum, text) => sum + text.codePointCount(0, text.length).toLong)
     val reservation = EmbeddingQuotaReservation(context, hash, 1L, texts.length.toLong, characters)
     quota.reserve(reservation, quotaPolicy, now) *>
-      // 让 Provider 看见可信 purpose；例如带 instruction 的 Qwen/OpenAI-compatible Adapter 可据此分别格式化 query 与 document。
-      delegate.embedScoped(context, texts).flatMap { result =>
-        if result.embeddings.length != texts.length then
+      delegate.embed(request.copy(texts = texts)).flatMap { result =>
+        if result.denseEmbeddings.length != texts.length then
           ZIO.fail(AgentError.RetrievalFailed("Embedding Provider 输出数量与去重后输入不一致"))
-        else if result.embeddings.exists(_.values.length != dimension) then
+        else if result.denseEmbeddings.exists(_.values.length != dim) then
           ZIO.fail(AgentError.RetrievalFailed("Embedding Provider 输出维度漂移"))
         else ZIO.succeed(result)
       }
+
+  private def key(request: EmbeddingRequest, text: String): EmbeddingCacheKey =
+    val instruction = request.instruction.fold("-")(i => s"${i.id}:${i.version}")
+    val space       = request.context.knowledgeSpaceId.fold("default")(_.value)
+    val fingerprint =
+      s"${request.role}|${request.output}|$instruction|${request.dimension.getOrElse(capabilities.defaultDenseDimension)}|${request.context.tenantId.value}|$space|${request.context.permissionFingerprint}"
+    EmbeddingCacheKey(
+      request.context.tenantId,
+      request.context.purpose,
+      descriptor.provider,
+      descriptor.model,
+      request.dimension.getOrElse(capabilities.defaultDenseDimension),
+      s"${config.cacheKeyVersion}|$fingerprint",
+      sha256(text)
+    )
 
   private def cacheRead(keys: Chunk[EmbeddingCacheKey], now: Instant) =
     cache
@@ -300,17 +323,6 @@ final class GovernedEmbeddingService(
         if config.cacheFailureMode == CacheFailureMode.FailOpen then ZIO.unit else ZIO.fail(error)
       )
 
-  private def key(context: EmbeddingRequestContext, text: String): EmbeddingCacheKey =
-    EmbeddingCacheKey(
-      context.tenantId,
-      context.purpose,
-      descriptor.provider,
-      descriptor.model,
-      dimension,
-      config.cacheKeyVersion,
-      sha256(text)
-    )
-
   private def sha256(value: String): String =
     MessageDigest
       .getInstance("SHA-256")
@@ -318,13 +330,12 @@ final class GovernedEmbeddingService(
       .map(byte => f"${byte & 0xff}%02x")
       .mkString
 
-object GovernedEmbeddingService:
+object GovernedEmbeddingModel:
   /** 从原始 Provider、缓存、配额 Store 和显式策略装配治理门面。 */
   def layer(
       quotaPolicy: EmbeddingQuotaPolicy = EmbeddingQuotaPolicy(),
       config: GovernedEmbeddingConfig = GovernedEmbeddingConfig()
-  ): URLayer[EmbeddingService & EmbeddingCacheStore & EmbeddingQuotaStore, EmbeddingService] =
-    ZLayer.fromFunction(
-      (delegate: EmbeddingService, cache: EmbeddingCacheStore, quota: EmbeddingQuotaStore) =>
-        GovernedEmbeddingService(delegate, cache, quota, quotaPolicy, config): EmbeddingService
+  ): URLayer[EmbeddingModel & EmbeddingCacheStore & EmbeddingQuotaStore, EmbeddingModel] =
+    ZLayer.fromFunction((delegate: EmbeddingModel, cache: EmbeddingCacheStore, quota: EmbeddingQuotaStore) =>
+      GovernedEmbeddingModel(delegate, cache, quota, quotaPolicy, config): EmbeddingModel
     )

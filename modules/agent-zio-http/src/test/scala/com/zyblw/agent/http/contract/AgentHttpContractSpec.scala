@@ -10,8 +10,11 @@ import zio.test.*
   */
 object AgentHttpContractSpec extends ZIOSpecDefault:
   private val releasedOpenApi =
-    val stream = Option(getClass.getResourceAsStream("/openapi/agent-http-v1.2.0.json"))
+    val url = Option(getClass.getResource("/openapi/agent-http-v1.2.0.json"))
       .getOrElse(throw IllegalStateException("缺少已审查的 OpenAPI v1.2.0 快照"))
+    val connection = url.openConnection()
+    connection.setUseCaches(false)
+    val stream = connection.getInputStream
     try Source.fromInputStream(stream, "UTF-8").mkString.trim
     finally stream.close()
 

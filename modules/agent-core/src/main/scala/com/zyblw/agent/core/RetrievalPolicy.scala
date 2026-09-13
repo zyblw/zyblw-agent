@@ -10,7 +10,7 @@ import zio.*
   * @param topK
   *   调用方未显式指定时的检索条数
   * @param minimumScore
-  *   注入 Context 前 seed 命中的最低得分；0 表示不过滤
+  *   注入 Context 前 seed 命中的最低余弦 `vectorScore`；0 表示不过滤。Hybrid 的 RRF 分只用于排序。有词法命中时不受此阈值约束。
   * @param rerankEnabled
   *   是否执行重排阶段
   */

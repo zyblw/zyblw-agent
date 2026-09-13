@@ -14,7 +14,7 @@
 - `publishM2` + 独立 Maven consumer
 - `.github/scripts/verify-local-evidence.sh --manifest`
 
-## 已延期，等独立上线环境
+## 已延期，等约定窗口的生产流量测量
 
 - 数小时真实 soak
 - VM/进程节点丢失

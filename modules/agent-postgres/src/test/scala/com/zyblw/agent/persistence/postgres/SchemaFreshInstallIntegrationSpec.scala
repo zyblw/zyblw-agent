@@ -10,7 +10,7 @@ import org.testcontainers.utility.DockerImageName
 import zio.*
 import zio.test.*
 
-/** 真实 PostgreSQL 16 上验证 0.8 全新基线：死投影表不存在、bytes 可外置。 */
+/** 真实 PostgreSQL 16 上验证 0.9 全新基线：死投影表不存在、bytes 可外置。 */
 object SchemaFreshInstallIntegrationSpec extends ZIOSpecDefault:
   private val dataSourceLayer: ZLayer[Any, Throwable, DataSource] = ZLayer.scoped {
     for container <- ZIO.acquireRelease(

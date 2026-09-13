@@ -38,12 +38,11 @@ lifecycle, protocol, security, or license boundary plus an ADR.
 
 ## Current state
 
-The version line is `0.8.0`: folded Flyway, retrieval modes, knowledge HTTP, and `KnowledgeQaHost`.
-There is no in-place upgrade from `0.6.x` or the superseded `0.7.0` candidate. See
-`docs/upgrading-to-0.8.0.md`.
+The only supported version line is `0.9.0`: folded Flyway (core + 1024 knowledge each a single V001), retrieval modes, knowledge HTTP, citation source types, and `KnowledgeQaHost`.
+Installation starts from an empty database and follows `docs/fresh-install-0.9.0.md`.
 
 Maturity is tracked per capability in `docs/maturity-and-roadmap.md`, not per module. As of
-`0.8.0`:
+`0.9.0`:
 
 - **Foundation**: runtime loop, typed tools and policy, durable command worker, layered
   instructions, business HTTP v1, run inspection.
@@ -72,7 +71,7 @@ is the Wave 0–3 roadmap in
    justify branching/orchestration. Honest breaking changes must still be documented per surface.
 3. Outcome / trajectory / safety / resource scoring separated in evals, with confidence intervals
    and human calibration, before any release claims quality improvements.
-4. RAG hardening beyond the 0.8.0 baseline: real OCR and malicious-PDF corpora, host-side
+4. RAG hardening for the current baseline: real OCR and malicious-PDF corpora, host-side
    object-store source resolvers, and retention workers.
 5. Wave 2 context and protocol: `ContextSection` snapshot/diff, `SkillCatalog` with on-demand
    loading, and the stable/experimental `AgentProtocol` declaration; then continue hardening the
@@ -123,15 +122,15 @@ Run the smallest relevant checks during development and the full gates before a 
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.8.0-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.9.0-local"; publishM2'
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.8.0-local sbt -batch compile
+ZYBLW_AGENT_VERSION=0.9.0-local sbt -batch compile
 ```
 
 Console changes additionally require, in `modules/agent-dashboard`:
 
 ```bash
-npm run typecheck && npm run lint && npm run build && npm run test:e2e
+npm run typecheck && npm run lint && npm run build && npm run test:e2e && npm run test:e2e:host
 ```
 
 For console design and interaction work, use the repository-local frontend skills in this order:

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "releaseLine": "0.8.0",
+  "releaseLine": "0.9.0",
   "mechanisms": [
     {
       "id": "dataset-content-binding",

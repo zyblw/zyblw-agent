@@ -467,6 +467,58 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
         records.find(_.commandId == recover.commandId).exists(_.status == RunCommandStatus.Superseded)
       )).provideLayer(storesLayer)
     },
+    test("正式 WorkerHost 中一个 Run 被取消不会中断无关 Run 或宿主") {
+      (for
+        stores   <- ZIO.service[Stores]
+        runA     <- createRun(stores.runStore)
+        runB     <- createRun(stores.runStore)
+        commandA <- stores.commandStore.submit(runA, RunCommandPayload.Recover, "recover:isolation-a")
+        commandB <- stores.commandStore.submit(runB, RunCommandPayload.Recover, "recover:isolation-b")
+        enteredA <- Promise.make[Nothing, Unit]
+        enteredB <- Promise.make[Nothing, Unit]
+        releaseB <- Promise.make[Nothing, Unit]
+        stoppedA <- Promise.make[Nothing, Unit]
+        runtime = new LeaseAwareAgentRuntime:
+          def executeLeased(lease: RunCommandLease): IO[AgentError, Unit] =
+            if lease.runId == runA then
+              (enteredA.succeed(()).unit *> ZIO.never)
+                .ensuring(stoppedA.succeed(()).unit)
+            else enteredB.succeed(()).unit *> releaseB.await
+        host <- WorkerHost
+          .make(
+            WorkerId("postgres-cancel-isolation"),
+            WorkerHostConfig(
+              leaseDuration = 500.millis,
+              heartbeatEvery = 100.millis,
+              pollEvery = 10.millis,
+              parallelism = 2
+            )
+          )
+          .provide(ZLayer.succeed(stores.commandStore), ZLayer.succeed(runtime))
+        fiber <- host.run.fork
+        _     <- enteredA.await
+        _     <- enteredB.await
+        _     <- stores.commandStore.submit(
+          runA,
+          RunCommandPayload.Cancel(Some("user-request")),
+          "cancel:isolation",
+          priority = Int.MaxValue
+        )
+        _ <- stoppedA.await.timeoutFail(AgentError.Unexpected("cancel did not interrupt run A"))(3.seconds)
+        _ <- releaseB.succeed(())
+        savedB <- stores.commandStore
+          .get(commandB.commandId)
+          .repeatUntil(_.status == RunCommandStatus.Completed)
+          .timeoutFail(AgentError.Unexpected("unrelated run B did not complete"))(3.seconds)
+        hostExit <- fiber.poll
+        savedA   <- stores.commandStore.get(commandA.commandId)
+        _        <- fiber.interrupt
+      yield assertTrue(
+        savedA.status == RunCommandStatus.Queued,
+        savedB.status == RunCommandStatus.Completed,
+        hostExit.isEmpty
+      )).provideLayer(storesLayer)
+    },
     test("正式 WorkerHost 多实例有界并发消费时每条命令只执行一次") {
       (for
         stores  <- ZIO.service[Stores]
@@ -740,5 +792,5 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
         noSecondClaim.isEmpty
       )).provideLayer(storesLayer)
     }
-  ) @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@ TestAspect.withLiveClock @@
+  ) @@ PostgresIntegrationAspect.enabled @@ TestAspect.withLiveClock @@
     TestAspect.timeout(3.minutes) @@ TestAspect.sequential

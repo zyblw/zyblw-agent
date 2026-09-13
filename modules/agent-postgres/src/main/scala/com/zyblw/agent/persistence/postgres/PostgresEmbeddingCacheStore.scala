@@ -119,6 +119,18 @@ final class PostgresEmbeddingCacheStore(
         }
       }
 
+  override def invalidateTenant(tenantId: TenantId): IO[RetrievalError, Unit] =
+    withConnection { connection =>
+      jdbc("invalidate tenant embedding cache") {
+        val statement = connection.prepareStatement("DELETE FROM agent_embedding_cache WHERE tenant_id = ?")
+        try
+          statement.setString(1, tenantId.value)
+          statement.executeUpdate()
+          ()
+        finally statement.close()
+      }
+    }
+
   /** 执行一批固定 SQL 的缓存读取，并验证数据库中的数组仍符合模型维度契约。 */
   private def readBatch(
       batch: Chunk[EmbeddingCacheKey],

@@ -19,6 +19,7 @@ object EmbeddingConfigLoaderSpec extends ZIOSpecDefault:
           config.dimension == 1024,
           config.sendDimensions,
           config.maxBatchSize == 128,
+          config.maxTextsPerRequest == 10_000,
           config.requestTimeout == 60.seconds,
           config.embeddingsUrl == "https://api.openai.com/v1/embeddings",
           !config.toString.contains("embedding-secret")
@@ -27,14 +28,15 @@ object EmbeddingConfigLoaderSpec extends ZIOSpecDefault:
     },
     test("全部键均可被部署覆盖") {
       val values = Map(
-        "EMBEDDING_PROVIDER_ID"     -> "glm-embeddings",
-        "EMBEDDING_BASE_URL"        -> "https://embeddings.example/v4",
-        "EMBEDDING_API_KEY"         -> "embedding-secret",
-        "EMBEDDING_MODEL"           -> "embedding-3",
-        "EMBEDDING_DIMENSION"       -> "1024",
-        "EMBEDDING_SEND_DIMENSIONS" -> "false",
-        "EMBEDDING_MAX_BATCH_SIZE"  -> "16",
-        "EMBEDDING_REQUEST_TIMEOUT" -> "5s"
+        "EMBEDDING_PROVIDER_ID"           -> "glm-embeddings",
+        "EMBEDDING_BASE_URL"              -> "https://embeddings.example/v4",
+        "EMBEDDING_API_KEY"               -> "embedding-secret",
+        "EMBEDDING_MODEL"                 -> "embedding-3",
+        "EMBEDDING_DIMENSION"             -> "1024",
+        "EMBEDDING_SEND_DIMENSIONS"       -> "false",
+        "EMBEDDING_MAX_BATCH_SIZE"        -> "16",
+        "EMBEDDING_MAX_TEXTS_PER_REQUEST" -> "512",
+        "EMBEDDING_REQUEST_TIMEOUT"       -> "5s"
       )
       OpenAICompatibleEmbeddingConfig.fromEnvironment.provide(provider(values)).map { config =>
         assertTrue(
@@ -42,6 +44,7 @@ object EmbeddingConfigLoaderSpec extends ZIOSpecDefault:
           config.dimension == 1024,
           !config.sendDimensions,
           config.maxBatchSize == 16,
+          config.maxTextsPerRequest == 512,
           config.requestTimeout == 5.seconds,
           config.embeddingsUrl == "https://embeddings.example/v4/embeddings"
         )

@@ -11,8 +11,9 @@ import zio.*
   * 三个 scope 故意分开，而不是合并成一个 `agent:admin`：
   *
   *   - [[ReadScope]] 只读聚合，泄漏面最小，可以发给值班与监控；
-  *   - [[WriteScope]] 能改变部署行为（工具白名单、审批策略、死信重排、索引退役），必须单独授予；
-  *   - [[DebugScope]] 会触发真实 Provider 调用并产生费用（检索沙盒、文档摄入），因此既不被 [[WriteScope]] 蕴含，也不被 [[ReadScope]] 蕴含。
+  *   - [[WriteScope]] 能改变部署行为（工具白名单、审批策略、死信重排），必须单独授予；
+  *   - [[DebugScope]] 会触发真实 Provider 调用并产生费用（检索沙盒），因此既不被 [[WriteScope]] 蕴含，也不被 [[ReadScope]] 蕴含。检索沙盒另外要求
+  *     `knowledge:read`。
   *
   * [[WriteScope]] 蕴含 [[ReadScope]]：能改配置的人必然要先看到当前配置，强制业务同时授予两个 scope 只会制造无意义的配置错误。
   */
@@ -20,10 +21,10 @@ object AdminAuthorization:
   /** 读取管理面聚合、Run 目录、有效配置快照与评测趋势。 */
   val ReadScope: String = "agent:admin:read"
 
-  /** 修改运行时配置覆盖、重排死信命令、退役知识索引等改变部署行为的操作。 */
+  /** 修改运行时配置覆盖、重排死信命令等改变部署行为的操作。 */
   val WriteScope: String = "agent:admin:write"
 
-  /** 执行会产生真实 Provider 费用的调试操作：检索沙盒与文档摄入。 */
+  /** 执行会产生真实 Provider 费用的调试操作：检索沙盒。 */
   val DebugScope: String = "agent:admin:debug"
 
   /** 校验只读权限；`WriteScope` 蕴含读权限。 */

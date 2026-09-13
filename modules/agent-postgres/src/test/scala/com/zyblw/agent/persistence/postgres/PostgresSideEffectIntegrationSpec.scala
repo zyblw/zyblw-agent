@@ -378,7 +378,7 @@ object PostgresSideEffectIntegrationSpec extends ZIOSpecDefault:
         invalid.isFailure
       )).provideLayer(servicesLayer)
     }
-  ) @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@ TestAspect.withLiveClock @@
+  ) @@ PostgresIntegrationAspect.enabled @@ TestAspect.withLiveClock @@
     TestAspect.timeout(3.minutes) @@ TestAspect.sequential
 
   /** 查询目标业务行及三个可靠性表的数量。 */

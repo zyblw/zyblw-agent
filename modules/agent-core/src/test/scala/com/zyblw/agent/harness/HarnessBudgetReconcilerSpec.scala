@@ -1,7 +1,7 @@
 package com.zyblw.agent.harness
 
 import com.zyblw.agent.core.*
-import com.zyblw.agent.memory.RunStore
+import com.zyblw.agent.memory.{ModelCallWrite, RunStore}
 import java.time.Instant
 import zio.*
 import zio.test.*
@@ -30,6 +30,57 @@ object HarnessBudgetReconcilerSpec extends ZIOSpecDefault:
   private val layer = ZLayer.make[RunStore & HarnessStore](RunStore.inMemory, HarnessStore.inMemory)
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("HarnessBudgetReconciler")(
+    test("终态仍有 Unknown 模型调用时保留 Goal 预留") {
+      (for
+        runs      <- ZIO.service[RunStore]
+        harness   <- ZIO.service[HarnessStore]
+        goal      <- GoalId.random
+        id        <- createRun(runs, RunStatus.Completed)
+        state     <- runs.load(id)
+        requestId <- ModelRequestId.random
+        eventId   <- EventId.random
+        record = ModelCallExecutionRecord(
+          id,
+          requestId,
+          1,
+          ModelCallStatus.Unknown,
+          "p",
+          "m",
+          CapturePolicy.MetadataOnly,
+          "a" * 64,
+          1,
+          0,
+          ModelCallContextLineage(1, 0, 0, 0, 0),
+          None,
+          None,
+          updatedAtEpochMilli = 1L
+        )
+        event = PersistedAgentEvent(
+          eventId,
+          id,
+          state.lastEventSequence + 1,
+          AgentEvent.ModelCallUnknown(id, requestId.asString, 1L),
+          1L
+        )
+        _ <- runs.commit(
+          state.version,
+          state.copy(lastEventSequence = event.sequence),
+          NonEmptyChunk(event),
+          Some(ModelCallWrite.Insert(record))
+        )
+        _ <- harness.saveGoal(0L, Goal(goal, ThreadId("unknown"), "unknown cost"))
+        _ <- harness
+          .configureGoalBudget(goal, GoalBudgetPolicy(1, 2, 2, 100, 50, 120, Some(BigDecimal("2.00"))))
+        _           <- harness.reserveGoalBudget(goal, id, limits)
+        reconciler  <- HarnessBudgetReconciler.make(harness, runs)
+        report      <- reconciler.reconcileNext()
+        reservation <- harness.getGoalBudgetReservation(goal, id)
+      yield assertTrue(
+        report.pending == 1,
+        report.settled == 0,
+        reservation.exists(_.status == GoalBudgetReservationStatus.Reserved)
+      )).provideLayer(layer)
+    },
     test("只结算终态，缺失/非终态保持 Reserved，游标到末尾后安全回绕") {
       (for
         runs       <- ZIO.service[RunStore]

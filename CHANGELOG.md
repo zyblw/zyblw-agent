@@ -3,12 +3,65 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
+## 0.9.0 - Unreleased
+
+### Durable Worker reliability
+
+- Normal cancellation, lease preemption, and generation takeover now stop only the affected command. The claim lane remains available for unrelated Runs while stale completion remains fenced.
+- Retryable claim/store failures back off inside the lane; unrecoverable Worker/store failures, defects, and unexpected Worker termination still fail the host.
+
+### Embedded HTTP boundaries
+
+- `AgentHttpApi` now exposes additive submission, run-read, event, control, command, and metadata route groups. Existing `routes` still serves the complete stable v1 contract; embedded product hosts can mount only the minimum surface they own.
+
+### RAG Runtime 绿场脊柱
+
+- 知识 V001 替换为 Space / Profile / census / chunks / audit / withdrawn；检索只读 pinned `activeProfileId`。
+- 唯一 Embedding SPI 为 `EmbeddingModel.embed(EmbeddingRequest)`；删除 `EmbeddingService`。
+- `DocumentChunk` 只存 `ChunkRepresentations`；citation 只用 `displayText`。
+- 默认检索 1024 dense + PostgreSQL FTS + weighted RRF + rerank；sparse / planner assist 默认关闭。
+- 安全硬门禁与消融 A–D runner 进入 `agent-evals`；宿主中医校准标 deferred。
+- 摄入主路径写入 checkpoint；质量不足进入 quarantine（`Failed` + `ingestion.quarantine`），不得 `activate`。
+- 文档发布显式写 space/profile；换模写入 building Profile，只有空间级 `activateProfile(expectedRevision)` 才 CAS。请求内 `pinnedProfileId` 钉死，中途切指针不影响进行中查询。
+- Profile 切换要求可信评测绑定完整目标 census，并在 Space 锁内与当前 active corpus 对齐；缺文档、失败文档、质量未通过或 revision 漂移均 fail-closed。切换审计独立保存 evaluation/census/count，旧 Profile 与 chunks 保留供回滚，已评测发布的 Profile 封闭写入。
+- 文档 retire 仅删除当前 active Space/Profile 的 chunks，不再误删旧 Profile 回滚快照；内存 Store 与 PostgreSQL 使用相同的 active Profile 选择和封存语义。
+- 自动 Profile 身份同时绑定 embedding 与 indexing strategy；重建使用来源修订生成稳定幂等键并保留每份 manifest 的原 ACL，避免重试重复计费或把批量操作者权限写回索引。
+- OpenAI-compatible embedding 将单次逻辑请求上限 `maxTextsPerRequest` 与 HTTP 分批上限 `maxBatchSize` 分离；大请求可按 adapter 上限有界分批，同时继续在发网前拒绝超出 Provider 总量能力的输入。
+- `ContextAssembler` 按 token/来源多样性裁剪；legal-hold 文档排除 retention purge。sparse 仍默认关闭，不作为发布门禁。
+- `EvidenceBundle` 的 Profile/Space、证据状态、降级阶段与逐候选取舍贯通 `RetrievalResult`、知识工具、管理调试 API 和 RAG Inspector；检索增加 assemble 阶段 span。
+- Phrase / heading 过滤绑定与检索 SELECT 的 space/profile 列对齐，避免短查询在 planner Exact→Phrase 路径上 JDBC 参数不足。
+- 检索沙盒迁到 `POST /api/v1/admin/debug/retrieve`（`agent:admin:debug` 且 `knowledge:read`）；删除 `/api/v1/admin/knowledge/**` 与平台 `POST /api/v2/ops/knowledge/retrieve` 副本。清单租户只来自会话；记忆装配与 `DefaultRetriever.acceptsSeed` 对齐。
+
+### Model Routing（Experimental）
+
+- 新增显式开启的 Fast/Standard/Reasoning 主调用路由；固定候选顺序，能力/敏感级/预算准入，保留显式模型选择。
+- 路由决定与 ModelCall 同事务持久化；关闭正文采集仍保留执行账本；失败调用保留次数并按 Unknown 禁止自动恢复。
+- 冻结路由和价格内容指纹，保存选中单价；未知价格不能通过费用硬限；实际 token 超限前先保存已知用量。
+- 现有配置加载器可从启动期 JSON 加载路由政策；管理面与 Incident Pack 提供低敏路由解释，不包含 Prompt 或完整价目。
+- 默认装配保持旧行为；公共 Scala case class 加字段仅面向当前开发 minor。未改 SQL migration、稳定 HTTP 或平台装配。
+- Goal 对账遇到未结算模型调用时保留预留；内存/PostgreSQL 账本禁止在状态转换中改写路由决定。
+- Qwen 升级为一级 OpenAI-compatible 档案：区域端点、模型和密钥均由部署显式配置，并纳入低成本真实 smoke 入口。
+- Retry/Fallback、动态评分/限流、持久费用预留与 Planner 尚未启用。
+
+0.9.0 is the current fresh-install baseline. There is no in-place upgrade from the frozen
+published `0.8.0` artifact, or from 0.6.x / 0.7.0-candidate databases: hosts must create a new
+PostgreSQL database and rebuild knowledge indexes. Core Flyway history is
+`V001__zyblw_agent_0_9_baseline.sql`; the 1024 knowledge history is
+`optional/pgvector_1024/V001__agent_knowledge_0_9_baseline.sql`. Citations remain in
+`AgentState` JSON (schema v7); they are not SQL columns. `RunCitation` / `CitationView` add
+optional allowlist `sourceKind`. `knowledge_search` returns preview excerpts; `knowledge_fetch`
+returns the authorized chunk text. Read-only knowledge/web tools may declare conflict-aware
+parallelism. HTTP OpenAPI stays `1.2.0`. The
+pgvector **extension** requirement remains `>= 0.8.0`. See
+[the 0.9.0 upgrade guide](docs/fresh-install-0.9.0.md).
+
 ## 0.8.0 - 2026-08-23
 
-0.8.0 is a fresh-install baseline. There is no in-place upgrade from 0.6.x / 0.7.0-candidate
-databases: hosts must create a new PostgreSQL database and rebuild knowledge indexes. Core Flyway
-history collapses V001–V013 into `V001__zyblw_agent_0_8_baseline.sql`; the 1024 knowledge history
-is `optional/pgvector_1024/V001__agent_knowledge_0_8_baseline.sql` with pg_trgm, metadata/heading
+0.8.0 is a frozen published artifact, not the current install path. It was a fresh-install
+baseline with no in-place upgrade from 0.6.x / 0.7.0-candidate databases: hosts must create a
+new PostgreSQL database and rebuild knowledge indexes. Core Flyway history collapses V001–V013
+into `V001__zyblw_agent_0_8_baseline.sql`; the 1024 knowledge history is
+`optional/pgvector_1024/V001__agent_knowledge_0_8_baseline.sql` with pg_trgm, metadata/heading
 GIN indexes, and phrase re-identification. `AgentPostgresMigrations.resetAll` rebuilds both
 histories. Retrieval now has `Hybrid` / `VectorOnly` / `LexicalOnly` / `Phrase` modes plus
 document/page/heading/metadata/chunk filters applied after ACL and before ranking. Chunking
@@ -20,7 +73,7 @@ is the book Q&A composition root: JDBC `serve` uses the durable application and 
 schema, `status` reports both Flyway histories, and reindex is atomic per document. Indexed ACL
 is the reader scope (`knowledge:read`); operator write/admin scopes are not written into chunks.
 Live ingest/serve/reindex require `EMBEDDING_DIMENSION=1024` and do not fall back to hash
-embeddings. See [the 0.8.0 upgrade guide](docs/upgrading-to-0.8.0.md).
+embeddings. Current empty-install path is [the 0.9.0 upgrade guide](docs/fresh-install-0.9.0.md).
 
 ## 0.7.0 - Superseded candidate
 
@@ -35,7 +88,7 @@ supported deployment shape; Kubernetes remains Preview until a real cluster is e
 host evidence items stay `deferred` until a dedicated hosted environment exists. The supported
 business path is Docker talking directly to a self-hosted PostgreSQL; `scripts/verify-business-ready.sh`
 is the adoption gate. The 0.7.0 candidate was superseded; do not tag `v0.7.0`. See
-[the 0.8.0 upgrade guide](docs/upgrading-to-0.8.0.md).
+[the 0.9.0 upgrade guide](docs/fresh-install-0.9.0.md).
 `ProductionSupportHost status` reports Flyway version and in-flight Run/command counts so hosts can
 drain before switching processes.
 
@@ -266,7 +319,8 @@ call. The local `McpServerId` remains the authorization identity, while TLS/mTLS
 for cryptographic server authentication. `McpRootsProvider` adds an explicit, server-scoped `roots/list` handler for absolute local
 file URIs; it never scans the working directory or enables sampling/elicitation as a side effect.
 
-0.7.0 was superseded by the 0.8.0 fresh-install baseline; see [the 0.8.0 upgrade guide](docs/upgrading-to-0.8.0.md).
+0.7.0 was superseded by the 0.8.0 fresh-install baseline, now a frozen published artifact;
+current empty install is [the 0.9.0 upgrade guide](docs/fresh-install-0.9.0.md).
 
 ## 0.6.2 - 2026-08-16
 
@@ -274,7 +328,7 @@ Makes PDF ingestion operator-usable: quality-gated cascade with `extractionMode=
 
 Admin HTTP (explicitly evolutionary) accepts `extractionMode` on ingestion and surfaces requested/actual extraction on document views. No knowledge or core Flyway history changes.
 
-See [the 0.6.2 upgrade guide](docs/upgrading-to-0.6.2.md).
+That historical release is not an installation path for the current source line.
 
 ## 0.6.1 - 2026-08-13
 
@@ -289,14 +343,14 @@ longer download Google Fonts.
 This release candidate establishes the fresh-install 1024-dimensional knowledge-index baseline used by the rebuilt platform RAG
 integration. It is intentionally a minor release rather than a 0.5.x patch: it adds public migration entry points and a new
 pgvector physical contract. It must be released to Maven Central before a server using `migrateCoreAndKnowledge1024` is built for
-CI or production; see [the 0.6.0 RAG upgrade guide](docs/upgrading-to-0.6.0.md).
+CI or production.
 
 ## 0.5.0 - 2026-08-07
 
 Adds an optional administration sub-surface and the runtime resolver paths that make its overrides observable without a restart.
 The Agent runtime, durable commands, business HTTP v1, workflow outcome v2 and the 0.4 knowledge schema are unchanged. Upgrading
 without wiring any admin capability mounts no new routes, but the `V002` migration and two layer signature changes still apply —
-see [docs/upgrading-to-0.5.0.md](docs/upgrading-to-0.5.0.md).
+the historical 0.5.0 release notes.
 
 ### Added
 
@@ -601,7 +655,7 @@ see [docs/upgrading-to-0.5.0.md](docs/upgrading-to-0.5.0.md).
 
 ### Upgrade
 
-- See [`docs/upgrading-to-0.2.0.md`](docs/upgrading-to-0.2.0.md). Applications using custom Workflow nodes/checkpoint stores or custom
+- Applications using custom Workflow nodes/checkpoint stores or custom
   RAG Chunkers must migrate and rebuild their index version. The stable Agent Runtime, Tool, Provider and HTTP v1 paths do not require
   an intentional API migration, but every consumer must recompile and run its own contract tests.
 

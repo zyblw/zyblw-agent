@@ -1,6 +1,6 @@
 # 下一代 Runtime 开发手册
 
-> 状态：**工作手册**（不是 `0.6.2` 现行实现说明）
+> 状态：**历史工作手册**（当前事实以 `0.9.0` 源码与正式运行手册为准）
 > 最后核验：2026-08-22
 > 决策来源：[ADR-0018](0018-next-generation-runtime-kernel.md)（Kernel 铁律）+ [ADR-0019](0019-typed-extensions-and-constrained-execution.md)（Typed Extensions / Precise Approvals / Constrained Execution 与 Wave 路线）
 > 事实来源：`modules/agent-core` 现行代码与测试；外部框架仅作对照，不作为本仓库合同
@@ -785,7 +785,7 @@ Deterministic `CrashInjector` 优于只靠随机 kill。已有 tool crash 测试
 
 | 文档 | 角色 |
 |---|---|
-| `runtime.md`、`persistence.md`、`database-schema.md`、`run-inspection.md`、`tools.md` | **现行 0.6.2 事实**，P0 代码落地后再回写 |
+| `runtime.md`、`persistence.md`、`database-schema.md`、`run-inspection.md`、`tools.md` | **现行 0.9.0 事实** |
 | `architecture.md` | 现行总览 + 文首指向本文 |
 | `maturity-and-roadmap.md` | 成熟度矩阵仍描述现状；未落地项按 Wave 归属 |
 | ADR-0001–0017 | 仍有效；冲突处以 ADR-0018/0019 为准规划，不以之假装已实现 |

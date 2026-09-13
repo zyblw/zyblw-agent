@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-07-22
+> 最后核验：2026-09-05
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -42,6 +42,7 @@ HTTP body、endpoint、request ID 或 API Key。
 |---|---|---|
 | `deepseek` | OpenAI-compatible + DeepSeek profile | `DEEPSEEK_API_KEY`；模型可选 |
 | `glm` | OpenAI-compatible + GLM profile | `GLM_API_KEY`；模型可选 |
+| `qwen` | OpenAI-compatible + Qwen profile | `QWEN_API_KEY`、`QWEN_BASE_URL`、`QWEN_MODEL` |
 | `openai-chat` | OpenAI Chat Completions | `OPENAI_API_KEY`、`OPENAI_MODEL` |
 | `openai-responses` | OpenAI Responses 原生 | `OPENAI_API_KEY`、`OPENAI_MODEL` |
 | `anthropic` | Anthropic Messages 原生 | `ANTHROPIC_API_KEY`、`ANTHROPIC_MODEL` |
@@ -92,7 +93,7 @@ ZYBLW_SMOKE_PROVIDER=deepseek \
   mise exec -- sbt "examples/runMain com.zyblw.agent.examples.ContextCompressionLiveSmokeExample"
 ```
 
-同一个入口支持 `deepseek`、`glm`、`openai-chat`、`openai-responses`、`anthropic` 和 `gemini`。Runner 会：
+同一个入口支持 `deepseek`、`glm`、`qwen`、`openai-chat`、`openai-responses`、`anthropic` 和 `gemini`。Runner 会：
 
 1. 在任何计费调用前查询模型能力，要求声明 tool calling；
 2. 要求传入的压缩器明确声明 `supportsModelAssisted=true`；

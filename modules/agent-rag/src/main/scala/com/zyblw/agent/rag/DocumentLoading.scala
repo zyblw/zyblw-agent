@@ -199,7 +199,9 @@ final case class DocumentIngestionRequest(
     tenantId: TenantId,
     permissions: Set[String],
     ingestionId: String,
-    expectation: ActiveVersionExpectation = ActiveVersionExpectation.AnyVersion
+    expectation: ActiveVersionExpectation = ActiveVersionExpectation.AnyVersion,
+    knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId("default"),
+    targetProfileId: Option[IndexProfileId] = None
 ):
   require(ingestionId.trim.nonEmpty && ingestionId.length <= 500, "Document ingestionId 长度必须位于 1..500")
 
@@ -253,7 +255,9 @@ final class DocumentIngestionService(
           request.tenantId,
           request.permissions,
           request.ingestionId,
-          request.expectation
+          request.expectation,
+          request.knowledgeSpaceId,
+          request.targetProfileId
         )
       yield DocumentIngestionOutcome.Indexed(
         document.id,

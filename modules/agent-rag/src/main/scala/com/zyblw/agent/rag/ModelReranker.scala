@@ -167,7 +167,10 @@ final class ModelReranker(model: RerankerModel, policy: ModelRerankerPolicy = Mo
         .flatMap(response => validateAndMap(response, selected, request.topN))
       call.catchAll { error =>
         policy.failureMode match
-          case RerankerFailureMode.FailOpen   => ZIO.succeed(hits.take(limit))
+          case RerankerFailureMode.FailOpen =>
+            ZIO.succeed(
+              hits.take(limit).map(hit => hit.copy(signals = hit.signals.updated("rerankFallback", 1.0)))
+            )
           case RerankerFailureMode.FailClosed => ZIO.fail(error)
       }
 

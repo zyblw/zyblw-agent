@@ -19,8 +19,9 @@ final case class ProviderEndpointCapabilities(
     thinking: Boolean = false,
     usageReporting: Boolean = true
 ) derives JsonCodec:
-  def toModelCapabilities: ModelCapabilities =
-    ModelCapabilities(
+  /** 只覆盖端点 JSON 可配置的字段；strict schema、tool choice 等协议能力继承 Adapter 档案。 */
+  def applyTo(base: ModelCapabilities): ModelCapabilities =
+    base.copy(
       toolCalls = toolCalls,
       streaming = streaming,
       vision = vision,
@@ -123,7 +124,9 @@ object ProviderEndpoints:
         case "relay" => OpenAICompatibility.relay(declaration.providerId)
         case _       => compatibilityFor(declaration.providerId)
       descriptor = compatibility.descriptor.copy(
-        models = declaration.models.map(model => model.name -> model.capabilities.toModelCapabilities).toMap
+        models = declaration.models
+          .map(model => model.name -> model.capabilities.applyTo(compatibility.descriptor.capabilities))
+          .toMap
       )
       cfg = OpenAICompatibleConfig(
         baseUrl = declaration.baseUrl,
@@ -142,4 +145,5 @@ object ProviderEndpoints:
     case "openai"   => OpenAICompatibility.openAI
     case "deepseek" => OpenAICompatibility.deepSeek
     case "glm"      => OpenAICompatibility.glm
+    case "qwen"     => OpenAICompatibility.qwen
     case other      => OpenAICompatibility.relay(other)

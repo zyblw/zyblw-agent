@@ -22,7 +22,7 @@ import zio.*
 final class KnowledgeAdminLive private (
     directory: KnowledgeIndexDirectory,
     store: KnowledgeIndexStore,
-    embeddings: EmbeddingService,
+    embeddings: EmbeddingModel,
     vectors: VectorStore,
     reranker: Reranker,
     ingestion: DocumentIngestionService,
@@ -96,9 +96,25 @@ final class KnowledgeAdminLive private (
       citations = result.citations.map(citationView),
       embeddingProvider = descriptor.provider,
       embeddingModel = descriptor.model,
-      embeddingDimension = descriptor.dimension,
+      embeddingDimension = descriptor.denseDescriptor.dimension,
       rerankApplied = rerankApplied,
-      contextExpanded = contextExpanded
+      contextExpanded = contextExpanded,
+      evidenceStatus = result.evidence.status.toString,
+      candidateCount = result.evidence.candidateCount,
+      acceptedCount = result.evidence.acceptedCount,
+      topAcceptedScore = result.evidence.topAcceptedScore,
+      profileId = result.diagnostics.profileId,
+      knowledgeSpaceId = result.diagnostics.knowledgeSpaceId,
+      degradedStages = result.diagnostics.degradedStages,
+      evidenceSelections = result.diagnostics.selections.map(selection =>
+        KnowledgeEvidenceSelectionView(
+          selection.documentId,
+          selection.chunkId,
+          selection.seedChunkId,
+          selection.decision.toString
+        )
+      ),
+      maxEvidenceTokens = result.diagnostics.maxEvidenceTokens
     )
 
   def retire(tenantId: String, documentId: String, expectedActiveVersion: Long): IO[AgentError, Unit] =
@@ -259,7 +275,7 @@ object KnowledgeAdminLive:
   def make(
       directory: KnowledgeIndexDirectory,
       store: KnowledgeIndexStore,
-      embeddings: EmbeddingService,
+      embeddings: EmbeddingModel,
       vectors: VectorStore,
       reranker: Reranker,
       ingestion: DocumentIngestionService,
@@ -295,14 +311,14 @@ object KnowledgeAdminLive:
       expansion: RetrievalExpansionConfig = RetrievalExpansionConfig(),
       maxConcurrentIngestions: Int = DefaultMaxConcurrentIngestions
   ): URLayer[
-    KnowledgeIndexDirectory & KnowledgeIndexStore & EmbeddingService & VectorStore & Reranker &
+    KnowledgeIndexDirectory & KnowledgeIndexStore & EmbeddingModel & VectorStore & Reranker &
       DocumentIngestionService & IngestionJobStore & RetrievalPolicySource,
     KnowledgeAdminService
   ] = ZLayer.scoped {
     for
       directory  <- ZIO.service[KnowledgeIndexDirectory]
       store      <- ZIO.service[KnowledgeIndexStore]
-      embeddings <- ZIO.service[EmbeddingService]
+      embeddings <- ZIO.service[EmbeddingModel]
       vectors    <- ZIO.service[VectorStore]
       reranker   <- ZIO.service[Reranker]
       ingestion  <- ZIO.service[DocumentIngestionService]

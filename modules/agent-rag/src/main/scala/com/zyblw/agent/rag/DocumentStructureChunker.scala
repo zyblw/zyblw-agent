@@ -17,7 +17,7 @@ final case class DocumentStructureChunkerConfig(
     maxCharacters: Int = 1200,
     overlapCharacters: Int = 120,
     mergePeers: Boolean = true,
-    strategyVersion: String = "document-structure-v1",
+    strategyVersion: String = "document-structure-v2",
     /** token 装箱预算。默认对齐 cl100k Embedding tokenizer；`maxCharacters` 只作硬性安全上限。 */
     maxTokens: Option[Int] = Some(512),
     tokenCounter: TokenCounter = TokenCounter.Cl100k
@@ -75,7 +75,7 @@ final class DocumentStructureChunker(
         "chunkContentSha" -> KnowledgeIndexer.sha256(draft.text),
         "contentFormat"   -> document.representation.toString.toLowerCase(java.util.Locale.ROOT)
       ) ++ Option.when(draft.headingPath.nonEmpty)("headingPath" -> draft.headingPath.mkString(" > "))
-      DocumentChunk(
+      DocumentChunk.fromText(
         id = preparedChunk.id,
         documentId = document.id,
         text = rendered,
@@ -160,9 +160,9 @@ final class DocumentStructureChunker(
     val prefix = renderPrefix(path)
     if prefix.isEmpty then text else s"$prefix\n\n$text"
 
+  /** 只把末 1–2 级标题写成短前缀；完整路径留在 lineage / metadata，不糊进每块正文。 */
   private def renderPrefix(path: Chunk[String]): String =
-    val raw =
-      path.zipWithIndex.map { case (title, index) => s"${"#" * (index + 1).min(6)} $title" }.mkString("\n")
+    val raw = path.takeRight(2).map(_.trim).filter(_.nonEmpty).mkString(" · ")
     if codePoints(raw) <= config.maxCharacters / 3 then raw else slice(raw, 0, config.maxCharacters / 3)
 
   private def codePoints(value: String): Int = value.codePointCount(0, value.length)

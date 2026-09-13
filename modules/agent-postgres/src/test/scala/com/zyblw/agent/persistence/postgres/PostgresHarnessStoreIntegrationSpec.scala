@@ -366,7 +366,7 @@ object PostgresHarnessStoreIntegrationSpec extends ZIOSpecDefault:
           snapshot.exists(_.consumed.runs == 1L)
         )
       }
-    ).provideLayer(storeLayer) @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@
+    ).provideLayer(storeLayer) @@ PostgresIntegrationAspect.enabled @@
       TestAspect.withLiveClock @@ TestAspect.timeout(2.minutes)
 
   private def corruptGoalArtifacts(dataSource: DataSource, goalId: GoalId): Task[Unit] =

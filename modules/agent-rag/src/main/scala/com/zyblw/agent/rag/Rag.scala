@@ -22,19 +22,70 @@ final case class SourceDocument(
 final case class DocumentChunk(
     id: String,
     documentId: String,
-    text: String,
     sourceUri: String,
     tenantId: TenantId,
     permissions: Set[String],
+    representations: ChunkRepresentations,
     metadata: Map[String, String] = Map.empty,
-    /** 可选的全文检索文本。中文部署可在摄取阶段使用受控分词器生成空格分隔 lexeme；模型不可填写。 `None` 时存储实现使用原始 `text`。
-      */
-    searchText: Option[String] = None,
-    /** 所属知识索引版本；普通内存用例默认 1，耐久索引发布时由 `KnowledgeIndexer` 覆盖。 */
-    indexVersion: Long = 1L,
-    /** 受控切分器生成的父子、相邻、页码与 bbox 谱系；纯文本或旧切分器可为 None。 */
+    knowledgeSpaceId: Option[KnowledgeSpaceId] = None,
+    profileId: Option[IndexProfileId] = None,
+    documentRevisionId: Option[String] = None,
+    catalogVersion: Long = 1L,
     lineage: Option[ChunkLineage] = None
-)
+):
+  /** 引用与展示文本。 */
+  def displayText: String = representations.displayText
+
+  /** 兼容切分器/测试读取；等于 displayText。 */
+  def text: String = displayText
+
+  def denseText: String = representations.denseText
+
+  def lexicalText: String = representations.lexicalText
+
+  def searchText: Option[String] = Some(representations.lexicalText)
+
+  /** 管理面/目录使用的文档修订号，不是 embedding identity。 */
+  def indexVersion: Long = catalogVersion
+
+  def withLexical(lexicalText: String): DocumentChunk =
+    copy(representations = ChunkRepresentations.of(displayText, denseText, lexicalText))
+
+object DocumentChunk:
+  def apply(
+      id: String,
+      documentId: String,
+      text: String,
+      sourceUri: String,
+      tenantId: TenantId,
+      permissions: Set[String]
+  ): DocumentChunk =
+    fromText(id, documentId, text, sourceUri, tenantId, permissions)
+
+  /** 正文进入三份表示；lexical 可用 searchText 覆盖。 */
+  def fromText(
+      id: String,
+      documentId: String,
+      text: String,
+      sourceUri: String,
+      tenantId: TenantId,
+      permissions: Set[String],
+      metadata: Map[String, String] = Map.empty,
+      searchText: Option[String] = None,
+      indexVersion: Long = 1L,
+      lineage: Option[ChunkLineage] = None
+  ): DocumentChunk =
+    new DocumentChunk(
+      id,
+      documentId,
+      sourceUri,
+      tenantId,
+      permissions,
+      ChunkRepresentations.of(text, text, searchText.getOrElse(text)),
+      metadata,
+      catalogVersion = indexVersion,
+      lineage = lineage
+    )
 final case class Embedding(values: Chunk[Float]):
   require(values.nonEmpty, "Embedding 不能为空")
 
@@ -82,13 +133,25 @@ final case class EmbeddingBatchResult(
     providerRequestIds: Chunk[String] = Chunk.empty
 )
 
-final case class IndexedChunk(chunk: DocumentChunk, embedding: Embedding)
+final case class IndexedChunk(
+    chunk: DocumentChunk,
+    embedding: Embedding,
+    sparse: Option[SparseEmbedding] = None
+)
 final case class RetrievalScope(
     tenantId: TenantId,
     permissions: Set[String],
     /** 网络重试可复用的可选请求 ID；缺失时 Retriever 为本次调用生成随机 ID。 */
-    requestId: Option[String] = None
-)
+    requestId: Option[String] = None,
+    knowledgeSpaceId: Option[KnowledgeSpaceId] = None,
+    pinnedProfileId: Option[IndexProfileId] = None,
+    runId: Option[RunId] = None,
+    parentSpanId: Option[String] = None
+):
+  def spaceId: KnowledgeSpaceId = knowledgeSpaceId.getOrElse(KnowledgeSpaceId("default"))
+
+  def withPinnedProfile(profileId: IndexProfileId): RetrievalScope =
+    copy(pinnedProfileId = Some(profileId))
 
 /** 一个检索命中及其可解释的排名信号。
   *
@@ -152,7 +215,8 @@ final case class RetrievalEvidence(
 final case class RetrievalResult(
     hits: Chunk[RetrievalHit],
     citations: Chunk[Citation],
-    evidence: RetrievalEvidence = RetrievalEvidence()
+    evidence: RetrievalEvidence = RetrievalEvidence(),
+    diagnostics: RetrievalDiagnostics = RetrievalDiagnostics()
 )
 
 trait Chunker:
@@ -178,7 +242,7 @@ final class SlidingWindowChunker(maxCharacters: Int = 1200, overlap: Int = 120) 
       val step   = maxCharacters - overlap
       val chunks = Iterator.iterate(0)(_ + step).takeWhile(_ < document.text.length).zipWithIndex.map {
         case (start, index) =>
-          DocumentChunk(
+          DocumentChunk.fromText(
             id = s"${document.id}-$index",
             documentId = document.id,
             text = document.text.slice(start, (start + maxCharacters).min(document.text.length)),
@@ -191,38 +255,17 @@ final class SlidingWindowChunker(maxCharacters: Int = 1200, overlap: Int = 120) 
       Chunk.fromIterable(chunks.toList)
     }
 
-trait EmbeddingService:
-  /** 返回固定向量维度；同一索引内所有向量必须一致。 */
-  def dimension: Int
-
-  /** Provider、模型、维度与批量能力；最小自定义实现可使用框架生成的本地描述。 */
-  def descriptor: EmbeddingProviderDescriptor =
-    EmbeddingProviderDescriptor(
-      "custom",
-      getClass.getSimpleName,
-      dimension,
-      Int.MaxValue,
-      supportsDimensions = false
+/** 本地测试模型的默认 dense 能力。 */
+object EmbeddingDefaults:
+  def denseCapabilities(dimension: Int, maxBatch: Int = Int.MaxValue): EmbeddingCapabilities =
+    EmbeddingCapabilities(
+      inputRoles = Set(EmbeddingInputRole.Query, EmbeddingInputRole.Document),
+      outputs = Set(EmbeddingOutputKind.Dense),
+      minDenseDimension = dimension,
+      maxDenseDimension = dimension,
+      defaultDenseDimension = dimension,
+      maxTextsPerRequest = maxBatch
     )
-
-  /** 批量编码文本，输出数量必须与输入数量一致。 */
-  def embed(texts: Chunk[String]): IO[RetrievalError, Chunk[Embedding]]
-
-  /** 返回包含 usage/request ID 的详细结果。纯本地实现可只返回向量；真实 HTTP Adapter 应覆盖并报告 Provider usage。
-    * @param texts
-    *   输入顺序是输出位置契约的一部分，不能按并行完成顺序返回
-    */
-  def embedDetailed(texts: Chunk[String]): IO[RetrievalError, EmbeddingBatchResult] =
-    embed(texts).map(EmbeddingBatchResult(_))
-
-  /** 带可信租户、用途和幂等请求 ID 的生产调用入口。 原始 Provider 默认直通；`GovernedEmbeddingService` 覆盖它以实施缓存和原子配额。
-    */
-  def embedScoped(
-      context: EmbeddingRequestContext,
-      texts: Chunk[String]
-  ): IO[RetrievalError, EmbeddingBatchResult] =
-    val _ = context
-    embedDetailed(texts)
 
 trait VectorStore:
   /** 插入或更新带向量的文档块。 */
@@ -254,9 +297,10 @@ trait VectorStore:
       query: Embedding,
       scope: RetrievalScope,
       filter: RetrievalFilter,
-      limit: Int
+      limit: Int,
+      sparseQuery: Option[SparseEmbedding] = None
   ): IO[RetrievalError, Chunk[RetrievalHit]] =
-    val _    = (mode, queryText)
+    val _    = (mode, queryText, sparseQuery)
     val pool = math.min(math.max(limit, 1).toLong * 8L, Int.MaxValue.toLong).toInt
     search(query, scope, pool).map(_.filter(hit => filter.matches(hit.chunk)).take(limit.max(0)))
 
@@ -279,6 +323,24 @@ trait VectorStore:
   ): IO[RetrievalError, Chunk[RetrievalHit]] =
     val _ = (seeds, scope, config)
     ZIO.succeed(Chunk.empty)
+
+  /** 查询向量身份必须与该租户 pinned/active Profile 一致；空库视为通过。 */
+  def assertEmbeddingIdentity(
+      tenantId: TenantId,
+      descriptor: EmbeddingProviderDescriptor,
+      spaceId: KnowledgeSpaceId = KnowledgeSpaceId("default"),
+      profileId: Option[IndexProfileId] = None
+  ): IO[RetrievalError, Unit] =
+    val _ = (tenantId, descriptor, spaceId, profileId)
+    ZIO.unit
+
+  /** 读取空间当前 active Profile；尚无指针时为 None。 */
+  def resolveActiveProfile(
+      tenantId: TenantId,
+      spaceId: KnowledgeSpaceId
+  ): IO[RetrievalError, Option[IndexProfileId]] =
+    val _ = (tenantId, spaceId)
+    ZIO.succeed(None)
 
   /** 删除租户内某原始文档的全部块。 */
   def deleteByDocument(documentId: String, tenantId: TenantId): IO[RetrievalError, Unit]
@@ -304,7 +366,8 @@ final class InMemoryVectorStore private (
       query: Embedding,
       scope: RetrievalScope,
       filter: RetrievalFilter,
-      limit: Int
+      limit: Int,
+      sparseQuery: Option[SparseEmbedding] = None
   ): IO[RetrievalError, Chunk[RetrievalHit]] =
     if limit <= 0 then ZIO.succeed(Chunk.empty)
     else
@@ -314,7 +377,7 @@ final class InMemoryVectorStore private (
           item.chunk.permissions.subsetOf(scope.permissions) &&
           filter.matches(item.chunk)
         }
-        Chunk.fromIterable(RetrievalScoring.rank(mode, queryText, query, authorized).take(limit))
+        Chunk.fromIterable(RetrievalScoring.rank(mode, queryText, query, authorized, sparseQuery).take(limit))
       }
 
   override def fetchChunks(
@@ -457,12 +520,17 @@ trait Retriever:
     ZIO.fail(AgentError.RetrievalFailed("Retriever 未实现 fetchChunks"))
 
 final class DefaultRetriever(
-    embeddings: EmbeddingService,
+    embeddings: EmbeddingModel,
     vectors: VectorStore,
     reranker: Reranker,
     expansion: RetrievalExpansionConfig = RetrievalExpansionConfig(),
     policies: RetrievalPolicySource = RetrievalPolicySource.default,
-    lexical: LexicalProcessor = SimpleChineseLexicalProcessor
+    lexical: LexicalProcessor = SimpleChineseLexicalProcessor,
+    budgets: CandidateBudgets = CandidateBudgets(),
+    sparseEnabled: Boolean = false,
+    assist: QueryAssist = QueryAssist.disabled,
+    assistConfig: QueryAssistConfig = QueryAssistConfig(),
+    telemetry: Option[com.zyblw.agent.observability.AgentOperationTelemetry] = None
 ) extends Retriever:
   /** 把单 query 编码后搜索并重排，最终引用保留 source 与 metadata。 */
   def retrieve(request: RetrievalRequest): IO[RetrievalError, RetrievalResult] =
@@ -481,36 +549,112 @@ final class DefaultRetriever(
     else
       // 单次检索内只读取一次工作点，避免同一次调用的重排开关和阈值来自不同版本的覆盖。
       val policy = policies.current()
+      val plan   = DeterministicQueryPlanner.plan(
+        query,
+        request.mode,
+        budgets.copy(rerankSeeds = limit, perBranch = math.max(budgets.perBranch, limit)),
+        sparseEnabled
+      )
+      val wantSparse =
+        plan.includeSparse && embeddings.capabilities.outputs.contains(EmbeddingOutputKind.DenseAndSparse)
+      val searchMode =
+        request.mode // Explicit caller modes are authoritative; planning never replaces a branch.
       for
-        requestId <- scope.requestId.fold(Random.nextUUID.map(_.toString))(ZIO.succeed(_))
-        detailed  <- embeddings.embedScoped(
-          EmbeddingRequestContext(scope.tenantId, EmbeddingPurpose.Query, requestId),
-          Chunk(query)
-        )
+        resolvedProfile <- scope.pinnedProfileId.fold(
+          vectors.resolveActiveProfile(scope.tenantId, scope.spaceId)
+        )(id => ZIO.succeed(Some(id)))
+        pinned      = resolvedProfile.getOrElse(IndexProfileId("default"))
+        pinnedScope = scope.withPinnedProfile(pinned)
+        requestId <- pinnedScope.requestId.fold(Random.nextUUID.map(_.toString))(ZIO.succeed(_))
+        rewritten <-
+          if assistConfig.enabled then
+            assist
+              .rewrite(plan.subqueries.head, assistConfig)
+              .timeoutFail(AgentError.RetrievalFailed("query assist 超时"))(assistConfig.timeout)
+              .flatMap(value =>
+                if value.rewritten.codePointCount(0, value.rewritten.length) <= 4000 then
+                  ZIO.succeed(Some(value.rewritten))
+                else ZIO.fail(AgentError.RetrievalFailed("Query rewrite exceeds input limit"))
+              )
+              .catchAll(_ => ZIO.succeed(None))
+          else ZIO.succeed(None)
+        subqueries = rewritten.fold(plan.subqueries)(value => Chunk(value))
+        traceRun <- scope.runId.fold(RunId.random)(ZIO.succeed(_))
+        detailed <- observe(traceRun, scope, "embed")(
+          embeddings.embed(
+            EmbeddingRequest(
+              subqueries,
+              EmbeddingInputRole.Query,
+              if wantSparse then EmbeddingOutputKind.DenseAndSparse else EmbeddingOutputKind.Dense,
+              context = EmbeddingRequestContext(
+                pinnedScope.tenantId,
+                EmbeddingPurpose.Query,
+                requestId,
+                knowledgeSpaceId = Some(pinnedScope.spaceId),
+                permissionFingerprint = pinnedScope.permissions.toList.sorted.mkString(",")
+              )
+            )
+          )
+        )(_.items.length.toLong)
+        _ <- ZIO
+          .fail(
+            AgentError.RetrievalFailed(
+              "Query embedding response violates count, identity or dimension contract"
+            )
+          )
+          .unless(
+            detailed.items.length == subqueries.length &&
+              detailed.descriptor.provider == embeddings.descriptor.provider &&
+              detailed.descriptor.model == embeddings.descriptor.model &&
+              detailed.items
+                .forall(_.dense.exists(_.values.length == embeddings.capabilities.defaultDenseDimension))
+          )
         queryEmbedding <- ZIO
-          .fromOption(detailed.embeddings.headOption)
+          .fromOption(detailed.denseEmbeddings.headOption)
           .orElseFail(AgentError.RetrievalFailed("Embedding provider 返回空结果"))
-        // 候选池放大三倍供 reranker 选择；Long 中间值防止外部错误 limit 造成 Int 溢出。
-        candidateLimit = Math.min(limit.toLong * 3L, Int.MaxValue.toLong).toInt
-        lexicalQuery   = lexical.query(query)
-        candidates <- vectors.searchFiltered(
-          request.mode,
-          lexicalQuery,
-          queryEmbedding,
-          scope,
-          request.filter,
-          candidateLimit
+        _ <- vectors.assertEmbeddingIdentity(
+          pinnedScope.tenantId,
+          embeddings.descriptor.denseDescriptor,
+          pinnedScope.spaceId,
+          Some(pinned)
         )
+        candidateLimit = plan.budgets.perBranch
+        lexicalQuery   =
+          if searchMode == RetrievalMode.Phrase then subqueries.head else lexical.query(subqueries.head)
+        first <- observe(traceRun, scope, "hybrid_search")(
+          vectors.searchFiltered(
+            searchMode,
+            lexicalQuery,
+            queryEmbedding,
+            pinnedScope,
+            request.filter,
+            candidateLimit,
+            sparseQuery = if wantSparse then detailed.items.headOption.flatMap(_.sparse) else None
+          )
+        )(_.length.toLong)
+        rest <- ZIO.foreach(subqueries.zip(detailed.denseEmbeddings).drop(1)) { case (subquery, embedding) =>
+          vectors.searchFiltered(
+            searchMode,
+            if searchMode == RetrievalMode.Phrase then subquery else lexical.query(subquery),
+            embedding,
+            pinnedScope,
+            request.filter,
+            candidateLimit,
+            sparseQuery = None
+          )
+        }
+        candidates = DefaultRetriever.mergeHits(first +: rest, plan.budgets.fusion)
         // 关闭重排时直接截断候选池。这里不能跳过后续校验：截断结果同样要满足数量、去重和权限契约，
         // 而 searchFiltered 来自存储 Adapter，与 reranker 一样位于信任边界之外。
         reranked <-
-          if policy.rerankEnabled then reranker.rerank(query, candidates, limit)
+          if policy.rerankEnabled then
+            observe(traceRun, scope, "rerank")(reranker.rerank(query, candidates, limit))(_.length.toLong)
           else ZIO.succeed(candidates.take(limit))
         // Reranker 可能是远端或业务自定义实现；即使它失陷，也不能注入候选集外或未授权文档。
-        validated <- validateReranked(candidates, reranked, scope, limit)
-        // 阈值只作用于 seed 命中。上下文扩展块按 expandedScoreFactor 主动降分，
-        // 用同一个阈值筛掉它们会让"提高阈值"意外地同时关闭上下文扩展。
-        hits     = validated.filter(_.score >= policy.minimumScore)
+        validated <- validateReranked(candidates, reranked, pinnedScope, limit)
+        // 阈值只作用于 seed 命中。RRF fused score 只排序；余弦/词法决定是否接受。
+        // 扩展块按 expandedScoreFactor 主动降分，不得再用同一阈值筛掉它们。
+        hits     = validated.filter(hit => DefaultRetriever.acceptsSeed(hit, policy.minimumScore))
         evidence = RetrievalEvidence(
           status =
             if candidates.isEmpty then RetrievalEvidenceStatus.NoCandidates
@@ -519,23 +663,47 @@ final class DefaultRetriever(
             else RetrievalEvidenceStatus.Supported,
           candidateCount = candidates.length,
           acceptedCount = hits.length,
-          topAcceptedScore = hits.map(_.score).maxOption,
+          topAcceptedScore = hits.map(DefaultRetriever.relevanceScore).maxOption,
           minimumScore = policy.minimumScore
         )
-        expanded <- vectors.expandContext(hits, scope, expansion)
-        context  <- validateExpanded(hits, expanded, scope, expansion.maxAdditionalChunks)
-        citations = context.zipWithIndex.map { case (hit, index) =>
-          val origins = hit.chunk.lineage.fold(Chunk.empty[DocumentOrigin])(_.origins)
-          Citation(
-            s"cite-${index + 1}",
-            hit.chunk.sourceUri,
-            hit.chunk.text.take(500),
-            hit.score,
-            origins.map(_.pageNumber).distinct,
-            origins
+        expanded <- observe(traceRun, scope, "expand")(vectors.expandContext(hits, pinnedScope, expansion))(
+          _.length.toLong
+        )
+        context <- validateExpanded(hits, expanded, pinnedScope, expansion.maxAdditionalChunks)
+        bundle  <- observe(traceRun, scope, "assemble")(
+          ZIO.succeed(
+            ContextAssembler.assemble(
+              hits,
+              context.filterNot(hit =>
+                hits.exists(seed =>
+                  seed.chunk.documentId == hit.chunk.documentId && seed.chunk.id == hit.chunk.id
+                )
+              ),
+              evidence,
+              plan.budgets,
+              profileId = Some(pinned),
+              knowledgeSpaceId = Some(pinnedScope.spaceId),
+              degradedStages = Chunk.fromIterable(
+                Option.when(assistConfig.enabled && rewritten.isEmpty)("rewrite-fallback") ++
+                  Option.when(plan.includeSparse && !wantSparse)("sparse-disabled") ++
+                  Option
+                    .when(reranked.exists(_.signals.get("rerankFallback").contains(1.0)))("rerank-fallback")
+              )
+            )
           )
-        }
-      yield RetrievalResult(context, citations, evidence)
+        )(
+          _.items
+            .count(item =>
+              item.decision == EvidenceDecision.KeptSeed || item.decision == EvidenceDecision.KeptExpanded
+            )
+            .toLong
+        )
+      yield bundle.toRetrievalResult
+
+  private def observe[A](runId: RunId, scope: RetrievalScope, stage: String)(effect: IO[RetrievalError, A])(
+      count: A => Long
+  ): IO[RetrievalError, A] =
+    telemetry.fold(effect)(_.retrieval(runId, stage, scope.parentSpanId)(effect)(count))
 
   override def fetch(chunkIds: Set[String], scope: RetrievalScope): IO[RetrievalError, RetrievalResult] =
     if chunkIds.isEmpty then
@@ -547,32 +715,51 @@ final class DefaultRetriever(
         )
       )
     else
-      vectors.fetchChunks(chunkIds, scope).map { chunks =>
-        val hits = chunks.zipWithIndex.map { case (chunk, index) =>
-          RetrievalHit(chunk, 1.0d, Map("fetch" -> 1.0d, "ordinal" -> index.toDouble))
-        }
-        val citations = hits.zipWithIndex.map { case (hit, index) =>
-          val origins = hit.chunk.lineage.fold(Chunk.empty[DocumentOrigin])(_.origins)
-          Citation(
-            s"cite-${index + 1}",
-            hit.chunk.sourceUri,
-            hit.chunk.text.take(500),
-            hit.score,
-            origins.map(_.pageNumber).distinct,
-            origins
+      val pin = scope.pinnedProfileId.fold(vectors.resolveActiveProfile(scope.tenantId, scope.spaceId))(id =>
+        ZIO.succeed(Some(id))
+      )
+      pin.flatMap { resolved =>
+        val pinned      = resolved.getOrElse(IndexProfileId("default"))
+        val pinnedScope = scope.withPinnedProfile(pinned)
+        vectors.fetchChunks(chunkIds, pinnedScope).map { chunks =>
+          val hits = chunks.zipWithIndex.map { case (chunk, index) =>
+            RetrievalHit(chunk, 1.0d, Map("fetch" -> 1.0d, "ordinal" -> index.toDouble))
+          }
+          val citations = hits.zipWithIndex.map { case (hit, index) =>
+            val origins = hit.chunk.lineage.fold(Chunk.empty[DocumentOrigin])(_.origins)
+            Citation(
+              s"cite-${index + 1}",
+              hit.chunk.sourceUri,
+              hit.chunk.displayText.take(500),
+              hit.score,
+              origins.map(_.pageNumber).distinct,
+              origins
+            )
+          }
+          RetrievalResult(
+            hits,
+            citations,
+            RetrievalEvidence(
+              if hits.isEmpty then RetrievalEvidenceStatus.NoAcceptedHits
+              else RetrievalEvidenceStatus.Supported,
+              candidateCount = hits.length,
+              acceptedCount = hits.length,
+              topAcceptedScore = hits.map(_.score).maxOption
+            ),
+            RetrievalDiagnostics(
+              profileId = Some(pinned.value),
+              knowledgeSpaceId = Some(pinnedScope.spaceId.value),
+              selections = hits.map(hit =>
+                EvidenceSelection(
+                  hit.chunk.documentId,
+                  hit.chunk.id,
+                  hit.chunk.lineage.flatMap(_.seedChunkId).getOrElse(hit.chunk.id),
+                  EvidenceDecision.KeptSeed
+                )
+              )
+            )
           )
         }
-        RetrievalResult(
-          hits,
-          citations,
-          RetrievalEvidence(
-            if hits.isEmpty then RetrievalEvidenceStatus.NoAcceptedHits
-            else RetrievalEvidenceStatus.Supported,
-            candidateCount = hits.length,
-            acceptedCount = hits.length,
-            topAcceptedScore = hits.map(_.score).maxOption
-          )
-        )
       }
 
   /** 在 Reranker 信任边界之后重新验证身份、授权、数量和数值。
@@ -617,17 +804,57 @@ final class DefaultRetriever(
     else ZIO.fail(AgentError.RetrievalFailed("上下文扩展输出违反权限、数量或有限值契约"))
 
 object DefaultRetriever:
-  val layer: URLayer[EmbeddingService & VectorStore & Reranker, Retriever] =
-    ZLayer.fromFunction((embeddings: EmbeddingService, vectors: VectorStore, reranker: Reranker) =>
+  /** 词法命中直接接受；仅向量近邻必须过余弦阈值。RRF fused score 不参与门槛。 */
+  def acceptsSeed(hit: RetrievalHit, minimumScore: Double): Boolean =
+    hasLexicalSupport(hit) || relevanceScore(hit) >= minimumScore
+
+  def relevanceScore(hit: RetrievalHit): Double =
+    hit.signals.get("vectorScore").getOrElse {
+      if hasLexicalSupport(hit) && hit.signals.contains("textScore") then hit.signals("textScore")
+      else if hasLexicalSupport(hit) then hit.score
+      else hit.score
+    }
+
+  private def hasLexicalSupport(hit: RetrievalHit): Boolean =
+    hit.signals.get("textScore").exists(_ > 0.0) || hit.signals.get("textRank").exists(_ > 0.0)
+
+  def mergeHits(groups: Chunk[Chunk[RetrievalHit]], limit: Int): Chunk[RetrievalHit] =
+    Chunk.fromIterable(
+      groups.flatten
+        .groupBy(hit => hit.chunk.documentId -> hit.chunk.id)
+        .values
+        .map(_.maxBy(hit => (hit.score, hit.chunk.documentId, hit.chunk.id)))
+        .toVector
+        .sortBy(hit => (-hit.score, hit.chunk.documentId, hit.chunk.id))
+        .take(limit.max(0))
+    )
+
+  val layer: URLayer[EmbeddingModel & VectorStore & Reranker, Retriever] =
+    ZLayer.fromFunction((embeddings: EmbeddingModel, vectors: VectorStore, reranker: Reranker) =>
       DefaultRetriever(embeddings, vectors, reranker)
+    )
+
+  val observedLayer: URLayer[
+    EmbeddingModel & VectorStore & Reranker & RetrievalPolicySource &
+      com.zyblw.agent.observability.AgentOperationTelemetry,
+    Retriever
+  ] =
+    ZLayer.fromFunction(
+      (
+          model: EmbeddingModel,
+          store: VectorStore,
+          reranker: Reranker,
+          policy: RetrievalPolicySource,
+          telemetry: com.zyblw.agent.observability.AgentOperationTelemetry
+      ) => DefaultRetriever(model, store, reranker, policies = policy, telemetry = Some(telemetry)): Retriever
     )
 
   /** 接入运行时覆盖的装配；宿主提供由 `RuntimeSettingsService` 支撑的解析器后，管理台调整 topK、 最低得分与重排开关即可在下一次检索生效。
     */
-  val governedLayer: URLayer[EmbeddingService & VectorStore & Reranker & RetrievalPolicySource, Retriever] =
+  val governedLayer: URLayer[EmbeddingModel & VectorStore & Reranker & RetrievalPolicySource, Retriever] =
     ZLayer.fromFunction(
       (
-          embeddings: EmbeddingService,
+          embeddings: EmbeddingModel,
           vectors: VectorStore,
           reranker: Reranker,
           policies: RetrievalPolicySource
@@ -635,19 +862,19 @@ object DefaultRetriever:
     )
 
   /** 让宿主以 ZLayer 明确替换中文 baseline，例如接入经过评测的领域词典 tokenizer。 */
-  val lexicalLayer: URLayer[EmbeddingService & VectorStore & Reranker & LexicalProcessor, Retriever] =
+  val lexicalLayer: URLayer[EmbeddingModel & VectorStore & Reranker & LexicalProcessor, Retriever] =
     ZLayer.fromFunction(
-      (embeddings: EmbeddingService, vectors: VectorStore, reranker: Reranker, lexical: LexicalProcessor) =>
+      (embeddings: EmbeddingModel, vectors: VectorStore, reranker: Reranker, lexical: LexicalProcessor) =>
         DefaultRetriever(embeddings, vectors, reranker, lexical = lexical)
     )
 
   val governedLexicalLayer: URLayer[
-    EmbeddingService & VectorStore & Reranker & RetrievalPolicySource & LexicalProcessor,
+    EmbeddingModel & VectorStore & Reranker & RetrievalPolicySource & LexicalProcessor,
     Retriever
   ] =
     ZLayer.fromFunction(
       (
-          embeddings: EmbeddingService,
+          embeddings: EmbeddingModel,
           vectors: VectorStore,
           reranker: Reranker,
           policies: RetrievalPolicySource,
@@ -656,14 +883,42 @@ object DefaultRetriever:
     )
 
 /** 确定性测试 embedding，不应用于真实语义检索。 */
-final class HashEmbedding(val dimension: Int = 64) extends EmbeddingService:
-  /** 确定性哈希向量，仅供测试/示例，不代表语义 embedding 质量。 */
-  def embed(texts: Chunk[String]): IO[RetrievalError, Chunk[Embedding]] =
-    ZIO.succeed(texts.map { text =>
-      val values = Array.fill[Float](dimension)(0.0f)
-      text.codePoints().toArray.zipWithIndex.foreach { case (point, index) =>
-        val slot = Math.floorMod(point * 31 + index, dimension)
-        values(slot) = values(slot) + 1.0f
-      }
-      Embedding(Chunk.fromArray(values))
-    })
+final class HashEmbedding(val dimension: Int = 64) extends EmbeddingModel:
+  override val capabilities: EmbeddingCapabilities       = EmbeddingDefaults.denseCapabilities(dimension)
+  override val descriptor: EmbeddingProviderDescriptorV2 =
+    EmbeddingProviderDescriptorV2("hash", s"hash-$dimension", capabilities)
+
+  def embed(request: EmbeddingRequest): IO[RetrievalError, EmbeddingResponse] =
+    validate(request) *> ZIO.succeed(
+      EmbeddingResponse(
+        request.texts.map(text => EmbeddingItem(Some(hashOne(text)), None)),
+        descriptor
+      )
+    )
+
+  private def hashOne(text: String): Embedding =
+    val values = Array.fill[Float](dimension)(0.0f)
+    text.codePoints().toArray.zipWithIndex.foreach { case (point, index) =>
+      val slot = Math.floorMod(point * 31 + index, dimension)
+      values(slot) = values(slot) + 1.0f
+    }
+    Embedding(Chunk.fromArray(values))
+
+object EmbeddingModelOps:
+  def testContext(
+      tenantId: TenantId = TenantId("test"),
+      purpose: EmbeddingPurpose = EmbeddingPurpose.Indexing,
+      requestId: String = "test-embed"
+  ): EmbeddingRequestContext = EmbeddingRequestContext(tenantId, purpose, requestId)
+
+  def embedTexts(
+      model: EmbeddingModel,
+      texts: Chunk[String],
+      role: EmbeddingInputRole = EmbeddingInputRole.Document,
+      context: EmbeddingRequestContext = testContext()
+  ): IO[RetrievalError, Chunk[Embedding]] =
+    if texts.isEmpty then ZIO.succeed(Chunk.empty)
+    else
+      model
+        .embed(EmbeddingRequest(texts, role, EmbeddingOutputKind.Dense, context = context))
+        .map(_.denseEmbeddings)

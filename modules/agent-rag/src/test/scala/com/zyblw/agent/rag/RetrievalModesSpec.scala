@@ -18,7 +18,7 @@ object RetrievalModesSpec extends ZIOSpecDefault:
       heading: Chunk[String] = Chunk("太阳病"),
       metadata: Map[String, String] = Map("edition" -> "song")
   ): DocumentChunk =
-    DocumentChunk(
+    DocumentChunk.fromText(
       id = id,
       documentId = documentId,
       text = text,

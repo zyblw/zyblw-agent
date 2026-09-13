@@ -1,11 +1,11 @@
 # Docker / 自管 PostgreSQL 接入
 
-> 状态：0.8.0 业务接入手册
-> 最后核验：2026-08-23
+> 状态：0.9.0 业务接入手册
+> 最后核验：2026-08-28
 > 事实来源：`deploy/docker/compose.business.yml`、`ProductionSupportHost`、`KnowledgeQaHost`、`AgentPostgresMigrations`
 
 当前可靠拓扑是 **Docker 启动应用 + 你自己部署的 PostgreSQL**。这足够支撑业务智能体接入。
-长时 soak、节点丢失、主备切换、PgBouncer 饱和、滚动发布、备份 RPO/RTO 和 SLO owner 已延期，等有独立上线环境再补。
+长时 soak、节点丢失、主备切换、PgBouncer 饱和、滚动发布、备份 RPO/RTO 和 SLO owner 已延期，在约定窗口的生产流量上测量后再补。
 
 ## 安装
 
@@ -32,14 +32,14 @@ sbt "examples/runMain com.zyblw.agent.examples.production.ProductionSupportHost 
 
 ## 升级
 
-1. 先跑 `ProductionSupportHost status`（或对生产库的副本跑同一命令）。确认 Flyway 版本、pending 列表和
+1. 先跑 `ProductionSupportHost status`（或对迁移前的数据库副本跑同一命令，不是产品 Test 环境）。确认 Flyway 版本、pending 列表和
    进行中 Run/命令计数。
 2. 停止提交新 Run，等待 `activeRuns`、`queued`、`leased` 归零。
 3. 备份当前库。
 4. 新镜像或新制品先跑 `migrate`。已发布 Flyway 只读。加法 migration 在仍有进行中工作时报警告，但切换
-   0.8 进程前必须已经 drain。
-5. 再启动或替换 `serve`。每个副本使用自己的 `ZYBLW_AGENT_WORKER_ID`。不要让 0.6.2 与 0.8 Worker 同时领
-   同一批 Run。旧库不能原地升级，必须按 [升级到 0.8.0](upgrading-to-0.8.0.md) 重建。
+   新进程前必须已经 drain。
+5. 再启动或替换 `serve`。每个副本使用自己的 `ZYBLW_AGENT_WORKER_ID`。不要让新旧 Worker 同时领取同一批 Run。
+   旧库不能原地升级，必须按 [升级到 0.9.0](fresh-install-0.9.0.md) 重建。
 6. 失败时停止扩流并向前修复。没有 down migration。
 
 ## 备份

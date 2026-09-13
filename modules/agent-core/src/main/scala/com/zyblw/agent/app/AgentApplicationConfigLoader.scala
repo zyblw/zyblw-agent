@@ -2,10 +2,11 @@ package com.zyblw.agent.app
 
 import com.zyblw.agent.composition.RuntimeProfile
 import com.zyblw.agent.core.*
-import com.zyblw.agent.model.{ModelRole, ModelRoleBinding, ModelRoleCatalog}
+import com.zyblw.agent.model.{ModelRole, ModelRoleBinding, ModelRoleCatalog, ModelRoutingPolicy}
 import com.zyblw.agent.scheduler.WorkerHostConfig
 import com.zyblw.agent.tools.*
 import zio.*
+import zio.json.*
 
 /** `AgentApplicationConfig` 的 ZIO Config 描述与启动期加载入口。
   *
@@ -148,15 +149,21 @@ object AgentApplicationConfigLoader:
   private lazy val profileDescription: Config[RuntimeProfile] =
     (
       Config.string("profile_id").withDefault("default") ++
-        Config.string("capture_policy").withDefault("metadata-only")
-    ).mapAttempt { case (id, policy) =>
+        Config.string("capture_policy").withDefault("metadata-only") ++
+        Config.string("model_routing_policy").withDefault("")
+    ).mapAttempt { case (id, policy, routingJson) =>
       val capture = normalized(policy) match
         case "disabled"      => CapturePolicy.Disabled
         case "metadata-only" => CapturePolicy.MetadataOnly
         case "replayable"    => CapturePolicy.Replayable
         case _               =>
           throw IllegalArgumentException("runtime.capture-policy 仅支持 disabled、metadata-only 或 replayable")
-      RuntimeProfile(id, capture)
+      val routing = Option(routingJson.trim).filter(_.nonEmpty).map { encoded =>
+        encoded
+          .fromJson[ModelRoutingPolicy]
+          .fold(_ => throw IllegalArgumentException("runtime.model-routing-policy 不是合法路由 JSON"), identity)
+      }
+      RuntimeProfile(id, capture, routing)
     }.nested("runtime")
 
   /** 部署侧角色目录，路径位于 `<prefix>.role.bindings`。

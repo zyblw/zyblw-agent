@@ -8,14 +8,12 @@ import zio.test.*
 object KnowledgeIndexerSpec extends ZIOSpecDefault:
 
   /** 创建可统计调用次数的两维测试 Embedding。 */
-  private def countingEmbedding(calls: Ref[Int]): EmbeddingService = new EmbeddingService:
-    val dimension: Int                                   = 2
-    override val descriptor: EmbeddingProviderDescriptor =
-      EmbeddingProviderDescriptor("test-embedding", "v1", 2, 100, supportsDimensions = false)
-
-    /** 每次逻辑调用只增加一次计数，输出数量严格等于输入。 */
-    def embed(texts: Chunk[String]): IO[RetrievalError, Chunk[Embedding]] =
-      calls.update(_ + 1).as(texts.map(text => Embedding(Chunk(text.length.toFloat, 1.0f))))
+  private def countingEmbedding(calls: Ref[Int]): EmbeddingModel =
+    EmbeddingModel.stub(
+      provider = "test-embedding",
+      onEmbed =
+        texts => calls.update(_ + 1).as(texts.map(text => Embedding(Chunk(text.length.toFloat, 1.0f))))
+    )
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("KnowledgeIndexer")(
     test("构建发布为 active，完成后的相同 ingestionId 不重复调用 Provider") {
@@ -82,13 +80,7 @@ object KnowledgeIndexerSpec extends ZIOSpecDefault:
     test("Embedding 协议失败会把 Building manifest 标记为 Failed") {
       for
         store <- InMemoryKnowledgeIndexStore.make
-        broken = new EmbeddingService:
-          val dimension: Int                                   = 2
-          override val descriptor: EmbeddingProviderDescriptor =
-            EmbeddingProviderDescriptor("broken", "v1", 2, 10, supportsDimensions = false)
-
-          /** 故意少返回一个向量，用于验证发布前的数量防线。 */
-          def embed(texts: Chunk[String]): IO[RetrievalError, Chunk[Embedding]] = ZIO.succeed(Chunk.empty)
+        broken  = EmbeddingModel.stub(provider = "broken", onEmbed = _ => ZIO.succeed(Chunk.empty))
         indexer = KnowledgeIndexer(SlidingWindowChunker(10, 0), broken, store)
         result <- indexer
           .index(
@@ -140,5 +132,65 @@ object KnowledgeIndexerSpec extends ZIOSpecDefault:
         goneV1.isEmpty,
         goneV2.isEmpty
       )
+    },
+    test("质量不足写入隔离且不得激活") {
+      for
+        store <- InMemoryKnowledgeIndexStore.make
+        calls <- Ref.make(0)
+        indexer = KnowledgeIndexer(
+          SlidingWindowChunker(10, 0),
+          countingEmbedding(calls),
+          store,
+          qualityPolicy = ExtractionQualityPolicy(minScriptCodePoints = 48)
+        )
+        result <- indexer
+          .index(
+            SourceDocument("doc-q", "(cid:12)(cid:13)", "doc://q"),
+            TenantId("tenant-a"),
+            Set("read"),
+            "q-1"
+          )
+          .exit
+        manifest <- store.find(KnowledgeDocumentKey(TenantId("tenant-a"), "doc-q"), "q-1")
+        active   <- store.active(KnowledgeDocumentKey(TenantId("tenant-a"), "doc-q"))
+        callsN   <- calls.get
+      yield assertTrue(
+        result.isFailure,
+        manifest.exists(_.isQuarantined),
+        manifest.exists(_.status == KnowledgeIndexStatus.Failed),
+        active.isEmpty,
+        callsN == 0
+      )
+    },
+    test("空 ingestionId 时 HMAC 可推导且确定") {
+      for
+        store <- InMemoryKnowledgeIndexStore.make
+        calls <- Ref.make(0)
+        indexer  = KnowledgeIndexer(SlidingWindowChunker(10, 0), countingEmbedding(calls), store)
+        document = SourceDocument("doc-hmac", "abcdefgh", "doc://hmac")
+        first  <- indexer.index(document, TenantId("tenant-a"), Set("read"), "")
+        second <- indexer.index(document, TenantId("tenant-a"), Set("read"), "")
+        count  <- calls.get
+      yield assertTrue(first.manifest.build.ingestionId == second.manifest.build.ingestionId, count == 1)
+    },
+    test("DocumentEnricher 不能改写 tenant/ACL/URI") {
+      val hostile = new DocumentEnricher:
+        def descriptor: EnricherDescriptor = EnricherDescriptor.Host("hostile", "1")
+        def enrich(document: SourceDocument, chunks: Chunk[DocumentChunk]) =
+          ZIO.succeed(EnrichmentResult(Map("tenantId" -> "other", "sourceUri" -> "http://evil")))
+      for
+        store <- InMemoryKnowledgeIndexStore.make
+        calls <- Ref.make(0)
+        indexer = KnowledgeIndexer(
+          SlidingWindowChunker(10, 0),
+          countingEmbedding(calls),
+          store,
+          enricher = hostile
+        )
+        result <- indexer
+          .index(SourceDocument("doc-e", "abcdefgh", "doc://e"), TenantId("tenant-a"), Set("read"), "e-1")
+          .exit
+        manifest <- store.find(KnowledgeDocumentKey(TenantId("tenant-a"), "doc-e"), "e-1")
+      yield assertTrue(result.isFailure, manifest.exists(_.status == KnowledgeIndexStatus.Failed))
     }
   )

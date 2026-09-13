@@ -12,7 +12,7 @@ object BookCorpusRagEval:
   private val read           = Set("knowledge:read")
   val scope: RetrievalScope  = RetrievalScope(tenant, read, Some("book-eval"))
 
-  val suwen: DocumentChunk = DocumentChunk(
+  val suwen: DocumentChunk = DocumentChunk.fromText(
     "chunk-suwen-yinyang",
     "suwen",
     "阴阳者，天地之道也，万物之纲纪，变化之父母。",
@@ -30,7 +30,7 @@ object BookCorpusRagEval:
     )
   )
 
-  val shanghan: DocumentChunk = DocumentChunk(
+  val shanghan: DocumentChunk = DocumentChunk.fromText(
     "chunk-shanghan-guizhi",
     "shanghan",
     "太阳中风，阳浮而阴弱，啬啬恶寒，淅淅恶风，翕翕发热，鼻鸣干呕者，桂枝汤主之。",

@@ -44,13 +44,15 @@ curl -fsS http://127.0.0.1:8080/health/ready
 本地联调可先发布到 Maven Local：
 
 ```bash
-sbt -batch 'set ThisBuild / version := "0.8.0-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.9.0-local"; publishM2'
 ```
 
-业务项目使用精确版本 `0.8.0-local`，不要写版本范围。
+业务项目使用精确版本 `0.9.0-local`，不要写版本范围。
 
 ## 4. 其他 Compose
 
-- `compose.business.yml`：默认业务路径，本地构建并连接外部库。
-- `compose.external-db.yml`：已有镜像摘要时使用。
-- `compose.staging.yml`：本机演练用的内置 PostgreSQL，不是生产库。
+选哪一份：
+
+- `compose.business.yml`：默认业务路径。本地构建，JDBC 连你自己的外部库，和生产同构。
+- `compose.external-db.yml`：已经有发布镜像摘要、仍连外部库时使用。
+- `compose.staging.yml`：bundled Postgres 本机演练，不是产品 Test 站，也不是生产库。知识表里的 `staging` 与此无关。

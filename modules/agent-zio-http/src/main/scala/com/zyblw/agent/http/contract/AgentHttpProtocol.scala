@@ -255,7 +255,9 @@ final case class CitationView(
     score: Double,
     pageNumbers: List[Int] = Nil,
     chunkId: Option[String] = None,
-    documentId: Option[String] = None
+    documentId: Option[String] = None,
+    sourceType: String = "site",
+    sourceKind: Option[String] = None
 ) derives JsonCodec
 object CitationView:
   given Schema[CitationView] = DeriveSchema.gen[CitationView]

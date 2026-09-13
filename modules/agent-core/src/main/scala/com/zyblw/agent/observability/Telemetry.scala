@@ -78,15 +78,23 @@ object InMemoryTelemetry:
   * @param tracer
   *   由宿主或 OTLP 模块创建的 OpenTelemetry Tracer
   */
-final class OpenTelemetryAgentTelemetry(tracer: Tracer) extends AgentTelemetry:
+final class OpenTelemetryAgentTelemetry private (tracer: Tracer, context: FiberRef[Context])
+    extends AgentTelemetry:
   /** 把一个离散框架事件输出为瞬时 span；原始 prompt、answer 与工具结果不得出现在 attributes。 */
   def emit(event: TelemetryEvent): UIO[Unit] =
     ZIO.succeed {
-      val builder = event.traceId.flatMap(parentContext).fold(tracer.spanBuilder(event.name)) { parent =>
-        tracer.spanBuilder(event.name).setParent(parent)
-      }
+      val builder =
+        if event.name == "agent.run" then tracer.spanBuilder(event.name).setNoParent()
+        else
+          event.traceId
+            .flatMap(id => parentContext(id, event.parentSpanId))
+            .fold(tracer.spanBuilder(event.name).setNoParent()) { parent =>
+              tracer.spanBuilder(event.name).setParent(parent)
+            }
       val startedAt = event.startedAtEpochMilli.filter(_ <= event.atEpochMilli).getOrElse(event.atEpochMilli)
-      val span      = builder.setStartTimestamp(startedAt, TimeUnit.MILLISECONDS).startSpan()
+      val span      = TelemetrySpanIdentity.withEvent(event) {
+        builder.setStartTimestamp(startedAt, TimeUnit.MILLISECONDS).startSpan()
+      }
       event.runId.foreach(runId => span.setAttribute("agent.run.id", runId.asString))
       event.traceId.foreach(traceId => span.setAttribute("agent.trace.id", traceId))
       GenAiSemanticMap
@@ -105,30 +113,27 @@ final class OpenTelemetryAgentTelemetry(tracer: Tracer) extends AgentTelemetry:
     *   被观测的业务 effect
     */
   def span[R, E, A](name: String, attributes: Map[String, String])(effect: ZIO[R, E, A]): ZIO[R, E, A] =
-    ZIO.scoped {
-      ZIO
-        .acquireRelease(ZIO.succeed {
-          val span = tracer.spanBuilder(name).startSpan()
-          GenAiSemanticMap.project(name, attributes).foreach((key, value) => span.setAttribute(key, value))
-          span -> span.makeCurrent()
-        }) { case (_, scope) => ZIO.succeed(scope.close()) }
-        .flatMap { case (otelSpan, _) =>
-          effect
-            .onExit {
-              case Exit.Success(_) => ZIO.succeed(otelSpan.setStatus(StatusCode.OK)).unit
-              case Exit.Failure(_) => ZIO.succeed(otelSpan.setStatus(StatusCode.ERROR)).unit
-            }
-            .ensuring(ZIO.succeed(otelSpan.end()))
-        }
+    context.get.flatMap { parent =>
+      ZIO.acquireReleaseWith(ZIO.succeed {
+        val span = tracer.spanBuilder(name).setParent(parent).startSpan()
+        GenAiSemanticMap.project(name, attributes).foreach((key, value) => span.setAttribute(key, value))
+        span
+      })(span => ZIO.succeed(span.end())) { span =>
+        context.locally(parent.`with`(span))(
+          effect.onExit(exit =>
+            ZIO.succeed(span.setStatus(if exit.isSuccess then StatusCode.OK else StatusCode.ERROR)).unit
+          )
+        )
+      }
     }
 
   /** 把框架 traceId 转换为 OpenTelemetry 远程父上下文；非法 ID 回退为新 trace。 */
-  private def parentContext(traceId: String): Option[Context] =
+  private def parentContext(traceId: String, parentSpanId: Option[String]): Option[Context] =
     val normalized = traceId.replace("-", "").toLowerCase
     Option.when(normalized.matches("[0-9a-f]{32}") && normalized.exists(_ != '0')) {
       val spanContext = SpanContext.createFromRemoteParent(
         normalized,
-        "0000000000000001",
+        parentSpanId.filter(_.matches("[0-9a-f]{16}")).getOrElse(TelemetrySpanIdentity.RunRoot),
         TraceFlags.getSampled,
         TraceState.getDefault
       )
@@ -136,7 +141,24 @@ final class OpenTelemetryAgentTelemetry(tracer: Tracer) extends AgentTelemetry:
     }
 
 object OpenTelemetryAgentTelemetry:
-  def layer(tracer: Tracer): ULayer[AgentTelemetry] = ZLayer.succeed(OpenTelemetryAgentTelemetry(tracer))
+  def make(tracer: Tracer): ZIO[Scope, Nothing, OpenTelemetryAgentTelemetry] =
+    FiberRef.make(Context.root()).map(OpenTelemetryAgentTelemetry(tracer, _))
+
+  def layer(tracer: Tracer): ULayer[AgentTelemetry] = ZLayer.scoped(make(tracer))
+
+/** The SDK ID generator reads this only inside synchronous startSpan; never across an effect/fiber boundary.
+  */
+object TelemetrySpanIdentity:
+  val RunRoot: String               = "0000000000000001"
+  private val starting              = new ThreadLocal[TelemetryEvent]()
+  def event: Option[TelemetryEvent] = Option(starting.get())
+  def tool(callId: String): String  =
+    com.zyblw.agent.composition.CanonicalDigest.sha256(s"tool:$callId").take(16)
+  def withEvent[A](value: TelemetryEvent)(start: => A): A =
+    val previous = starting.get()
+    starting.set(value)
+    try start
+    finally if previous == null then starting.remove() else starting.set(previous)
 
 enum TelemetryOverflowPolicy:
   case BackPressure, DropNewest, DropOldest

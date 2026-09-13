@@ -33,13 +33,13 @@ Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基
 
 0.4 收口审计发现：只在空数据库单独测试核心和知识 migration，无法证明生产中的“先核心、后知识”顺序。两套 history 若共同管理非空
 `public` schema，Flyway 会正确拒绝启动。当前实现已经把知识表和专属 history 固定到 `zyblw_agent_knowledge`，并把真实知识
-Testcontainer 改为先执行核心 migration、再执行知识 migration、最后重复执行知识 migration。这条约束在 0.5 继续有效，
-并追加核心 `V001 → V002` 的顺序应用证据。
+Testcontainer 改为先执行核心 migration、再执行知识 migration、最后重复执行知识 migration。`0.9.0`
+以 core 与 1024 Space/Profile knowledge 两条唯一 V001 绿场基线验证该约束。
 
-每个 `0.6.x` 标签前必须重新取得以下完整证据，任一项缺失都不能称为已发布：
+每个 `0.9.x` 标签前必须重新取得以下完整证据，任一项缺失都不能称为已发布：
 
 - `scalafmtCheckAll; scalafmtSbtCheck; testFull` 全部通过；
-- `RUN_POSTGRES_INTEGRATION=1 postgres/testFull` 在 PostgreSQL 16/pgvector 下全部通过，且覆盖 `V002` 生成列抽取、
+- `RUN_POSTGRES_INTEGRATION=1 postgres/testFull` 在 PostgreSQL/pgvector 下全部通过，且覆盖唯一 V001 基线、
   keyset 分页与内存实现一致、亚毫秒游标推进、append-only 覆盖历史与并发写入的乐观锁裁决；
 - command 与 Workflow 两条独立 JVM `SIGKILL` 演练通过，并都在 kill 后重启同一 PostgreSQL 实例；CI 以独立 20 分钟 job、每条 10 分钟硬上限运行相同脚本；
 - `durable-worker-soak.sh` 通过正式 PostgreSQL Start 事务、多个 `WorkerHost` 和唯一 `AgentRuntime` 执行有界多轮负载；CI 以独立 15 分钟 job、脚本 10 分钟硬上限运行相同 smoke；
@@ -52,7 +52,7 @@ Testcontainer 改为先执行核心 migration、再执行知识 migration、最�
 - 管理面授权边界通过：缺少 scope 在触达适配器之前被拒、write 蕴含 read、debug **不**被 write 蕴含、未装配能力返回 404
   且 capability 探测如实报告不可用；
 - `modules/agent-dashboard` 的 `typecheck`、`lint`、`build` 与 Playwright 浏览器契约通过；
-- 与候选一致的 `0.6.x-local publishM2`、独立 Maven consumer 与关键示例成功。
+- 与候选一致的 `0.9.x-local publishM2`、独立 Maven consumer 与关键示例成功。
 
 ### 最近一次完整本地证据
 

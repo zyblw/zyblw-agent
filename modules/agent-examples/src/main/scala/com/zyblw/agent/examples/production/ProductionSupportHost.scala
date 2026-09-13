@@ -84,10 +84,10 @@ object ProductionSupportHost extends ZIOAppDefault:
       if readiness.schema.hasPending then readiness.schema.pendingVersions.mkString(",") else "none"
     val verdict =
       if readiness.schema.hasPending && readiness.drainRequired then
-        "先 drain 进行中 Run，再在 staging 副本测量后执行 migrate。"
+        "先 drain 进行中 Run，再在迁移前的数据库副本上测量后执行 migrate。"
       else if readiness.schema.hasPending then "可以执行 migrate；完成后用新进程替换 serve。"
       else if readiness.drainRequired then "schema 已是目标版本，但仍有进行中工作，切换进程前先 drain。"
-      else "可以切换 0.8 进程或继续 serve。"
+      else "可以切换新进程或继续 serve。"
     s"""升级预检
   核心 schema: $schema
   pending: $pending

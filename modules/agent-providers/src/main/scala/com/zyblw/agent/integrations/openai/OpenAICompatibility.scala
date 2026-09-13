@@ -83,6 +83,30 @@ object OpenAICompatibility:
     ToolChoiceMode.AutoOnly
   )
 
+  /** Alibaba Cloud Model Studio 的 Qwen OpenAI Chat Completions 兼容档案。
+    *
+    * Qwen 的具体能力随模型变化。这里仅声明兼容端点共同具备、且已被本 Adapter 契约覆盖的保守能力；视觉、思考等能力应在 `ProviderEndpointDeclaration.models`
+    * 中按部署模型显式覆盖。
+    */
+  val qwen: OpenAICompatibility = OpenAICompatibility(
+    ProviderDescriptor(
+      "qwen",
+      "Alibaba Cloud Qwen",
+      "openai-chat-completions",
+      ModelCapabilities(
+        toolCalls = true,
+        strictToolSchema = false,
+        specificToolChoice = true,
+        developerRole = false,
+        streaming = true,
+        usageReporting = true
+      )
+    ),
+    DeveloperRoleMode.MapToSystem,
+    StrictToolSchemaMode.Omit,
+    ToolChoiceMode.Full
+  )
+
   /** 通用中转站档案：任意本地 Provider id，协议仍走 OpenAI Chat Completions。
     *
     * 模型名原样发送到网关；能力默认保守（工具 + 流式），宿主应通过 `ProviderEndpointsConfig` 为每个模型填写更精确的 `ModelCapabilities`。

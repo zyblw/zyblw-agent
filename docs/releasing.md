@@ -1,7 +1,7 @@
 # 开源发布与版本维护
 
 > 状态：运行手册  
-> 最后核验：2026-08-23
+> 最后核验：2026-08-28
 > 事实来源：`build.sbt`、`project/plugins.sbt`、`.github/workflows/*.yml`、`integration-tests/maven-consumer`
 
 ## 两档门禁
@@ -10,12 +10,12 @@
 
 | 档位 | 目的 | 必过 | 不做 |
 |---|---|---|---|
-| 业务接入 | 业务仓库用 Docker + 自管 PostgreSQL 引入框架 | `scripts/verify-business-ready.sh`：格式、`testFull`、问答契约、证据清单结构。可选 `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`。然后 `publishM2` 得到 `0.8.0-local`，或 `compose.business.yml` 启动 | 长时 soak、主备、PgBouncer、滚动发布、备份 RPO/RTO、SLO owner |
+| 业务接入 | 业务仓库用 Docker + 自管 PostgreSQL 引入框架 | `scripts/verify-business-ready.sh`：格式、`testFull`、问答契约、证据清单结构。可选 `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`。然后 `publishM2` 得到 `0.9.0-local`，或 `compose.business.yml` 启动 | 长时 soak、主备、PgBouncer、滚动发布、备份 RPO/RTO、SLO owner |
 | 公开发布 | annotated tag 上 Maven Central | 现有 release workflow：`testFull`、`publishM2`、Maven consumer、签名、Portal | 在没有宿主环境时不把 7 项证据改成 `verified_host`，也不因此阻塞业务接入 |
 
-业务项目固定精确版本，不要写版本范围或 `SNAPSHOT`。`0.8.0` 的 CHANGELOG 已定日；annotated tag `v0.8.0`
-必须打在已经包含该日期条目与 `docs/upgrading-to-0.8.0.md` 的 `origin/main` commit 上。见
-[升级到 0.8.0](upgrading-to-0.8.0.md)。
+业务项目固定精确版本，不要写版本范围或 `SNAPSHOT`。当前全新安装和发布候选均为 `0.9.0`。
+annotated tag `v0.9.0` 必须打在已经包含定日 CHANGELOG 条目与 `docs/fresh-install-0.9.0.md` 的 `origin/main` commit 上。见
+[0.9.0 全新安装](fresh-install-0.9.0.md)。
 
 ## 发布目标
 
@@ -61,8 +61,8 @@ Git、Actions cache 或日志。发布步骤还会先停止前序验证启动的
 使用与 CHANGELOG、升级指南一致的 annotated tag 触发发布，例如：
 
 ```bash
-git tag -a v0.6.0 -m "zyblw-agent v0.6.0"
-git push origin v0.6.0
+git tag -a v0.9.0 -m "zyblw-agent v0.9.0"
+git push origin v0.9.0
 ```
 
 标签触发 release workflow：
@@ -81,36 +81,17 @@ Central artifact 不可覆盖；失败修复必须用新版本。
 
 ## 日常版本策略
 
-- `0.3.0` 是 Agent/Workflow/核心数据库生产基线；它的公共契约和已发布 migration 保持冻结。
-- `0.4.0` 建立结构化 RAG、文档 lineage 与独立知识 schema 基线。
-- `0.5.0` 是加法型 minor：新增可选管理面、运行时配置覆盖与模型治理，追加核心 `V002`，不改动 0.4 知识 schema。
-  `0.5.x` patch 保护公共 Scala API、state JSON、业务 HTTP/OpenAPI 和两套 Flyway history；`/api/v1/admin/**` 是
-  显式标记的 Beta 表面，不进入该 patch 承诺。破坏性演进进入下一个 minor。
-- `0.6.0` 为新建 RAG 库建立独立的 1024 维基线，并追加核心 `V003` 使 Embedding 缓存按用途隔离。它不把已发布的
-  1536 knowledge schema 原地改维度；保留数据的宿主必须新建 snapshot、重建向量并在评测后切换。此公共 API/物理契约变化属于
-  minor，不能作为 `0.5.x` patch 发布。
-- `0.6.1` 是兼容 patch：新增宿主动态治理装配和 Dashboard 同域会话模式，不修改任何已发布 migration 或稳定线格式。
-- `0.6.2` 是兼容 patch：新增 PDF 提取级联、可选视觉转录和管理面提取方式字段，不修改任何已发布 migration 或稳定线格式。
-- `0.7.0` 候选已作废。`0.8.0` 是当前全新安装基线：核心与 1024 知识 Flyway 各自折叠为单个 V001，检索 mode/filter、
-  知识 HTTP 与 `KnowledgeQaHost` 进入主线。不提供从 0.6.x / 0.7.0 候选的原地升级。见 [升级到 0.8.0](upgrading-to-0.8.0.md)。
-- `1.x`：公共核心、迁移、HTTP 契约和运维承诺达到稳定后再进入。
-- Provider、Beta/Experimental 模块也跟随统一版本，减少多模块组合矩阵。
-- `modules/agent-dashboard` 是浏览器应用，随仓库一起打标签，但不发布 Maven 制品，也不占用一个新的 artifact 坐标。
-
-当前 build 使用 `early-semver`。所有已发布制品与 tag 保持不可变；真实 `0.6.0` artifact 是后续 0.6 patch 的兼容基线，不能用
-空检查或开发分支替代。
-
-仓库使用 sbt-version-policy/MiMa 对 `COMPAT_BASELINE_VERSION` 指定的 Maven Central 历史制品执行兼容审计。
-`0.8.0` 相对已发布 `0.6.2` 允许已记录的 early-semver minor 破坏，因此 PR 使用
-`show versionPolicyAssessCompatibility` 记录每个 artifact 的实际兼容等级（不要同时设置
-`versionPolicyIntention`），tag 使用单独的 `versionCheck` 验证版本幅度。发布后切换到 `0.8.0` 基线并对 patch 使用
-`BinaryAndSourceCompatible`/`versionPolicyCheck`。独立 Maven consumer 与平台下游回归仍必须执行，因为 MiMa 不验证
-POM、资源、服务装配和真实宿主启动路径。
+- 当前唯一开发与安装版本是 `0.9.0`，核心与 1024 知识各只有一份 V001 空库基线。
+- build、CI 和 release 不比较或消费旧版本 artifact；旧 tag 与 Central 制品只作为不可变发布记录存在。
+- 当前使用 early SemVer。`0.9.0` 发布后，后续 `0.9.x` 以它为二进制和源码兼容基线；破坏性变化进入新的 minor。
+- Provider、Beta/Experimental 模块跟随统一版本，减少多模块组合矩阵。
+- `modules/agent-dashboard` 随仓库打 tag，但不发布 Maven 制品。
+- 独立 Maven consumer 仍保留，用来验证当前候选的 POM、资源和 source/doc JAR，不构成业务运行的第二版本路径。
 
 ## 发布前清单
 
 1. CHANGELOG 中有用户可理解的变化、升级方式和风险。
-2. annotated tag、CHANGELOG 顶部版本与 `docs/upgrading-to-X.Y.Z.md` 一致，且 tag commit 已经包含在远端 `main`；
+2. annotated tag、CHANGELOG 顶部版本与 `docs/fresh-install-0.9.0.md` 一致，且 tag commit 已经包含在远端 `main`；
    release workflow 会通过 `.github/scripts/verify-release.sh` fail-closed 校验。
 3. `sbt -batch testFull` 成功。
 4. `RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull` 成功。
@@ -119,15 +100,12 @@ POM、资源、服务装配和真实宿主启动路径。
 7. `integration-tests/workflow-wake-worker-soak.sh` 成功；wake/execution claim 与终态 cycle 一一对应，多个独立 Store/Worker 参与，无 generation reclaim、abandon、lease loss 或失败；正式 wake queue 快照的 due/expired/final-depth 门禁与 P95 回归阈值通过。
 8. `sbt -batch publishM2` 成功，所有公开模块生成 POM/source/doc。
 9. `integration-tests/maven-consumer` 设置 `ZYBLW_AGENT_VERSION` 后仅依赖本地发布物也能编译。
-10. 0.6.0 必须验证核心 `V001 + V002 + V003` 可在既有 0.5 库上顺序应用，1024 knowledge baseline 在全新专属
-   `zyblw_agent_knowledge` schema/history 可幂等重放，且 pgvector 维度与缓存用途隔离在真实 PostgreSQL 上通过；发布后的 patch
-   还必须验证代表性升级库，且不得修改已发布 migration。
+10. 空 PostgreSQL 上核心与 1024 knowledge V001 可幂等执行，结构、维度、权限与注释审计全部通过。
 11. 启用控制台时，`modules/agent-dashboard` 的 `typecheck`、`lint`、`build` 与 Playwright 浏览器契约全部通过。
 12. POM 包含 name、description、URL、license、developer 和 SCM。
 13. 无密钥、真实用户数据或敏感 trace 进入 Git 历史和 artifact。
-14. 私有业务仓库使用相同 Maven-local 版本完成下游兼容验证，但任何私有源码、token 或日志都不进入公开 workflow。
-14. Central Portal 显示 Published 后，在私有 `zyblw-platform` 仓库手动运行 `zyblw-server CI`，输入刚发布的精确
-    `agent_version`；该回归只从 Maven Central 解析制品，并包含 PostgreSQL 契约测试。
+14. 私有业务仓库使用同一固定 commit 的 sibling 源码候选完成空库与真实业务回归；私有源码、token 和日志不得进入公开 workflow。
+15. Central Portal 显示 Published 后，验证 Maven consumer 能从 Central 解析当前精确版本。
 
 框架的 Scaladoc 会读取多个 source root 的 TASTy；仓库通过 `.jvmopts` 为 sbt 构建 JVM 提供 3 GiB 上限和 G1GC。
 CI 不应以更小的 `SBT_OPTS/JAVA_OPTS` 覆盖该基线。若 `packageDoc` 失败，发布必须失败；不能用空 doc JAR 掩盖 API

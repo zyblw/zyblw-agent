@@ -41,6 +41,20 @@ object ToolBatchSchedulerSpec extends ZIOSpecDefault:
         plan.batches(1).invocations.map(_.ordinal) == NonEmptyChunk(2, 3)
       )
     },
+    test("互异只读冲突组进入同一并行批，写入仍拆批") {
+      val calls = Chunk(
+        invocation(0, "knowledge_search", metadata("knowledge.index", ToolAccessMode.Read)),
+        invocation(1, "search_content", metadata("content.catalog", ToolAccessMode.Read)),
+        invocation(2, "web_search", metadata("web.search", ToolAccessMode.Read)),
+        invocation(3, "write-index", metadata("knowledge.index", ToolAccessMode.Write))
+      )
+      val plan = ToolBatchPlanner.plan(calls).toOption.get
+      assertTrue(
+        plan.batches.length == 2,
+        plan.batches(0).invocations.map(_.ordinal) == NonEmptyChunk(0, 1, 2),
+        plan.batches(1).invocations.map(_.ordinal) == NonEmptyChunk(3)
+      )
+    },
     test("并行完成顺序不同且部分失败时，报告仍按模型序号并聚合全部失败") {
       val calls = Chunk(
         invocation(0, "slow", metadata("a", ToolAccessMode.Read)),

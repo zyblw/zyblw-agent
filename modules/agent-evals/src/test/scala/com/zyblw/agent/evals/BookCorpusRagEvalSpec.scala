@@ -23,15 +23,17 @@ object BookCorpusRagEvalSpec extends ZIOSpecDefault:
     test("内存 Retriever 对每种模式召回正确片段并拒绝跨租户 decoy") {
       (for
         store      <- ZIO.service[VectorStore]
-        embeddings <- ZIO.service[EmbeddingService]
+        embeddings <- ZIO.service[EmbeddingModel]
         retriever  <- ZIO.service[Retriever]
-        vectors    <- embeddings.embed(BookCorpusRagEval.fixtures.map(_.text))
-        _          <- store.upsert(BookCorpusRagEval.fixtures.zip(vectors).map(IndexedChunk.apply))
-        report     <- RagEvalRunner(4).runRetriever(retriever, BookCorpusRagEval.cases)
+        vectors    <- EmbeddingModelOps.embedTexts(embeddings, BookCorpusRagEval.fixtures.map(_.text))
+        _          <- store.upsert(BookCorpusRagEval.fixtures.zip(vectors).map { case (chunk, vector) =>
+          IndexedChunk(chunk, vector)
+        })
+        report <- RagEvalRunner(4).runRetriever(retriever, BookCorpusRagEval.cases)
       yield assertTrue(report.passed, report.reports.length == BookCorpusRagEval.cases.length))
         .provide(
           InMemoryVectorStore.layer,
-          ZLayer.succeed[EmbeddingService](HashEmbedding(32)),
+          ZLayer.succeed[EmbeddingModel](HashEmbedding(32)),
           Reranker.identity,
           DefaultRetriever.layer
         )

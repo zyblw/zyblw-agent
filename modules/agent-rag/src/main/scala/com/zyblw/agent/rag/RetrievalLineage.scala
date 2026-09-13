@@ -86,7 +86,9 @@ final case class ChunkLineage(
     nextChunkId: Option[String] = None,
     headingPath: Chunk[String] = Chunk.empty,
     origins: Chunk[DocumentOrigin] = Chunk.empty,
-    blockIds: Chunk[String] = Chunk.empty
+    blockIds: Chunk[String] = Chunk.empty,
+    seedChunkId: Option[String] = None,
+    documentRevisionId: Option[String] = None
 ):
   require(parentId.forall(_.trim.nonEmpty), "lineage parentId 不能是空字符串")
   require(ordinal >= 0, "lineage ordinal 不能为负数")

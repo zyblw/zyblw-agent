@@ -18,7 +18,7 @@
 所有发布模块使用统一坐标：
 
 ```scala
-val zyblwAgentVersion = "0.8.0"
+val zyblwAgentVersion = "0.9.0"
 "io.github.zyblw" %% "<artifact>" % zyblwAgentVersion
 ```
 

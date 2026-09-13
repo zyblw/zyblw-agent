@@ -10,10 +10,8 @@ Service、Agent、Harness 或 Durable Workflow。
         → 暂停/恢复/取消 → 低敏 Inspector、Trace 与 Eval
 ```
 
-当前版本线是 `0.8.0`。这是全新安装基线：没有从 `0.6.x` / `0.7.0` 候选库的原地升级路径。
-已发布的 `0.6.2` Maven 制品仍冻结在
-[`v0.6.2`](https://github.com/zyblw/zyblw-agent/releases/tag/v0.6.2)，不能原地升级到本版本。
-完整操作见 [升级到 0.8.0](docs/upgrading-to-0.8.0.md)。
+当前唯一版本线是 `0.9.0`，只支持全新数据库与重新摄入知识文档。完整操作见
+[0.9.0 全新安装](docs/fresh-install-0.9.0.md)。
 
 ## 什么时候使用哪一层
 
@@ -37,7 +35,7 @@ Harness 不是第二套模型循环；Workflow 也不替代普通函数。多 Ag
 - PostgreSQL 16+
 - 可配置的 OpenAI-compatible Provider
 
-`0.8.0` 的书籍问答入口是 `KnowledgeQaHost`；客户支持与审批写工具仍走 `ProductionSupportHost`。二者都需要 PostgreSQL、可信身份头和 ZIO HTTP。`AgentQuickstart` 已删除。
+`0.9.0` 的书籍问答入口是 `KnowledgeQaHost`；客户支持与审批写工具仍走 `ProductionSupportHost`。二者都需要 PostgreSQL、可信身份头和 ZIO HTTP。`AgentQuickstart` 已删除。
 
 ```bash
 export ZYBLW_AGENT_JDBC_URL=jdbc:postgresql://127.0.0.1:5432/zyblw_agent
@@ -59,10 +57,10 @@ sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost serve"
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.8.0",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.8.0",
-  "io.github.zyblw" %% "zyblw-agent-postgres"  % "0.8.0",
-  "io.github.zyblw" %% "zyblw-agent-zio-http"  % "0.8.0"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.9.0",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.9.0",
+  "io.github.zyblw" %% "zyblw-agent-postgres"  % "0.9.0",
+  "io.github.zyblw" %% "zyblw-agent-zio-http"  % "0.9.0"
 )
 ```
 
@@ -250,7 +248,7 @@ npm run dev          # 打开 http://localhost:3000，在右上角填写后端�
 3. 写工具保持固定 SQL、稳定业务幂等键、审批和 outbox；模型参数不能变成语句。
 4. 运行账号只有 DML。Flyway 与结构探针属于部署任务。
 5. 需要运维界面时再装配管理面，并单独确定入口、身份来源与限流。
-6. 当前单库 Docker 路径通过业务接入门禁即可引进；7 项宿主证据保持 `deferred`，有独立上线环境后再补，不宣称通用 production-supported。
+6. 当前单库 Docker 路径通过业务接入门禁即可引进；7 项宿主证据保持 `deferred`，在约定窗口的生产流量上测量后再补，不宣称通用 production-supported。
 
 ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`/ZIO Schema 维护 `/api/v1` 与 OpenAPI；Server 和
 关键 worker 由同一 Scope 管生命周期。它不会创建 DataSource、匿名认证或 Provider Secret。详见
@@ -272,11 +270,11 @@ ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`
 
 只通过单元测试而没有容量、故障、升级和真实业务质量证据时，应标记为可运行或 Experimental，不能宣称生产就绪。
 
-## 兼容、升级与故障定位
+## 安装契约与故障定位
 
-`0.6.0` 的空库依次执行 core V001/V002/V003 与独立 1024 knowledge V001。V002 的生成列会重写 `agent_runs`，
-大规模部署仍须安排窗口；V003 仅使可再生 Embedding 缓存安全失效旧用途。已发布 migration 一律不修改、不 repair。
-完整边界见 [兼容性契约](docs/compatibility.md)与[升级到 0.6.0](docs/upgrading-to-0.6.0.md)。
+`0.9.0` 空库只执行 core V001 与独立 1024 knowledge V001。应用不提供旧 schema、旧向量维度或旧状态的升级入口；
+探测到非当前基线时直接拒绝启动。完整边界见[兼容性契约](docs/compatibility.md)与
+[0.9.0 全新安装](docs/fresh-install-0.9.0.md)。
 
 常见问题先按边界定位：
 
@@ -317,8 +315,8 @@ RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
 ./integration-tests/workflow-wake-worker-kill-recovery.sh --restart-postgres
 ./integration-tests/durable-worker-soak.sh
 ./integration-tests/workflow-wake-worker-soak.sh
-sbt -batch 'set ThisBuild / version := "0.8.0-local"; publishM2'
-cd integration-tests/maven-consumer && ZYBLW_AGENT_VERSION=0.8.0-local sbt -batch compile
+sbt -batch 'set ThisBuild / version := "0.9.0-local"; publishM2'
+cd integration-tests/maven-consumer && ZYBLW_AGENT_VERSION=0.9.0-local sbt -batch compile
 ```
 
 控制台单独验证：

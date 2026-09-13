@@ -3,14 +3,14 @@
 # 多阶段构建：依赖安装、生产构建和运行时分离，使最终镜像不含构建工具链和开发依赖。
 # 控制台是纯浏览器端应用，运行时只需要托管静态资源和 Next.js 的最小服务器。
 
-FROM node:22-alpine AS deps
+FROM node:26-alpine AS deps
 WORKDIR /app
 # 先只复制清单文件，让依赖层在源码变化时仍可复用缓存。
 COPY package.json package-lock.json ./
 # 用 npm ci 而不是 npm install：它严格遵循 lockfile，保证镜像与本地验证过的依赖树一致。
 RUN npm ci
 
-FROM node:22-alpine AS builder
+FROM node:26-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -24,7 +24,7 @@ ENV NEXT_PUBLIC_AGENT_BASE_PATH=$NEXT_PUBLIC_AGENT_BASE_PATH
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
-FROM node:22-alpine AS runner
+FROM node:26-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1

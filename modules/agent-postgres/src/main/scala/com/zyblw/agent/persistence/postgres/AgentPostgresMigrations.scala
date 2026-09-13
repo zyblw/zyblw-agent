@@ -66,9 +66,13 @@ object AgentPostgresMigrations:
   )
 
   private val KnowledgeRelations = Chunk(
-    "agent_knowledge_documents",
-    "agent_knowledge_chunk_staging",
-    "agent_knowledge_chunks"
+    "agent_knowledge_spaces",
+    "agent_knowledge_profiles",
+    "agent_knowledge_profile_documents",
+    "agent_knowledge_profile_chunk_staging",
+    "agent_knowledge_profile_chunks",
+    "agent_knowledge_profile_activation_audit",
+    "agent_knowledge_withdrawn"
   )
 
   /** 校验配置并用独立 Flyway history 表应用框架 migration。
@@ -194,7 +198,7 @@ object AgentPostgresMigrations:
         val columns = requiredColumns(
           connection,
           schema,
-          "agent_knowledge_chunks",
+          "agent_knowledge_profile_chunks",
           Chunk(
             "parent_id",
             "lineage_ordinal",
@@ -206,7 +210,7 @@ object AgentPostgresMigrations:
             "block_ids"
           )
         )
-        Chunk("agent_knowledge_chunk_staging", "agent_knowledge_chunks").foreach { table =>
+        Chunk("agent_knowledge_profile_chunk_staging", "agent_knowledge_profile_chunks").foreach { table =>
           val actual = querySingleString(
             connection,
             "SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = to_regclass(quote_ident(?) || '.' || quote_ident(?)) AND attname = 'embedding' AND NOT attisdropped",

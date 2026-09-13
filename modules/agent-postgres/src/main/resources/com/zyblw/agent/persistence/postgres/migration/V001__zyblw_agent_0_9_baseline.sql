@@ -1,6 +1,6 @@
--- zyblw-agent 0.8 全新数据库基线。
+-- zyblw-agent 0.9 全新数据库基线。
 --
--- 这是开发阶段允许破坏性重构后的唯一默认 migration；不支持从 0.7.x 及更早 Flyway 历史原地升级。
+-- 这是开发阶段允许破坏性重构后的唯一默认 migration；不支持从 0.8.x 及更早 Flyway 历史原地升级。
 -- 采用本版本的应用必须使用空 schema/新数据库并重新构建派生索引。已发布版本的 migration 只保留在对应 Maven artifact/tag 中。
 -- zyblw-agent PostgreSQL 首次正式发布基线；本文件直接描述当前完整结构。
 

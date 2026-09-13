@@ -1,47 +1,33 @@
 'use client';
 
 /**
- * 知识库：索引清单、检索沙盒与异步摄入。
+ * 知识库：会话租户的索引清单与检索沙盒。
  *
- * 检索沙盒是这个页面的核心。它的价值不是"能搜东西"，而是**以某个业务主体的租户与权限视角复现一次真实
- * 召回，并展示检索链每一阶段留下的原始信号**。用管理员自己的权限去查会让 ACL 问题永远无法复现，因此
- * 租户和权限必须由使用者显式填写。
- *
- * 沙盒会调用 Embedding Provider 并产生真实费用，所以它需要 `agent:admin:debug`，且只在点击时发起请求，
- * 不因窗口重新聚焦或组件重挂载而自动重发。
- *
- * 整个页面共用一个租户：清单过滤、沙盒模拟身份与摄入目标指向同一个值。三个各自为政的租户输入会让人以为
- * 自己在某个租户下调试，而实际上正在往另一个租户里写文档。
+ * 清单 / 退役走稳定 `/api/v1/knowledge/**`，租户只来自会话。沙盒走
+ * `POST /api/v1/admin/debug/retrieve`，用请求体里的模拟租户与权限复现 ACL；会调用 Embedding
+ * 并产生费用，因此需要 `agent:admin:debug` 且 `knowledge:read`，只在点击时发起。
  */
 
 import React, { useMemo, useState } from 'react';
+import { ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import {
-  AlertTriangle,
-  ChevronLeft,
-  ChevronRight,
-  FlaskConical,
-  Layers,
-  Search,
-  Upload,
-} from 'lucide-react';
-import {
-  useIngestionJobs,
   useKnowledgeDocuments,
   useKnowledgeRetrieve,
   useRetireDocument,
-  useSubmitIngestion,
 } from '@/lib/queries';
 import { useToast } from '@/lib/toast';
 import { useDebouncedUrlValue } from '@/lib/urlState';
-import type { IngestionJobView, KnowledgeDocumentPage, KnowledgeDocumentView, KnowledgeRetrievalHitView } from '@/types/admin';
+import type {
+  KnowledgeDocumentPage,
+  KnowledgeDocumentView,
+  KnowledgeRetrievalHitView,
+  KnowledgeRetrievalResult,
+} from '@/types/admin';
 import {
-  formatBytes,
   formatCount,
   formatDuration,
-  formatInstant,
   formatRelative,
   formatScore,
-  ingestionStatusTone,
   parseList,
 } from '@/lib/format';
 import {
@@ -61,13 +47,6 @@ import {
 
 /** 一页索引清单的条数；比 Run 目录小，因为每一行的信息密度高得多。 */
 const DOCUMENTS_PAGE_SIZE = 25;
-
-const EXTRACTION_MODE_OPTIONS = [
-  { value: 'auto', label: '自动识别（按文本质量升档）' },
-  { value: 'text', label: '仅文字层' },
-  { value: 'ocr', label: '仅版面 OCR' },
-  { value: 'vision', label: '仅视觉转录' },
-] as const;
 
 function extractionModeLabel(mode: string | null | undefined): string {
   switch (mode) {
@@ -94,60 +73,38 @@ function extractionLabel(doc: KnowledgeDocumentView): string | null {
 }
 
 export function RagInspector() {
-  // 三处租户输入共用一个防抖绑定：草稿只驱动输入框，已提交值驱动查询与游标栈。否则敲一个租户 ID 会让
-  // 清单、摄入任务两组查询各重发一次每个字符。
-  const [tenantDraft, setTenant, tenant] = useDebouncedUrlValue('ragTenant');
-
-  // 游标栈与产生它的租户绑定；租户一变就在渲染时判定失效并从第一页开始，不需要 effect 去清理。
-  const [paging, setPaging] = useState<{ key: string; stack: (string | undefined)[] }>({
-    key: tenant,
-    stack: [undefined],
-  });
-  const cursorStack = paging.key === tenant ? paging.stack : [undefined];
+  const [tenantDraft, setTenant] = useDebouncedUrlValue('ragTenant');
+  const [cursorStack, setCursorStack] = useState<(string | undefined)[]>([undefined]);
   const cursor = cursorStack[cursorStack.length - 1];
 
   const documents = useKnowledgeDocuments({
-    tenantId: tenant || undefined,
     limit: DOCUMENTS_PAGE_SIZE,
     cursor,
   });
-  const jobs = useIngestionJobs({ tenantId: tenant || undefined, limit: 20 });
-
   const activeCount = documents.data?.items.filter((doc) => doc.active).length ?? 0;
   const totalChunks =
     documents.data?.items.reduce((sum, doc) => sum + (doc.active ? doc.chunkCount : 0), 0) ?? 0;
 
   return (
     <div className="space-y-4 p-4">
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
         <StatCard label="索引版本" value={formatCount(documents.data?.items.length)} hint="当前页可见" />
         <StatCard label="生效文档" value={formatCount(activeCount)} tone="good" hint="当前页可见" />
         <StatCard label="生效 chunk" value={formatCount(totalChunks)} hint="当前页可见" />
-        <StatCard
-          label="进行中摄入"
-          value={formatCount(
-            jobs.data?.filter((job) => job.status !== 'Completed' && job.status !== 'Failed').length ?? 0,
-          )}
-          tone="warn"
-        />
       </div>
 
       <RetrievalSandbox tenant={tenantDraft} onTenantChange={setTenant} />
 
       <div className="grid gap-4 xl:grid-cols-2">
         <IndexManifests
-          tenant={tenantDraft}
-          onTenantChange={setTenant}
           page={documents.data}
           error={documents.error}
           pending={documents.isPending}
           canGoBack={cursorStack.length > 1}
-          onPrevious={() => setPaging({ key: tenant, stack: cursorStack.slice(0, -1) })}
-          onNext={() =>
-            setPaging({ key: tenant, stack: [...cursorStack, documents.data?.nextCursor ?? undefined] })
-          }
+          onPrevious={() => setCursorStack(cursorStack.slice(0, -1))}
+          onNext={() => setCursorStack([...cursorStack, documents.data?.nextCursor ?? undefined])}
         />
-        <IngestionPanel tenant={tenantDraft} onTenantChange={setTenant} jobs={jobs.data} jobsError={jobs.error} jobsPending={jobs.isPending} />
+        <LibrarySourcePanel />
       </div>
     </div>
   );
@@ -158,8 +115,9 @@ function RetrievalSandbox({ tenant, onTenantChange }: { tenant: string; onTenant
   const [query, setQuery] = useState('');
   const [permissions, setPermissions] = useState('');
   const [limit, setLimit] = useState('5');
-  const [rerank, setRerank] = useState(true);
+  const [rerank, setRerank] = useState(false);
   const [expandContext, setExpandContext] = useState(true);
+  const [mode, setMode] = useState('hybrid');
   const [selectedChunk, setSelectedChunk] = useState<string | null>(null);
 
   const retrieve = useKnowledgeRetrieve();
@@ -176,6 +134,7 @@ function RetrievalSandbox({ tenant, onTenantChange }: { tenant: string; onTenant
       limit: Math.max(1, Math.min(50, Number.parseInt(limit, 10) || 5)),
       rerank,
       expandContext,
+      mode,
     });
   }
 
@@ -188,7 +147,7 @@ function RetrievalSandbox({ tenant, onTenantChange }: { tenant: string; onTenant
       actions={
         <>
           <Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">
-            需要 agent:admin:debug
+            需要 agent:admin:debug + knowledge:read
           </Badge>
           <Button onClick={run} disabled={!canRun || retrieve.isPending}>
             <Search className="h-3 w-3" />
@@ -204,7 +163,7 @@ function RetrievalSandbox({ tenant, onTenantChange }: { tenant: string; onTenant
           value={tenant}
           onChange={onTenantChange}
           placeholder="必填"
-          hint="与下方索引清单共用同一个租户"
+          hint="只用于沙盒 ACL 复现，不会改清单租户"
         />
         <TextInput
           label="模拟权限（逗号分隔）"
@@ -213,6 +172,7 @@ function RetrievalSandbox({ tenant, onTenantChange }: { tenant: string; onTenant
           placeholder="留空表示无额外授权"
         />
         <TextInput label="topK" value={limit} onChange={setLimit} className="w-20" inputMode="numeric" />
+        <TextInput label="mode" value={mode} onChange={setMode} placeholder="hybrid / phrase" />
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-slate-300">
@@ -252,16 +212,30 @@ function RetrievalSandbox({ tenant, onTenantChange }: { tenant: string; onTenant
             <span>
               {result.embeddingProvider} / {result.embeddingModel} · {result.embeddingDimension} 维
             </span>
+            <Badge className="text-sky-300 bg-sky-500/10 ring-sky-500/30">
+              {mode || 'hybrid'}
+            </Badge>
             <Badge className={result.rerankApplied ? 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30' : ''}>
               重排 {result.rerankApplied ? '已执行' : '未执行'}
             </Badge>
             <Badge className={result.contextExpanded ? 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30' : ''}>
               上下文扩展 {result.contextExpanded ? '已执行' : '未执行'}
             </Badge>
+            <Badge
+              className={
+                result.evidenceStatus === 'Supported'
+                  ? 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30'
+                  : 'text-amber-300 bg-amber-500/10 ring-amber-500/30'
+              }
+            >
+              证据 {result.evidenceStatus}
+            </Badge>
             <span className="ml-auto">
               {result.hits.length} 条命中 · {result.citations.length} 条引用
             </span>
           </div>
+
+          <EvidenceDiagnostics result={result} />
 
           {result.hits.length === 0 ? (
             <div className="mt-3">
@@ -301,6 +275,71 @@ function RetrievalSandbox({ tenant, onTenantChange }: { tenant: string; onTenant
             title="尚未执行检索"
             reason="填写查询与要模拟的租户后点击执行。沙盒不会自动重发请求，因为每次调用都产生真实的 Embedding 费用。"
           />
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/** Profile、降级与 Evidence assembler 取舍；全部是低敏标识，不展示被丢弃正文。 */
+function EvidenceDiagnostics({ result }: { result: KnowledgeRetrievalResult }) {
+  const dropped = result.evidenceSelections.filter((selection) => selection.decision.startsWith('Dropped'));
+  return (
+    <Panel title="证据诊断" description="用于复现本次检索使用的索引版本、降级阶段和证据裁剪" className="mt-3 bg-slate-950/30">
+      <div className="grid gap-3 text-xs sm:grid-cols-2 xl:grid-cols-4">
+        <Field label="Knowledge Space">
+          <Mono>{result.knowledgeSpaceId ?? 'default'}</Mono>
+        </Field>
+        <Field label="Index Profile">
+          <Mono>{result.profileId ?? '未解析'}</Mono>
+        </Field>
+        <Field label="候选 / 接受">
+          <span className="tabular-nums text-slate-200">
+            {result.candidateCount} / {result.acceptedCount}
+          </span>
+        </Field>
+        <Field label="证据预算">
+          <span className="tabular-nums text-slate-200">{formatCount(result.maxEvidenceTokens)} tokens</span>
+        </Field>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {result.degradedStages.length === 0 ? (
+          <Badge className="text-emerald-300 bg-emerald-500/10 ring-emerald-500/30">无降级</Badge>
+        ) : (
+          result.degradedStages.map((stage) => (
+            <Badge key={stage} className="text-amber-300 bg-amber-500/10 ring-amber-500/30">
+              {stage}
+            </Badge>
+          ))
+        )}
+        {dropped.length > 0 && (
+          <Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">
+            丢弃 {dropped.length} 个候选
+          </Badge>
+        )}
+      </div>
+      {result.evidenceSelections.length > 0 && (
+        <div className="mt-3 overflow-x-auto rounded-lg border border-slate-800">
+          <table className="w-full min-w-[42rem] text-left text-xs">
+            <thead className="bg-slate-900/80 text-slate-400">
+              <tr>
+                <th className="px-3 py-2 font-medium">决策</th>
+                <th className="px-3 py-2 font-medium">文档</th>
+                <th className="px-3 py-2 font-medium">Chunk</th>
+                <th className="px-3 py-2 font-medium">Seed</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800 text-slate-300">
+              {result.evidenceSelections.map((selection) => (
+                <tr key={`${selection.documentId}:${selection.chunkId}:${selection.decision}`}>
+                  <td className="px-3 py-2">{selection.decision}</td>
+                  <td className="px-3 py-2"><Mono>{selection.documentId}</Mono></td>
+                  <td className="px-3 py-2"><Mono>{selection.chunkId}</Mono></td>
+                  <td className="px-3 py-2"><Mono>{selection.seedChunkId}</Mono></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </Panel>
@@ -429,8 +468,6 @@ function ChunkDetail({ hit }: { hit: KnowledgeRetrievalHitView }) {
 
 /** 索引清单与退役操作。 */
 function IndexManifests({
-  tenant,
-  onTenantChange,
   page,
   error,
   pending,
@@ -438,8 +475,6 @@ function IndexManifests({
   onPrevious,
   onNext,
 }: {
-  tenant: string;
-  onTenantChange: (value: string) => void;
   page: KnowledgeDocumentPage | undefined;
   error: unknown;
   pending: boolean;
@@ -454,15 +489,10 @@ function IndexManifests({
   return (
     <Panel
       title="知识索引清单"
-      description="每一行是一个索引版本；只有 active 版本参与检索。翻页使用后端返回的 keyset 游标"
+      description="会话租户下的索引版本；只有 active 版本参与检索。需要 knowledge:read，退役需要 knowledge:write"
       actions={
         <>
-          <TextInput
-            value={tenant}
-            onChange={onTenantChange}
-            placeholder="按租户过滤"
-            className="w-40"
-          />
+          <Badge className="text-sky-300 bg-sky-500/10 ring-sky-500/30">knowledge:read / write</Badge>
           <Button variant="secondary" disabled={!canGoBack} onClick={onPrevious}>
             <ChevronLeft className="h-3 w-3" /> 上一页
           </Button>
@@ -537,7 +567,6 @@ function IndexManifests({
                           retire.mutate(
                             {
                               documentId: doc.documentId,
-                              tenantId: doc.tenantId,
                               expectedActiveVersion: doc.indexVersion,
                             },
                             {
@@ -575,165 +604,18 @@ function IndexManifests({
   );
 }
 
-/** 异步摄入：上传与任务进度。 */
-function IngestionPanel({
-  tenant,
-  onTenantChange,
-  jobs,
-  jobsError,
-  jobsPending,
-}: {
-  tenant: string;
-  onTenantChange: (value: string) => void;
-  jobs: IngestionJobView[] | undefined;
-  jobsError: unknown;
-  jobsPending: boolean;
-}) {
-  const [permissions, setPermissions] = useState('');
-  const [extractionMode, setExtractionMode] = useState('auto');
-  const [file, setFile] = useState<File | null>(null);
-  const submit = useSubmitIngestion();
-  const { notify } = useToast();
-
-  function upload() {
-    if (!file || !tenant.trim()) return;
-    submit.mutate(
-      {
-        params: {
-          fileName: file.name,
-          tenantId: tenant.trim(),
-          mediaType: file.type || 'application/octet-stream',
-          permissions: parseList(permissions),
-          extractionMode,
-        },
-        content: file,
-      },
-      {
-        onSuccess: (job) => notify('success', '摄入任务已提交', `${job.fileName} · 任务 ${job.jobId}`),
-        onError: (error) =>
-          notify('error', '提交摄入失败', error instanceof Error ? error.message : String(error)),
-      },
-    );
-    setFile(null);
-  }
-
+/** 问答知识只从书库运营面写入；控制台不再接受上传。 */
+function LibrarySourcePanel() {
   return (
-    <Panel
-      title="文档摄入"
-      description="默认自动按文本质量选择文字层、OCR 或视觉。只有自动结果不对时才手动指定。"
-      actions={
-        <Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">需要 agent:admin:debug</Badge>
-      }
-    >
-      <div className="grid gap-3 md:grid-cols-2">
-        <TextInput
-          label="租户"
-          value={tenant}
-          onChange={onTenantChange}
-          placeholder="必填"
-          hint="与索引清单、检索沙盒共用同一个租户"
-        />
-        <TextInput
-          label="权限标签（逗号分隔）"
-          value={permissions}
-          onChange={setPermissions}
-          placeholder="留空表示公开"
-        />
-      </div>
-      <label className="mt-3 block text-xs text-slate-400">
-        提取方式
-        <select
-          value={extractionMode}
-          onChange={(event) => setExtractionMode(event.target.value)}
-          className={`mt-1 w-full rounded-md border border-slate-800 bg-slate-950 px-2 py-1.5 text-xs text-slate-200 ${FOCUS_RING}`}
-        >
-          {EXTRACTION_MODE_OPTIONS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <div className="mt-3 flex items-center gap-2">
-        <label
-          className={`flex-1 cursor-pointer rounded-md border border-dashed border-slate-700 px-3 py-2 text-xs text-slate-400 hover:border-slate-600 focus-within:border-indigo-500`}
-        >
-          <span className="sr-only">选择要摄入的文件</span>
-          <input
-            type="file"
-            className="sr-only"
-            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-          />
-          {file ? (
-            <span className="text-slate-200">
-              {file.name} · {formatBytes(file.size)}
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-1.5">
-              <Upload className="h-3.5 w-3.5" /> 选择文件（上限 32 MiB）
-            </span>
-          )}
-        </label>
-        <Button onClick={upload} disabled={!file || !tenant.trim() || submit.isPending}>
-          {submit.isPending ? '提交中…' : '提交摄入'}
-        </Button>
-      </div>
-
-      <div className="mt-3">
-        <ErrorBanner error={submit.error} context="提交摄入任务" />
-        <ErrorBanner error={jobsError} context="读取摄入任务" />
-      </div>
-
-      <div className="mt-3 space-y-2">
-        <div className="flex items-center gap-1.5 text-xs font-medium text-slate-300">
-          <Layers className="h-3.5 w-3.5" /> 最近任务
-        </div>
-        {jobsPending ? (
-          <LoadingRows rows={3} />
-        ) : (jobs?.length ?? 0) === 0 ? (
-          <EmptyState title="没有摄入任务" />
-        ) : (
-          jobs?.map((job) => (
-            <div key={job.jobId} className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2">
-              <div className="flex items-center gap-2 text-xs">
-                <span className="truncate text-slate-200">{job.fileName}</span>
-                <Badge className={ingestionStatusTone(job.status)}>{job.status}</Badge>
-                <span className="ml-auto text-[11px] text-slate-500">
-                  {formatRelative(job.createdAtEpochMilli)}
-                </span>
-              </div>
-              <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-800">
-                <div
-                  className={`h-full transition-all ${
-                    job.status === 'Failed' ? 'bg-rose-500' : 'bg-indigo-500'
-                  }`}
-                  style={{ width: `${job.progressPercent}%` }}
-                />
-              </div>
-              <div className="mt-1 flex flex-wrap items-center gap-x-3 text-[11px] text-slate-500">
-                <span>租户 {job.tenantId}</span>
-                {job.documentId && <CopyableId value={job.documentId} label="文档 ID" truncate={20} className="text-slate-400" />}
-                {job.chunkCount !== null && job.chunkCount !== undefined && (
-                  <span>{formatCount(job.chunkCount)} chunk</span>
-                )}
-                {job.indexVersion && <span>v{job.indexVersion}</span>}
-                <span className="ml-auto">{formatInstant(job.updatedAtEpochMilli)}</span>
-              </div>
-              {job.failureCode && (
-                <div className="mt-1.5 inline-flex items-center gap-1.5 rounded bg-rose-950/40 px-2 py-1 text-[11px] text-rose-300">
-                  <AlertTriangle className="h-3 w-3" /> 失败分类 <Mono>{job.failureCode}</Mono>
-                </div>
-              )}
-            </div>
-          ))
-        )}
-      </div>
-
-      <p className="mt-3 flex items-start gap-1.5 text-[11px] text-slate-600">
-        <FlaskConical className="mt-0.5 h-3 w-3 shrink-0" />
-        进度阶段对应后端索引状态机的 begin → stage → activate，不是按时间推进的动画；因此停在某一阶段
-        意味着该阶段确实仍在执行。
+    <Panel title="问答写入" description="控制台只检查索引与检索，不写入问答证据">
+      <p className="text-sm leading-6 text-slate-300">
+        书目与内部知识都在
+        {' '}
+        <a className="text-indigo-300 underline" href="/admin/library">
+          /admin/library
+        </a>
+        {' '}
+        提取、按章审校后再索引。这里上传的孤儿文档不能成为 /ask 引用。
       </p>
     </Panel>
   );

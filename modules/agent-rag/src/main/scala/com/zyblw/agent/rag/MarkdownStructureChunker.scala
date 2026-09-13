@@ -19,7 +19,7 @@ final case class MarkdownStructureChunkerConfig(
     maxCharacters: Int = 1200,
     overlapCharacters: Int = 120,
     maxHeadingDepth: Int = 6,
-    strategyId: String = "markdown-structure-v1"
+    strategyId: String = "markdown-structure-v2"
 ):
   require(maxCharacters >= 128, "Markdown chunk maxCharacters 必须至少为 128")
   require(
@@ -35,7 +35,7 @@ final case class MarkdownStructureChunkerConfig(
   *
   *   - fenced code 内的 `#` 不会被误判为标题；
   *   - 正常大小的段落、列表、表格和代码块不会被字符窗口从中间切开；
-  *   - 每块正文前重建完整标题路径，让 Embedding 与最终 Context 都能看见章节语境；
+  *   - 完整标题路径留在 lineage / `headingPath`；写入 embedding 的正文只带末 1–2 级短前缀；
   *   - chunk ID 来自 `document + heading path + exact body` 的 SHA-256，而不是全局序号，因此前面章节插入内容不会让后面所有 ID 漂移；
   *   - metadata 保存标题路径、原始行号、正文 hash 与稳定策略版本，便于引用、评测和重建。
   *
@@ -94,7 +94,7 @@ final class MarkdownStructureChunker(
             "chunkContentSha" -> KnowledgeIndexer.sha256(draft.body),
             "contentFormat"   -> document.representation.toString.toLowerCase(java.util.Locale.ROOT)
           ) ++ Option.when(headingPath.nonEmpty)("headingPath" -> headingPath)
-          DocumentChunk(
+          DocumentChunk.fromText(
             id = chunkId,
             documentId = document.id,
             text = render(draft.headingPath, draft.body),
@@ -259,15 +259,14 @@ final class MarkdownStructureChunker(
       .map(start => sliceCodePoints(value, start, (start + size).min(total)))
       .toVector
 
-  /** 标题路径最多占块预算三分之一；超长标题不会挤掉全部正文。 */
+  /** 末 1–2 级短前缀最多占块预算三分之一；完整祖先路径不写入正文。 */
   private def renderHeadingPrefix(path: Vector[String]): String =
     val raw = path
       .take(config.maxHeadingDepth)
-      .zipWithIndex
-      .map { case (title, index) =>
-        s"${"#" * (index + 1)} $title"
-      }
-      .mkString("\n")
+      .takeRight(2)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .mkString(" · ")
     takeCodePoints(raw, config.maxCharacters / 3)
 
   private def render(path: Vector[String], body: String): String =

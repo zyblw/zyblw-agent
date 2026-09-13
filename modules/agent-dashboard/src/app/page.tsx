@@ -163,11 +163,15 @@ function CredentialGate({ onOpenConnection }: { onOpenConnection: () => void }) 
             </div>
             <div className="flex items-start gap-2">
               <Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">agent:admin:write</Badge>
-              <span>改变部署行为：工具白名单、审批策略、模型切换、死信重排、索引退役。蕴含读权限。</span>
+              <span>改变部署行为：工具白名单、审批策略、模型切换、死信重排。蕴含读权限。</span>
             </div>
             <div className="flex items-start gap-2">
               <Badge className="text-rose-300 bg-rose-500/10 ring-rose-500/30">agent:admin:debug</Badge>
-              <span>产生真实 Provider 费用：检索沙盒、文档摄入、模型探活。不被写权限蕴含，必须单独授予。</span>
+              <span>产生真实 Provider 费用：检索沙盒、模型探活。不被写权限蕴含；沙盒另外需要 knowledge:read。</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <Badge className="text-emerald-300 bg-emerald-500/10 ring-emerald-500/30">knowledge:read / write</Badge>
+              <span>知识清单与退役。不被 agent:admin:* 蕴含。</span>
             </div>
           </div>
 

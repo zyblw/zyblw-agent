@@ -219,12 +219,17 @@ export function SecurityArtifacts({ onOpenConfig }: { onOpenConfig: () => void }
           <ScopeCard
             scope="agent:admin:write"
             tone="text-amber-300 bg-amber-500/10 ring-amber-500/30"
-            description="改变部署行为：工具白名单、审批策略、死信重排、索引退役。蕴含读权限，因为改配置前必须先看到当前配置。"
+            description="改变部署行为：工具白名单、审批策略、死信重排。蕴含读权限，因为改配置前必须先看到当前配置。"
           />
           <ScopeCard
             scope="agent:admin:debug"
             tone="text-rose-300 bg-rose-500/10 ring-rose-500/30"
-            description="产生真实 Provider 费用：检索沙盒与文档摄入。不被写权限蕴含，必须单独授予。"
+            description="产生真实 Provider 费用：检索沙盒与模型探活。不被写权限蕴含；沙盒另外需要 knowledge:read。"
+          />
+          <ScopeCard
+            scope="knowledge:read / write"
+            tone="text-emerald-300 bg-emerald-500/10 ring-emerald-500/30"
+            description="知识清单与退役。不被 agent:admin:* 蕴含。"
           />
         </div>
         <p className="mt-3 flex items-start gap-1.5 text-[11px] text-slate-600">

@@ -1,9 +1,11 @@
 package com.zyblw.agent.inspection
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.model.*
 import java.time.Instant
 import java.util.UUID
 import zio.*
+import zio.json.*
 import zio.test.*
 
 object IncidentPackSpec extends ZIOSpecDefault:
@@ -50,7 +52,7 @@ object IncidentPackSpec extends ZIOSpecDefault:
         encoded.exists(json => json.contains(runId.asString) && !json.contains("secret-prompt")),
         leaked == Left("incident-pack-secret-leak"),
         pack.modelCalls.isEmpty,
-        pack.schemaVersion == 1
+        pack.schemaVersion == 2
       )
     },
     test("模型账本摘要只有指纹前缀和计数") {
@@ -79,6 +81,50 @@ object IncidentPackSpec extends ZIOSpecDefault:
         pack.modelCalls.headOption.exists(_.fingerprintPrefix == "abababababab"),
         !encoded.contains("hidden-body"),
         encoded.contains("Unknown")
+      )
+    },
+    test("路由摘要只暴露低敏解释码和版本") {
+      val decision = RouteDecision(
+        ModelRequirement(ModelProfile.Reasoning),
+        ModelRef("provider-a", "model-a"),
+        "policy-v1",
+        "a" * 64,
+        Chunk(
+          ModelCandidateDecision(ModelRef("provider-a", "model-a"), Chunk.empty),
+          ModelCandidateDecision(ModelRef("provider-b", "model-b"), Chunk("vision"))
+        ),
+        legacyExplicitModel = false,
+        estimatedInputTokens = 20,
+        maxOutputTokens = 10,
+        pricingFingerprint = "b" * 64,
+        selectedPrice = Some(ModelPrice(1, 2)),
+        estimatedCost = Some(BigDecimal("0.00004"))
+      )
+      val record = ModelCallExecutionRecord(
+        runId,
+        ModelRequestId(UUID.fromString("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")),
+        1,
+        ModelCallStatus.Succeeded,
+        "provider-a",
+        "model-a",
+        CapturePolicy.MetadataOnly,
+        "c" * 64,
+        1,
+        0,
+        ModelCallContextLineage(20, 0, 0, 0, 0),
+        None,
+        None,
+        updatedAtEpochMilli = startedAt.toEpochMilli,
+        routeDecision = Some(decision)
+      )
+      val summary = ModelCallIncidentSummary.from(record)
+      assertTrue(
+        summary.requestedProfile.contains("Reasoning"),
+        summary.routePolicyVersion.contains("policy-v1"),
+        summary.routeDecisionCodes.contains("selected:provider-a/model-a"),
+        summary.routeDecisionCodes.contains("skip:provider-b/model-b:vision"),
+        summary.pricingFingerprintPrefix.contains("b" * 12),
+        !summary.toJson.contains("inputPerMillionTokens")
       )
     }
   )

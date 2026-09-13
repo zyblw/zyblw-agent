@@ -120,5 +120,51 @@ object WorkerHostSpec extends ZIOSpecDefault:
         maxAtCap == 2,
         maxAfter == 2
       )
+    },
+    test("一个 Run 丢失租约只中断当前执行，其他 lane 与宿主继续运行") {
+      for
+        environment <- RunCommandStore.inMemory.build
+        store = environment.get[RunCommandStore]
+        runA      <- RunId.random
+        runB      <- RunId.random
+        _         <- store.submit(runA, RunCommandPayload.Recover, "recover:lease-lost-a")
+        _         <- store.submit(runB, RunCommandPayload.Recover, "recover:lease-lost-b")
+        entered   <- Queue.unbounded[RunCommandLease]
+        finalized <- Queue.unbounded[RunId]
+        runtime = new LeaseAwareAgentRuntime:
+          def executeLeased(lease: RunCommandLease): IO[AgentError, Unit] =
+            (entered.offer(lease) *> ZIO.never)
+              .ensuring(finalized.offer(lease.runId).unit)
+        host <- WorkerHost
+          .make(
+            WorkerId("host-lease-isolation"),
+            WorkerHostConfig(
+              leaseDuration = 5.seconds,
+              heartbeatEvery = 1.second,
+              pollEvery = 100.millis,
+              parallelism = 2
+            )
+          )
+          .provide(ZLayer.succeed(store), ZLayer.succeed(runtime))
+        fiber  <- host.run.fork
+        first  <- entered.take
+        second <- entered.take
+        _      <- store.submit(
+          runA,
+          RunCommandPayload.Cancel(Some("user-request")),
+          "cancel:lease-isolation",
+          priority = Int.MaxValue
+        )
+        _                  <- TestClock.adjust(1.second)
+        interrupted        <- finalized.take
+        hostExit           <- fiber.poll
+        remainingFinalizer <- finalized.poll
+        _                  <- fiber.interrupt
+      yield assertTrue(
+        Set(first.runId, second.runId) == Set(runA, runB),
+        interrupted == runA,
+        hostExit.isEmpty,
+        remainingFinalizer.isEmpty
+      )
     }
   )

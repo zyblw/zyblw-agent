@@ -12,14 +12,8 @@ import zio.test.*
 object DocumentLoadingSpec extends ZIOSpecDefault:
 
   /** 建立一个固定两维向量的测试服务，使测试只关注 Loader 与 Indexer 的组合协议。 */
-  private val embeddings: EmbeddingService = new EmbeddingService:
-    val dimension: Int                                   = 2
-    override val descriptor: EmbeddingProviderDescriptor =
-      EmbeddingProviderDescriptor("document-loading-test", "v1", 2, 100, supportsDimensions = false)
-
-    /** 输出与输入严格同序同数量，避免把 Provider 行为混入本套测试。 */
-    def embed(texts: Chunk[String]): IO[RetrievalError, Chunk[Embedding]] =
-      ZIO.succeed(texts.map(text => Embedding(Chunk(text.length.toFloat, 1.0f))))
+  private val embeddings: EmbeddingModel =
+    EmbeddingModel.stub(provider = "document-loading-test")
 
   /** 用 UTF-8 小文本创建输入，便于每个测试明确控制 ID、MIME 和可信 metadata。 */
   private def input(

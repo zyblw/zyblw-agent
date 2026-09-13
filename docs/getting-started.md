@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-13
+> 最后核验：2026-08-28
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -15,22 +15,22 @@
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.8.0",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.8.0"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.9.0",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.9.0"
 )
 ```
 
 需要 ZIO HTTP 控制面再加入 `zyblw-agent-zio-http`；需要 PostgreSQL 耐久化再加入
 `zyblw-agent-postgres`。完整矩阵见 [模块选择](modules.md)。
 
-`0.8.0` 是当前全新安装基线。验证未发布提交时，可以在框架目录执行
-`sbt -batch 'set ThisBuild / version := "0.8.0-local"; publishM2'`，宿主临时使用同一唯一版本并显式启用 Maven
-Local；不要覆盖旧本地版本，也不要把本地版本或 `SNAPSHOT` 当作可重复生产发布物。完整命令见
+当前全新安装是 **0.9 空库基线**，目标坐标是 `0.9.0`。源码联调固定 sibling checkout 的精确 commit；制品发布前用
+`sbt -batch 'set ThisBuild / version := "0.9.0-local"; publishM2'` 验证独立 Maven consumer。不要把本地版本或
+`SNAPSHOT` 当作可重复生产发布物。完整命令见
 [server 消费指南](consuming-from-server.md)。
 
 ### 先按生产参考宿主接入
 
-`0.8.0` 不再提供无数据库 Quickstart。仓库入口是客户支持参考宿主与书籍问答宿主：
+`0.9.0` 不再提供无数据库 Quickstart。仓库入口是客户支持参考宿主与书籍问答宿主：
 
 ```bash
 sbt "examples/runMain com.zyblw.agent.examples.production.ProductionSupportHost status"
@@ -176,7 +176,7 @@ transaction。
 ```scala
 val localRagLayer = ZLayer.make[RagApplication](
   DocumentLoaderRegistry.layer(Chunk(markdownLoader)),
-  ZLayer.succeed[EmbeddingService](embeddingService),
+  ZLayer.succeed[EmbeddingModel](embeddingService),
   InMemoryKnowledgeIndexStore.knowledge,
   MarkdownStructureChunker.layer,
   KnowledgeIndexer.layer(),

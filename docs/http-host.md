@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-23
+> 最后核验：2026-09-11
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -16,8 +16,12 @@
 
 | 形态 | 推荐做法 | 原因 |
 |---|---|---|
-| 嵌入既有 ZIO HTTP 后端 | 引入 `zyblw-agent-zio-http`，只把 `AgentHttpApi.routes` 合并到业务 `Routes` | 端口、TLS、认证、优雅关闭和应用主 Scope 已由宿主拥有 |
+| 嵌入既有 ZIO HTTP 后端 | 引入 `zyblw-agent-zio-http`，按业务所有权合并 `AgentHttpApi` 路由组或完整 `routes` | 端口、TLS、认证、优雅关闭和应用主 Scope 已由宿主拥有 |
 | 独立 Agent 服务 | 引入同一 artifact，并使用 `AgentHttpHost` | Host 统一管理 Server、command worker、健康探针和关键后台进程 |
+
+已有自己创建、查询和控制用例的产品宿主不应为了 SSE 暴露完整框架控制面。`AgentHttpApi` 还提供
+`submissionRoutes`、`runReadRoutes`、`eventRoutes`、`controlRoutes`、`commandRoutes` 与 `metadataRoutes`；例如产品只需要
+耐久进度流时可仅合并 `eventRoutes`。完整 `routes` 继续组合全部分组，适合独立 Agent 服务并保持稳定 v1 契约。
 
 ```scala
 libraryDependencies ++= Seq(

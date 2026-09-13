@@ -184,6 +184,6 @@ object HarnessBudgetStoreConformanceSpec extends ZIOSpecDefault:
   def spec =
     suite("Harness budget store conformance")(
       contract("in-memory", HarnessStore.inMemory) @@ TestAspect.timeout(10.seconds),
-      contract("postgres", postgres) @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@
+      contract("postgres", postgres) @@ PostgresIntegrationAspect.enabled @@
         TestAspect.timeout(2.minutes)
     )

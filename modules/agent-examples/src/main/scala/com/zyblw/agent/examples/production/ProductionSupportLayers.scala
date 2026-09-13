@@ -156,7 +156,7 @@ object ProductionSupportLayers:
               tracesEndpoint = traces,
               metricsEndpoint = metrics,
               serviceName = "zyblw-agent-support",
-              serviceVersion = "0.8.0",
+              serviceVersion = "0.9.0",
               deploymentEnvironment = config.mode.toString.toLowerCase
             ),
             MetricAttributePolicy(allowedToolNames = Set("lookup_order", "issue_refund"))
@@ -222,7 +222,7 @@ object ProductionSupportLayers:
     ZLayer.succeed(
       AgentHttpHostConfig(
         serviceName = "zyblw-agent-support",
-        serviceVersion = "0.8.0",
+        serviceVersion = "0.9.0",
         environment = config.mode.toString.toLowerCase
       )
     )

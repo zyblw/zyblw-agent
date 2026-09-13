@@ -1,15 +1,15 @@
 # ADR 0018：下一代 Runtime Kernel — Durable Truth、ModelCall 与 ZIO 原生执行
 
-> 状态：**Proposed / 部分实现**（P0–P2 工作树切片已落地，尚未成为 `0.6.2` 发布合同）
+> 状态：**Accepted / 部分实现**（P0–P2 已纳入 `0.9.0` 当前合同）
 > 日期：2026-08-20
-> 影响：后续 Runtime / 状态 / 持久化 / Inspector 演进；不改变 `0.6.2` 已发布契约，直至对应代码与 migration 落地
+> 影响：`0.9.0` Runtime / 状态 / 持久化 / Inspector 当前基线与后续演进
 >
 > 配套工作手册：[next-generation-runtime.md](next-generation-runtime.md)
 > 后续扩展：[ADR-0019](0019-typed-extensions-and-constrained-execution.md) 在本 ADR 铁律之上新增 Typed Extensions、ApprovalSubject、ExecutionEnvironment、ContextSection 与 stable AgentProtocol 五项决策,并把实施顺序重排为 Wave 0–3
 
 ## 背景
 
-`zyblw-agent` 当前版本线是 `0.6.2` / `0.x`。仓库已经具备可恢复的 Durable Runtime、工具执行账本、lease/fencing、审批、Context、RAG、Workflow 与 Inspector。ADR-0002/0005/0008/0010/0016 把「模型只提议、Runtime 控制执行、ZLayer 管依赖、Snapshot 管恢复、Ledger 管副作用」写成了控制不变量。
+`zyblw-agent` 当前且唯一支持的版本线是 `0.9.0`。仓库已经具备可恢复的 Durable Runtime、工具执行账本、lease/fencing、审批、Context、RAG、Workflow 与 Inspector。ADR-0002/0005/0008/0010/0016 把「模型只提议、Runtime 控制执行、ZLayer 管依赖、Snapshot 管恢复、Ledger 管副作用」写成了控制不变量。
 
 同时出现了两类压力：
 

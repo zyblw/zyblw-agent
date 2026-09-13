@@ -219,7 +219,9 @@ object TelemetryRunObserver:
             "langfuse.observation.type" -> "tool"
           ) ++ extra
         )
-    projected -> current.copy(tools = current.tools.removed(key))
+    projected.map(
+      _.copy(spanId = Some(com.zyblw.agent.observability.TelemetrySpanIdentity.tool(callId)))
+    ) -> current.copy(tools = current.tools.removed(key))
 
   /** 完成 Run observation 并清理全部关联，防止常驻 Worker 的内存随历史 Run 增长。 */
   private def finishRunTrace(

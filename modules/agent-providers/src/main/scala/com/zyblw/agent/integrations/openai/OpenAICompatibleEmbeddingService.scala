@@ -26,6 +26,8 @@ import scala.util.Try
   *   是否向兼容服务发送 `dimensions`；只有明确支持时才能开启
   * @param maxBatchSize
   *   一个 HTTP 请求的最大文本数
+  * @param maxTextsPerRequest
+  *   一个逻辑调用的文本总上限；Adapter 会把它确定性拆成多个 HTTP 子批次
   * @param maxParallelBatches
   *   同一逻辑调用最多并发多少个 HTTP 子批次
   * @param maxCharactersPerText
@@ -45,6 +47,7 @@ final case class OpenAICompatibleEmbeddingConfig(
     dimension: Int,
     sendDimensions: Boolean = true,
     maxBatchSize: Int = 128,
+    maxTextsPerRequest: Int = 10_000,
     maxParallelBatches: Int = 4,
     maxCharactersPerText: Int = 100_000,
     maxCharactersPerBatch: Int = 500_000,
@@ -57,6 +60,10 @@ final case class OpenAICompatibleEmbeddingConfig(
   require(model.trim.nonEmpty, "model 不能为空")
   require(dimension > 0, "dimension 必须为正数")
   require(maxBatchSize > 0, "maxBatchSize 必须为正数")
+  require(
+    maxTextsPerRequest >= maxBatchSize && maxTextsPerRequest <= 100_000,
+    "maxTextsPerRequest 必须位于 maxBatchSize..100000"
+  )
   require(maxParallelBatches > 0, "maxParallelBatches 必须为正数")
   require(maxCharactersPerText > 0, "maxCharactersPerText 必须为正数")
   require(maxCharactersPerBatch >= maxCharactersPerText, "maxCharactersPerBatch 不能小于单文本上限")
@@ -68,7 +75,8 @@ final case class OpenAICompatibleEmbeddingConfig(
   /** 日志摘要永远不包含 API Key 或默认选项正文。 */
   override def toString: String =
     s"OpenAICompatibleEmbeddingConfig(providerId=$providerId, baseUrl=$baseUrl, apiKey=<redacted>, " +
-      s"model=$model, dimension=$dimension, maxBatchSize=$maxBatchSize, maxParallelBatches=$maxParallelBatches)"
+      s"model=$model, dimension=$dimension, maxBatchSize=$maxBatchSize, maxTextsPerRequest=$maxTextsPerRequest, " +
+      s"maxParallelBatches=$maxParallelBatches)"
 
 object OpenAICompatibleEmbeddingConfig:
   /** 本 loader 读取 API Key 的环境变量名。
@@ -112,9 +120,10 @@ object OpenAICompatibleEmbeddingConfig:
         Config.int("EMBEDDING_DIMENSION") ++
         Config.boolean("EMBEDDING_SEND_DIMENSIONS").withDefault(true) ++
         Config.int("EMBEDDING_MAX_BATCH_SIZE").withDefault(128) ++
+        Config.int("EMBEDDING_MAX_TEXTS_PER_REQUEST").withDefault(10_000) ++
         Config.duration("EMBEDDING_REQUEST_TIMEOUT").withDefault(60.seconds)
     ).mapAttempt {
-      case (providerId, baseUrl, apiKey, model, dimension, sendDimensions, maxBatchSize, timeout) =>
+      case (providerId, baseUrl, apiKey, model, dimension, sendDimensions, maxBatchSize, maxTexts, timeout) =>
         OpenAICompatibleEmbeddingConfig(
           providerId = providerId,
           baseUrl = baseUrl,
@@ -123,6 +132,7 @@ object OpenAICompatibleEmbeddingConfig:
           dimension = dimension,
           sendDimensions = sendDimensions,
           maxBatchSize = maxBatchSize,
+          maxTextsPerRequest = maxTexts,
           requestTimeout = timeout
         )
     }
@@ -149,28 +159,26 @@ object OpenAICompatibleEmbeddingConfig:
 final class OpenAICompatibleEmbeddingService(
     client: Client,
     config: OpenAICompatibleEmbeddingConfig
-) extends EmbeddingService:
-  val dimension: Int                                   = config.dimension
-  override val descriptor: EmbeddingProviderDescriptor = EmbeddingProviderDescriptor(
-    config.providerId,
-    config.model,
-    config.dimension,
-    config.maxBatchSize,
-    config.sendDimensions
-  )
+) extends EmbeddingModel:
+  val dimension: Int                               = config.dimension
+  override val capabilities: EmbeddingCapabilities =
+    EmbeddingDefaults.denseCapabilities(config.dimension, config.maxTextsPerRequest)
+  override val descriptor: EmbeddingProviderDescriptorV2 =
+    EmbeddingProviderDescriptorV2(config.providerId, config.model, capabilities)
 
-  /** 返回与输入严格同序的向量；空输入不访问网络。 */
-  def embed(texts: Chunk[String]): IO[RetrievalError, Chunk[Embedding]] =
-    embedDetailed(texts).map(_.embeddings)
+  def embed(request: EmbeddingRequest): IO[RetrievalError, EmbeddingResponse] =
+    validate(request) *>
+      embedBatch(request.texts).map { batch =>
+        EmbeddingResponse(
+          batch.embeddings.map(embedding => EmbeddingItem(Some(embedding), None)),
+          descriptor,
+          batch.usage,
+          batch.providerRequestIds.headOption
+        )
+      }
 
-  /** 执行确定性分批、有界并发、协议校验和 usage 汇总。
-    *
-    * @param texts
-    *   所有文本必须非空且不超过配置上限
-    * @return
-    *   向量、可选累计 usage 与子批次 request ID
-    */
-  override def embedDetailed(texts: Chunk[String]): IO[RetrievalError, EmbeddingBatchResult] =
+  /** 执行确定性分批、有界并发、协议校验和 usage 汇总。 */
+  private def embedBatch(texts: Chunk[String]): IO[RetrievalError, EmbeddingBatchResult] =
     if texts.isEmpty then ZIO.succeed(EmbeddingBatchResult(Chunk.empty, Some(EmbeddingUsage(0L, 0L))))
     else
       for
@@ -398,5 +406,5 @@ final class OpenAICompatibleEmbeddingService(
 
 object OpenAICompatibleEmbeddingService:
   /** 使用显式配置构造只依赖共享 Client 的 Layer。 */
-  def configured(config: OpenAICompatibleEmbeddingConfig): URLayer[Client, EmbeddingService] =
+  def configured(config: OpenAICompatibleEmbeddingConfig): URLayer[Client, EmbeddingModel] =
     ZLayer.fromFunction((client: Client) => OpenAICompatibleEmbeddingService(client, config))

@@ -1,7 +1,7 @@
 # zyblw-agent 能力审计、框架对照与演进判断
 
 > 状态：当前审计
-> 最后核验：2026-08-22
+> 最后核验：2026-08-28
 > 事实来源：当前源码、测试、构建、迁移、发布工作流，以及文末列出的官方框架资料
 > 演进排序的权威来源：[ADR-0019](architecture/0019-typed-extensions-and-constrained-execution.md) 的 Wave 0–3；本文用于能力现状与竞品对照，不另立路线
 
@@ -22,12 +22,66 @@
 
 - 完整生产参考宿主，而不是无数据库五分钟路径；
 - 真实长会话下的 Context 质量与 Prompt Cache 成本证据；
-- 一等的计划、目标、任务清单与按需 Skill；Artifact 现有实验性的隔离/版本化 SPI，但尚无耐久 Adapter；
+- 一等的计划、目标、任务清单与按需 Skill；Artifact 已有 PostgreSQL 耐久 Adapter，但对象存储、线上保留期和真实业务治理仍未闭环；
 - 跨版本数据库/JSON/API 兼容演练；
 - trace viewer、调试 UI、客户端 SDK 和独立外部用户反馈；
 - 多节点 soak、容量模型、SLO、备份恢复与真实攻击测试。
 
 因此，项目当前最重要的动作不是继续拆模块或增加多 Agent 名词，而是让已有单 Agent 主线更易用、更可测、更可运营。
+
+## 当前上线门禁判定
+
+### 判定
+
+`zyblw-agent 0.9.0` 空库基线的**单 Agent 耐久运行主线可以作为受限生产的框架依赖**（本地用 sibling 源码验证；Maven Central 发布是后续步骤）：类型化工具、预算、审批、命令队列、
+lease/fencing、PostgreSQL、RAG 引用和低敏观测已经形成可信地基。它不应被表述为“所有能力通用生产就绪”。
+
+当前合理发布方式是：本地/迭代吃源码；生产在 `0.9.0` Central 之后固定精确坐标。只开放单 Agent、只读 RAG 和已验证的低风险工具（含可选 `web_search`），从白名单/小流量开始。
+多 Agent、自动写入、任意 MCP、长期记忆和动态图编排不得随核心主线一起默认启用。
+
+### 本次工作树证据
+
+| 证据 | 结果 | 能证明什么 | 不能证明什么 |
+|---|---|---|---|
+| `sbt -batch 'scalafmtCheckAll;scalafmtSbtCheck;testFull'` | pass | 全模块格式、确定性单元和契约基线可编译、可执行 | 真实 Provider、数据库主备、长时负载 |
+| `RUN_POSTGRES_INTEGRATION=1 sbt -DRUN_POSTGRES_INTEGRATION=1 -batch postgres/testFull` | pass，105/105 | PostgreSQL 16/Testcontainers 的迁移、并发、事务、RAG ACL、embedding 身份 fail-closed、恢复契约 | 生产数据量、跨可用区故障、RPO/RTO |
+| 247 个主源码文件、178 个测试源码文件 | 事实 | 不是示例级代码库，测试投入较高 | 文件数量和测试数量本身不等于成熟度 |
+| `AgentRuntimeLive.scala` 2,155 行、`PostgresWorkflowCheckpointStore.scala` 1,879 行 | 风险信号 | 核心职责集中、改动半径较大 | 不能仅凭行数判定设计错误 |
+
+发布候选仍必须补充精确 Central 制品的独立 consumer、真实 Provider 小额度 smoke、业务固定数据集、部署环境恢复和
+生产观测证据。测试通过只说明当前已编码契约成立，不授予未测试能力更高成熟度。
+
+### 上线前必须收口的框架事项
+
+| 优先级 | 事项 | 验收条件 |
+|---|---|---|
+| P0 | 发布契约与文档消除版本漂移 | README、成熟度、生产基线、迁移说明只描述当前 0.9 空库基线；不保留旧安装入口；链接与命令在 CI 校验 |
+| P0 | 生产故障与容量证据 | 在真实部署完成节点丢失、数据库主备切换、滚动发布、数小时/数天 soak；给出队列、恢复、DB pool、内存和成本的容量曲线与 SLO |
+| P0 | 真实 Provider/RAG 业务门禁 | 固定模型、Prompt、索引和数据集版本；正常、无证据、冲突、注入、越权、超时、429/5xx 都有结果/轨迹/安全/资源四轴门禁 |
+| P0 | 宿主权限契约 | 明确框架只执行 `RunContext` 中宿主授予的 tenant/user/scopes；下游必须证明这些值来自认证与授权服务，不能硬编码或从模型参数取得 |
+| P1 | 大文件按真实职责收口 | 先加 characterization/conformance test，再把 Runtime 阶段、SQL 映射/查询和诊断投影按变化原因拆开；不为降低行数制造单实现接口 |
+| P1 | 运维闭环 | Run/队列/成本/RAG/Provider dashboard、低敏日志、告警阈值、值班负责人、止损动作和事故回放可执行 |
+| P1 | RAG 摄取生产化 | 真实 OCR/Docling smoke、恶意与畸形 PDF corpus、对象存储 Source resolver、保留/撤回 Worker、领域召回与引用趋势通过 |
+| P2 | 生态与易用性 | 生产最小示例、独立下游反馈、兼容 diff、客户端 SDK/CLI 按真实消费者需求增加 |
+
+### 与业务平台的推荐组合
+
+```text
+产品事实/不可变 revision/asset
+        -> 同事务 outbox
+        -> 平台知识投影 Worker
+        -> RagApplication（派生索引，可重建，绝不反向成为业务事实源）
+
+已认证用户 -> 平台 AuthorizationService -> RunContext(tenant,user,scopes)
+        -> AgentApplication durable submit
+        -> 只读 Tool / RAG
+        -> AgentState citations + retrievalEvidence
+        -> 平台 AnswerProjector 再校验引用、安全与公开 URL
+```
+
+这是合适的耦合：业务仓库拥有身份、权限、内容和产品消息；框架拥有运行、工具、索引和恢复协议；两者只通过发布制品、
+窄端口和版本化 DTO 连接。不要让 Agent 直接写业务表，也不要让平台复制第二套 Runtime、向量索引或 Python Agent 服务。
+需要特别注意：框架的 ACL 只能保证“按宿主传入的 scope 过滤”，不能修正宿主把 private 内容错误映射为公共 scope 的问题。
 
 ## 二、当前能力的真实分层
 
@@ -95,9 +149,9 @@
 
 本轮据此重构 `core.workflow`：节点不再通过返回值隐藏下一跳；`WorkflowDefinition.make` 先验证完整图；
 `WorkflowCheckpoint` 保存访问预算；fan-out 明确采用 `AllSucceeded`，由 ZIO 结构化并发传播失败与取消。随后完成的
-`WorkflowExecutionStore` 已补上 pending outcome、耐久账本、lease/fencing 与 prepare→checkpoint 故障注入；0.3 又补齐
+`WorkflowExecutionStore` 已补上 pending outcome、耐久账本、lease/fencing 与 prepare→checkpoint 故障注入；后续版本又补齐
 durable wait/signal 的原子注册/消费、稳定 signal ID 去重与 deadline 竞态裁决。当前仍故意只支持单步 fan-out 分支，避免在
-没有子图命名空间、kill/restart 和多节点 soak 前假装拥有完整图平台。0.3 进一步以 wait 行作为 durable wake command，
+没有子图命名空间、kill/restart 和多节点 soak 前假装拥有完整图平台。当前版本进一步以 wait 行作为 durable wake command，
 补齐 Scoped `WorkflowWakeWorker`、heartbeat、延迟释放和 PostgreSQL `SKIP LOCKED` fencing。
 
 内存/PostgreSQL 共享低敏 execution timeline、wait 状态机与 wake lease 契约；通用 command Worker 与 Workflow wake
@@ -123,7 +177,7 @@ execution claim 与完成 cycle 一一对应。下一步是部署节点丢失、
 3. **Context 工程仍缺线上闭环**：已有预算和压缩机制，但缓存命中率、上下文丢弃与答案质量的关联还没有长期数据。
 4. **Harness 有基础设施、缺业务证据**：Goal/Plan/Todo/Skill ADT、CAS Store、PostgreSQL Adapter、Steering/FollowUp、
    ArtifactReference 与跨 Run 任务预算已落地，但真实脱敏长任务数据、人工校准与 on-demand SkillCatalog（Wave 2）仍缺；
-   Artifact 生产耐久 Adapter、治理和 Tool 接入仍待真实需求验证。
+   Artifact 已有 PostgreSQL 耐久 Adapter；对象存储、多模态正文、线上保留治理和 Tool 接入仍待真实需求验证。
 5. **开发工具仍处早期**：已有安全 Run Inspector、分页 Timeline 和机械一致性诊断，但尚无成熟 CLI/UI、筛选导出和
    checkpoint fork/time-travel。
 6. **生态小**：没有独立下游、第三方 Provider/Tool 插件和真实公开发布反馈。
@@ -233,12 +287,11 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 
 ### P0：开发体验和真实发布
 
-- Maven Central `0.1.0`、`0.2.0`、`0.2.1` 与新的生产基线 `0.3.0` 均有不可变发布记录；`0.3.0` 用一次明确的
-  fresh schema 重建收敛 durable command 与 Workflow wait/wakeup，后续 `0.3.x` 恢复 minor 内兼容；
+- 当前空库安装基线为 `0.9.0`；构建、CI 和业务接入不引用旧制品或旧安装入口；
 - 维持 `ProductionSupportHost` 作为唯一用户可见生产参考，并保持 contract 测试不依赖付费密钥；
-- 以真实 `0.3.0` 制品持续检查 Scala API、JSON 快照、HTTP schema 和追加式数据库 migration，并以
+- 以当前 0.9 源码契约检查 Scala API、JSON 快照、HTTP schema 和空库 V001，并以
   [兼容性契约](compatibility.md)分开记录各兼容表面；
-- 用发布制品而不是源码完整验证 `zyblw-server`；
+- `zyblw-platform` 用 `.github/zyblw-agent.sha` 固定 sibling 源码 commit；`0.9.0-local` 只验证独立制品 consumer；
 - 在已有安全 Timeline/inspect HTTP 读模型上增加 CLI 与轻量界面，不急着做大型 Web Studio。
 
 成功标准：陌生 Scala/ZIO 开发者只读 README 能运行；失败时能从 typed error 和 trace 找到边界。
@@ -319,7 +372,7 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 - [ZIO ZLayer](https://zio.dev/reference/contextual/zlayer/)
 - [ZIO resource management](https://zio.dev/reference/resource/)
 - [ZIO TestClock](https://zio.dev/reference/test/services/clock/)
-- [ZIO HTTP Endpoint](https://ziohttp.com/concepts/endpoint/)
+- [ZIO HTTP Endpoint](https://ziohttp.com/reference/endpoint/)
 
 ## 本轮图工程讨论来源
 

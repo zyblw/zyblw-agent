@@ -38,7 +38,7 @@ object RagAgentExample extends ZIOAppDefault:
   private val localRagLayer: ZLayer[Any, RetrievalError, RagApplication] =
     ZLayer.make[RagApplication](
       DocumentLoaderRegistry.layer(Chunk(markdownLoader)),
-      ZLayer.succeed[EmbeddingService](HashEmbedding(64)),
+      ZLayer.succeed[EmbeddingModel](HashEmbedding(64)),
       InMemoryKnowledgeIndexStore.knowledge,
       MarkdownStructureChunker.layer,
       KnowledgeIndexer.layer(),

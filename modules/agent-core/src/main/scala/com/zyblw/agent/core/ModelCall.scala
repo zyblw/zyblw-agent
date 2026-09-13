@@ -8,7 +8,7 @@ import zio.json.*
 /** 主模型请求进入耐久账本时保存多少正文。
   *
   * 生产默认 [[MetadataOnly]]：只保存指纹、计数与模型标识。[[Replayable]] 额外保存可重建的
-  * `CanonicalModelRequest`，仅用于评测、排障授权和确定性测试。[[Disabled]] 不写账本，恢复语义退回 0.6.2。
+  * `CanonicalModelRequest`，仅用于评测、排障授权和确定性测试。未启用路由时 [[Disabled]] 不写账本；启用路由时保留 MetadataOnly 执行事实。
   */
 enum CapturePolicy derives JsonCodec:
   case Disabled, MetadataOnly, Replayable
@@ -79,7 +79,9 @@ final case class ModelCallExecutionRecord(
     usage: Option[TokenUsage] = None,
     finishReason: Option[FinishReason] = None,
     errorCategory: Option[String] = None,
-    updatedAtEpochMilli: Long
+    updatedAtEpochMilli: Long,
+    /** 旧 JSON 缺省为 None；关闭正文采集不影响已启用路由的最小账本。 */
+    routeDecision: Option[com.zyblw.agent.model.RouteDecision] = None
 ) derives JsonCodec:
   def toChatRequest: Either[String, ChatRequest] =
     for
@@ -91,6 +93,25 @@ final case class ModelCallExecutionRecord(
 
   /** Replayable 账本必须自洽：lineage 中的工具指纹只能来自当时保存的定义，不能事后用 live registry 重算。 */
   def verifyFrozenTools: Either[String, Unit] =
+    verifyRouteDecision.flatMap(_ => verifyToolFingerprint)
+
+  private def verifyRouteDecision: Either[String, Unit] = routeDecision match
+    case None           => Right(())
+    case Some(decision) =>
+      Either.cond(
+        decision.selectedModel.provider == provider && decision.selectedModel.model == model &&
+          com.zyblw.agent.model.ModelRouter.select(decision.candidates).contains(decision.selectedModel) &&
+          decision.selectedPrice.map(
+            _.estimate(TokenUsage(decision.estimatedInputTokens, decision.maxOutputTokens.toLong))
+          ) == decision.estimatedCost &&
+          canonicalRequest.forall(c =>
+            c.settings.provider.contains(provider) && c.settings.model.contains(model)
+          ),
+        (),
+        "模型路由证据与冻结调用不一致"
+      )
+
+  private def verifyToolFingerprint: Either[String, Unit] =
     (lineage.toolDefinitionsFingerprint, canonicalRequest) match
       case (Some(expected), Some(canonical)) =>
         val actual = CanonicalModelRequest.toolDefinitionsFingerprint(canonical.tools)

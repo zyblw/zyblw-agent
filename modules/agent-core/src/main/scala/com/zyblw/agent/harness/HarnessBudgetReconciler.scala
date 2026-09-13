@@ -63,9 +63,20 @@ final class HarnessBudgetReconciler private (
   private def reconcileOne(reservation: GoalBudgetReservation): UIO[ReconcileOutcome] =
     runs.load(reservation.runId).either.flatMap {
       case Right(state) if RunStatus.isTerminal(state.status) =>
-        harness
-          .settleGoalBudget(reservation.goalId, reservation.runId, state.usage)
-          .as(ReconcileOutcome.Settled)
+        runs
+          .getModelCalls(reservation.runId)
+          .flatMap { calls =>
+            // 终态不代表费用已知；不得把 Unknown/Dispatched 的预留释放成零消费。
+            val uncertain = calls.exists(call =>
+              Set(ModelCallStatus.Prepared, ModelCallStatus.Dispatched, ModelCallStatus.Unknown)
+                .contains(call.status)
+            )
+            if uncertain then ZIO.succeed(ReconcileOutcome.Pending)
+            else
+              harness
+                .settleGoalBudget(reservation.goalId, reservation.runId, state.usage)
+                .as(ReconcileOutcome.Settled)
+          }
           .catchAll(_ => ZIO.succeed(ReconcileOutcome.Failed))
       case Right(_) => ZIO.succeed(ReconcileOutcome.Pending)
       case Left(_)  => ZIO.succeed(ReconcileOutcome.Failed)

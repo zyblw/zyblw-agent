@@ -190,6 +190,72 @@ object AgentHttpApiSpec extends ZIOSpecDefault:
   )
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("AgentHttpApi")(
+    test("完整 routes 保持六个边界的原有端点与版本头") {
+      val create = Request
+        .post(
+          v1 / "agents" / "http-test" / "runs",
+          Body.fromString(CreateRunRequest("new-thread", "hello").toJson)
+        )
+        .addHeader("Idempotency-Key", "http-start-key")
+      for
+        submission <- api.routes.runZIO(create)
+        runRead    <- api.routes.runZIO(Request.get(v1 / "runs" / runId.asString))
+        event      <- api.routes.runZIO(Request.get(v1 / "runs" / runId.asString / "events"))
+        control    <- api.routes.runZIO(Request.post(v1 / "runs" / runId.asString / "recover", Body.empty))
+        command    <- api.routes.runZIO(Request.get(v1 / "commands" / commandId.asString))
+        metadata   <- api.routes.runZIO(Request.get(v1 / "openapi.json"))
+        responses = List(submission, runRead, event, control, command, metadata)
+      yield assertTrue(
+        responses.map(_.status) == List(
+          Status.Accepted,
+          Status.Ok,
+          Status.Ok,
+          Status.Accepted,
+          Status.Ok,
+          Status.Ok
+        ),
+        responses.forall(
+          _.rawHeader(AgentHttpProtocol.ApiVersionHeader)
+            .contains(AgentHttpProtocol.ApiVersionHeaderValue)
+        )
+      )
+    },
+    test("eventRoutes 只暴露事件列表与 SSE") {
+      val create = Request
+        .post(
+          v1 / "agents" / "http-test" / "runs",
+          Body.fromString(CreateRunRequest("new-thread", "hello").toJson)
+        )
+        .addHeader("Idempotency-Key", "event-boundary")
+      for
+        events <- api.eventRoutes.runZIO(Request.get(v1 / "runs" / runId.asString / "events"))
+        stream <- api.eventRoutes.runZIO(
+          Request.get(v1 / "runs" / streamRunId.asString / "events" / "stream")
+        )
+        createRun  <- api.eventRoutes.runZIO(create)
+        getRun     <- api.eventRoutes.runZIO(Request.get(v1 / "runs" / runId.asString))
+        inspection <- api.eventRoutes.runZIO(
+          Request.get(v1 / "runs" / runId.asString / "inspection")
+        )
+        control <- api.eventRoutes.runZIO(
+          Request.post(v1 / "runs" / runId.asString / "recover", Body.empty)
+        )
+        command  <- api.eventRoutes.runZIO(Request.get(v1 / "commands" / commandId.asString))
+        metadata <- api.eventRoutes.runZIO(Request.get(v1 / "openapi.json"))
+      yield assertTrue(
+        events.status == Status.Ok,
+        stream.status == Status.Ok,
+        events
+          .rawHeader(AgentHttpProtocol.ApiVersionHeader)
+          .contains(AgentHttpProtocol.ApiVersionHeaderValue),
+        stream
+          .rawHeader(AgentHttpProtocol.ApiVersionHeader)
+          .contains(AgentHttpProtocol.ApiVersionHeaderValue),
+        List(createRun, getRun, inspection, control, command, metadata).forall(
+          _.status == Status.NotFound
+        )
+      )
+    },
     test("创建端点只提交 Start 命令并立即返回 202，不调用 Runtime.run/runEvents") {
       val request = Request
         .post(

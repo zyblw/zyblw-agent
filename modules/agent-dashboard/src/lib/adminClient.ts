@@ -21,7 +21,6 @@ import type {
   ErrorResponse,
   EvalSuiteIdentityView,
   EvalTrendSeries,
-  IngestionJobView,
   KnowledgeDocumentPage,
   KnowledgeRetireRequest,
   KnowledgeRetrievalResult,
@@ -40,6 +39,8 @@ import type {
 
 /** 管理 API 的基础路径；与 `AgentHttpProtocol.BasePath` 加上管理子面一致。 */
 const ADMIN_BASE = '/api/v1/admin';
+const KNOWLEDGE_BASE = '/api/v1/knowledge';
+const KNOWLEDGE_DEBUG_RETRIEVE = '/api/v1/admin/debug/retrieve';
 
 /**
  * 后端返回的错误。
@@ -367,81 +368,35 @@ export const adminApi = {
     });
   },
 
-  /** 分页列出知识索引版本清单。 */
+  /** 分页列出当前会话租户的知识索引版本清单。需要 `knowledge:read`。 */
   knowledgeDocuments(
     config: AdminClientConfig,
-    params: { tenantId?: string; limit?: number; cursor?: string } = {},
+    params: { limit?: number; cursor?: string } = {},
   ): Promise<KnowledgeDocumentPage> {
-    return request(config, `${ADMIN_BASE}/knowledge/documents${queryString(params)}`);
+    return request(config, `${KNOWLEDGE_BASE}/documents${queryString(params)}`);
   },
 
-  /** 执行一次真实检索。该操作会调用 Embedding Provider 并产生费用，需要 `agent:admin:debug`。 */
+  /**
+   * 执行一次真实检索。会调用 Embedding Provider 并产生费用，需要 `agent:admin:debug` 且
+   * `knowledge:read`。tenantId / permissions 由请求体显式给出，用于复现业务主体的 ACL。
+   */
   knowledgeRetrieve(
     config: AdminClientConfig,
     body: KnowledgeRetrieveRequest,
   ): Promise<KnowledgeRetrievalResult> {
-    return request(config, `${ADMIN_BASE}/knowledge/retrieve`, { method: 'POST', json: body });
+    return request(config, KNOWLEDGE_DEBUG_RETRIEVE, { method: 'POST', json: body });
   },
 
-  /** 退役某个文档当前 Active 的索引版本。 */
+  /** 退役某个文档当前 Active 的索引版本。需要 `knowledge:write`。 */
   knowledgeRetire(
     config: AdminClientConfig,
     documentId: string,
     body: KnowledgeRetireRequest,
   ): Promise<void> {
-    return request(config, `${ADMIN_BASE}/knowledge/documents/${encodeURIComponent(documentId)}/retire`, {
-      method: 'POST',
-      json: body,
+    return request(config, `${KNOWLEDGE_BASE}/documents/${encodeURIComponent(documentId)}`, {
+      method: 'DELETE',
+      json: { expectedActiveVersion: body.expectedActiveVersion },
     });
-  },
-
-  /**
-   * 提交异步摄入任务，立即返回任务视图。
-   *
-   * 文件字节作为原始请求体发送、元数据放查询参数，与后端一致：走 multipart 会引入一个解析器，走 Base64
-   * 会把二进制放大三分之一。返回 202 后由调用方轮询 `ingestionJob`。
-   */
-  submitIngestion(
-    config: AdminClientConfig,
-    params: {
-      fileName: string;
-      tenantId: string;
-      mediaType?: string;
-      permissions?: string[];
-      extractionMode?: string;
-    },
-    content: Blob,
-  ): Promise<IngestionJobView> {
-    return request(
-      config,
-      `${ADMIN_BASE}/knowledge/ingestions${queryString({
-        fileName: params.fileName,
-        tenantId: params.tenantId,
-        mediaType: params.mediaType,
-        permissions: params.permissions,
-        extractionMode: params.extractionMode,
-      })}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': params.mediaType || content.type || 'application/octet-stream',
-        },
-        body: content,
-      },
-    );
-  },
-
-  /**
-   * 列出摄入任务。
-   *
-   * 单任务查询端点没有绑定：清单本身按"是否仍有非终态任务"自适应轮询，已经覆盖了提交后跟踪进度的场景，
-   * 再留一个无人调用的单任务方法只会让读者以为存在两条不同的进度来源。
-   */
-  ingestionJobs(
-    config: AdminClientConfig,
-    params: { tenantId?: string; limit?: number } = {},
-  ): Promise<IngestionJobView[]> {
-    return request(config, `${ADMIN_BASE}/knowledge/ingestions${queryString(params)}`);
   },
 
   /** 列出本部署声明跟踪的评测趋势线。 */

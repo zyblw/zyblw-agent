@@ -518,6 +518,14 @@ export interface KnowledgeCitationView {
   pageNumbers: number[];
 }
 
+/** Evidence assembler 对候选的低敏保留/丢弃决策。 */
+export interface KnowledgeEvidenceSelectionView {
+  documentId: string;
+  chunkId: string;
+  seedChunkId: string;
+  decision: string;
+}
+
 /**
  * 检索沙盒请求。
  *
@@ -531,6 +539,7 @@ export interface KnowledgeRetrieveRequest {
   limit?: number;
   rerank?: boolean;
   expandContext?: boolean;
+  mode?: string;
 }
 
 /** 检索沙盒结果。 */
@@ -543,11 +552,19 @@ export interface KnowledgeRetrievalResult {
   embeddingDimension: number;
   rerankApplied: boolean;
   contextExpanded: boolean;
+  evidenceStatus: string;
+  candidateCount: number;
+  acceptedCount: number;
+  topAcceptedScore?: number | null;
+  profileId?: string | null;
+  knowledgeSpaceId?: string | null;
+  degradedStages: string[];
+  evidenceSelections: KnowledgeEvidenceSelectionView[];
+  maxEvidenceTokens: number;
 }
 
-/** 退役某个知识索引版本的请求。 */
+/** 退役某个知识索引版本的请求。租户只来自会话，不接受请求体覆盖。 */
 export interface KnowledgeRetireRequest {
-  tenantId: string;
   expectedActiveVersion: number;
 }
 

@@ -32,9 +32,17 @@ final class AgentOperationTelemetry(
     */
   def retrieval[R, E, A](
       runId: RunId,
-      operation: String
+      operation: String,
+      parentSpanId: Option[String] = None
   )(effect: ZIO[R, E, A])(hitCount: A => Long): ZIO[R, E, A] =
-    observe(runId, "agent.retrieval", "retriever", "agent.retrieval.operation", boundedRetrieval(operation))(
+    observe(
+      runId,
+      "agent.retrieval",
+      "retriever",
+      "agent.retrieval.operation",
+      boundedRetrieval(operation),
+      parentSpanId
+    )(
       effect
     ) {
       case Exit.Success(value) =>
@@ -129,7 +137,8 @@ final class AgentOperationTelemetry(
       spanName: String,
       observationType: String,
       operationKey: String,
-      operation: String
+      operation: String,
+      parentSpanId: Option[String] = None
   )(
       effect: ZIO[R, E, A]
   )(
@@ -154,7 +163,8 @@ final class AgentOperationTelemetry(
             "langfuse.observation.type" -> observationType
           ),
           atEpochMilli = ended,
-          startedAtEpochMilli = Option.when(ended >= started)(started)
+          startedAtEpochMilli = Option.when(ended >= started)(started),
+          parentSpanId = parentSpanId
         )
         _      <- telemetry.emit(trace)
         _      <- metrics.record(point)
@@ -179,7 +189,7 @@ final class AgentOperationTelemetry(
     if cause.isInterrupted then MetricOutcome.Cancelled else MetricOutcome.Failed
 
   private def boundedRetrieval(value: String): String =
-    bounded(value, Set("retrieve", "rerank", "hybrid_search", "embed", "index"))
+    bounded(value, Set("retrieve", "rerank", "hybrid_search", "embed", "index", "expand", "assemble"))
   private def boundedMemory(value: String): String =
     bounded(value, Set("capture", "extract", "search", "list", "upsert", "delete", "purge"))
   private def boundedCommand(value: String): String =

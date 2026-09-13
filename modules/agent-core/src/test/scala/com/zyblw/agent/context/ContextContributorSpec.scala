@@ -52,7 +52,28 @@ object ContextContributorSpec extends ZIOSpecDefault:
       yield assertTrue(
         resolver.sourceIds == Chunk("static-memory@1", "static-safety@2"),
         sources.memories.map(_.key) == Chunk("语言"),
-        sources.safetyInstructions == Chunk("资料不足时拒绝编造")
+        sources.safetyInstructions == Chunk("资料不足时拒绝编造"),
+        sources.priorTurns.isEmpty
+      )
+    },
+    test("priorTurns 按贡献者顺序合并，且不是 System 策略") {
+      val history = new ContextContributor:
+        val id                                                                              = "prior-turns"
+        def contribute(state: AgentState, definition: AgentDefinition): UIO[ContextSources] =
+          val _ = (state, definition)
+          ZIO.succeed(
+            ContextSources(priorTurns =
+              Chunk(AgentMessage.user("刚才那本伤寒论"), AgentMessage.assistant("可先看太阳病提纲。"))
+            )
+          )
+      val resolver = ContextContributor.resolver(history, safety)
+      for
+        current <- state
+        sources <- resolver.resolve(current, agent)
+      yield assertTrue(
+        sources.priorTurns.map(_.text) == Chunk("刚才那本伤寒论", "可先看太阳病提纲。"),
+        sources.safetyInstructions == Chunk("资料不足时拒绝编造"),
+        !sources.priorTurns.exists(_.role == MessageRole.System)
       )
     }
   )

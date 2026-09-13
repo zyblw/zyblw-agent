@@ -2,6 +2,9 @@
   "name": "agent-dashboard",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=26 <27"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build --webpack",
@@ -15,19 +18,23 @@
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",
     "lucide-react": "^1.28.0",
-    "next": "16.3.0",
+    "next": "16.3.5",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
+    "@types/node": "^24",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.3.0",
+    "eslint-config-next": "16.3.5",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "overrides": {
+    "sharp": "^0.35.4",
+    "js-yaml": "^4.3.2"
   }
 }

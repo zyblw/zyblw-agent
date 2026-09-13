@@ -1,8 +1,10 @@
 package com.zyblw.agent.app
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.model.*
 import com.zyblw.agent.tools.*
 import zio.*
+import zio.json.*
 import zio.test.*
 
 /** 验证配置加载、默认值、启动期约束和错误脱敏，避免配置问题拖到第一条真实 Run 才出现。 */
@@ -65,7 +67,8 @@ object AgentApplicationConfigLoaderSpec extends ZIOSpecDefault:
           config.worker.maxAttempts == 8,
           config.worker.parallelism == 4,
           config.profile.id == "default",
-          config.profile.capturePolicy == CapturePolicy.MetadataOnly
+          config.profile.capturePolicy == CapturePolicy.MetadataOnly,
+          config.profile.modelRouting.isEmpty
         )
       }
     },
@@ -129,6 +132,40 @@ object AgentApplicationConfigLoaderSpec extends ZIOSpecDefault:
           config.profile.capturePolicy == CapturePolicy.Replayable
         )
       }
+    },
+    test("从无密钥 JSON 加载确定性模型路由") {
+      val policy = ModelRoutingPolicy(
+        "standard-v1",
+        Chunk(
+          ModelRouteCandidate(ModelRef("primary", "model-a")),
+          ModelRouteCandidate(
+            ModelRef("secondary", "model-b"),
+            Set(ModelProfile.Standard, ModelProfile.Reasoning),
+            DataSensitivity.Restricted
+          )
+        ),
+        defaultMaxOutputTokens = 2048,
+        sensitivityFloor = DataSensitivity.Confidential
+      )
+      val values = Map("zyblw.agent.runtime.model_routing_policy" -> policy.toJson)
+      AgentApplicationConfigLoader.load().provide(configProvider(values)).map { config =>
+        assertTrue(
+          config.profile.modelRouting.contains(policy),
+          config.profile.modelRouting.exists(_.fingerprint == policy.fingerprint),
+          !config.toString.contains("apiKey")
+        )
+      }
+    },
+    test("路由 JSON 损坏时启动失败且不回显原值") {
+      val secretLike = "not-json-sk-sensitive"
+      AgentApplicationConfigLoader
+        .load()
+        .provide(configProvider(Map("zyblw.agent.runtime.model_routing_policy" -> secretLike)))
+        .exit
+        .map { exit =>
+          val message = exit.causeOption.flatMap(_.failureOption).map(_.message).getOrElse("")
+          assertTrue(exit.isFailure, message.contains("model-routing-policy"), !message.contains(secretLike))
+        }
     },
     test("解析 ModelRole 目录且不把密钥写入配置") {
       val values = Map(

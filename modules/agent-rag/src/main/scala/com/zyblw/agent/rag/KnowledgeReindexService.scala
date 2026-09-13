@@ -8,7 +8,9 @@ final case class KnowledgeReindexRequest(
     tenantId: TenantId,
     permissions: Set[String],
     limit: Int = 32,
-    afterDocumentId: Option[String] = None
+    afterDocumentId: Option[String] = None,
+    knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId("default"),
+    targetProfileId: Option[IndexProfileId] = None
 ):
   require(limit > 0 && limit <= 200, "reindex limit 必须位于 1..200")
 
@@ -31,6 +33,9 @@ trait KnowledgeSourceResolver:
   def load(tenantId: TenantId, documentId: String): IO[RetrievalError, Option[DocumentInput]]
 
 object KnowledgeSourceResolver:
+  /** Resolver-provided stable source revision/hash used to make a reindex retry idempotent. */
+  val SourceRevisionMetadata: String = "knowledge.sourceRevision"
+
   val unavailable: ULayer[KnowledgeSourceResolver] = ZLayer.succeed(
     new KnowledgeSourceResolver:
       def load(tenantId: TenantId, documentId: String): UIO[Option[DocumentInput]] =
@@ -40,6 +45,7 @@ object KnowledgeSourceResolver:
 
 final class KnowledgeReindexService(
     directory: KnowledgeIndexDirectory,
+    store: KnowledgeIndexStore,
     ingestion: DocumentIngestionService,
     sources: KnowledgeSourceResolver,
     parallelism: Int = 2
@@ -51,13 +57,19 @@ final class KnowledgeReindexService(
       cursor <- ZIO.foreach(request.afterDocumentId) { encoded =>
         ZIO.fromEither(KnowledgeIndexCursor.decode(encoded)).mapError(AgentError.RetrievalFailed(_))
       }
-      page <- directory.list(Some(request.tenantId), request.limit, cursor)
-      // 目录按版本列出；同一 documentId 只重建最新清单，避免二次扫描把历史版本再摄入一遍。
-      targets = page.items.distinctBy(_.build.key.documentId)
+      activeProfile <- store.resolveActiveProfile(request.tenantId, request.knowledgeSpaceId)
+      page          <- directory.list(Some(request.tenantId), request.limit, cursor)
+      // 只从请求开始时的 active Profile 枚举权威 corpus；失败构建、历史版本和并行 Profile 都不能成为重建来源。
+      targets = page.items
+        .filter(manifest =>
+          manifest.build.knowledgeSpaceId == request.knowledgeSpaceId &&
+            activeProfile.contains(manifest.build.profileId) &&
+            manifest.status == KnowledgeIndexStatus.Ready &&
+            manifest.active
+        )
+        .distinctBy(_.build.key.documentId)
       items <- ZIO
-        .foreachPar(targets) { manifest =>
-          reindexOne(request, manifest.build.key.documentId)
-        }
+        .foreachPar(targets)(manifest => reindexOne(request, manifest))
         .withParallelism(parallelism)
     yield KnowledgeReindexReport(
       items,
@@ -67,24 +79,36 @@ final class KnowledgeReindexService(
 
   private def reindexOne(
       request: KnowledgeReindexRequest,
-      documentId: String
+      manifest: KnowledgeIndexManifest
   ): UIO[KnowledgeReindexItem] =
+    val documentId = manifest.build.key.documentId
     sources
       .load(request.tenantId, documentId)
       .flatMap {
         case None =>
           ZIO.succeed(KnowledgeReindexItem(documentId, KnowledgeReindexStatus.SourceUnavailable))
         case Some(input) =>
-          val ingestionId =
-            s"reindex-${documentId.take(80)}-${java.lang.Long.toHexString(java.lang.System.nanoTime())}"
+          val target = request.targetProfileId
+            .map(_.value)
+            .getOrElse(manifest.build.profileId.value)
+          val sourceRevision = input.metadata
+            .get(KnowledgeSourceResolver.SourceRevisionMetadata)
+            .orElse(input.metadata.get("contentHash"))
+            .filter(_.trim.nonEmpty)
+            .getOrElse(manifest.build.contentHash)
+          val ingestionId = s"reindex-${IngestionKeys.sha256(
+              s"${request.knowledgeSpaceId.value}\n$target\n$documentId\n$sourceRevision"
+            )}"
           ingestion
             .ingestOne(
               DocumentIngestionRequest(
                 input,
                 request.tenantId,
-                request.permissions,
+                manifest.permissions,
                 ingestionId,
-                ActiveVersionExpectation.AnyVersion
+                ActiveVersionExpectation.AnyVersion,
+                request.knowledgeSpaceId,
+                request.targetProfileId
               )
             )
             .as(KnowledgeReindexItem(documentId, KnowledgeReindexStatus.Reindexed))
@@ -95,7 +119,7 @@ final class KnowledgeReindexService(
 
 object KnowledgeReindexService:
   val layer: URLayer[
-    KnowledgeIndexDirectory & DocumentIngestionService & KnowledgeSourceResolver,
+    KnowledgeIndexDirectory & KnowledgeIndexStore & DocumentIngestionService & KnowledgeSourceResolver,
     KnowledgeReindexService
   ] =
-    ZLayer.fromFunction(KnowledgeReindexService(_, _, _))
+    ZLayer.fromFunction(KnowledgeReindexService(_, _, _, _))

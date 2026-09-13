@@ -683,7 +683,9 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore:
           """UPDATE model_call_executions
             |SET status = ?, attempt = ?, record_json = ?::jsonb, updated_at = ?
             |WHERE run_id = ?::uuid AND request_id = ?::uuid AND status = ? AND attempt = ?
-            |  AND provider = ? AND model = ? AND fingerprint = ? AND capture_policy = ?""".stripMargin
+            |  AND provider = ? AND model = ? AND fingerprint = ? AND capture_policy = ?
+            |  AND COALESCE(record_json -> 'routeDecision', 'null'::jsonb)
+            |      = COALESCE(?::jsonb -> 'routeDecision', 'null'::jsonb)""".stripMargin
         )
         try
           update.setString(1, next.status.toString)
@@ -698,6 +700,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore:
           update.setString(10, next.model)
           update.setString(11, next.fingerprint)
           update.setString(12, next.capturePolicy.toString)
+          update.setString(13, next.toJson)
           if update.executeUpdate() != 1 then
             throw ModelCallLedgerConflict(next.requestId.asString, expectedStatus.toString, expectedAttempt)
         finally update.close()

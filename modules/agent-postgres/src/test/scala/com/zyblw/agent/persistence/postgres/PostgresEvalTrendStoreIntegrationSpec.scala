@@ -194,7 +194,7 @@ object PostgresEvalTrendStoreIntegrationSpec extends ZIOSpecDefault:
         result.left.forall(!_.message.contains(projected.metadata.evaluationId))
       )).provideLayer(harnessLayer)
     }
-  ) @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@ TestAspect.timeout(
+  ) @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
     3.minutes
   ) @@ TestAspect.sequential
 

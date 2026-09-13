@@ -253,7 +253,9 @@ private[http] object AgentHttpProjection:
       score = value.score,
       pageNumbers = value.pageNumbers.toList,
       chunkId = value.chunkId.map(bounded(_)),
-      documentId = value.documentId.map(bounded(_))
+      documentId = value.documentId.map(bounded(_)),
+      sourceType = value.sourceType.toString.toLowerCase,
+      sourceKind = value.sourceKind.map(bounded(_))
     )
 
   private def evidence(value: RunRetrievalEvidence): RetrievalEvidenceView =

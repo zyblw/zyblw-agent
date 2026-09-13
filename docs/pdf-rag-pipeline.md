@@ -1,6 +1,6 @@
 # PDF RAG 生产流水线
 
-> 状态：0.8.0 书籍问答基线；tokenizer 对齐切分 + Hybrid/Vector/Lexical/Phrase
+> 状态：0.9.0 书籍问答基线；tokenizer 对齐切分 + Hybrid/Vector/Lexical/Phrase
 > 事实来源：`agent-rag`、`agent-document-loaders`、`agent-postgres`、optional pgvector migrations 与真实 PostgreSQL Testcontainers
 
 本指南回答一个具体问题：一批 PDF 从目录/对象存储进入框架后，如何变成可撤回、可授权、可追溯、可评测的
@@ -14,7 +14,7 @@
   -> CascadingDocumentLoader（Tika 文本层 / Docling OCR / 可选逐页 VLM）
   -> SourceDocument(Markdown + DocumentStructure)
   -> DocumentStructureChunker(block/parent/page/bbox/neighbor)
-  -> GovernedEmbeddingService(cache/quota/model identity)
+  -> GovernedEmbeddingModel(cache/quota/model identity)
   -> KnowledgeIndexer(Building -> stage -> activate)
   -> PostgreSQL FTS + pgvector + lineage
   -> ACL 前置的 Hybrid / VectorOnly / LexicalOnly / Phrase + 结构化过滤
@@ -65,7 +65,7 @@ PDF 二进制或整份 Markdown。
 Embedding 不只是“调一个 API”：
 
 - manifest 固化 provider/model/dimension/max batch/切分策略；
-- `GovernedEmbeddingService` 用 tenant+model+dimension+text hash 做精确缓存，并以 request ID 幂等预留配额；
+- `GovernedEmbeddingModel` 用 tenant+model+dimension+text hash 做精确缓存，并以 request ID 幂等预留配额；
 - 不同模型、维度或预处理策略不共用索引；
 - 用真实业务评测比较多语言召回，不用排行榜代替自己的语料。
 

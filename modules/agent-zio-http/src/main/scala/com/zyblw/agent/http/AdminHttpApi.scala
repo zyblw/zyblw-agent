@@ -20,6 +20,17 @@ final case class RuntimeConfigUpdateRequest(
     reason: String
 ) derives JsonCodec
 
+/** 检索沙盒请求。tenant 与 permissions 必须显式给出，才能按业务主体复现 ACL。 */
+final case class KnowledgeDebugRetrieveRequest(
+    query: String,
+    tenantId: String,
+    permissions: List[String] = Nil,
+    limit: Option[Int] = None,
+    rerank: Option[Boolean] = None,
+    expandContext: Option[Boolean] = None,
+    mode: Option[String] = None
+) derives JsonCodec
+
 /** 管理台专用的低敏事件信封。
   *
   * 不能直接复用业务 `RunEventView` 的完整 JSON：业务投影允许携带最终输出和安全消息，而跨租户管理 scope 不应因此 获得业务正文。这里显式保留结构化状态、计数与工具名称，同时删除
@@ -109,7 +120,8 @@ final case class AdminCapabilitiesView(
   * @param ops
   *   队列快照与死信重排
   * @param knowledge
-  *   宿主是否装配了知识后端；业务路由已迁到 `/api/v1/knowledge`，管理面不再挂载知识路径
+  *   宿主是否装配了知识后端。CRUD 在 `/api/v1/knowledge`；管理面只挂会产生费用的 `POST /api/v1/admin/debug/retrieve`，不挂旧的
+  *   admin/knowledge 路径
   * @param evals
   *   评测趋势只读
   * @param models
@@ -141,7 +153,7 @@ final case class AdminCapabilities(
   *
   *   - 读取类要求 `agent:admin:read`（`agent:admin:write` 蕴含它）；
   *   - 改变部署行为的写入要求 `agent:admin:write`；
-  *   - 会产生真实 Provider 费用的检索沙盒与文档摄入要求 `agent:admin:debug`，且不被写权限蕴含。
+  *   - 会产生真实 Provider 费用的检索沙盒要求 `agent:admin:debug` 且 `knowledge:read`，且不被写权限蕴含。
   *
   * 与 `AgentHttpApi` 一样，身份来自宿主的 `AgentRequestContextResolver`，框架不自带认证中间件。
   */
@@ -154,7 +166,7 @@ final class AdminHttpApi(
   /** 可与 `AgentHttpApi.routes` 使用 `++` 合并的管理面路由。 */
   val routes: Routes[Any, Nothing] =
     (metaRoutes ++ runRoutes ++ runEventRoutes ++ inspectionRoutes ++ harnessRoutes ++ configRoutes ++ opsRoutes ++ evalRoutes ++
-      modelRoutes) @@
+      modelRoutes ++ knowledgeDebugRoutes) @@
       HandlerAspect.addHeader(AgentHttpProtocol.ApiVersionHeader, AgentHttpProtocol.ApiVersionHeaderValue)
 
   /** 能力声明与观测深链；只要求读权限，因为它不暴露任何业务数据。 */
@@ -447,6 +459,37 @@ final class AdminHttpApi(
       }
     )
   }
+
+  /** 检索沙盒：以请求体里的租户与权限复现召回。知识 CRUD 仍只在 `/api/v1/knowledge`。 */
+  private def knowledgeDebugRoutes: Routes[Any, Nothing] =
+    capabilities.knowledge.fold(Routes.empty) { knowledge =>
+      Routes(
+        Method.POST / "api" / "v1" / "admin" / "debug" / "retrieve" -> handler { (request: Request) =>
+          respond {
+            for
+              actor <- authorizeDebug(request)
+              _     <- KnowledgeAuthorization.requireRead(actor)
+              body  <- decodeJson[KnowledgeDebugRetrieveRequest](request)
+              tenant = body.tenantId.trim
+              query  = body.query.trim
+              _      <- ZIO.fail(AgentError.InvalidConfiguration("query 不能为空")).when(query.isEmpty)
+              _      <- ZIO.fail(AgentError.InvalidConfiguration("tenantId 不能为空")).when(tenant.isEmpty)
+              result <- knowledge.retrieve(
+                KnowledgeRetrievalRequest(
+                  query = query,
+                  tenantId = tenant,
+                  permissions = body.permissions.map(_.trim).filter(_.nonEmpty).toSet,
+                  limit = body.limit.getOrElse(5),
+                  rerank = body.rerank.getOrElse(false),
+                  expandContext = body.expandContext.getOrElse(true),
+                  mode = body.mode.getOrElse("hybrid")
+                )
+              )
+            yield Response.json(result.toJson)
+          }
+        }
+      )
+    }
 
   /** 解析 Run 目录查询参数；非法状态名 fail-closed，不静默忽略。 */
   private def parseRunQuery(request: Request): IO[AgentError, RunDirectoryQuery] =

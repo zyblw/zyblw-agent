@@ -63,13 +63,15 @@ object ProviderPresets:
   val DeepSeekDefaultModel = "deepseek-v4-flash"
   val GlmDefaultModel      = "glm-4.7-flash"
 
-  /** DeepSeek 与 GLM 各自的 API Key 变量名；两者与 OpenAI 共用配置类型但不共用凭据。 */
+  /** 各 OpenAI-compatible Provider 的 API Key 变量名；共用配置类型但不共用凭据。 */
   val DeepSeekApiKeyVariable: String = "DEEPSEEK_API_KEY"
   val GlmApiKeyVariable: String      = "GLM_API_KEY"
+  val QwenApiKeyVariable: String     = "QWEN_API_KEY"
 
   /** 可展示的凭据引用；只含变量名，不含值。 */
   val deepSeekCredentialReference: String = CredentialReference.environment(DeepSeekApiKeyVariable)
   val glmCredentialReference: String      = CredentialReference.environment(GlmApiKeyVariable)
+  val qwenCredentialReference: String     = CredentialReference.environment(QwenApiKeyVariable)
 
   /** 构造 OpenAI 官方端点配置。 */
   def openAI(apiKey: String, model: String): OpenAICompatibleConfig =
@@ -107,6 +109,15 @@ object ProviderPresets:
       compatibility = OpenAICompatibility.glm
     )
 
+  /** 构造 Qwen 配置。端点和模型必须由部署显式给出，因为 Model Studio API Key 与区域端点绑定，模型 ID 也会演进。 */
+  def qwen(apiKey: String, baseUrl: String, model: String): OpenAICompatibleConfig =
+    OpenAICompatibleConfig(
+      baseUrl = baseUrl,
+      apiKey = apiKey,
+      defaultModel = model,
+      compatibility = OpenAICompatibility.qwen
+    )
+
   /** DeepSeek 的 ZIO Config 描述；密钥保持为 `Config.Secret` 直到构造 Adapter。 */
   val deepSeekEnvironmentConfig: Config[OpenAICompatibleConfig] =
     (
@@ -121,6 +132,14 @@ object ProviderPresets:
         Config.string("GLM_MODEL").withDefault(GlmDefaultModel)
     ).mapAttempt { case (key, model) => glm(key.stringValue, model) }
 
+  /** Qwen 的 ZIO Config 描述。区域端点与模型都必须显式配置，避免错误区域或过期模型静默上线。 */
+  val qwenEnvironmentConfig: Config[OpenAICompatibleConfig] =
+    (
+      Config.secret(QwenApiKeyVariable) ++
+        Config.string("QWEN_BASE_URL") ++
+        Config.string("QWEN_MODEL")
+    ).mapAttempt { case (key, baseUrl, model) => qwen(key.stringValue, baseUrl, model) }
+
   /** 从当前 ZIO ConfigProvider 读取 DeepSeek 密钥和模型。 */
   def deepSeekFromEnvironment: IO[AgentError, OpenAICompatibleConfig] =
     load("DeepSeek", deepSeekEnvironmentConfig)
@@ -128,6 +147,10 @@ object ProviderPresets:
   /** 从当前 ZIO ConfigProvider 读取 GLM 密钥和模型。 */
   def glmFromEnvironment: IO[AgentError, OpenAICompatibleConfig] =
     load("GLM", glmEnvironmentConfig)
+
+  /** 从当前 ZIO ConfigProvider 读取 Qwen 密钥、区域端点和模型。 */
+  def qwenFromEnvironment: IO[AgentError, OpenAICompatibleConfig] =
+    load("Qwen", qwenEnvironmentConfig)
 
   /** 从当前 ZIO ConfigProvider 读取 OpenAI 密钥和模型。 */
   def openAIFromEnvironment: IO[AgentError, OpenAICompatibleConfig] =

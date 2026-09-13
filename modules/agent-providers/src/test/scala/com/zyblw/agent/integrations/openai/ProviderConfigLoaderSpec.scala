@@ -3,7 +3,7 @@ package com.zyblw.agent.integrations.openai
 import zio.*
 import zio.test.*
 
-/** 验证 OpenAI、DeepSeek、GLM 配置都经过可替换 ConfigProvider，并确保失败文本不会泄漏 Secret。 */
+/** 验证 OpenAI、DeepSeek、GLM、Qwen 配置都经过可替换 ConfigProvider，并确保失败文本不会泄漏 Secret。 */
 object ProviderConfigLoaderSpec extends ZIOSpecDefault:
   def spec: Spec[TestEnvironment & Scope, Any] = suite("OpenAI provider config loader")(
     test("OpenAI-compatible 与 Responses 共享部署键但保持独立协议配置") {
@@ -43,6 +43,21 @@ object ProviderConfigLoaderSpec extends ZIOSpecDefault:
         !deepSeek.toString.contains("deepseek-secret"),
         !glm.toString.contains("glm-secret")
       )).provide(provider(values))
+    },
+    test("Qwen 必须显式加载区域端点和模型且不泄漏密钥") {
+      val values = Map(
+        "QWEN_API_KEY"  -> "qwen-secret",
+        "QWEN_BASE_URL" -> "https://dashscope.example/compatible-mode/v1",
+        "QWEN_MODEL"    -> "qwen-test"
+      )
+      ProviderPresets.qwenFromEnvironment.provide(provider(values)).map { qwen =>
+        assertTrue(
+          qwen.defaultModel == "qwen-test",
+          qwen.chatCompletionsUrl == "https://dashscope.example/compatible-mode/v1/chat/completions",
+          qwen.compatibility.descriptor.id == "qwen",
+          !qwen.toString.contains("qwen-secret")
+        )
+      }
     },
     test("构造失败信息不包含 API Key") {
       val secret = "must-not-appear-in-error"

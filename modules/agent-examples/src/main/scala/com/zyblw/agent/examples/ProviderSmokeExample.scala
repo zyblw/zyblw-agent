@@ -19,6 +19,7 @@ import zio.json.*
   *
   *   - `deepseek`：`DEEPSEEK_API_KEY`、可选 `DEEPSEEK_MODEL`；
   *   - `glm`：`GLM_API_KEY`、可选 `GLM_MODEL`；
+  *   - `qwen`：`QWEN_API_KEY`、`QWEN_BASE_URL`、`QWEN_MODEL`；
   *   - `openai-chat`：`OPENAI_API_KEY`、`OPENAI_MODEL`；
   *   - `openai-responses`：`OPENAI_API_KEY`、`OPENAI_MODEL`；
   *   - `anthropic`：`ANTHROPIC_API_KEY`、`ANTHROPIC_MODEL`；
@@ -60,6 +61,10 @@ object ProviderSmokeExample extends ZIOAppDefault:
       ProviderPresets.glmFromEnvironment.map(config =>
         Target(OpenAICompatibleChatModel(client, config), config.defaultModel)
       )
+    case "qwen" =>
+      ProviderPresets.qwenFromEnvironment.map(config =>
+        Target(OpenAICompatibleChatModel(client, config), config.defaultModel)
+      )
     case "openai-chat" =>
       ProviderPresets.openAIFromEnvironment.map(config =>
         Target(OpenAICompatibleChatModel(client, config), config.defaultModel)
@@ -79,7 +84,7 @@ object ProviderSmokeExample extends ZIOAppDefault:
     case _ =>
       ZIO.fail(
         AgentError.InvalidConfiguration(
-          "ZYBLW_SMOKE_PROVIDER 必须是 deepseek/glm/openai-chat/openai-responses/anthropic/gemini"
+          "ZYBLW_SMOKE_PROVIDER 必须是 deepseek/glm/qwen/openai-chat/openai-responses/anthropic/gemini"
         )
       )
 

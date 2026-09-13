@@ -58,22 +58,15 @@ jobs:
           git fetch --no-tags origin main:refs/remotes/origin/main
           bash .github/scripts/verify-release.sh "$RELEASE_TAG" origin/main
 
-      - name: Validate release version and audit binary compatibility
+      - name: Validate release version
         shell: bash
-        env:
-          COMPAT_BASELINE_VERSION: "0.6.2"
         run: |
           set -euo pipefail
           release_version="${RELEASE_TAG#v}"
-          # --server starts a fresh JVM. A shared sbtn server would keep
-          # versionPolicyIntention from versionCheck and fail-close assess.
           sbt --server --batch --supershell=false \
             "set ThisBuild / version := \"$release_version\";" \
             "set ThisBuild / versionPolicyIntention := sbtversionpolicy.Compatibility.None;" \
             "versionCheck"
-          sbt --server --batch --supershell=false \
-            "set ThisBuild / version := \"$release_version\";" \
-            "show versionPolicyAssessCompatibility"
 
       - name: Verify process-death and database-restart recovery
         run: |
@@ -127,14 +120,14 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "24"
+          node-version: "26.8.1"
           cache: npm
           cache-dependency-path: modules/agent-dashboard/package-lock.json
 
       - name: Verify dashboard standalone and host-session contracts
         working-directory: modules/agent-dashboard
         run: |
-          # 0.8.0 inspect copy says "不含 prompt"; a substring locator treated that as a leak.
+          # The inspect copy says "不含 prompt"; a substring locator treated that as a leak.
           # This step runs after publishM2 and does not change published Scala artifacts.
           python3 - <<'PY'
           from pathlib import Path
@@ -221,7 +214,7 @@ jobs:
           # the credential-less verification server, and a preceding `shutdown`
           # races its socket teardown (observed as an immediate silent exit).
           # Pin the release version: a dirty tree after dashboard recover would
-          # otherwise make sbt-dynver publish 0.8.0+0-<sha>-SNAPSHOT to
+          # otherwise make sbt-dynver publish a dirty-tree SNAPSHOT to
           # maven-snapshots (Forbidden).
           release_version="${RELEASE_TAG#v}"
           git checkout -- modules/agent-dashboard/tests/e2e/inspect-panel.spec.ts || true

@@ -3,6 +3,7 @@ package com.zyblw.agent.persistence.postgres
 import com.dimafeng.testcontainers.PostgreSQLContainer
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
+import com.zyblw.agent.model.*
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.UUID
@@ -94,7 +95,22 @@ object RunStoreConformanceSpec extends ZIOSpecDefault:
             ModelCallContextLineage(1, 0, 0, 0, 0),
             None,
             None,
-            updatedAtEpochMilli = 1L
+            updatedAtEpochMilli = 1L,
+            routeDecision = Some(
+              RouteDecision(
+                ModelRequirement(),
+                ModelRef("contract", "model"),
+                "v0",
+                "a" * 64,
+                Chunk(ModelCandidateDecision(ModelRef("contract", "model"), Chunk.empty)),
+                false,
+                1,
+                1,
+                "b" * 64,
+                None,
+                None
+              )
+            )
           )
           prepared = PersistedAgentEvent(
             preparedId,
@@ -141,11 +157,63 @@ object RunStoreConformanceSpec extends ZIOSpecDefault:
               Some(ModelCallWrite.Insert(record.copy(provider = "other")))
             )
             .exit
-          after  <- store.load(runId)
-          events <- store.events(runId)
-          ledger <- store.getModelCall(runId, requestId)
+          changedDecision = RouteDecision(
+            ModelRequirement(),
+            ModelRef("contract", "model"),
+            "v1",
+            "a" * 64,
+            Chunk(ModelCandidateDecision(ModelRef("contract", "model"), Chunk.empty)),
+            false,
+            1,
+            1,
+            "b" * 64,
+            None,
+            None
+          )
+          routeConflict <- store
+            .commit(
+              before.version,
+              before,
+              NonEmptyChunk(prepared),
+              Some(
+                ModelCallWrite.Transition(
+                  ModelCallStatus.Dispatched,
+                  1,
+                  record.copy(status = ModelCallStatus.Succeeded, routeDecision = Some(changedDecision))
+                )
+              )
+            )
+            .exit
+          after     <- store.load(runId)
+          events    <- store.events(runId)
+          ledger    <- store.getModelCall(runId, requestId)
+          settledId <- EventId.random
+          settledEvent = PersistedAgentEvent(
+            settledId,
+            runId,
+            after.lastEventSequence + 1,
+            AgentEvent.ModelCallCompleted(runId, TokenUsage(1, 1), 2L),
+            2L
+          )
+          _ <- store.commit(
+            after.version,
+            after.copy(lastEventSequence = settledEvent.sequence, pendingModelCall = None),
+            NonEmptyChunk(settledEvent),
+            Some(
+              ModelCallWrite.Transition(
+                ModelCallStatus.Dispatched,
+                1,
+                record.copy(status = ModelCallStatus.Succeeded, usage = Some(TokenUsage(1, 1)))
+              )
+            )
+          )
+          settled <- store.getModelCall(runId, requestId)
         yield assertTrue(
           conflict.isFailure,
+          routeConflict.isFailure,
+          settled.exists(r =>
+            r.status == ModelCallStatus.Succeeded && r.routeDecision == record.routeDecision
+          ),
           after == before,
           events.map(_.sequence) == Chunk(0L, 1L),
           ledger.contains(record)
@@ -428,6 +496,6 @@ object RunStoreConformanceSpec extends ZIOSpecDefault:
   def spec =
     suite("RunStore conformance")(
       contract("in-memory", RunStore.inMemory),
-      contract("postgres", postgres) @@ TestAspect.ifEnvSet("RUN_POSTGRES_INTEGRATION") @@
+      contract("postgres", postgres) @@ PostgresIntegrationAspect.enabled @@
         TestAspect.timeout(2.minutes)
     )
