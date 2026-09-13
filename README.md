@@ -207,7 +207,7 @@ PDF/Markdown
 → Rerank / 有界谱系扩展 / Citation / Context Budget
 ```
 
-本地可用 `InMemoryKnowledgeIndexStore.knowledge`；新建生产知识库在 0.6.0 Published 后替换为
+本地测试可用 `InMemoryKnowledgeIndexStore.knowledge`；`0.9.0` 生产参考路径使用
 `PostgresAgentPersistence.migratedKnowledge1024()`（应用启动时自动迁移），或由部署任务先调用
 `AgentPostgresMigrations.migrateKnowledge1024` 后使用 `PostgresAgentPersistence.knowledge(1024)`。知识对象与 Flyway history
 位于 `zyblw_agent_knowledge` 专属 schema。详细代码见

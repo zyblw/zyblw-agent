@@ -17,7 +17,7 @@
 - [ ] `scalafmtCheckAll`、`scalafmtSbtCheck` 与 `testFull`。
 - [ ] PostgreSQL 契约测试（持久化或 migration 变更时）。
 - [ ] `publishM2` 与独立 Maven consumer 编译（公开依赖面变更时）。
-- [ ] 需要业务联调时，已记录 Platform 的源码/Maven-local/Central 下游验证结果。
+- [ ] 需要业务联调时，已记录 Platform 固定 sibling commit 的 Server、PostgreSQL、Compose 与浏览器验证结果。
 - [ ] 已说明未运行的门禁及原因。
 
 ## 交付
