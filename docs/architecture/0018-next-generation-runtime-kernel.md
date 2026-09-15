@@ -13,7 +13,7 @@
 
 同时出现了两类压力：
 
-1. **模型交互仍是黑盒。** `AgentRuntimeLive` 在调用 Provider 前实时组装 `ChatRequest`，调用后即丢弃。系统能恢复「执行到哪了」，不能证明「第 N 次模型调用当时看到了什么」。
+1. **模型交互仍是黑盒。** 当时 `AgentRuntimeLive` 在调用 Provider 前实时组装 `ChatRequest`，调用后即丢弃。系统能恢复「执行到哪了」，不能证明「第 N 次模型调用当时看到了什么」。该实现已由 [ADR-0028](0028-functional-kernel-runtime-driver.md) 替换为 `AgentKernel` + `AgentRuntimeDriver`；Prompt lineage 由 [ADR-0029](0029-context-authority-prompt-lineage.md) 补齐。
 2. **Kernel 有膨胀风险。** 若把 Conversation Tree、Lane、Action Interpreter、Harness、Multi-Agent 一次塞进核心，会在 ZIO 之上再造一套 Runtime，并制造多份互相竞争的 Durable Truth。
 
 Pi Agent / Durable Harness 与 DeepSeek Harness 提供了有价值的设计证据，但都不是本仓库的目标架构。Pi 优化本地 Coding Agent 的 DX 与 session tree；DeepSeek 优化 TypeScript 下的 capability seam 与 session log reconstruction。`zyblw-agent` 的差异化应落在：**生产级、多租户、可取消、可恢复、可治理的 Scala / ZIO Agent Application Runtime**。
@@ -175,7 +175,7 @@ SHA-256，规划时审批要求保存为 callId 集合。恢复先完成契约�
 
 ## 参考
 
-- 现行实现：`AgentRuntimeLive`、`RunStore`、`ToolExecutionRecord`、ADR-0002/0005/0008/0010/0016
+- 现行实现：`AgentKernel`、`AgentRuntimeDriver`、`RunStore`、`ToolExecutionRecord`、`PromptCompiler`、ADR-0002/0005/0008/0010/0016/0028/0029
 - [Pi Durable AgentHarness design](https://github.com/earendil-works/pi/blob/main/packages/agent/docs/harness-v2.md)（设计参考，非实现模板）
 - DeepSeek Harness：`Model-visible means logged` 与 request reconstruction invariant
 - [ZIO](https://zio.dev/reference/core/zio.md)

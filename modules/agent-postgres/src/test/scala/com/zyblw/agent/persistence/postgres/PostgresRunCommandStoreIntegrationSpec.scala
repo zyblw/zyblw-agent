@@ -1,6 +1,7 @@
 package com.zyblw.agent.persistence.postgres
 
 import com.dimafeng.testcontainers.PostgreSQLContainer
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.harness.*
 import com.zyblw.agent.memory.*
@@ -15,8 +16,8 @@ import zio.test.*
 
 /** 真实 PostgreSQL command dispatcher 契约测试。
   *
-  * 覆盖 `SKIP LOCKED` 并发、租约 generation 抢占、AgentState 提交 fencing、Cancel 原子抢占以及 pg_dump/restore。 CI 通过
-  * `RUN_POSTGRES_INTEGRATION=1` 显式启用，不能用 H2 或 mock SQL 代替这些并发语义。
+  * 覆盖 `agent_run_commands` 与 `agent_run_dispatch` 的 `SKIP LOCKED` 并发、租约 generation 抢占、AgentState 提交
+  * fencing、Cancel 原子抢占以及 pg_dump/restore。CI 通过 `RUN_POSTGRES_INTEGRATION=1` 显式启用，不能用 H2 或 mock SQL 代替这些并发语义。
   */
 object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
   final private case class Stores(
@@ -62,6 +63,8 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
     )
   }
 
+  private val commandAgent = AgentDefinition(AgentId("command-pg-test"), "Command PG", "命令队列测试")
+
   /** 创建满足外键和事件不变量的最小 Run。 */
   private def createRun(store: RunStore): UIO[RunId] =
     (for
@@ -82,6 +85,9 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
         now,
         now,
         Version.initial,
+        commandAgent,
+        RuntimeComposition.fingerprint(RuntimeProfile.default, commandAgent, commandAgent.modelSettings),
+        ThreadId("command-pg-thread"),
         lastEventSequence = 0L
       )
       event = PersistedAgentEvent(
@@ -116,8 +122,9 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
         now,
         now,
         Version.initial,
-        threadId = Some(ThreadId("pg-start-thread")),
-        definition = Some(agent),
+        agent,
+        RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings),
+        ThreadId("pg-start-thread"),
         runContext = context,
         lastEventSequence = 0L
       )
@@ -193,7 +200,14 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
         request = RunRequest(ThreadId("pg-harness-submit"), AgentMessage.user("开始"), limits = limits)
         submissions <- ZIO.foreachPar(1 to 12)(_ =>
           RunInitialization
-            .prepareForGoal(goalId, agent, request, "pg-harness-key", maxToolCalls = 2)
+            .prepareForGoal(
+              goalId,
+              agent,
+              request,
+              "pg-harness-key",
+              maxToolCalls = 2,
+              RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings)
+            )
             .flatMap(stores.submissionStore.submitStart)
         )
         accepted = submissions.head
@@ -204,7 +218,8 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
           agent,
           request,
           "pg-harness-over-budget",
-          maxToolCalls = 2
+          maxToolCalls = 2,
+          RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings)
         )
         exhausted         <- stores.submissionStore.submitStart(failedSubmission).either
         orphan            <- stores.runStore.load(failedSubmission.state.runId).either
@@ -213,7 +228,8 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
           agent,
           request,
           "pg-harness-key",
-          maxToolCalls = 2
+          maxToolCalls = 2,
+          RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings)
         )
         rebound       <- stores.submissionStore.submitStart(reboundSubmission).either
         otherSnapshot <- stores.harnessStore.getGoalBudget(otherGoal)

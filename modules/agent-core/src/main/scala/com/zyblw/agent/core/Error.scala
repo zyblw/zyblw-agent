@@ -1,5 +1,7 @@
 package com.zyblw.agent.core
 
+import zio.Chunk
+
 /** 供重试、HTTP 映射和遥测聚合使用的稳定错误分类。 */
 enum ErrorCategory:
   case Configuration, Authentication, Authorization, Validation, RateLimit, Timeout
@@ -171,12 +173,42 @@ object AgentError:
     val category              = ErrorCategory.Conflict
     override val safeToExpose = true
 
-  /** 冻结的运行组合与当前进程不兼容；禁止 silent capability drift。 */
-  final case class CompositionIncompatible(runId: RunId, reason: String) extends AgentError:
+  /** 挂起到期且决议为失败。`kind` 是低敏等待类别，不含 payload。 */
+  final case class SuspensionExpired(runId: RunId, kind: String) extends AgentError:
+    val message               = s"Run ${runId.asString} 的挂起已到期: $kind"
+    val category              = ErrorCategory.Timeout
+    override val safeToExpose = true
+
+  /** 冻结的运行组合与当前进程的**能力**不兼容；禁止 silent capability drift。
+    *
+    * 与 [[CompositionRequiresRevalidation]] 的区别是这里至少有一项安全相关能力被替换（工具集、权限剖面、执行环境、模型或指令），恢复该 Run
+    * 会用另一套安全语义执行已冻结的计划。 `changedFields` 只含属性名与类别，不含任何一侧取值，可安全外泄。
+    */
+  final case class CompositionIncompatible(
+      runId: RunId,
+      changedFields: Chunk[com.zyblw.agent.composition.CompositionDriftField],
+      reason: String
+  ) extends AgentError:
     val message               = s"运行 ${runId.asString} 的组合已不兼容: $reason"
     val category              = ErrorCategory.Conflict
     override val safeToExpose = true
-    override val diagnostic   = Map("reason" -> reason)
+    override val diagnostic   =
+      Map("reason" -> reason, "changedFields" -> changedFields.map(_.field).toList.sorted.mkString(","))
+
+  /** 组合的非安全元数据（profile 身份、采集档位）已变化，需要人重新确认后才能继续。
+    *
+    * 仍然 fail-closed，但语义上不同于能力被替换：运维看到这个错误应当去确认部署意图，而不是去追查权限泄漏。
+    */
+  final case class CompositionRequiresRevalidation(
+      runId: RunId,
+      changedFields: Chunk[com.zyblw.agent.composition.CompositionDriftField],
+      reason: String
+  ) extends AgentError:
+    val message               = s"运行 ${runId.asString} 的组合需要重新确认: $reason"
+    val category              = ErrorCategory.Conflict
+    override val safeToExpose = true
+    override val diagnostic   =
+      Map("reason" -> reason, "changedFields" -> changedFields.map(_.field).toList.sorted.mkString(","))
 
   final case class OptimisticLock(expected: Version, actual: Version) extends StoreError:
     val message            = s"Optimistic lock conflict: expected=${expected.value}, actual=${actual.value}"

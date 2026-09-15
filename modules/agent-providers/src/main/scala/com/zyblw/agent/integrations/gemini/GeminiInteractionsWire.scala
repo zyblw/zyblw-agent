@@ -275,8 +275,15 @@ private[gemini] object GeminiInteractionsWire:
       case Some(json) =>
         val input  = longField(json, "total_input_tokens").getOrElse(0L)
         val output = longField(json, "total_output_tokens").getOrElse(0L)
-        if input >= 0L && output >= 0L then ZIO.succeed(TokenUsage(input, output))
-        else ZIO.fail(AgentError.InvalidModelResponse(s"$location 包含负 token: input=$input, output=$output"))
+        val cached = longField(json, "total_cached_tokens").getOrElse(0L)
+        if input >= 0L && output >= 0L && cached >= 0L && cached <= input then
+          ZIO.succeed(TokenUsage(input, output, cachedInputTokens = cached))
+        else
+          ZIO.fail(
+            AgentError.InvalidModelResponse(
+              s"$location 包含无效 token: input=$input, output=$output, cache_read=$cached"
+            )
+          )
 
   /** 工具结果优先保持单个 JSON 值；多内容块退化为按顺序排列的 JSON 数组。 */
   private def toolResultValue(message: AgentMessage): Json =

@@ -105,6 +105,7 @@ private[openai] object OpenAIResponsesDescriptor:
       vision = true,
       streaming = true,
       parallelToolCalls = true,
-      usageReporting = true
+      usageReporting = true,
+      promptCache = PromptCacheCapability.implicitRead
     )
   )

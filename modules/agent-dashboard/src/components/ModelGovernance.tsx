@@ -224,6 +224,7 @@ function CapabilityBadges({ option }: { option: ModelOptionView }) {
     { label: '视觉', on: option.capabilities.vision },
     { label: '思考', on: option.capabilities.thinking },
     { label: '流式', on: option.capabilities.streaming },
+    { label: `缓存 ${option.capabilities.promptCacheKind}`, on: option.capabilities.promptCacheKind !== 'Unsupported' },
   ];
   return (
     <div className="flex flex-wrap gap-1">
@@ -359,7 +360,12 @@ function ModelCatalogTable({
                             </div>
                             {option.price.cachedInputPerMillionTokens && (
                               <div className="text-slate-600">
-                                缓存入 {option.price.cachedInputPerMillionTokens} {option.price.currency}
+                                缓存读 {option.price.cachedInputPerMillionTokens} {option.price.currency}
+                              </div>
+                            )}
+                            {option.price.cacheWriteInputPerMillionTokens && (
+                              <div className="text-slate-600">
+                                缓存写 {option.price.cacheWriteInputPerMillionTokens} {option.price.currency}
                               </div>
                             )}
                           </>

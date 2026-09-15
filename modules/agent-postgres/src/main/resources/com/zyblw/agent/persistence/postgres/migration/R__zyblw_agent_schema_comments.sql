@@ -6,7 +6,7 @@
 COMMENT ON TABLE agent_runs IS 'Agent Run 当前耐久快照；version 承担乐观并发控制，state_json 是运行恢复事实';
 COMMENT ON TABLE agent_events IS 'Run 的不可变顺序事件；(run_id, sequence) 保证单调、无重复的耐久时间线';
 COMMENT ON TABLE tool_executions IS '工具调用执行账本；Prepared/Running/Succeeded/Failed/Unknown 支撑崩溃恢复和幂等重放判断';
-COMMENT ON TABLE approval_requests IS '高风险工具的耐久审批请求与决定；相同 approval_id 不允许产生相反事实';
+COMMENT ON TABLE agent_suspensions IS '挂起的到期索引与 lease；每 Run 至多一行，只保存 kind/deadline/决议动作等低敏字段，挂起正文留在 state_json';
 COMMENT ON TABLE agent_memories IS '跨 Run 长期记忆；删除保留版本 tombstone，但清空 value_json 与 search_text 正文';
 COMMENT ON TABLE agent_memory_audit IS '记忆读取、纠正、删除、retention 与导出的低敏不可变审计，不保存 query、正文或原始 key';
 COMMENT ON TABLE agent_artifacts IS '租户隔离的 Artifact 元数据；正文在 versions 表，授权由宿主 ArtifactScope 推导';
@@ -49,7 +49,7 @@ BEGIN
     JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     WHERE namespace.nspname = current_schema()
       AND relation.relname IN (
-        'agent_runs', 'agent_events', 'tool_executions', 'approval_requests', 'agent_memories',
+        'agent_runs', 'agent_events', 'tool_executions', 'agent_suspensions', 'agent_memories',
         'agent_memory_audit',
         'agent_run_commands', 'agent_run_dispatch', 'agent_business_operations', 'agent_outbox_events',
         'agent_inbox_messages', 'agent_compensations', 'agent_embedding_cache',
@@ -172,6 +172,8 @@ BEGIN
       WHEN 'accepted_signal_id' THEN '已被等待条件接受的外部 signal 稳定标识。'
       WHEN 'accepted_signal_payload' THEN '已被等待条件接受的 signal 正文。'
       WHEN 'accepted_signal_sha256' THEN '已接受 signal 正文的 SHA-256，用于校验未被改写。'
+      WHEN 'accepted_signal_authorization' THEN '已接受 signal 的授权上下文 SHA-256 指纹；换租户或权限后旧 signal 不能再推进等待。'
+      WHEN 'authorization_fingerprint' THEN '外部 signal 发送方的授权上下文 SHA-256 指纹，不保存租户或用户原文。'
       WHEN 'action' THEN '记忆治理动作：read、list、search、correct、delete、delete_scope 或 retention_purge。'
       WHEN 'actor_kind' THEN '审计主体类型：authenticated 或 system。'
       WHEN 'actor_system_name' THEN '系统主体名称；仅 actor_kind=system 时存在。'
@@ -192,7 +194,8 @@ BEGIN
       WHEN 'name_hash' THEN 'Artifact 名称的 SHA-256；审计表不保存原始名称。'
       WHEN 'sha256' THEN 'Artifact 版本字节的 SHA-256；用于完整性核对。'
       WHEN 'available_at' THEN '命令、事件或补偿最早可被领取的时间。'
-      WHEN 'awaiting_approval' THEN '由 pendingApproval 对象是否存在生成的待审批标记，供管理台部分索引使用。'
+      WHEN 'awaiting_approval' THEN '由 status = WaitingForApproval 生成的待审批标记，供管理台部分索引使用。'
+      WHEN 'awaiting_signal' THEN '由 status = Suspended 生成的待外部事件标记；覆盖等信号、等人工输入与等计时器三类挂起。'
       WHEN 'batch_id' THEN '同一批工具调用的稳定批次标识。'
       WHEN 'call_id' THEN '单次模型或工具调用的稳定标识。'
       WHEN 'cancel_requested' THEN '是否已收到取消请求；取消事实仍须经命令队列推进。'
@@ -217,9 +220,16 @@ BEGIN
       WHEN 'cursor_kind' THEN 'Workflow 游标：At 表示停在某节点，Completed 表示工作流结束。'
       WHEN 'dataset_id' THEN '评测数据集稳定标识。'
       WHEN 'dataset_version' THEN '评测数据集版本。'
-      WHEN 'deadline' THEN 'timer/signal 等待的绝对截止时间。'
+      WHEN 'deadline' THEN '等待的绝对截止时间；NULL 表示无限期等待且不进入到期索引。'
       WHEN 'decided_at' THEN '审批作出决定的时间。'
       WHEN 'decision_json' THEN '审批决定的结构化低敏载荷。'
+      WHEN 'expiry_outcome' THEN '挂起到期后的决议动作：FailRun 或 ResumeWithDefault。'
+      WHEN 'expiry_generation' THEN '到期领取代数；每次 claim 单调递增，用于 fencing。'
+      WHEN 'expiry_owner' THEN '当前持有到期租约的 Worker 标识。'
+      WHEN 'expiry_token' THEN '到期租约令牌；与 owner、generation 共同校验写权限。'
+      WHEN 'expiry_claimed_at' THEN '到期项被排他领取的时间。'
+      WHEN 'expiry_lease_expires_at' THEN '到期租约失效时间；超过即可被其他 Worker 抢占。'
+      WHEN 'expiry_heartbeat_at' THEN '到期租约最近一次续约时间。'
       WHEN 'definition_version' THEN 'Workflow 定义版本；与 workflow_id、session_id 共同构成 identity。'
       WHEN 'deleted_at' THEN '记忆被删除并清空正文的时间。'
       WHEN 'destination' THEN 'outbox 事件投递目的地标识。'
@@ -253,6 +263,7 @@ BEGIN
       WHEN 'interaction_id' THEN 'Harness 交互事实稳定标识；只追加，不能改写成控制命令。'
       WHEN 'job_id' THEN '文档摄取任务唯一标识。'
       WHEN 'key_version' THEN 'Embedding 缓存键版本，用于指令或规范化策略演进。'
+      WHEN 'kind' THEN '挂起等待原因的低敏类别：approval、human-input、external-signal 或 timer。'
       WHEN 'last_failure' THEN '最近一次失败的稳定低敏分类；不得保存原始异常全文。'
       WHEN 'lease_expires_at' THEN '当前租约到期时间。'
       WHEN 'lease_owner' THEN '当前持有租约的 Worker 标识。'

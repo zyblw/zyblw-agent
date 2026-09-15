@@ -30,6 +30,22 @@ object CanonicalModelRequestSpec extends ZIOSpecDefault:
       val other  = CanonicalModelRequest.toolDefinitionsFingerprint(Chunk(lookup, refund))
       assertTrue(first == same, first != other, first.matches("[0-9a-f]{64}"))
     },
+    test("稳定前缀指纹包含冻结工具与设置，不包含动态尾部") {
+      val stable = AgentMessage.system("policy")
+      val base = ChatRequest(
+        Chunk(stable, AgentMessage.user("dynamic-a")),
+        Chunk(ToolDefinition("lookup", "query", zio.json.ast.Json.Obj())),
+        ModelSettings(model = Some("m"))
+      )
+      val changedTail = base.copy(messages = Chunk(stable, AgentMessage.user("dynamic-b")))
+      val changedTool = base.copy(tools = Chunk(ToolDefinition("other", "query", zio.json.ast.Json.Obj())))
+      assertTrue(
+        CanonicalModelRequest.stablePrefixFingerprint(base, 1) ==
+          CanonicalModelRequest.stablePrefixFingerprint(changedTail, 1),
+        CanonicalModelRequest.stablePrefixFingerprint(base, 1) !=
+          CanonicalModelRequest.stablePrefixFingerprint(changedTool, 1)
+      )
+    },
     test("Replayable 账本拒绝工具指纹与 Canonical 不一致") {
       val tools     = Chunk(ToolDefinition("lookup_order", "查询订单", zio.json.ast.Json.Obj()))
       val canonical = CanonicalModelRequest(Chunk(AgentMessage.user("hi")), tools, ModelSettings())

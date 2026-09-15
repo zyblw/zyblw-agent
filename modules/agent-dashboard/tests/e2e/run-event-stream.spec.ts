@@ -10,6 +10,7 @@ const usage = {
   outputTokens: 4,
   totalTokens: 16,
   cachedInputTokens: 0,
+  cacheWriteInputTokens: 0,
   reasoningOutputTokens: 0,
   estimatedCost: '0.0001',
 };
@@ -96,8 +97,9 @@ async function installAdminRoutes(
         json: {
           capturedAtEpochMilli: 1785974402000,
           totalRuns: 1,
-          countsByStatus: { Succeeded: 1 },
+          countsByStatus: { Completed: 1 },
           awaitingApproval: 0,
+          awaitingSignal: 0,
         },
       });
       return;
@@ -112,9 +114,10 @@ async function installAdminRoutes(
               agentId: 'support-agent',
               sessionId: 'session-1',
               threadId: null,
-              status: 'Succeeded',
+              status: 'Completed',
               steps: 1,
               awaitingApproval: false,
+              awaitingSignal: false,
               tenantId: 'acme',
               userId: 'user-1',
               usage,

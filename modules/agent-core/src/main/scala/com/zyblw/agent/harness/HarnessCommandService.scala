@@ -48,16 +48,14 @@ final class HarnessCommandServiceLive(
           request,
           idempotencyKey,
           toolPolicies.current().maxCallsPerRun,
-          Some(
-            RuntimeComposition.freeze(
-              profile,
-              resolved,
-              modelPolicies,
-              contextSources.sourceIds,
-              extensions.sourceIds,
-              extensions.environment.id.value,
-              extensions.environment.permissions.fingerprint
-            )
+          RuntimeComposition.freeze(
+            profile,
+            resolved,
+            modelPolicies,
+            contextSources.sourceIds,
+            extensions.sourceIds,
+            extensions.environment.id.value,
+            extensions.environment.permissions.fingerprint
           )
         )
       }

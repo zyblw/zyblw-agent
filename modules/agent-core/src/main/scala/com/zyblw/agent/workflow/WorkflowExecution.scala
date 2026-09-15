@@ -240,12 +240,17 @@ trait WorkflowExecutionStore[S] extends WorkflowCheckpointStore[S]:
   /** 返回当前尚未消费的唯一等待；同一 Run 出现多个活跃等待属于数据损坏并 fail-closed。 */
   def currentWait(runId: RunId): IO[StoreError, Option[WorkflowWaitRecord]]
 
-  /** 接收并去重一个外部 signal。数据库/测试时钟达到 deadline 后 timeout 必然胜出。 */
+  /** 接收并去重一个外部 signal。数据库/测试时钟达到 deadline 后 timeout 必然胜出。
+    *
+    * @param authorization
+    *   发送方的可信授权上下文。相同 signalId 必须携带相同指纹，否则视为冲突而不是重复。
+    */
   def signal(
       waitKey: WorkflowWaitKey,
       signalId: WorkflowSignalId,
       name: WorkflowSignalName,
-      payload: String
+      payload: String,
+      authorization: com.zyblw.agent.composition.AuthorizationFingerprint
   ): IO[StoreError, WorkflowSignalReceipt]
 
   /** 原子决议已到期等待；返回本次从 Pending 转为 TimedOut 的记录，供宿主提交唤醒任务。 */
@@ -306,7 +311,8 @@ object WorkflowExecutionStore:
   final private case class MemorySignal(
       receipt: WorkflowSignalReceipt,
       name: WorkflowSignalName,
-      payload: String
+      payload: String,
+      authorization: com.zyblw.agent.composition.AuthorizationFingerprint
   )
   final private case class MemoryWakeDispatch(
       availableAt: Instant,
@@ -526,13 +532,16 @@ object WorkflowExecutionStore:
             waitKey: WorkflowWaitKey,
             signalId: WorkflowSignalId,
             name: WorkflowSignalName,
-            payload: String
+            payload: String,
+            authorization: com.zyblw.agent.composition.AuthorizationFingerprint
         ): IO[StoreError, WorkflowSignalReceipt] =
           validateSignalPayload(payload) *> Clock.instant.flatMap { now =>
             state.modifyZIO { current =>
               val signalSlot = MemorySignalSlot(waitKey, signalId)
               current.signals.get(signalSlot) match
-                case Some(existing) if existing.name == name && existing.payload == payload =>
+                case Some(existing)
+                    if existing.name == name && existing.payload == payload &&
+                      existing.authorization == authorization =>
                   ZIO.succeed(
                     existing.receipt.copy(disposition = WorkflowSignalDisposition.Duplicate) -> current
                   )
@@ -551,7 +560,8 @@ object WorkflowExecutionStore:
                             case WorkflowWaitStatus.Pending if now.isBefore(wait.deadline) =>
                               wait.copy(
                                 status = WorkflowWaitStatus.Signaled,
-                                signal = Some(WorkflowSignalValue(signalId, name, payload, now)),
+                                signal =
+                                  Some(WorkflowSignalValue(signalId, name, payload, now, authorization)),
                                 resolvedAt = Some(now)
                               ) -> WorkflowSignalDisposition.Accepted
                             case WorkflowWaitStatus.Pending =>
@@ -570,7 +580,7 @@ object WorkflowExecutionStore:
                             waits = current.waits.updated(waitKey, updatedWait),
                             signals = current.signals.updated(
                               signalSlot,
-                              MemorySignal(receipt, name, payload)
+                              MemorySignal(receipt, name, payload, authorization)
                             ),
                             wakeups = wakeups
                           )

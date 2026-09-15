@@ -16,33 +16,39 @@ import zio.json.*
   *   命中提示缓存的输入 token 单价;`None` 表示该 Provider 不为缓存单独计价,按输入价计算
   * @param currency
   *   计价货币;同一价格表内必须一致
+  * @param cacheWriteInputPerMillionTokens
+  *   写入提示缓存的输入 token 单价;`None` 时按普通输入价计算
   */
 final case class ModelPrice(
     inputPerMillionTokens: BigDecimal,
     outputPerMillionTokens: BigDecimal,
     cachedInputPerMillionTokens: Option[BigDecimal] = None,
-    currency: String = "USD"
+    currency: String = "USD",
+    cacheWriteInputPerMillionTokens: Option[BigDecimal] = None
 ) derives JsonCodec:
   require(inputPerMillionTokens >= 0, "输入单价不能为负数")
   require(outputPerMillionTokens >= 0, "输出单价不能为负数")
   require(cachedInputPerMillionTokens.forall(_ >= 0), "缓存输入单价不能为负数")
+  require(cacheWriteInputPerMillionTokens.forall(_ >= 0), "缓存写入单价不能为负数")
   require(currency.trim.nonEmpty, "计价货币不能为空")
 
   /** 估算一次调用的费用。
     *
-    * `cachedInputTokens` 是 `inputTokens` 的子集,因此未命中缓存的部分是两者之差——把两个字段各自乘以单价再相加会 把缓存命中的 token 收费两次,这是照着 usage
-    * 字段直觉实现时最容易踩的错。
+    * cache read/write 都是 `inputTokens` 的子集,因此 fresh input 是三者之差。三种输入分别按配置单价计费，避免重复收费。
     *
     * `reasoningOutputTokens` 同样是 `outputTokens` 的子集,并且主流厂商按普通输出 token 计费,因此这里刻意不为它 单独计价:再乘一次就是重复计费。
     */
   def estimate(usage: TokenUsage): BigDecimal =
-    val cached      = usage.cachedInputTokens.min(usage.inputTokens).max(0L)
-    val freshInput  = (usage.inputTokens - cached).max(0L)
+    val cachedRead  = usage.cacheReadInputTokens
+    val cachedWrite = usage.cacheWriteInputTokens
+    val freshInput  = usage.freshInputTokens
     val cachedPrice = cachedInputPerMillionTokens.getOrElse(inputPerMillionTokens)
+    val writePrice  = cacheWriteInputPerMillionTokens.getOrElse(inputPerMillionTokens)
     val million     = BigDecimal(1_000_000)
     (BigDecimal(freshInput) * inputPerMillionTokens +
-      BigDecimal(cached) * cachedPrice +
-      BigDecimal(usage.outputTokens.max(0L)) * outputPerMillionTokens) / million
+      BigDecimal(cachedRead) * cachedPrice +
+      BigDecimal(cachedWrite) * writePrice +
+      BigDecimal(usage.outputTokens) * outputPerMillionTokens) / million
 
 /** 部署声明的模型价格表。
   *

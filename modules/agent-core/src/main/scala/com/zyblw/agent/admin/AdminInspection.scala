@@ -1,21 +1,20 @@
 package com.zyblw.agent.admin
 
+import com.zyblw.agent.composition.{CompositionComparisonView, LiveComposition}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.harness.{Goal, GoalBudgetSnapshot, GoalId, HarnessStore, Plan, PlanId}
 import com.zyblw.agent.memory.RunStore
 import zio.*
 import zio.json.*
 
-/** 低敏组合指纹投影；不含指令正文或模型 prompt。 */
+/** Run 冻结组合与当前进程组合的对照视图。
+  *
+  * 只给出冻结侧不足以排查漂移：运维真正要回答的是"现在这台机器和当时差在哪"。视图本体复用
+  * [[com.zyblw.agent.composition.CompositionComparisonView]]，管理面与事故包因此不会各自维护一份会漂移的投影。
+  */
 final case class AdminCompositionView(
     runId: String,
-    fingerprintPrefix: String,
-    profileId: String,
-    modelRefPrefix: String,
-    capturePolicy: String,
-    sourceIds: List[String],
-    environmentId: String,
-    permissionFingerprintPrefix: String
+    composition: CompositionComparisonView
 ) derives JsonCodec
 
 /** 低敏 ModelCall 账本行；不含 CanonicalModelRequest。 */
@@ -34,7 +33,7 @@ final case class AdminModelCallView(
     routeDecisionCodes: List[String] = Nil,
     estimatedRouteCost: Option[String] = None,
     pricingFingerprintPrefix: Option[String] = None,
-    legacyExplicitModel: Option[Boolean] = None
+    explicitModelPinned: Option[Boolean] = None
 ) derives JsonCodec
 
 /** 低敏审批主体；只暴露摘要前缀和声明等级。 */
@@ -45,6 +44,21 @@ final case class AdminApprovalSubjectView(
     environmentId: String,
     permissionFingerprintPrefix: String,
     subjectFingerprintPrefix: Option[String]
+) derives JsonCodec
+
+/** 一次挂起记录的低敏投影；审批只是其中一种等待。 */
+final case class AdminSuspensionRecordView(
+    kind: String,
+    createdAtEpochMilli: Long,
+    deadlineEpochMilli: Option[Long],
+    expiryOutcome: String,
+    approval: Option[AdminApprovalSubjectView]
+) derives JsonCodec
+
+/** Run 是否存在、以及当前挂起（若有）。`record = None` 表示 Run 在跑或已终态，不是 404。 */
+final case class AdminSuspensionView(
+    runId: String,
+    record: Option[AdminSuspensionRecordView]
 ) derives JsonCodec
 
 /** 低敏 Harness 投影；不含 Goal 正文、Skill 正文或 Artifact bytes。 */
@@ -110,69 +124,79 @@ trait RunInspectionAdmin:
   def composition(runId: RunId): IO[StoreError, Option[AdminCompositionView]]
   def modelCalls(runId: RunId, limit: Int): IO[StoreError, Chunk[AdminModelCallView]]
   def approval(runId: RunId): IO[StoreError, Option[AdminApprovalSubjectView]]
+  def suspension(runId: RunId): IO[StoreError, Option[AdminSuspensionView]]
 
 object RunInspectionAdmin:
-  def fromStore(store: RunStore): RunInspectionAdmin = new RunInspectionAdmin:
-    def composition(runId: RunId): IO[StoreError, Option[AdminCompositionView]] =
-      loadState(store, runId).map(_.flatMap { state =>
-        state.composition.map { fingerprint =>
+  /** @param live
+    *   现场组合读出口。宿主没有装配时 `composition` 只返回冻结侧，`drift` 留空而不是伪造"兼容"。
+    */
+  def fromStore(store: RunStore, live: Option[LiveComposition] = None): RunInspectionAdmin =
+    new RunInspectionAdmin:
+      def composition(runId: RunId): IO[StoreError, Option[AdminCompositionView]] =
+        loadState(store, runId).map(_.map { state =>
           AdminCompositionView(
             runId.asString,
-            fingerprint.value.take(16),
-            fingerprint.profileId,
-            fingerprint.modelRef.take(16),
-            fingerprint.capturePolicy.toString,
-            fingerprint.sourceIds.toList,
-            fingerprint.executionEnvironmentId,
-            fingerprint.permissionProfileFingerprint.take(16)
+            CompositionComparisonView.of(state.composition, live.map(_.freeze(state.definition)))
+          )
+        })
+
+      def modelCalls(runId: RunId, limit: Int): IO[StoreError, Chunk[AdminModelCallView]] =
+        store.getModelCalls(runId).map { records =>
+          Chunk.fromIterable(
+            records
+              .sortBy(_.updatedAtEpochMilli)
+              .takeRight(math.max(limit, 0))
+              .map { record =>
+                val route = record.routeDecision
+                AdminModelCallView(
+                  record.requestId.asString,
+                  record.status.toString,
+                  record.provider,
+                  record.model,
+                  record.capturePolicy.toString,
+                  record.fingerprint.take(16),
+                  record.usage.map(_.inputTokens).getOrElse(0L),
+                  record.usage.map(_.outputTokens).getOrElse(0L),
+                  record.errorCategory,
+                  requestedProfile = route.map(_.requirement.profile.toString),
+                  routePolicyVersion = route.map(_.policyVersion),
+                  routeDecisionCodes = route.fold(List.empty[String])(_.decisionCodes.toList),
+                  estimatedRouteCost = route.flatMap(_.estimatedCost).map(_.toString),
+                  pricingFingerprintPrefix = route.map(_.pricingFingerprint.take(16)),
+                  explicitModelPinned = route.map(_.explicitModelPinned)
+                )
+              }
           )
         }
-      })
 
-    def modelCalls(runId: RunId, limit: Int): IO[StoreError, Chunk[AdminModelCallView]] =
-      store.getModelCalls(runId).map { records =>
-        Chunk.fromIterable(
-          records
-            .sortBy(_.updatedAtEpochMilli)
-            .takeRight(math.max(limit, 0))
-            .map { record =>
-              val route = record.routeDecision
-              AdminModelCallView(
-                record.requestId.asString,
-                record.status.toString,
-                record.provider,
-                record.model,
-                record.capturePolicy.toString,
-                record.fingerprint.take(16),
-                record.usage.map(_.inputTokens).getOrElse(0L),
-                record.usage.map(_.outputTokens).getOrElse(0L),
-                record.errorCategory,
-                requestedProfile = route.map(_.requirement.profile.toString),
-                routePolicyVersion = route.map(_.policyVersion),
-                routeDecisionCodes = route.fold(List.empty[String])(_.decisionCodes.toList),
-                estimatedRouteCost = route.flatMap(_.estimatedCost).map(_.toString),
-                pricingFingerprintPrefix = route.map(_.pricingFingerprint.take(16)),
-                legacyExplicitModel = route.map(_.legacyExplicitModel)
-              )
-            }
-        )
-      }
+      def approval(runId: RunId): IO[StoreError, Option[AdminApprovalSubjectView]] =
+        suspension(runId).map(_.flatMap(_.record.flatMap(_.approval)))
 
-    def approval(runId: RunId): IO[StoreError, Option[AdminApprovalSubjectView]] =
-      loadState(store, runId).map(_.flatMap { state =>
-        state.pendingApproval.map { request =>
-          AdminApprovalSubjectView(
-            request.id,
-            request.toolCall.name,
-            request.risk.toString,
-            request.subject.map(_.environment.value).getOrElse("unknown"),
-            request.subject.map(_.permissions.fingerprint.take(16)).getOrElse(""),
-            request.subject.map(_.value.take(16))
-          )
+      def suspension(runId: RunId): IO[StoreError, Option[AdminSuspensionView]] =
+        loadState(store, runId).map(_.map { state =>
+          AdminSuspensionView(runId.asString, state.suspension.map(toSuspensionRecord))
+        })
+
+      private def loadState(store: RunStore, runId: RunId): IO[StoreError, Option[AgentState]] =
+        store.load(runId).asSome.catchSome { case _: AgentError.RunNotFound =>
+          ZIO.succeed(None)
         }
-      })
 
-    private def loadState(store: RunStore, runId: RunId): IO[StoreError, Option[AgentState]] =
-      store.load(runId).asSome.catchSome { case _: AgentError.RunNotFound =>
-        ZIO.succeed(None)
-      }
+  private def toApproval(request: ApprovalRequest): AdminApprovalSubjectView =
+    AdminApprovalSubjectView(
+      request.id,
+      request.toolCall.name,
+      request.risk.toString,
+      request.subject.map(_.environment.value).getOrElse("unknown"),
+      request.subject.map(_.permissions.fingerprint.take(16)).getOrElse(""),
+      request.subject.map(_.value.take(16))
+    )
+
+  private def toSuspensionRecord(record: SuspensionRecord): AdminSuspensionRecordView =
+    AdminSuspensionRecordView(
+      kind = record.kind.kind,
+      createdAtEpochMilli = record.createdAt.toEpochMilli,
+      deadlineEpochMilli = record.deadline.map(_.toEpochMilli),
+      expiryOutcome = record.expiryOutcome.toString,
+      approval = record.kind.approvalRequest.map(toApproval)
+    )

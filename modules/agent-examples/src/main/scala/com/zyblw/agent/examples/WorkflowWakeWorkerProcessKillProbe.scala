@@ -190,7 +190,8 @@ object WorkflowWakeWorkerProcessKillProbe extends ZIOAppDefault:
         wait.key,
         WorkflowSignalId("workflow-process-kill-signal"),
         signalName,
-        "ready"
+        "ready",
+        com.zyblw.agent.composition.AuthorizationFingerprint.of(RunContext())
       )
       _ <- ensure(
         receipt.disposition == WorkflowSignalDisposition.Accepted,

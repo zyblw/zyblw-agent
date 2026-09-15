@@ -11,7 +11,12 @@ private[anthropic] object AnthropicMessagesWire:
   /** 保存上轮完整 assistant content blocks，以便 thinking/signature 和 tool_use 在工具回填时原样重放。 */
   val RawContentBlocksMetadata = "anthropic.messages.content_blocks"
 
-  final private case class UsageDto(input_tokens: Long, output_tokens: Long) derives JsonDecoder
+  final private case class UsageDto(
+      input_tokens: Long,
+      output_tokens: Long,
+      cache_creation_input_tokens: Option[Long],
+      cache_read_input_tokens: Option[Long]
+  ) derives JsonDecoder
   final private case class ResponseDto(
       id: Option[String],
       content: Chunk[Json],
@@ -88,7 +93,14 @@ private[anthropic] object AnthropicMessagesWire:
         .foreach(dto.content.filter(block => stringField(block, "type").contains("tool_use")))(decodeToolUse)
       usage <- dto.usage match
         case None        => ZIO.succeed(TokenUsage())
-        case Some(value) => validatedUsage(value.input_tokens, value.output_tokens, "response.usage")
+        case Some(value) =>
+          validatedUsage(
+            value.input_tokens,
+            value.output_tokens,
+            "response.usage",
+            value.cache_read_input_tokens.getOrElse(0L),
+            value.cache_creation_input_tokens.getOrElse(0L)
+          )
       text = dto.content
         .flatMap(block =>
           Option.when(stringField(block, "type").contains("text"))(stringField(block, "text")).flatten
@@ -241,10 +253,26 @@ private[anthropic] object AnthropicMessagesWire:
   private[anthropic] def validatedUsage(
       input: Long,
       output: Long,
-      location: String
+      location: String,
+      cacheRead: Long = 0L,
+      cacheWrite: Long = 0L
   ): IO[AgentError, TokenUsage] =
-    if input >= 0L && output >= 0L then ZIO.succeed(TokenUsage(input, output))
-    else ZIO.fail(AgentError.InvalidModelResponse(s"$location 包含负 token: input=$input, output=$output"))
+    val total = BigInt(input) + BigInt(cacheRead) + BigInt(cacheWrite)
+    if input >= 0L && output >= 0L && cacheRead >= 0L && cacheWrite >= 0L && total <= Long.MaxValue then
+      ZIO.succeed(
+        TokenUsage(
+          total.toLong,
+          output,
+          cachedInputTokens = cacheRead,
+          cacheWriteInputTokens = cacheWrite
+        )
+      )
+    else
+      ZIO.fail(
+        AgentError.InvalidModelResponse(
+          s"$location 包含无效 token: input=$input, output=$output, cache_read=$cacheRead, cache_write=$cacheWrite"
+        )
+      )
 
   /** 工具结果的多内容块按原顺序转成字符串，JSON 保持结构表示。 */
   private def contentAsText(message: AgentMessage): String =

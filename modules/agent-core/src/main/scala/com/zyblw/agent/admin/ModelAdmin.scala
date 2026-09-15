@@ -29,7 +29,11 @@ final case class ModelCapabilitiesView(
     streaming: Boolean,
     usageReporting: Boolean,
     maxInputTokens: Option[Long],
-    maxOutputTokens: Option[Long]
+    maxOutputTokens: Option[Long],
+    promptCacheKind: String = "Unsupported",
+    reportsCacheReadTokens: Boolean = false,
+    reportsCacheWriteTokens: Boolean = false,
+    promptCacheRetention: Chunk[String] = Chunk.empty
 ) derives JsonCodec
 
 /** 目录中的一个可选模型。
@@ -70,7 +74,8 @@ final case class ModelPriceView(
     inputPerMillionTokens: String,
     outputPerMillionTokens: String,
     cachedInputPerMillionTokens: Option[String],
-    currency: String
+    currency: String,
+    cacheWriteInputPerMillionTokens: Option[String] = None
 ) derives JsonCodec
 
 /** 向量化模型的只读描述。

@@ -40,6 +40,8 @@ object RunDirectoryCursor:
   *   限定状态集合；空集合表示不过滤
   * @param awaitingApprovalOnly
   *   只返回正在等待人工审批的 Run，管理台审批台使用
+  * @param awaitingSignalOnly
+  *   只返回非审批类挂起（等信号 / 人工输入 / 计时器）的 Run
   * @param updatedAfterEpochMilli
   *   只返回该时间之后更新的 Run
   * @param updatedBeforeEpochMilli
@@ -54,6 +56,7 @@ final case class RunDirectoryQuery(
     agentId: Option[String] = None,
     statuses: Set[RunStatus] = Set.empty,
     awaitingApprovalOnly: Boolean = false,
+    awaitingSignalOnly: Boolean = false,
     updatedAfterEpochMilli: Option[Long] = None,
     updatedBeforeEpochMilli: Option[Long] = None,
     cursor: Option[RunDirectoryCursor] = None,
@@ -75,7 +78,8 @@ final case class RunDirectoryUsage(
     totalTokens: Long,
     cachedInputTokens: Long,
     reasoningOutputTokens: Long,
-    estimatedCost: String
+    estimatedCost: String,
+    cacheWriteInputTokens: Long = 0L
 ) derives JsonCodec
 
 /** Run 目录列表项。
@@ -92,6 +96,9 @@ final case class RunSummaryView(
     awaitingApproval: Boolean,
     pendingApprovalToolName: Option[String],
     pendingApprovalRisk: Option[String],
+    awaitingSignal: Boolean,
+    suspensionKind: Option[String],
+    suspensionDeadlineEpochMilli: Option[Long],
     tenantId: Option[String],
     userId: Option[String],
     usage: RunDirectoryUsage,
@@ -107,12 +114,15 @@ object RunSummaryView:
     runId = state.runId.asString,
     agentId = state.agentId.value,
     sessionId = state.sessionId.asString,
-    threadId = state.threadId.map(_.value),
+    threadId = Some(state.threadId.value),
     status = state.status.toString,
     steps = state.budget.steps,
-    awaitingApproval = state.pendingApproval.isDefined,
+    awaitingApproval = state.status == RunStatus.WaitingForApproval,
     pendingApprovalToolName = state.pendingApproval.map(_.toolCall.name),
     pendingApprovalRisk = state.pendingApproval.map(_.risk.toString),
+    awaitingSignal = state.status == RunStatus.Suspended,
+    suspensionKind = state.suspension.map(_.kind.kind),
+    suspensionDeadlineEpochMilli = state.suspension.flatMap(_.deadline.map(_.toEpochMilli)),
     tenantId = state.runContext.tenantId,
     userId = state.runContext.userId,
     usage = RunDirectoryUsage(
@@ -123,7 +133,8 @@ object RunSummaryView:
       totalTokens = state.usage.totalTokens,
       cachedInputTokens = state.usage.cachedInputTokens,
       reasoningOutputTokens = state.usage.reasoningOutputTokens,
-      estimatedCost = state.usage.estimatedCost.toString
+      estimatedCost = state.usage.estimatedCost.toString,
+      cacheWriteInputTokens = state.usage.cacheWriteInputTokens
     ),
     createdAtEpochMilli = state.createdAt.toEpochMilli,
     updatedAtEpochMilli = state.updatedAt.toEpochMilli,
@@ -143,7 +154,8 @@ final case class RunDirectoryOverview(
     capturedAtEpochMilli: Long,
     totalRuns: Long,
     countsByStatus: Map[String, Long],
-    awaitingApproval: Long
+    awaitingApproval: Long,
+    awaitingSignal: Long = 0L
 ) derives JsonCodec
 
 /** 跨 Run 的管理面查询 SPI。
@@ -214,7 +226,8 @@ object RunDirectory:
         capturedAtEpochMilli = now.toEpochMilli,
         totalRuns = views.length.toLong,
         countsByStatus = views.groupBy(_.status).map((status, group) => status -> group.length.toLong),
-        awaitingApproval = views.count(_.awaitingApproval).toLong
+        awaitingApproval = views.count(_.awaitingApproval).toLong,
+        awaitingSignal = views.count(_.awaitingSignal).toLong
       )
 
   /** ZIO 环境访问器：分页查询。 */
@@ -237,5 +250,6 @@ object RunDirectory:
       query.agentId.forall(_ == view.agentId) &&
       (query.statuses.isEmpty || query.statuses.map(_.toString).contains(view.status)) &&
       (!query.awaitingApprovalOnly || view.awaitingApproval) &&
+      (!query.awaitingSignalOnly || view.awaitingSignal) &&
       query.updatedAfterEpochMilli.forall(view.updatedAtEpochMilli >= _) &&
       query.updatedBeforeEpochMilli.forall(view.updatedAtEpochMilli <= _)

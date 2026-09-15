@@ -87,6 +87,7 @@ private[gemini] object GeminiInteractionsDescriptor:
       vision = false,
       streaming = true,
       parallelToolCalls = true,
-      usageReporting = true
+      usageReporting = true,
+      promptCache = PromptCacheCapability.implicitRead
     )
   )

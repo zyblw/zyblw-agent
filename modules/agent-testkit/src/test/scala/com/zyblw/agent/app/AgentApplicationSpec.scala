@@ -92,10 +92,10 @@ object AgentApplicationSpec extends ZIOSpecDefault:
         _       <- app.claimOnce
         done    <- app.inspect(command.runId)
       yield assertTrue(
-        created.definition.exists(_.modelSettings.provider.contains("scripted")),
-        created.definition.exists(_.modelSettings.model.contains("planner-model")),
-        created.definition.exists(_.modelSettings.metadata.get("model-role").contains("planner")),
-        created.composition.exists(_.modelRef.nonEmpty),
+        created.definition.modelSettings.provider.contains("scripted"),
+        created.definition.modelSettings.model.contains("planner-model"),
+        created.definition.modelSettings.metadata.get("model-role").contains("planner"),
+        created.composition.modelRef.nonEmpty,
         done.status == RunStatus.Completed
       )).provide(
         ScriptedChatModel.layer(Chunk(finalResponse())),
@@ -122,7 +122,7 @@ object AgentApplicationSpec extends ZIOSpecDefault:
       yield assertTrue(
         command.status == RunCommandStatus.Queued,
         before.status == RunStatus.Created,
-        before.composition.exists(_.capturePolicy == CapturePolicy.Replayable)
+        before.composition.capturePolicy == CapturePolicy.Replayable
       )).provide(
         ScriptedChatModel.layer(Chunk(finalResponse())),
         RegisteredToolRegistry.fromTools(Nil),

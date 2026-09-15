@@ -333,7 +333,7 @@ trait RuntimeSettingsService:
 
   /** 返回可被 Runtime 在构造 `ChatRequest` 时同步读取的模型工作点源。
     *
-    * 宿主必须把它装配给 `AgentRuntimeLive`，否则管理台对 Provider、模型与采样参数的修改会保存成功却不影响任何 一次模型调用。它同时携带部署价格表，因此接上它也就打开了
+    * 宿主必须把它装配给 `AgentRuntimeDriver`，否则管理台对 Provider、模型与采样参数的修改会保存成功却不影响任何 一次模型调用。它同时携带部署价格表，因此接上它也就打开了
     * `estimatedCost` 的估算。
     */
   def modelPolicySource: ModelPolicySource

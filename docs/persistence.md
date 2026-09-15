@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-21
+> 最后核验：2026-09-14
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -23,7 +23,7 @@
 
 ## 唯一 Agent Runtime
 
-`AgentRuntimeLive` 直接使用 `AgentState` 与 `RunStore`。本地同步入口通过 `RunStore.createWithEvents` 原子创建初始状态与
+`AgentRuntimeDriver` 直接使用 `AgentState` 与 `RunStore`；纯 `AgentKernel` 不访问持久化。 本地同步入口通过 `RunStore.createWithEvents` 原子创建初始状态与
 `RunCreated`；生产异步入口改用 `RunSubmissionStore`，把初始状态、首事件、Start 命令和 dispatcher 放在一个事务内。
 后续转换通过 expected version 乐观锁和 `RunStore.commit` 在一个事务内
 提交状态与领域事件。所有 Adapter 在写入前验证事件 runId、批内连续 sequence 与 `state.lastEventSequence` 一致，
@@ -43,7 +43,7 @@ modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/m
 ```
 
 主要表：`agent_runs`、`agent_events`、`agent_run_commands`、`agent_run_dispatch`、
-`model_call_executions`、`tool_executions`、`approval_requests`、`agent_business_operations`、
+`model_call_executions`、`tool_executions`、`agent_suspensions`、`agent_business_operations`、
 `agent_outbox_events`、`agent_inbox_messages`、`agent_compensations`、`agent_memories`、`agent_embedding_cache`、
 `agent_embedding_quota_windows`、`agent_embedding_quota_reservations`、`agent_eval_snapshots`、
 `agent_workflow_checkpoints`、`agent_workflow_node_executions`、`agent_workflow_waits`、`agent_workflow_signals`、

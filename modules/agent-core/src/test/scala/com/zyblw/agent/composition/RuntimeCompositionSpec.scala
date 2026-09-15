@@ -36,6 +36,10 @@ object RuntimeCompositionSpec extends ZIOSpecDefault:
     def invoke(arguments: Json, context: ToolExecutionContext): IO[AgentError, ToolResult] =
       ZIO.succeed(ToolResult(arguments))
 
+  /** 断言只针对属性名集合，而不针对错误文案：文案是给人看的，属性名才是稳定契约。 */
+  private def changedFieldsOf(drift: CompositionDrift): Set[String] =
+    drift.changedFields.map(_.field).toSet
+
   def spec: Spec[TestEnvironment & Scope, Any] = suite("RuntimeComposition")(
     test("相同组合判定 Compatible") {
       val live = RuntimeComposition.fingerprint(profile, agent, agent.modelSettings)
@@ -46,14 +50,14 @@ object RuntimeCompositionSpec extends ZIOSpecDefault:
     },
     test("注册表缺少冻结工具时即使指纹相同也 Incompatible") {
       assertTrue(
-        RuntimeComposition.compare(
-          frozen,
-          frozen,
-          liveToolNames = Set("echo"),
-          requiredToolNames = Set("echo", "search")
-        ) match
-          case CompositionDrift.Incompatible(reason) => reason.contains("search")
-          case _                                     => false
+        changedFieldsOf(
+          RuntimeComposition.compare(
+            frozen,
+            frozen,
+            liveToolNames = Set("echo"),
+            requiredToolNames = Set("echo", "search")
+          )
+        ) == Set("requiredToolsMissing")
       )
     },
     test("指令指纹变化判定 Incompatible") {
@@ -66,19 +70,13 @@ object RuntimeCompositionSpec extends ZIOSpecDefault:
       )
       val live = RuntimeComposition.fingerprint(profile, changed, changed.modelSettings)
       assertTrue(
-        RuntimeComposition.compare(frozen, live, liveTools) match
-          case CompositionDrift.Incompatible(reason) => reason.contains("指令")
-          case _                                     => false
+        changedFieldsOf(RuntimeComposition.compare(frozen, live, liveTools)) == Set("instructionFingerprint")
       )
     },
     test("生效模型引用变化判定 Incompatible") {
       val overlay = ModelSettings(provider = Some("primary"), model = Some("cheap-model"))
       val live    = RuntimeComposition.fingerprint(profile, agent, overlay)
-      assertTrue(
-        RuntimeComposition.compare(frozen, live, liveTools) match
-          case CompositionDrift.Incompatible(reason) => reason.contains("模型")
-          case _                                     => false
-      )
+      assertTrue(changedFieldsOf(RuntimeComposition.compare(frozen, live, liveTools)) == Set("modelRef"))
     },
     test("模型摘要覆盖完整设置且不受 Map 顺序影响") {
       val left = agent.modelSettings.copy(
@@ -110,11 +108,12 @@ object RuntimeCompositionSpec extends ZIOSpecDefault:
         agent,
         agent.modelSettings
       )
+      val drift = RuntimeComposition.compare(frozen, live, liveTools)
       assertTrue(
-        RuntimeComposition.compare(frozen, live, liveTools) match
-          case CompositionDrift.RequiresRevalidation(reason) =>
-            reason.contains("profile") && reason.contains("capture")
-          case _ => false
+        drift.isInstanceOf[CompositionDrift.RequiresRevalidation],
+        changedFieldsOf(drift) == Set("profileId", "capturePolicy"),
+        // 非安全变化才允许落到 RequiresRevalidation：这条断言防止安全字段被误标。
+        drift.changedFields.forall(!_.securityRelevant)
       )
     },
     test("扩展身份变化判定 Incompatible") {
@@ -122,26 +121,39 @@ object RuntimeCompositionSpec extends ZIOSpecDefault:
         profile,
         agent,
         agent.modelSettings,
-        extensionIds = Chunk("policy-bot@1")
+        extensionIds = Chunk(CapabilityRef(CapabilityKind.ApprovalReview, "policy-bot"))
+      )
+      assertTrue(changedFieldsOf(RuntimeComposition.compare(frozen, live, liveTools)) == Set("extensionIds"))
+    },
+    test("同一个 id 换了能力类别也算漂移") {
+      val asContext = RuntimeComposition.fingerprint(
+        profile,
+        agent,
+        agent.modelSettings,
+        sourceIds = Chunk(CapabilityRef(CapabilityKind.Context, "shared"))
+      )
+      val asSkill = RuntimeComposition.fingerprint(
+        profile,
+        agent,
+        agent.modelSettings,
+        sourceIds = Chunk(CapabilityRef(CapabilityKind.Skill, "shared"))
       )
       assertTrue(
-        RuntimeComposition.compare(frozen, live, liveTools) match
-          case CompositionDrift.Incompatible(reason) => reason.contains("扩展")
-          case _                                     => false
+        asContext.value != asSkill.value,
+        changedFieldsOf(RuntimeComposition.compare(asContext, asSkill, liveTools)) == Set("sourceIds")
       )
     },
-    test("旧组合指纹缺 extensionIds 仍可解码且与空扩展兼容") {
-      val encoded  = frozen.toJson
-      val stripped = encoded.fromJson[Json].map {
-        case Json.Obj(fields) => Json.Obj(fields.filterNot(_._1 == "extensionIds"))
-        case other            => other
-      }
-      val decoded = stripped.flatMap(_.toJson.fromJson[RuntimeCompositionFingerprint])
+    test("一次部署同时改多项时报出全部变化项") {
+      val live = RuntimeComposition.fingerprint(
+        RuntimeProfile("eval", CapturePolicy.Replayable),
+        agent,
+        agent.modelSettings,
+        extensionIds = Chunk(CapabilityRef(CapabilityKind.ApprovalReview, "policy-bot")),
+        executionEnvironmentId = "mcp-sandbox"
+      )
       assertTrue(
-        decoded.exists(_.extensionIds.isEmpty),
-        decoded.exists(value =>
-          RuntimeComposition.compare(value, frozen, liveTools) == CompositionDrift.Compatible
-        )
+        changedFieldsOf(RuntimeComposition.compare(frozen, live, liveTools)) ==
+          Set("extensionIds", "executionEnvironmentId", "profileId", "capturePolicy")
       )
     },
     test("执行环境身份变化判定 Incompatible") {
@@ -152,9 +164,8 @@ object RuntimeCompositionSpec extends ZIOSpecDefault:
         executionEnvironmentId = "mcp-sandbox"
       )
       assertTrue(
-        RuntimeComposition.compare(frozen, live, liveTools) match
-          case CompositionDrift.Incompatible(reason) => reason.contains("执行环境")
-          case _                                     => false
+        changedFieldsOf(RuntimeComposition.compare(frozen, live, liveTools)) ==
+          Set("executionEnvironmentId")
       )
     },
     test("权限剖面变化判定 Incompatible") {
@@ -165,9 +176,8 @@ object RuntimeCompositionSpec extends ZIOSpecDefault:
         permissionProfileFingerprint = PermissionProfile.denyAll.fingerprint
       )
       assertTrue(
-        RuntimeComposition.compare(frozen, live, liveTools) match
-          case CompositionDrift.Incompatible(reason) => reason.contains("权限剖面")
-          case _                                     => false
+        changedFieldsOf(RuntimeComposition.compare(frozen, live, liveTools)) ==
+          Set("permissionProfileFingerprint")
       )
     },
     test("旧组合指纹缺 permissionProfileFingerprint 视为宿主权限") {
@@ -203,13 +213,9 @@ object RuntimeCompositionSpec extends ZIOSpecDefault:
         profile,
         agent,
         agent.modelSettings,
-        Chunk("memory-rag@1")
+        Chunk(CapabilityRef(CapabilityKind.Context, "memory-rag"))
       )
-      assertTrue(
-        RuntimeComposition.compare(frozen, live, liveTools) match
-          case CompositionDrift.Incompatible(reason) => reason.contains("上下文来源")
-          case _                                     => false
-      )
+      assertTrue(changedFieldsOf(RuntimeComposition.compare(frozen, live, liveTools)) == Set("sourceIds"))
     },
     test("工具契约指纹对 JSON/Set 顺序稳定，并检测安全元数据漂移") {
       val leftSchema = Json.Obj(
@@ -243,7 +249,7 @@ object RuntimeCompositionSpec extends ZIOSpecDefault:
         baseline != ToolContractFingerprint.missing("echo")
       )
     },
-    test("DurableToolPlan 新指纹可往返，旧 JSON 缺字段保持可读") {
+    test("DurableToolPlan 新指纹可 JSON 往返") {
       val call        = ToolCall("call-echo", "echo", Json.Obj())
       val fingerprint = ToolContractFingerprint.registered(
         registeredTool(Json.Obj("type" -> Json.Str("object")))
@@ -252,26 +258,11 @@ object RuntimeCompositionSpec extends ZIOSpecDefault:
         "plan-contract",
         Chunk(DurableToolBatch(0, Chunk(DurableToolPlanItem(0, call)))),
         toolContractFingerprints = Map("echo" -> fingerprint),
-        approvalRequiredCallIds = Some(Set.empty)
+        approvalSubjects = Map.empty
       )
-      val encoded = plan.toJson
-      val legacy  = encoded.fromJson[Json].map {
-        case Json.Obj(fields) =>
-          Json.Obj(
-            fields.filterNot { case (name, _) =>
-              name == "toolContractFingerprints" || name == "approvalRequiredCallIds"
-            }
-          )
-        case other => other
-      }
-      assertTrue(
-        encoded.fromJson[DurableToolPlan].contains(plan),
-        legacy
-          .flatMap(_.toJson.fromJson[DurableToolPlan])
-          .exists(value => value.toolContractFingerprints.isEmpty && value.approvalRequiredCallIds.isEmpty)
-      )
+      assertTrue(plan.toJson.fromJson[DurableToolPlan].contains(plan))
     },
-    test("冻结指纹可 JSON 往返，旧状态缺字段仍可解码") {
+    test("冻结指纹可 JSON 往返") {
       val now   = java.time.Instant.parse("2026-08-20T00:00:00Z")
       val state = AgentState(
         RunId(java.util.UUID.fromString("11111111-1111-1111-1111-111111111111")),
@@ -286,18 +277,10 @@ object RuntimeCompositionSpec extends ZIOSpecDefault:
         now,
         now,
         Version.initial,
-        threadId = Some(ThreadId("composition-thread")),
-        definition = Some(agent),
-        composition = Some(frozen)
+        agent,
+        frozen,
+        ThreadId("composition-thread")
       )
-      val encoded  = state.toJson
-      val stripped = encoded.fromJson[Json].map {
-        case Json.Obj(fields) => Json.Obj(fields.filterNot(_._1 == "composition"))
-        case other            => other
-      }
-      assertTrue(
-        encoded.fromJson[AgentState].exists(_.composition.contains(frozen)),
-        stripped.flatMap(_.toJson.fromJson[AgentState]).exists(_.composition.isEmpty)
-      )
+      assertTrue(state.toJson.fromJson[AgentState].exists(_.composition == frozen))
     }
   )

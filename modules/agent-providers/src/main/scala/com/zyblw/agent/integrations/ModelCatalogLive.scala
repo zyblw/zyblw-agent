@@ -125,7 +125,11 @@ object ModelCatalogLive:
       streaming = capabilities.streaming,
       usageReporting = capabilities.usageReporting,
       maxInputTokens = capabilities.maxInputTokens,
-      maxOutputTokens = capabilities.maxOutputTokens
+      maxOutputTokens = capabilities.maxOutputTokens,
+      promptCacheKind = capabilities.promptCache.kind.toString,
+      reportsCacheReadTokens = capabilities.promptCache.reportsReadTokens,
+      reportsCacheWriteTokens = capabilities.promptCache.reportsWriteTokens,
+      promptCacheRetention = Chunk.fromIterable(capabilities.promptCache.supportedRetention.toList.map(_.toString).sorted)
     )
 
   /** 投影单价。
@@ -136,5 +140,6 @@ object ModelCatalogLive:
     inputPerMillionTokens = price.inputPerMillionTokens.bigDecimal.toPlainString,
     outputPerMillionTokens = price.outputPerMillionTokens.bigDecimal.toPlainString,
     cachedInputPerMillionTokens = price.cachedInputPerMillionTokens.map(_.bigDecimal.toPlainString),
-    currency = price.currency
+    currency = price.currency,
+    cacheWriteInputPerMillionTokens = price.cacheWriteInputPerMillionTokens.map(_.bigDecimal.toPlainString)
   )

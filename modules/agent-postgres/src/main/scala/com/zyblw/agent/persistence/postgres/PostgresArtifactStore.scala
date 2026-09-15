@@ -412,6 +412,9 @@ final class PostgresArtifactStore(
     case ArtifactScope.User(tenantId, userId) =>
       val tenant = tenantId.value
       "user" -> s"${tenant.length}:$tenant:${userId.value}"
+    case ArtifactScope.Run(runId, threadId) =>
+      val id = runId.asString
+      "run" -> s"${id.length}:$id:${threadId.value}"
 
   private def decodeScope(kind: String, key: String): ArtifactScope = kind match
     case "session" => ArtifactScope.Session(SessionId(UUID.fromString(key)))
@@ -422,6 +425,13 @@ final class PostgresArtifactStore(
       val tenant = key.substring(separator + 1, separator + 1 + length)
       val user   = key.substring(separator + 1 + length + 1)
       ArtifactScope.User(TenantId(tenant), UserId(user))
+    case "run" =>
+      val separator = key.indexOf(':')
+      if separator <= 0 then throw IllegalStateException(s"malformed run artifact scope: $kind")
+      val length = key.substring(0, separator).toInt
+      val runId  = RunId(UUID.fromString(key.substring(separator + 1, separator + 1 + length)))
+      val thread = ThreadId(key.substring(separator + 1 + length + 1))
+      ArtifactScope.Run(runId, thread)
     case other => throw IllegalStateException(s"unknown artifact scope: $other")
 
   private def encodeAction(action: ArtifactAuditAction): String = action match

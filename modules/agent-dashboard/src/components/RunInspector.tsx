@@ -39,7 +39,17 @@ import {
 } from '@/components/ui';
 
 /** 与后端 `RunStatus` 一致的过滤选项。 */
-const STATUS_OPTIONS = ['Running', 'AwaitingApproval', 'Succeeded', 'Failed', 'Cancelled'];
+const STATUS_OPTIONS = [
+  'Created',
+  'Running',
+  'WaitingForApproval',
+  'Suspended',
+  'Completed',
+  'Failed',
+  'Cancelled',
+  'TimedOut',
+  'BudgetExceeded',
+];
 
 export function RunInspector({ capabilities }: { capabilities: AdminCapabilitiesView | undefined }) {
   const url = useUrlState();
@@ -93,7 +103,7 @@ export function RunInspector({ capabilities }: { capabilities: AdminCapabilities
 
   return (
     <div className="space-y-4 p-4">
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
         <StatCard label="Run 总数" value={formatCount(overview.data?.totalRuns)} hint={
           overview.data ? `采样于 ${formatRelative(overview.data.capturedAtEpochMilli)}` : undefined
         } />
@@ -102,6 +112,12 @@ export function RunInspector({ capabilities }: { capabilities: AdminCapabilities
           value={formatCount(overview.data?.awaitingApproval)}
           tone={overview.data && overview.data.awaitingApproval > 0 ? 'warn' : 'neutral'}
           hint="需要人工决策"
+        />
+        <StatCard
+          label="其他挂起"
+          value={formatCount(overview.data?.awaitingSignal)}
+          tone={overview.data && (overview.data.awaitingSignal ?? 0) > 0 ? 'warn' : 'neutral'}
+          hint="等信号 / 人工输入 / 计时器"
         />
         <StatCard label="运行中" value={formatCount(overview.data?.countsByStatus?.Running ?? 0)} tone="good" />
         <StatCard
@@ -231,6 +247,11 @@ export function RunInspector({ capabilities }: { capabilities: AdminCapabilities
                           审批
                         </Badge>
                       )}
+                      {run.awaitingSignal && (
+                        <Badge className="ml-1 text-violet-300 bg-violet-500/10 ring-violet-500/30">
+                          {run.suspensionKind ?? '挂起'}
+                        </Badge>
+                      )}
                     </td>
                     <td className="py-2 pr-3 tabular-nums text-slate-400">{run.steps}</td>
                     <td className="py-2 pr-3 tabular-nums text-slate-400">
@@ -314,6 +335,7 @@ function RunDetail({
           <Field label="输入 Token">{formatCount(run.usage.inputTokens)}</Field>
           <Field label="输出 Token">{formatCount(run.usage.outputTokens)}</Field>
           <Field label="缓存命中 Token">{formatCount(run.usage.cachedInputTokens)}</Field>
+          <Field label="缓存写入 Token">{formatCount(run.usage.cacheWriteInputTokens)}</Field>
           <Field label="推理 Token">{formatCount(run.usage.reasoningOutputTokens)}</Field>
           <Field label="预估费用">{run.usage.estimatedCost}</Field>
         </div>
@@ -341,9 +363,19 @@ function RunDetail({
             审批决定通过业务 Run API 提交，管理台不代替业务主体做出决策。
           </div>
         </div>
+      ) : run.awaitingSignal ? (
+        <div className="mt-4 rounded-lg border border-violet-900/60 bg-violet-950/20 px-3 py-2 text-xs">
+          <div className="font-medium text-violet-200">等待外部推进</div>
+          <div className="mt-1 text-violet-300/80">
+            原因 <Mono>{run.suspensionKind ?? '未知'}</Mono>
+            {run.suspensionDeadlineEpochMilli
+              ? `，截止 ${formatInstant(run.suspensionDeadlineEpochMilli)}`
+              : '，无截止时间'}
+          </div>
+        </div>
       ) : (
         <div className="mt-4 inline-flex items-center gap-1.5 text-xs text-slate-500">
-          <CheckCircle2 className="h-3.5 w-3.5" /> 无待处理审批
+          <CheckCircle2 className="h-3.5 w-3.5" /> 无待处理等待
         </div>
       )}
     </Panel>

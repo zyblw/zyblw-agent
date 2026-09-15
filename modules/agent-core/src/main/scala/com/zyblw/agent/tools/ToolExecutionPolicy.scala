@@ -1,8 +1,10 @@
 package com.zyblw.agent.tools
 
+import com.zyblw.agent.artifacts.{ArtifactInput, ArtifactStore}
 import com.zyblw.agent.core.*
 import zio.*
 import zio.json.*
+import zio.json.EncoderOps
 
 enum ApprovalPolicy:
   case Never, RiskBased, Always
@@ -21,11 +23,16 @@ final case class ToolPolicyConfig(
     maxParallelism: Int = 4,
     defaultTimeout: Duration = 30.seconds,
     maxResultBytes: Long = 256 * 1024,
+    externalizeAboveBytes: Long = 32 * 1024,
     retryPolicy: ToolRetryPolicy = ToolRetryPolicy.Never,
     approvalPolicy: ApprovalPolicy = ApprovalPolicy.RiskBased
 ):
   require(maxCallsPerRun > 0 && maxCallsPerStep > 0 && maxParallelism > 0)
   require(maxResultBytes > 0)
+  require(
+    externalizeAboveBytes > 0L && externalizeAboveBytes <= maxResultBytes,
+    "externalizeAboveBytes 必须位于 (0, maxResultBytes]"
+  )
 
 object ToolPolicyConfig:
   val secureDefault: ToolPolicyConfig = ToolPolicyConfig()
@@ -57,20 +64,12 @@ object ToolPolicySource:
     ZLayer.fromFunction((config: ToolPolicyConfig) => static(config))
 
 /** 集中处理超时、并发度和结果大小，不让每个工具重复实现。 */
-final class ToolExecutor private (semaphore: Semaphore, policy: ToolPolicyConfig):
-  /** 在统一治理边界内执行一个已注册工具。
-    *
-    * @param tool
-    *   已完成类型擦除和环境捕获的工具
-    * @param call
-    *   模型提出的调用，其中 arguments 仍是不可信输入
-    * @param context
-    *   Runtime 构造的可信上下文
-    * @return
-    *   结构化工具结果；未授权、超时或超限通过 AgentError 失败
-    *
-    * `Semaphore.withPermit` 保证无论成功、失败还是 Fiber 中断都会归还许可。
-    */
+final class ToolExecutor private (
+    semaphore: Semaphore,
+    policy: ToolPolicyConfig,
+    artifacts: ArtifactStore
+):
+  /** 在统一治理边界内执行一个已注册工具。返回值在硬上限以内仍是全文 [[ToolResult.Inline]]，外置由 [[externalize]] 在 Guardrail 之后完成。 */
   def execute(
       tool: RegisteredTool,
       call: ToolCall,
@@ -98,17 +97,62 @@ final class ToolExecutor private (semaphore: Semaphore, policy: ToolPolicyConfig
           .timeoutFail(AgentError.ToolExecutionFailed(call.name, "工具执行超时", retryable = false))(
             policy.defaultTimeout
           )
-          .flatMap(limitResult(call.name, _))
+          .flatMap(enforceHardLimit(call.name, _))
       }
 
-  /** 以 UTF-8 JSON 字节数检查结果上限，避免大工具输出撑爆后续模型上下文。
-    * @param name
-    *   工具稳定名称，用于错误定位
-    * @param result
-    *   已编码为 JSON 的工具结果
-    */
-  private def limitResult(name: String, result: ToolResult): IO[AgentError, ToolResult] =
-    val bytes = result.value.toJson.getBytes(java.nio.charset.StandardCharsets.UTF_8).length.toLong
+  /** 同一并行许可池上收窄白名单，避免每个工具调用重建执行器。 */
+  def narrowed(allowed: Set[ToolName]): ToolExecutor =
+    ToolExecutor(semaphore, policy.copy(allowedTools = allowed), artifacts)
+
+  /** 阈值以上把 Inline 全文外置为 Run 域 Artifact；已外置或未超阈值的结果原样返回。 */
+  def externalize(
+      call: ToolCall,
+      context: ToolExecutionContext,
+      result: ToolResult
+  ): IO[AgentError, ToolResult] = externalize(call, context, result, Int.MaxValue)
+
+  /** 同时应用部署字节阈值与当前 Agent 的模型可见字符阈值，保证 Context 不需要二次改写结果。 */
+  def externalize(
+      call: ToolCall,
+      context: ToolExecutionContext,
+      result: ToolResult,
+      maxInlineCharacters: Int
+  ): IO[AgentError, ToolResult] =
+    result match
+      case _: ToolResult.Externalized => ZIO.succeed(result)
+      case inline: ToolResult.Inline  =>
+        val bytes = inline.utf8ByteSize
+        val characters = inline.value.toJson.length
+        if bytes <= policy.externalizeAboveBytes && characters <= maxInlineCharacters then ZIO.succeed(inline)
+        else
+          val name       = artifactName(call)
+          val bytesChunk = Chunk.fromArray(
+            inline.value.toJson.getBytes(java.nio.charset.StandardCharsets.UTF_8)
+          )
+          artifacts
+            .save(
+              ArtifactScope.of(context),
+              name,
+              ArtifactInput(bytesChunk, "application/json", Map("tool" -> call.name, "callId" -> call.id))
+            )
+            .mapBoth(
+              error =>
+                AgentError.ToolExecutionFailed(
+                  call.name,
+                  s"工具结果外置失败: ${if error.safeToExpose then error.message else "artifact-store"}",
+                  retryable = false
+                ),
+              descriptor =>
+                ToolResult.Externalized(
+                  descriptor.reference,
+                  ToolResult.previewOf(inline.value),
+                  inline.isError,
+                  inline.metadata
+                )
+            )
+
+  private def enforceHardLimit(name: String, result: ToolResult): IO[AgentError, ToolResult] =
+    val bytes = result.utf8ByteSize
     if bytes <= policy.maxResultBytes then ZIO.succeed(result)
     else
       ZIO.fail(
@@ -119,16 +163,18 @@ final class ToolExecutor private (semaphore: Semaphore, policy: ToolPolicyConfig
         )
       )
 
-object ToolExecutor:
-  /** 根据策略创建带固定并行许可数的执行器。
-    * @param policy
-    *   白名单、超时、重试、结果上限和并发许可配置
-    */
-  def make(policy: ToolPolicyConfig): UIO[ToolExecutor] =
-    Semaphore.make(policy.maxParallelism.toLong).map(ToolExecutor(_, policy))
+  private def artifactName(call: ToolCall): ArtifactName =
+    ArtifactName
+      .fromString(s"tool-results/${call.id}.json")
+      .getOrElse(ArtifactName("tool-results/result.json"))
 
-  /** 将执行器构造成无外部依赖的 ZLayer，供 Runtime 装配。
-    * @param policy
-    *   与 `make` 相同的集中治理配置
-    */
-  def layer(policy: ToolPolicyConfig): ULayer[ToolExecutor] = ZLayer.fromZIO(make(policy))
+object ToolExecutor:
+  /** 根据策略与 ArtifactStore 创建带固定并行许可数的执行器。 */
+  def make(policy: ToolPolicyConfig, artifacts: ArtifactStore): UIO[ToolExecutor] =
+    Semaphore.make(policy.maxParallelism.toLong).map(ToolExecutor(_, policy, artifacts))
+
+  /** 将执行器构造成依赖 ArtifactStore 的 ZLayer，由 Runtime Scope 持有一份，而不是每个工具调用重建。 */
+  val layer: URLayer[ToolPolicyConfig & ArtifactStore, ToolExecutor] =
+    ZLayer.fromZIO(
+      ZIO.serviceWithZIO[ToolPolicyConfig](policy => ZIO.serviceWithZIO[ArtifactStore](make(policy, _)))
+    )

@@ -1876,9 +1876,6 @@
             "type" : "integer",
             "format" : "int64"
           },
-          "runId" : {
-            "type" : "string"
-          },
           "pendingApproval" : {
             "anyOf" : [
               {
@@ -1903,6 +1900,21 @@
           },
           "threadId" : {
             "type" : "string"
+          },
+          "runId" : {
+            "type" : "string"
+          },
+          "suspension" : {
+            "anyOf" : [
+              {
+                "type" : "null"
+              },
+              {
+                "$ref" : "#/components/schemas/SuspensionView"
+              }
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
           }
         },
         "required" : [
@@ -1916,7 +1928,30 @@
           "updatedAtEpochMilli",
           "stateVersion"
         ],
-        "description" : "Run 查询的版本化公共投影。\n它故意不直接序列化框架内部的耐久状态对象：消息历史、工具参数、内部步骤、Context metadata 和恢复游标都不是公共协议。\n@param runId\nRun 唯一 ID\n@param threadId\n业务会话线程 ID\n@param agentId\n创建 Run 时冻结的 Agent ID\n@param status\n当前 RunStatus 字符串\n@param steps\n已消耗的 Agent loop 步数\n@param usage\n当前累计用量与费用估算\n@param output\n最近可公开的助手输出；尚未产生时为空\n@param pendingApproval\n等待人工处理时的最小审批摘要\n@param createdAtEpochMilli\nRun 创建 UTC epoch 毫秒\n@param updatedAtEpochMilli\n最近一次权威状态提交 UTC epoch 毫秒\n@param stateVersion\nPostgreSQL/RunStore 乐观锁版本，仅用于观察新旧，不可当作 lease token"
+        "description" : "Run 查询的版本化公共投影。\n它故意不直接序列化框架内部的耐久状态对象：消息历史、工具参数、内部步骤、Context metadata 和恢复游标都不是公共协议。\n@param runId\nRun 唯一 ID\n@param threadId\n业务会话线程 ID\n@param agentId\n创建 Run 时冻结的 Agent ID\n@param status\n当前 RunStatus 字符串\n@param steps\n已消耗的 Agent loop 步数\n@param usage\n当前累计用量与费用估算\n@param output\n最近可公开的助手输出；尚未产生时为空\n@param pendingApproval\n等待人工处理时的最小审批摘要\n@param suspension\n当前挂起的低敏摘要；审批类等待同时保留 `pendingApproval` 以便现有客户端继续工作\n@param createdAtEpochMilli\nRun 创建 UTC epoch 毫秒\n@param updatedAtEpochMilli\n最近一次权威状态提交 UTC epoch 毫秒\n@param stateVersion\nPostgreSQL/RunStore 乐观锁版本，仅用于观察新旧，不可当作 lease token"
+      },
+      "SuspensionView" : {
+        "type" : "object",
+        "properties" : {
+          "kind" : {
+            "type" : "string"
+          },
+          "deadlineEpochMilli" : {
+            "type" : [
+              "integer",
+              "null"
+            ],
+            "format" : "int64"
+          },
+          "expiryOutcome" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "kind",
+          "expiryOutcome"
+        ],
+        "description" : "等待外部输入时公开的最小挂起视图。不含 prompt、信号 payload 或审批正文。\n@param kind\n低敏等待类别：`approval` / `human-input` / `external-signal` / `timer`\n@param deadlineEpochMilli\n到期时刻；缺省表示无限期等待\n@param expiryOutcome\n到期决议：`FailRun` 或 `ResumeWithDefault`"
       },
       "ToolProgressView" : {
         "type" : "object",

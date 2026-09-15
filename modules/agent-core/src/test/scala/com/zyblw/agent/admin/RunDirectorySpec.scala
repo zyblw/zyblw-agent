@@ -1,5 +1,6 @@
 package com.zyblw.agent.admin
 
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import java.time.Instant
 import java.util.UUID
@@ -24,6 +25,7 @@ object RunDirectorySpec extends ZIOSpecDefault:
       pendingApproval: Option[ApprovalRequest] = None
   ): AgentState =
     val limits = RunLimits()
+    val agent  = AgentDefinition(AgentId(agentId), "目录", "测试用 Agent")
     AgentState(
       runId(tag),
       session,
@@ -33,10 +35,13 @@ object RunDirectorySpec extends ZIOSpecDefault:
       Chunk.empty,
       UsageSummary(),
       BudgetState(limits, UsageSummary(), 0),
-      pendingApproval,
+      pendingApproval.map(request => SuspensionRecord.of(request)),
       Instant.EPOCH,
       Instant.ofEpochMilli(updatedAtMilli),
       Version.initial,
+      agent,
+      RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings),
+      ThreadId("thread-1"),
       runContext = RunContext(tenantId = tenantId, userId = Some("u-1"))
     )
 
@@ -143,8 +148,39 @@ object RunDirectorySpec extends ZIOSpecDefault:
       for page <- subject.list(RunDirectoryQuery(statuses = Set.empty))
       yield assertTrue(page.items.length == 2)
     },
+    test("挂起过滤只返回 Suspended，并暴露低敏 kind 与 deadline") {
+      val deadline = Instant.ofEpochMilli(5_000L)
+      val subject  = directory(
+        state('a', 200L),
+        state(
+          'b',
+          100L,
+          status = RunStatus.Suspended,
+          pendingApproval = None
+        ).copy(suspension =
+          Some(
+            SuspensionRecord(
+              Suspension.Timer,
+              Instant.EPOCH,
+              deadline = Some(deadline),
+              expiryOutcome = SuspensionExpiry.FailRun
+            )
+          )
+        )
+      )
+      for page <- subject.list(RunDirectoryQuery(awaitingSignalOnly = true))
+      yield assertTrue(
+        page.items.map(_.runId) == Chunk(label('b')),
+        page.items.head.awaitingSignal,
+        page.items.head.suspensionKind.contains("timer"),
+        page.items.head.suspensionDeadlineEpochMilli.contains(5_000L)
+      )
+    },
     test("审批过滤只返回真正在等待人工审批的 Run") {
-      val subject = directory(state('a', 200L), state('b', 100L, pendingApproval = Some(approval('b'))))
+      val subject = directory(
+        state('a', 200L),
+        state('b', 100L, status = RunStatus.WaitingForApproval, pendingApproval = Some(approval('b')))
+      )
       for page <- subject.list(RunDirectoryQuery(awaitingApprovalOnly = true))
       yield assertTrue(
         page.items.map(_.runId) == Chunk(label('b')),
@@ -176,7 +212,9 @@ object RunDirectorySpec extends ZIOSpecDefault:
         )
     },
     test("审批视图只暴露工具名与风险等级，不暴露调用参数或审批理由") {
-      val subject = directory(state('a', 100L, pendingApproval = Some(approval('a'))))
+      val subject = directory(
+        state('a', 100L, status = RunStatus.WaitingForApproval, pendingApproval = Some(approval('a')))
+      )
       for page <- subject.list(RunDirectoryQuery())
       yield
         val fields = page.items.head.productElementNames.toSet
@@ -190,7 +228,7 @@ object RunDirectorySpec extends ZIOSpecDefault:
     test("总览按状态聚合并单独统计待审批数") {
       val subject = directory(
         state('a', 400L, status = RunStatus.Running),
-        state('b', 300L, status = RunStatus.Running, pendingApproval = Some(approval('b'))),
+        state('b', 300L, status = RunStatus.WaitingForApproval, pendingApproval = Some(approval('b'))),
         state('c', 200L, status = RunStatus.Failed),
         state('d', 100L, status = RunStatus.Failed, tenantId = Some("other"))
       )
@@ -199,10 +237,11 @@ object RunDirectorySpec extends ZIOSpecDefault:
         scoped <- subject.overview(Some("acme"))
       yield assertTrue(
         all.totalRuns == 4L,
-        all.countsByStatus == Map("Running" -> 2L, "Failed" -> 2L),
+        all.countsByStatus == Map("WaitingForApproval" -> 1L, "Running" -> 1L, "Failed" -> 2L),
         all.awaitingApproval == 1L,
+        all.awaitingSignal == 0L,
         scoped.totalRuns == 3L,
-        scoped.countsByStatus == Map("Running" -> 2L, "Failed" -> 1L)
+        scoped.countsByStatus == Map("WaitingForApproval" -> 1L, "Running" -> 1L, "Failed" -> 1L)
       )
     },
     test("游标编码可往返，非法输入返回校验错误而不是抛异常") {

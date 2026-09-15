@@ -25,9 +25,30 @@ final case class ExtensionDescriptor(
 
   def sourceId: String = s"$id@$version"
 
+  /** 进入组合指纹的身份。
+    *
+    * `ExtensionKind` 描述"扩展点"，`CapabilityKind` 描述"能力面"，两者刻意不合并：前者随扩展 SPI 演进，后者是 introspection
+    * 与漂移报告的稳定词汇表。没有对应能力面的扩展点归为 `Observer`——它们只观察，不改变执行语义。
+    */
+  def capability: CapabilityRef = CapabilityRef(
+    kind match
+      case ExtensionKind.Context                                => CapabilityKind.Context
+      case ExtensionKind.Tools                                  => CapabilityKind.Tool
+      case ExtensionKind.Skills                                 => CapabilityKind.Skill
+      case ExtensionKind.Guardrail                              => CapabilityKind.Guardrail
+      case ExtensionKind.ApprovalReview                         => CapabilityKind.ApprovalReview
+      case ExtensionKind.ToolLifecycle                          => CapabilityKind.ToolLifecycle
+      case ExtensionKind.ExecutionEnvironment                   => CapabilityKind.ExecutionEnvironment
+      case ExtensionKind.Artifacts                              => CapabilityKind.Persistence
+      case ExtensionKind.RunLifecycle | ExtensionKind.Telemetry => CapabilityKind.Observer
+    ,
+    id,
+    version
+  )
+
 /** Host 显式交给扩展的稳定输入。
   *
-  * 扩展永远拿不到 `AgentRuntimeLive`、`RunStore` 或可变 Kernel 内部。授权上下文已经是摘要：租户/主体/scope 的明文不在这里重复出现，模型输出也不能构造本对象。
+  * 扩展永远拿不到 `AgentRuntimeDriver`、`RunStore` 或可变 Kernel 内部。授权上下文已经是摘要：租户/主体/scope 的明文不在这里重复出现，模型输出也不能构造本对象。
   */
 final case class ExtensionInput(
     runId: RunId,
@@ -163,8 +184,7 @@ final case class RuntimeExtensions(
       approvalReviewers.map(_.descriptor) ++
       toolLifecycleObservers.map(_.descriptor)
 
-  val sourceIds: Chunk[String] =
-    Chunk.fromIterable(descriptors.map(_.sourceId).toList.distinct.sorted)
+  val sourceIds: Chunk[CapabilityRef] = CapabilityRef.normalize(descriptors.map(_.capability))
 
   require(
     descriptors.map(_.sourceId).toList.distinct.length == descriptors.length,

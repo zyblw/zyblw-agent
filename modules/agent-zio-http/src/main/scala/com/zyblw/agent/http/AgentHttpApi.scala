@@ -101,9 +101,6 @@ final class AgentHttpApi(
           state      <- runtime.inspect(parsed)
           actor      <- contexts.resolve(request)
           authorized <- RunAuthorization.read(state, actor)
-          _          <- ZIO
-            .fromOption(authorized.threadId)
-            .orElseFail(AgentError.PersistenceFailure("Run 缺少 threadId"))
         yield Response.json(AgentHttpProjection.run(authorized).toJson))
           .catchAll(error => ZIO.succeed(errorResponse(error)))
       },

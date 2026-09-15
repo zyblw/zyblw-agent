@@ -5,6 +5,83 @@ All notable user-visible changes will be recorded here. The project follows
 
 ## 0.9.0 - Unreleased
 
+### 破坏性变更：耐久形状归位（无原地升级路径，需重建数据库）
+
+本版本删除全部历史 schema 的读取分支。0.9.x 之前的数据库**无法原地升级**：`agent_runs.schema_version` 的 CHECK 已从
+`> 0` 收紧为 `= 1`，旧行会被数据库直接拒绝。这是刻意的——保留兼容读取分支等于保留"字段缺失所以跳过安全检查"的降级路径。
+
+四类破坏分别是：
+
+- **Scala API**：`AgentState.definition` / `composition` / `threadId` 由 `Option` 改为必填；`DurableToolPlan` 删除 v5 的
+  `approvalRequiredCallIds`，`approvalSubjects` 与 `toolContractFingerprints` 改为必填（空 `Map` 表示"已冻结且无需审批"，
+  与"尚未冻结"不再混为一谈），`frozenApprovalCallIds` 返回 `Set[String]`；`RouteDecision.legacyExplicitModel` 更名为
+  `explicitModelPinned`；`AgentEvalDatasetProvenance` 删除 v1 的 `reviewerId`。
+- **数据库**：`V001__zyblw_agent_0_9_baseline.sql` 原地重写，不新增 V002。
+- **Durable payload**：`AgentState.CurrentSchemaVersion`、`IncidentPack.SchemaVersion`、
+  `AgentEvalDatasetProvenance.CurrentSchemaVersion` 全部归位为 `1`。
+- **HTTP**：`GET /api/v1/runs/{id}` 的 `threadId` 不再可能缺失。
+
+随之删除的降级路径：组合指纹缺失时跳过漂移拒绝、工具契约指纹为空时跳过契约校验、审批主体缺失时回落到 `callId` 匹配、
+`definition_snapshot_missing` 诊断。
+
+### 统一挂起（Suspension）
+
+- `AgentState.pendingApproval` 被 `suspension: Option[SuspensionRecord]` 取代；审批只是 `Suspension.Approval` 一种等待。
+  非审批等待写入 `RunStatus.Suspended` 与 `AgentEvent.RunSuspended`；审批仍映射到 `WaitingForApproval`。
+- 挂起可带 `deadline` 与到期决议（`FailRun` / `ResumeWithDefault`）。`SuspensionExpiryWorker` 按 Workflow wake worker 的
+  `expireDue` + claim + lease 模式推进到期项，决议经 `RunCommitter` 写回权威状态。
+- 表 `approval_requests` 归位为 `agent_suspensions`（kind / deadline / expiry_outcome / Pending|Expired|Resolved + lease）。
+  索引不是第二事实源：挂起正文仍在 `state_json`。
+- Workflow `signal` 必须绑定 `AuthorizationFingerprint`；相同 signalId 换指纹视为冲突。`HumanTask` 可声明期望指纹。
+- HTTP `RunView` 增加可选 `suspension`（kind / deadline / expiryOutcome），`pendingApproval` 仍作为审批派生摘要保留。
+
+### Artifact-first 大工具结果
+
+- `ArtifactScope` / `ArtifactReference` 下沉到 `core`，新增 `Run` 隔离域；scope 只从 `ToolExecutionContext` 派生。
+- `ToolResult` 分为 `Inline` / `Externalized`。超过 `externalizeAboveBytes`（默认 32KB）的结果在 Guardrail 全文检查之后外置，
+  硬上限 `maxResultBytes` 仍失败。`ToolExecutor` 由 Runtime Scope 持有，注入 `ArtifactStore`。
+- 内建 `read_artifact`（ReadOnly）按当前 Run 域读取，经 `ArtifactAccessGrant` 授权。
+- 已外置结果在 Context 压缩中跳过，只保留 preview。
+
+### RunTrajectory 只读投影
+
+- 新增 `RunTrajectory`：把时间线、模型账本（含 `sectionDecisions`）、工具账本（`attempt` / `Unknown`）、挂起、控制面命令（含 DeadLetter）和组合对照收成一份只读投影，不是第二事实源。
+- `IncidentPack` 与 Eval `TrajectoryReplay` 统一消费该投影；脱敏门禁检查轨迹 JSON，Replayable 深比较仍使用账本 Canonical 正文。
+- 进程内 `RunEventStream.liveEvents` 产出 `LiveAgentEvent`，与 `RunStore.events` 的 `PersistedAgentEvent` 不能互相赋值。
+
+### 生产证据门禁
+
+- PostgreSQL conformance 覆盖 `agent_suspensions` 到期索引、Run 域 artifact 读回，以及 `CompositionDriftDetected` 事件耐久。
+- `verify-local-evidence.sh` 要求 `AgentSchemaInventory.Authoritative` 中每一张表都出现在 postgres `*ConformanceSpec` 或 `*IntegrationSpec` 正文中，不再用 8 张表白名单冒充全集覆盖。
+- `failover-drill.sh` 在备库提升后跑 `FailoverDurablePathProbe`：挂起到期 Worker 与 artifact blob 读回。7 项宿主证据仍为 `deferred`。
+
+### 管理面与控制台对齐最新契约
+
+- `AdminCompositionView` 嵌套 `CompositionComparisonView`（frozen / live / changedFields）。控制台 Inspect 面板按该形状渲染对照与漂移，不再读取已删除的扁平指纹字段。
+- Run 目录与总览暴露 `awaitingSignal` / `suspensionKind` / `suspensionDeadlineEpochMilli`，命中 V001 `awaiting_signal` 生成列；HTTP `GET /api/v1/admin/runs/{id}/suspension` 返回挂起信封。
+- 控制台状态过滤与色板使用真实 `RunStatus`（`WaitingForApproval` / `Suspended` / `Completed`），不再使用不存在的 `AwaitingApproval` / `Succeeded`。
+
+### Tool Search 评测门禁
+
+- 新增 320 工具固定 Eval：按需目录相对全量目录必须降低 token，目标工具召回为 1，加载后权限只能收窄并进入组合指纹与轨迹。
+- 本版本**不扩张** Tool Search Runtime API；没有收益证据前不把按需目录变成公共装配面。
+
+### Functional Kernel / Runtime Driver
+
+- 删除混合纯状态判断与 ZIO 效果的 `AgentRuntimeLive`，以无 I/O 的 `AgentKernel` 和唯一 `AgentRuntimeDriver` 取代；业务公共入口 `AgentRuntime` / `AgentApplication` 不变。
+- 恢复分派、预算、Model turn settlement、Tool batch 游标/usage/events、终态 outcome 与审批需求现在可直接做纯测试；Driver 仍独占 Provider/Tool/Store/Clock/Fiber/Scope 以及 CAS/fenced commit。
+- Kernel 现在验证状态迁移来源以及模型工具调用与 `DurableToolPlan` 的一一对应关系；终态不会被迟到失败覆盖。Kernel 只返回领域层模型结算事实，由 Driver 转换为 `ModelCallWrite`，不再依赖路由或持久化 package。
+- 数据库、HTTP、`AgentState` JSON、Model/Tool ledger 与 Flyway 均未改变；现有恢复、取消、审批和 Unknown 语义继续由全套 Runtime 测试锁定。
+
+### Context Authority、Prompt Lineage 与 Cache 非权威化
+
+- Memory、RAG、world-state 与历史摘要不再以 `System` 发送；只有 Agent/Host 配置可产生 System/Developer 指令，其余资料经转义后的 `User` `<context-data>` envelope 进入模型。
+- `PromptCompiler` 是模型调用前的纯验证边界：拒绝后置高权限指令、Secret 出站、伪造 role 和非 RuntimeDerived 的 RuntimeControl；稳定前缀与整体 plan 指纹写入既有 `ModelCallExecutionRecord.lineage`，不新建 Prompt Store。
+- Runtime Status 是 `AgentState` 的低敏纯投影，只在 recent 分区有剩余空间时放在动态尾部；空间不足时省略并记录 `context-runtime-status-omitted`，不挤掉当前用户回合。
+- ToolResult 在 Guardrail 看过全文后只物化一次；部署字节阈值或 Agent 字符阈值任一超限即外置。Context 只验证已冻结表示，不再二次压缩 Tool 消息。
+- `PromptCacheCapability` 取代 Boolean。`inputTokens` 是逻辑总输入，cache read/write 都是其中子集；预算按逻辑总量，价格按 fresh/read/write/output 分别计算。缓存未命中、过期或清空不改变授权、恢复或预算结果。
+- Anthropic 在完成 `cache_control` wire contract 前保持 Unsupported；OpenAI Responses 与 Gemini Interactions 只声明已验证的 implicit-read。模型辅助摘要的 Provider 调用与 checkpoint 提交之间仍有不确定窗口，生产默认仍是确定性压缩。
+
 ### Durable Worker reliability
 
 - Normal cancellation, lease preemption, and generation takeover now stop only the affected command. The claim lane remains available for unrelated Runs while stale completion remains fenced.

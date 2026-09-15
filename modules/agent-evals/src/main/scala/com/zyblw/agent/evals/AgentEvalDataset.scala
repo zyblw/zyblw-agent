@@ -45,8 +45,6 @@ final case class AgentEvalDatasetProvenance(
     changeId: String,
     ownerId: String,
     reviewStatus: EvalDatasetReviewStatus,
-    /** v1 单审字段，只用于读取历史清单；v2 发布门禁要求 reviewerIds。 */
-    reviewerId: Option[String],
     reviewedAt: Option[Instant],
     contentSha256: String,
     /** 至少两名独立审查者的低敏组织身份。框架只验证声明完整性，不替代宿主 RBAC/电子签名。 */
@@ -58,7 +56,8 @@ final case class AgentEvalDatasetProvenance(
 ) derives JsonCodec
 
 object AgentEvalDatasetProvenance:
-  val CurrentSchemaVersion = 2
+  /** 与其余耐久形状一同归位；`validateIntegrity` 要求精确等值，不接受历史清单。 */
+  val CurrentSchemaVersion = 1
 
 /** 带 provenance 和内容绑定的 Agent 评测数据集。
   *

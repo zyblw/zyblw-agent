@@ -14,8 +14,9 @@ import zio.test.*
 
 /** 真实 PostgreSQL 16 下的 Workflow checkpoint 契约。
   *
-  * 覆盖 0.3 fresh baseline、跨 Store 幂等/单调仲裁、identity 隔离、checksum fail-closed、execution timeline、durable wait，
-  * 以及暂停后由另一 Adapter 实例恢复。
+  * 覆盖 `agent_workflow_checkpoints`、`agent_workflow_node_executions`、`agent_workflow_waits` 与
+  * `agent_workflow_signals`：跨 Store 幂等/单调仲裁、identity 隔离、checksum fail-closed、execution timeline、durable
+  * wait，以及暂停后由另一 Adapter 实例恢复。
   */
 object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
   final private case class WorkflowState(value: Int, notes: Chunk[String]) derives JsonCodec
@@ -29,7 +30,10 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
 
   private val workflowId      = WorkflowId("postgres-workflow-spec")
   private val workflowVersion = WorkflowVersion(1)
-  private val entry           = NodeId("entry")
+  private val signalAuth      = com.zyblw.agent.composition.AuthorizationFingerprint.of(RunContext())
+  private val otherSignalAuth =
+    com.zyblw.agent.composition.AuthorizationFingerprint.of(RunContext(tenantId = Some("other-tenant")))
+  private val entry = NodeId("entry")
 
   private val harnessLayer: ZLayer[Any, Throwable, Harness] = ZLayer.scoped {
     for
@@ -382,16 +386,21 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
           wait.key,
           WorkflowSignalId("webhook-1"),
           signalName,
-          "approved"
+          "approved",
+          signalAuth
         )
         duplicate <- harness.storeA.signal(
           wait.key,
           WorkflowSignalId("webhook-1"),
           signalName,
-          "approved"
+          "approved",
+          signalAuth
         )
         conflict <- harness.storeB
-          .signal(wait.key, WorkflowSignalId("webhook-1"), signalName, "changed")
+          .signal(wait.key, WorkflowSignalId("webhook-1"), signalName, "changed", signalAuth)
+          .either
+        authConflict <- harness.storeB
+          .signal(wait.key, WorkflowSignalId("webhook-1"), signalName, "approved", otherSignalAuth)
           .either
         resolved <- harness.storeA
           .currentWait(runId)
@@ -436,8 +445,10 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
         accepted.disposition == WorkflowSignalDisposition.Accepted,
         duplicate.disposition == WorkflowSignalDisposition.Duplicate,
         conflict.left.exists(_.category == ErrorCategory.Conflict),
+        authConflict.left.exists(_.category == ErrorCategory.Conflict),
         resolved.status == WorkflowWaitStatus.Signaled,
         resolved.signal.exists(_.payload == "approved"),
+        resolved.signal.exists(_.authorization == signalAuth),
         remaining.isEmpty
       )).provideLayer(harnessLayer)
     },
@@ -486,7 +497,8 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
           wait.key,
           WorkflowSignalId("wake-concurrent-1"),
           signalName,
-          "ready"
+          "ready",
+          signalAuth
         )
         dispatchableSnapshot <- harness.storeA.wakeQueueSnapshot(workflowId, workflowVersion)
         raced                <- harness.storeA
@@ -596,7 +608,7 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
           .someOrFail(AgentError.PersistenceFailure("postgres wait missing"))
         _     <- Live.live(ZIO.sleep(1200.millis))
         raced <- harness.storeA
-          .signal(wait.key, WorkflowSignalId("late-webhook"), signalName, "late")
+          .signal(wait.key, WorkflowSignalId("late-webhook"), signalName, "late", signalAuth)
           .zipPar(harness.storeB.expireDue())
         resolved <- harness.storeA
           .currentWait(runId)

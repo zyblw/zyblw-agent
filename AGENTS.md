@@ -41,13 +41,15 @@ lifecycle, protocol, security, or license boundary plus an ADR.
 The only supported version line is `0.9.0`: folded Flyway (core + 1024 knowledge each a single V001), retrieval modes, knowledge HTTP, citation source types, and `KnowledgeQaHost`.
 Installation starts from an empty database and follows `docs/fresh-install-0.9.0.md`.
 
+Internal runtime structure is Functional Kernel + Driver ([ADR-0028](docs/architecture/0028-functional-kernel-runtime-driver.md)): pure `AgentKernel` decides, `AgentRuntimeDriver` owns effects. Public entry remains `AgentRuntime` / `AgentApplication`. Context authority and Prompt Cache are governed by [ADR-0029](docs/architecture/0029-context-authority-prompt-lineage.md) and [prompt-runtime.md](docs/prompt-runtime.md): Memory/RAG/summary never become System, and cache is not a fact source.
+
 Maturity is tracked per capability in `docs/maturity-and-roadmap.md`, not per module. As of
 `0.9.0`:
 
-- **Foundation**: runtime loop, typed tools and policy, durable command worker, layered
-  instructions, business HTTP v1, run inspection.
-- **Beta**: context and memory, RAG and document loading, providers, admin surface and console,
-  model governance, PostgreSQL, OTLP/Langfuse, cost estimation, Artifact metadata store.
+- **Foundation**: runtime loop (`AgentKernel` + `AgentRuntimeDriver`), typed tools and policy, durable command worker, layered
+  instructions, unified `Suspension`, business HTTP v1, run inspection / `RunTrajectory`.
+- **Beta**: context and memory (`PromptCompiler`, data envelopes), RAG and document loading, providers, admin surface and console,
+  model governance, PostgreSQL, OTLP/Langfuse, cost estimation, Artifact metadata store and Run-scoped externalized tool results.
 - **Experimental**: workflow graph, side-effect tooling, MCP (locked to 2025-11-25),
   workspace/sandbox, evaluation trend gating, Harness/Skill. Multimodal and knowledge-graph
   packages were removed; do not document them as current capabilities.
@@ -61,7 +63,9 @@ Deepen the verified mainline instead of widening the module surface. The authori
 is the Wave 0–3 roadmap in
 [ADR-0019](docs/architecture/0019-typed-extensions-and-constrained-execution.md) and
 [the handbook](docs/architecture/next-generation-runtime.md); kernel invariants remain governed by
-[ADR-0018](docs/architecture/0018-next-generation-runtime-kernel.md). In priority order:
+[ADR-0018](docs/architecture/0018-next-generation-runtime-kernel.md), with the current Kernel/Driver
+split in [ADR-0028](docs/architecture/0028-functional-kernel-runtime-driver.md) and context authority
+in [ADR-0029](docs/architecture/0029-context-authority-prompt-lineage.md). In priority order:
 
 1. Wave 0 production evidence: v6 approval-subject PostgreSQL gates and the operations runbook are in
    the repo; long-running soak, node kill, database failover and capacity SLO calibration remain

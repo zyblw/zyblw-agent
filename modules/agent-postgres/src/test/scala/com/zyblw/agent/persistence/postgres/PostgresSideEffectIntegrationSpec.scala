@@ -1,6 +1,7 @@
 package com.zyblw.agent.persistence.postgres
 
 import com.dimafeng.testcontainers.PostgreSQLContainer
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.RunStore
 import com.zyblw.agent.sideeffects.*
@@ -16,7 +17,9 @@ import zio.test.*
 
 /** 真实 PostgreSQL 16 可靠副作用契约。
   *
-  * 这些测试不能由内存 Map 或 H2 取代，因为它们验证的正是 transaction rollback、唯一约束等待、`SKIP LOCKED`、 TIMESTAMPTZ 和 lease fencing。
+  * 覆盖 `agent_business_operations`、`agent_outbox_events`、`agent_inbox_messages` 与
+  * `agent_compensations`。这些测试不能由 内存 Map 或 H2 取代，因为它们验证的正是 transaction rollback、唯一约束等待、`SKIP
+  * LOCKED`、TIMESTAMPTZ 和 lease fencing。
   */
 object PostgresSideEffectIntegrationSpec extends ZIOSpecDefault:
   final private case class Services(
@@ -89,6 +92,9 @@ object PostgresSideEffectIntegrationSpec extends ZIOSpecDefault:
     )
   }
 
+  private val sideEffectAgent =
+    AgentDefinition(AgentId("side-effect-pg-test"), "Side Effect PG", "副作用审计测试")
+
   /** 创建最小 Run，保持 side-effect 审计中的 runId 对应真实 AgentState。 */
   private def createRun(store: RunStore): UIO[RunId] =
     (for
@@ -109,6 +115,10 @@ object PostgresSideEffectIntegrationSpec extends ZIOSpecDefault:
         now,
         now,
         Version.initial,
+        sideEffectAgent,
+        RuntimeComposition
+          .fingerprint(RuntimeProfile.default, sideEffectAgent, sideEffectAgent.modelSettings),
+        ThreadId("side-effect-pg-thread"),
         runContext = RunContext(userId = Some("user-1")),
         lastEventSequence = 0L
       )

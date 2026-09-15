@@ -2,11 +2,11 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-11
+> 最后核验：2026-09-16
 >
 > 事实来源：对应模块源码、测试与构建定义
 
-> **下一阶段：** [ADR-0018](architecture/0018-next-generation-runtime-kernel.md)、[ADR-0019](architecture/0019-typed-extensions-and-constrained-execution.md) 与 [下一代 Runtime 开发手册](architecture/next-generation-runtime.md)。P0 Kernel、P1 Composition 与 P2 Harness 已落地；Wave 1 与 Wave 2 第一刀已纳入当前 `0.9.0`。后续：Wave 3 Tree/Fork/Replay 与编排（仍为 Proposed，需 Eval 门禁）。Wave 0 的宿主环境 soak/主备切换仍待。[Model Runtime 现状审计](architecture/model-runtime-current-state.md) 与 [目标架构](architecture/model-runtime-target.md) 是 Phase 0 文档，编码尚未开始。下面正文描述含已落地切片的现行架构。
+> **下一阶段：** [ADR-0018](architecture/0018-next-generation-runtime-kernel.md)、[ADR-0019](architecture/0019-typed-extensions-and-constrained-execution.md) 与 [下一代 Runtime 开发手册](architecture/next-generation-runtime.md)。P0 Kernel、P1 Composition 与 P2 Harness 已落地；Functional Kernel / Runtime Driver 已按 [ADR-0028](architecture/0028-functional-kernel-runtime-driver.md) 收口。后续：继续按变化原因缩小 Driver；Wave 3 Tree/Fork/Replay 与编排仍需 Eval 门禁。Wave 0 的宿主环境 soak/主备切换仍待。[Model Runtime 现状审计](architecture/model-runtime-current-state.md) 与 [目标架构](architecture/model-runtime-target.md) 是历史 Phase 0 输入，不再代表“尚未编码”。
 
 ## 设计边界
 
@@ -79,7 +79,8 @@ flowchart LR
 `DataSource` 时仍有独立 Flyway 生命周期：核心 0.9 V001 管理宿主默认 schema，1024 维知识 0.9 V001 固定管理 `zyblw_agent_knowledge`，运行时 SQL 不依赖
 `search_path`。OCR、LLM、Embedding 和对象存储调用全部在数据库事务之外完成。
 
-下图是当前已经落地的主路径。HTTP、CLI 与恢复 worker 都调用同一个 `AgentRuntime`；`ContextManager`、
+下图是当前已经落地的主路径。HTTP、CLI 与恢复 worker 都调用同一个 `AgentRuntime`；纯 `AgentKernel` 只归约决定和状态，
+`AgentRuntimeDriver` 执行 ZIO 效果并通过 `RunStore` 提交；`ContextManager` 经 `PromptCompiler` 冻结权限与 lineage，
 `GuardrailEngine`、`RegisteredToolRegistry`、`ToolExecutor` 和 `RunStore` 已进入同一状态机。
 
 ```mermaid
@@ -95,6 +96,7 @@ flowchart LR
   App --> Scheduler[WorkerHost]
   HTTP --> Control
   HTTP --> Runtime[ZIO Agent Runtime]
+  Runtime --> Kernel[Pure AgentKernel]
   Runtime --> Context[Context Manager]
   Runtime --> Provider[Model Provider SPI]
   Runtime --> Policy[Tool Policy + Guardrails]
@@ -200,6 +202,10 @@ sequenceDiagram
 - [0025 模型成本与预算](architecture/0025-model-cost-and-budget.md)
 - [0026 Provider Capability 模型](architecture/0026-provider-capability-model.md)
 - [0027 RAG Retrieval Runtime 绿场基线](architecture/0027-rag-retrieval-runtime.md)
+- [0028 Functional Kernel 与 ZIO Runtime Driver](architecture/0028-functional-kernel-runtime-driver.md)
+- [0029 Context Authority、Prompt Lineage 与 Cache 非权威化](architecture/0029-context-authority-prompt-lineage.md)
+- [Prompt Runtime、Context Authority 与 Cache 接入](prompt-runtime.md)
+- [Runtime、Context 与 Prompt Cache 一体化演进方案](architecture/runtime-context-evolution-plan.md)
 - [Model Runtime 现状审计（Phase 0）](architecture/model-runtime-current-state.md)
 - [Model Runtime 目标架构](architecture/model-runtime-target.md)
 - [模型路由](architecture/model-routing.md)

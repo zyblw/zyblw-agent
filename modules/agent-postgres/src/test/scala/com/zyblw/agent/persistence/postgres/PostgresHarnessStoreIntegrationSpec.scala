@@ -2,6 +2,7 @@ package com.zyblw.agent.persistence.postgres
 
 import com.dimafeng.testcontainers.PostgreSQLContainer
 import com.zyblw.agent.artifacts.*
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.harness.*
 import com.zyblw.agent.memory.RunStore
@@ -12,7 +13,11 @@ import zio.*
 import zio.json.*
 import zio.test.*
 
-/** 真实 PostgreSQL 16 验证 Harness CAS、外键、预算账本与恢复对账。 */
+/** 真实 PostgreSQL 16 验证 Harness CAS、外键、预算账本与恢复对账。
+  *
+  * 覆盖 `harness_goals`、`harness_plans`、`harness_skills`、`harness_interactions` 与
+  * `harness_budget_reservations`。
+  */
 object PostgresHarnessStoreIntegrationSpec extends ZIOSpecDefault:
   private val artifact = ArtifactReference(
     ArtifactScope.Session(SessionId(java.util.UUID.fromString("00000000-0000-0000-0000-000000000020"))),
@@ -397,6 +402,9 @@ object PostgresHarnessStoreIntegrationSpec extends ZIOSpecDefault:
       finally connection.close()
     }
 
+  private val harnessAgent =
+    AgentDefinition(AgentId("postgres-budget-reconciler"), "Budget Reconciler", "预算对账")
+
   private def createRun(store: RunStore): UIO[RunId] =
     (for
       runId   <- RunId.random
@@ -416,6 +424,9 @@ object PostgresHarnessStoreIntegrationSpec extends ZIOSpecDefault:
         now,
         now,
         Version.initial,
+        harnessAgent,
+        RuntimeComposition.fingerprint(RuntimeProfile.default, harnessAgent, harnessAgent.modelSettings),
+        ThreadId("harness-store-thread"),
         lastEventSequence = 0L
       )
       created = PersistedAgentEvent(

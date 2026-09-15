@@ -76,6 +76,18 @@ enum AgentEvent derives JsonCodec:
   case GuardrailEvaluated(runId: RunId, stage: String, allowed: Boolean, atEpochMilli: Long)
   case UsageUpdated(runId: RunId, usage: UsageSummary, atEpochMilli: Long)
   case CheckpointSaved(runId: RunId, version: Version, atEpochMilli: Long)
+
+  /** 冻结组合与现场组合不一致，本次恢复或模型调用被 fail-closed 拒绝。
+    *
+    * 只携带 `kind`（`incompatible` / `requires-revalidation`）与变化属性名，不携带任何一侧取值，因此可以进入 metric 维度与公共投影。它是 observer
+    * 判定漂移的**唯一**依据：不允许再靠匹配错误信息文本反推。
+    */
+  case CompositionDriftDetected(
+      runId: RunId,
+      kind: String,
+      changedFields: Chunk[com.zyblw.agent.composition.CompositionDriftField],
+      atEpochMilli: Long
+  )
   case RunSuspended(runId: RunId, reason: String, atEpochMilli: Long)
   case RunCompleted(runId: RunId, answer: AgentMessage, usage: UsageSummary, atEpochMilli: Long)
   case RunFailed(runId: RunId, category: String, safeMessage: String, atEpochMilli: Long)

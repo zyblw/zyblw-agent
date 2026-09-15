@@ -29,7 +29,6 @@ object AgentEvalDatasetSpec extends ZIOSpecDefault:
       values: Chunk[AgentEvalCase] = cases,
       digestCases: Chunk[AgentEvalCase] = cases,
       status: EvalDatasetReviewStatus = EvalDatasetReviewStatus.Approved,
-      reviewerId: Option[String] = Some("reviewer-1"),
       approvedAt: Option[Instant] = Some(reviewedAt),
       reviewerIds: Set[String] = Set("reviewer-1", "reviewer-2"),
       sources: Set[EvalDatasetSource] = Set(EvalDatasetSource.Curated, EvalDatasetSource.IncidentRedacted),
@@ -45,7 +44,6 @@ object AgentEvalDatasetSpec extends ZIOSpecDefault:
         changeId = "change-42",
         ownerId = "eval-team",
         reviewStatus = status,
-        reviewerId = reviewerId,
         reviewedAt = approvedAt,
         contentSha256 = AgentEvalDataset.contentSha256(digestCases),
         reviewerIds = reviewerIds,
@@ -99,7 +97,6 @@ object AgentEvalDatasetSpec extends ZIOSpecDefault:
     test("草稿、缺失审查身份和版本漂移都 fail-closed") {
       val draft = dataset(
         status = EvalDatasetReviewStatus.Draft,
-        reviewerId = None,
         approvedAt = None
       )
       val versionDrift = dataset(values = cases.updated(1, second.copy(datasetVersion = "dataset-v2")))

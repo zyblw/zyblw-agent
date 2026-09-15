@@ -10,7 +10,9 @@ CREATE TABLE agent_runs (
   agent_id TEXT NOT NULL CHECK (length(trim(agent_id)) > 0),
   status TEXT NOT NULL,
   version BIGINT NOT NULL CHECK (version >= 0),
-  schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+  -- 精确等值而不是 > 0：本版本不保留任何历史 schema 的读取分支，写入或读回旧形状必须在数据库层就失败，
+  -- 而不是让应用层出现"字段缺失所以跳过安全检查"的降级路径。
+  schema_version INTEGER NOT NULL CHECK (schema_version = 1),
   state_json JSONB NOT NULL,
   cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
   -- 仅异步 StartRun 使用；哈希列不保存原始身份或提示词。
@@ -21,8 +23,13 @@ CREATE TABLE agent_runs (
     GENERATED ALWAYS AS (state_json #>> '{runContext,tenantId}') STORED,
   user_id TEXT
     GENERATED ALWAYS AS (state_json #>> '{runContext,userId}') STORED,
+  -- 从 status 而不是 state_json 内部结构派生：Suspension.Approval 与 WaitingForApproval 由内核一对一绑定，因此状态列
+  -- 就是权威事实。旧写法探测 state_json -> 'pendingApproval' 是否为对象，把管理台索引耦合到了一个内部 JSON 字段名上。
   awaiting_approval BOOLEAN NOT NULL
-    GENERATED ALWAYS AS (COALESCE(jsonb_typeof(state_json -> 'pendingApproval') = 'object', FALSE)) STORED,
+    GENERATED ALWAYS AS (status = 'WaitingForApproval') STORED,
+  -- 非审批类挂起（等信号、等人工输入、等计时器）的标记，供控制面区分"等人批"与"等外部事件"。
+  awaiting_signal BOOLEAN NOT NULL
+    GENERATED ALWAYS AS (status = 'Suspended') STORED,
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   CHECK (
@@ -46,6 +53,9 @@ CREATE INDEX agent_runs_admin_tenant_updated_idx
 CREATE INDEX agent_runs_admin_approval_idx
   ON agent_runs(updated_at DESC, run_id DESC)
   WHERE awaiting_approval;
+CREATE INDEX agent_runs_admin_signal_idx
+  ON agent_runs(updated_at DESC, run_id DESC)
+  WHERE awaiting_signal;
 CREATE INDEX agent_runs_admin_agent_updated_idx ON agent_runs(agent_id, updated_at DESC, run_id DESC);
 
 CREATE TABLE agent_events (
@@ -79,18 +89,66 @@ CREATE UNIQUE INDEX tool_executions_idempotency_idx
 CREATE UNIQUE INDEX tool_executions_batch_ordinal_idx ON tool_executions(run_id, batch_id, ordinal);
 CREATE INDEX tool_executions_batch_status_idx ON tool_executions(run_id, batch_id, status, ordinal);
 
-CREATE TABLE approval_requests (
-  approval_id TEXT PRIMARY KEY,
-  run_id UUID NOT NULL REFERENCES agent_runs(run_id) ON DELETE CASCADE,
-  call_id TEXT NOT NULL,
-  status TEXT NOT NULL,
-  request_json JSONB NOT NULL,
-  decision_json JSONB,
+-- 挂起的到期索引。取代了原先的 approval_requests：那张表只覆盖审批一种等待，且没有 deadline，因此进程退出后不再有任何
+-- 计时器，一次未决审批可以无声地挂到永远。
+--
+-- 这张表**不保存挂起正文**：ApprovalRequest、prompt 与 signal 名都留在 agent_runs.state_json 里，权威事实只有一份。这里只
+-- 保存到期决议所需的低敏字段（kind / deadline / 决议动作）与 lease 列，让 SuspensionExpiryWorker 能在不解包业务数据的前提下
+-- 发现并排他领取到期项。
+CREATE TABLE agent_suspensions (
+  run_id UUID PRIMARY KEY REFERENCES agent_runs(run_id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('approval', 'human-input', 'external-signal', 'timer')),
+  -- NULL 表示无限期等待，此时该行不进入到期索引。
+  deadline TIMESTAMPTZ,
+  expiry_outcome TEXT NOT NULL CHECK (expiry_outcome IN ('FailRun', 'ResumeWithDefault')),
+  status TEXT NOT NULL CHECK (status IN ('Pending', 'Expired', 'Resolved')),
   created_at TIMESTAMPTZ NOT NULL,
-  decided_at TIMESTAMPTZ
+  resolved_at TIMESTAMPTZ,
+  expiry_generation BIGINT NOT NULL DEFAULT 0 CHECK (expiry_generation >= 0),
+  expiry_owner TEXT,
+  expiry_token UUID,
+  expiry_claimed_at TIMESTAMPTZ,
+  expiry_lease_expires_at TIMESTAMPTZ,
+  expiry_heartbeat_at TIMESTAMPTZ,
+  -- 无 deadline 时不能声明非默认到期决议：一个既没有 deadline 又宣称"到期按默认值继续"的行是自相矛盾的。
+  CHECK (deadline IS NOT NULL OR expiry_outcome = 'FailRun'),
+  CHECK (deadline IS NULL OR deadline > created_at),
+  -- 三态与 resolved_at 严格互推。
+  CHECK (
+    (status = 'Pending' AND resolved_at IS NULL)
+    OR (status IN ('Expired', 'Resolved') AND resolved_at IS NOT NULL)
+  ),
+  -- Expired 必须有 deadline：没有 deadline 的挂起不可能到期。
+  CHECK (status <> 'Expired' OR deadline IS NOT NULL),
+  -- lease 列要么全空，要么全非空且只在 Expired 上持有。
+  CHECK (
+    (
+      expiry_owner IS NULL AND expiry_token IS NULL AND expiry_claimed_at IS NULL
+      AND expiry_lease_expires_at IS NULL AND expiry_heartbeat_at IS NULL
+    )
+    OR (
+      status = 'Expired'
+      AND expiry_owner IS NOT NULL AND expiry_token IS NOT NULL AND expiry_claimed_at IS NOT NULL
+      AND expiry_lease_expires_at IS NOT NULL AND expiry_heartbeat_at IS NOT NULL
+      AND expiry_generation > 0
+      AND expiry_lease_expires_at > expiry_claimed_at
+      AND expiry_heartbeat_at >= expiry_claimed_at
+      AND expiry_heartbeat_at < expiry_lease_expires_at
+    )
+  )
 );
 
-CREATE INDEX approval_requests_run_status_idx ON approval_requests(run_id, status);
+-- 到期扫描只看未决且有 deadline 的行；无限期挂起被部分索引直接排除。
+CREATE INDEX agent_suspensions_due_idx
+  ON agent_suspensions(deadline, run_id)
+  WHERE status = 'Pending' AND deadline IS NOT NULL;
+
+-- 已到期待处置的行按可领取顺序排布，供 claim 使用。
+CREATE INDEX agent_suspensions_claim_idx
+  ON agent_suspensions(deadline, run_id)
+  WHERE status = 'Expired';
+
+CREATE INDEX agent_suspensions_kind_idx ON agent_suspensions(kind, status);
 
 
 -- 长期记忆与 Run 状态分离。Deleted 行保留版本 tombstone，但不保留记忆正文。
@@ -584,6 +642,9 @@ CREATE TABLE agent_workflow_waits (
   accepted_signal_sha256 CHAR(64) CHECK (
     accepted_signal_sha256 IS NULL OR accepted_signal_sha256 ~ '^[0-9a-f]{64}$'
   ),
+  accepted_signal_authorization CHAR(64) CHECK (
+    accepted_signal_authorization IS NULL OR accepted_signal_authorization ~ '^[0-9a-f]{64}$'
+  ),
   signal_received_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   resolved_at TIMESTAMPTZ,
@@ -611,6 +672,7 @@ CREATE TABLE agent_workflow_waits (
       AND accepted_signal_id IS NULL
       AND accepted_signal_payload IS NULL
       AND accepted_signal_sha256 IS NULL
+      AND accepted_signal_authorization IS NULL
       AND signal_received_at IS NULL)
     OR
     (status = 'Signaled'
@@ -620,6 +682,7 @@ CREATE TABLE agent_workflow_waits (
       AND accepted_signal_id IS NOT NULL
       AND accepted_signal_payload IS NOT NULL
       AND accepted_signal_sha256 IS NOT NULL
+      AND accepted_signal_authorization IS NOT NULL
       AND signal_received_at IS NOT NULL)
     OR
     (status = 'TimedOut'
@@ -629,6 +692,7 @@ CREATE TABLE agent_workflow_waits (
       AND accepted_signal_id IS NULL
       AND accepted_signal_payload IS NULL
       AND accepted_signal_sha256 IS NULL
+      AND accepted_signal_authorization IS NULL
       AND signal_received_at IS NULL)
     OR
     (status = 'Consumed'
@@ -680,6 +744,7 @@ CREATE TABLE agent_workflow_signals (
   signal_name TEXT NOT NULL CHECK (signal_name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$'),
   payload TEXT NOT NULL CHECK (octet_length(payload) <= 65536),
   payload_sha256 CHAR(64) NOT NULL CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'),
+  authorization_fingerprint CHAR(64) NOT NULL CHECK (authorization_fingerprint ~ '^[0-9a-f]{64}$'),
   disposition TEXT NOT NULL CHECK (disposition IN ('Accepted', 'Late', 'AlreadyResolved')),
   received_at TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (run_id, wait_step, wait_node_id, signal_id),
@@ -839,7 +904,7 @@ CREATE INDEX harness_budget_reservations_status_created_idx
   ON harness_budget_reservations(status, created_at, run_id);
 
 CREATE TABLE agent_artifacts (
-  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('session', 'user')),
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('session', 'user', 'run')),
   scope_key TEXT NOT NULL CHECK (length(trim(scope_key)) > 0 AND length(scope_key) <= 500),
   name TEXT NOT NULL CHECK (length(trim(name)) > 0 AND length(name) <= 255),
   latest_version BIGINT NOT NULL CHECK (latest_version > 0),
@@ -870,7 +935,7 @@ CREATE INDEX agent_artifact_versions_created_idx
 CREATE TABLE agent_artifact_audit (
   audit_id UUID PRIMARY KEY,
   action TEXT NOT NULL CHECK (action IN ('save', 'read', 'delete', 'purge')),
-  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('session', 'user')),
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('session', 'user', 'run')),
   scope_key TEXT NOT NULL,
   name_hash TEXT NOT NULL CHECK (name_hash ~ '^[0-9a-f]{64}$'),
   version BIGINT CHECK (version IS NULL OR version > 0),

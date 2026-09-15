@@ -1,6 +1,6 @@
 package com.zyblw.agent.runtime
 
-import com.zyblw.agent.composition.ApprovalSubject
+import com.zyblw.agent.composition.{ApprovalSubject, CapabilityKind, CapabilityRef}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.extension.*
 import com.zyblw.agent.memory.*
@@ -139,12 +139,13 @@ object ExtensionRuntimeSpec extends ZIOSpecDefault:
           runId = suspended match
             case RunOutcome.Suspended(id, _, _, _, _) => id
             case other                                => throw IllegalStateException(other.toString)
-          frozen <- store.load(runId).map(_.composition.flatMap(_.extensionIds.headOption))
+          frozen <- store.load(runId).map(_.composition.extensionIds.headOption)
         yield (suspended, frozen)).provideLayer(layers(model, tool, extensions))
         (suspended, frozen) = result
       yield assertTrue(
         suspended.isInstanceOf[RunOutcome.Suspended],
-        frozen.contains("policy-bot@1")
+        // 冻结的是带能力类别的身份：审批评审者与普通观察者的漂移处置优先级不同。
+        frozen.contains(CapabilityRef(CapabilityKind.ApprovalReview, "policy-bot", "1"))
       )
     }
   )

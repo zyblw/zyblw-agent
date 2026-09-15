@@ -133,7 +133,7 @@ object ApprovalSubjectRuntimeSpec extends ZIOSpecDefault:
         refreshed.exists(subject => frozen.exists(_.driftFrom(subject) == List("policy"))),
         // 刷新出的请求必须换一个 ID，否则旧页面提交的决定仍会应用到它从未展示过的副作用上。
         after.map(_.id) != before.map(_.id),
-        stale.asInstanceOf[RunOutcome.Suspended].approval.reason.contains("审批主体"),
+        stale.asInstanceOf[RunOutcome.Suspended].approval.exists(_.reason.contains("审批主体")),
         completed.isInstanceOf[RunOutcome.Completed],
         afterFinal == Chunk("draft")
       )

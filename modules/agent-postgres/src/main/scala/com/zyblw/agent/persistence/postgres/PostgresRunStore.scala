@@ -12,7 +12,7 @@ import zio.json.*
   *
   * 连接由宿主 DataSource 管理；所有阻塞 JDBC 操作都放入 `attemptBlocking`，并通过 Scope 保证关闭。
   */
-final class PostgresRunStore(dataSource: DataSource) extends RunStore:
+final class PostgresRunStore(dataSource: DataSource) extends RunStore with SuspensionStore:
 
   /** 在一个短事务中插入初始状态和首批领域事件，避免出现“Run 可查询但没有 RunCreated”或相反的半提交。
     *
@@ -61,6 +61,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore:
               }
               insertEvent.executeBatch()
             finally insertEvent.close()
+            syncSuspensionIndex(connection, state)
             connection.commit()
           catch
             case error: Throwable =>
@@ -106,36 +107,58 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore:
       val updated = state.copy(version = next, updatedAt = Instant.now())
       ZIO
         .attemptBlocking {
-          val statement = connection.prepareStatement(
-            """UPDATE agent_runs SET status = ?, version = ?, schema_version = ?, state_json = ?::jsonb, updated_at = ?
+          connection.setAutoCommit(false)
+          try
+            val statement = connection.prepareStatement(
+              """UPDATE agent_runs SET status = ?, version = ?, schema_version = ?, state_json = ?::jsonb, updated_at = ?
           |WHERE run_id = ?::uuid AND version = ?
           |  AND COALESCE(state_json ->> 'lastEventSequence', '-1')::bigint = ?""".stripMargin
-          )
-          try
-            statement.setString(1, updated.status.toString)
-            statement.setLong(2, next.value)
-            statement.setInt(3, updated.schemaVersion)
-            statement.setString(4, updated.toJson)
-            setInstant(statement, 5, updated.updatedAt)
-            statement.setString(6, state.runId.asString)
-            statement.setLong(7, expectedVersion.value)
-            statement.setLong(8, state.lastEventSequence)
-            statement.executeUpdate()
-          finally statement.close()
+            )
+            val changed =
+              try
+                statement.setString(1, updated.status.toString)
+                statement.setLong(2, next.value)
+                statement.setInt(3, updated.schemaVersion)
+                statement.setString(4, updated.toJson)
+                setInstant(statement, 5, updated.updatedAt)
+                statement.setString(6, state.runId.asString)
+                statement.setLong(7, expectedVersion.value)
+                statement.setLong(8, state.lastEventSequence)
+                statement.executeUpdate()
+              finally statement.close()
+            if changed != 1 then
+              val query = connection.prepareStatement(
+                """SELECT version, COALESCE(state_json ->> 'lastEventSequence', '-1')::bigint
+                  |FROM agent_runs WHERE run_id = ?::uuid""".stripMargin
+              )
+              try
+                query.setString(1, state.runId.asString)
+                val result = query.executeQuery()
+                if result.next() then
+                  val actualVersion  = result.getLong(1)
+                  val actualSequence = result.getLong(2)
+                  if actualVersion != expectedVersion.value then throw VersionConflict(actualVersion)
+                  else throw EventSequenceConflict(state.lastEventSequence, actualSequence)
+                else throw MissingRun(state.runId)
+              finally query.close()
+            syncSuspensionIndex(connection, updated)
+            connection.commit()
+            next
+          catch
+            case error: Throwable =>
+              try connection.rollback()
+              catch case rollbackError: Throwable => error.addSuppressed(rollbackError)
+              throw error
+          finally connection.setAutoCommit(true)
         }
-        .flatMap { changed =>
-          if changed == 1 then ZIO.succeed(next)
-          else
-            currentRunPosition(connection, state.runId).flatMap { case (actualVersion, actualSequence) =>
-              if actualVersion != expectedVersion then
-                ZIO.fail(AgentError.OptimisticLock(expectedVersion, actualVersion))
-              else
-                ZIO.fail(
-                  AgentError.PersistenceFailure(
-                    s"save 不能改变事件游标: runId=${state.runId.asString}, expected=$actualSequence, incoming=${state.lastEventSequence}"
-                  )
-                )
-            }
+        .mapError {
+          case VersionConflict(actual) => AgentError.OptimisticLock(expectedVersion, Version(actual))
+          case MissingRun(runId)       => AgentError.RunNotFound(runId)
+          case EventSequenceConflict(expected, actual) =>
+            AgentError.PersistenceFailure(
+              s"save 不能改变事件游标: runId=${state.runId.asString}, expected=$actual, incoming=$expected"
+            )
+          case error => databaseError("保存 Agent 状态失败", error)
         }
   }
 
@@ -249,6 +272,8 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore:
             verifyEventIdentities(connection, events)
 
             writeModelCall(connection, modelCall)
+
+            syncSuspensionIndex(connection, updated)
 
             connection.commit()
             next
@@ -611,6 +636,24 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore:
       }
     }
 
+  def listToolExecutions(runId: RunId): IO[StoreError, Chunk[ToolExecutionRecord]] =
+    withConnection { connection =>
+      ZIO.attemptBlocking {
+        val statement = connection.prepareStatement(
+          """SELECT run_id::text, batch_id, ordinal, call_id, tool_name, idempotency_key,
+            | status, attempt, record_json::text
+            |FROM tool_executions WHERE run_id = ?::uuid ORDER BY batch_id, ordinal""".stripMargin
+        )
+        try
+          statement.setString(1, runId.asString)
+          val result  = statement.executeQuery()
+          val builder = ChunkBuilder.make[ToolExecutionRecord]()
+          while result.next() do builder += decodeToolEnvelope(result, runId, None)
+          builder.result()
+        finally statement.close()
+      }
+    }
+
   def getModelCall(
       runId: RunId,
       requestId: ModelRequestId
@@ -899,6 +942,263 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore:
   private def setInstant(statement: PreparedStatement, index: Int, value: Instant): Unit =
     statement.setObject(index, value.atOffset(ZoneOffset.UTC))
 
+  def expireDue(limit: Int): IO[StoreError, Chunk[RunId]] = withConnection { connection =>
+    ZIO
+      .attemptBlocking {
+        val statement = connection.prepareStatement(
+          """WITH due AS (
+            |  SELECT run_id
+            |  FROM agent_suspensions
+            |  WHERE status = 'Pending' AND deadline IS NOT NULL AND deadline <= clock_timestamp()
+            |  ORDER BY deadline ASC, run_id ASC
+            |  FOR UPDATE SKIP LOCKED
+            |  LIMIT ?
+            |), updated AS (
+            |  UPDATE agent_suspensions AS suspensions
+            |  SET status = 'Expired', resolved_at = clock_timestamp()
+            |  FROM due
+            |  WHERE suspensions.run_id = due.run_id
+            |  RETURNING suspensions.run_id
+            |)
+            |SELECT run_id::text FROM updated""".stripMargin
+        )
+        try
+          statement.setInt(1, math.max(1, limit))
+          val result  = statement.executeQuery()
+          val builder = ChunkBuilder.make[RunId]()
+          while result.next() do
+            builder += RunId
+              .fromString(result.getString(1))
+              .fold(message => throw IllegalStateException(message), identity)
+          builder.result()
+        finally statement.close()
+      }
+      .mapError(error => databaseError("决议到期挂起失败", error))
+  }
+
+  def claimExpired(
+      owner: WorkerId,
+      leaseDuration: Duration,
+      limit: Int
+  ): IO[StoreError, Chunk[SuspensionLease]] = withConnection { connection =>
+    LeaseToken.random.flatMap { token =>
+      ZIO
+        .attemptBlocking {
+          connection.setAutoCommit(false)
+          try
+            val select = connection.prepareStatement(
+              """SELECT run_id::text
+                |FROM agent_suspensions
+                |WHERE status = 'Expired'
+                |  AND (expiry_token IS NULL OR expiry_lease_expires_at <= clock_timestamp())
+                |ORDER BY deadline ASC NULLS LAST, run_id ASC
+                |FOR UPDATE SKIP LOCKED
+                |LIMIT ?""".stripMargin
+            )
+            val candidates =
+              try
+                select.setInt(1, math.max(1, limit))
+                val result  = select.executeQuery()
+                val builder = ChunkBuilder.make[String]()
+                while result.next() do builder += result.getString(1)
+                builder.result()
+              finally select.close()
+            val update = connection.prepareStatement(
+              """UPDATE agent_suspensions
+                |SET expiry_generation = expiry_generation + 1,
+                |    expiry_owner = ?, expiry_token = ?::uuid,
+                |    expiry_claimed_at = clock_timestamp(),
+                |    expiry_lease_expires_at = clock_timestamp() + (? * INTERVAL '1 millisecond'),
+                |    expiry_heartbeat_at = clock_timestamp()
+                |WHERE run_id = ?::uuid AND status = 'Expired'
+                |  AND (expiry_token IS NULL OR expiry_lease_expires_at <= clock_timestamp())
+                |RETURNING expiry_generation, expiry_lease_expires_at, kind, expiry_outcome""".stripMargin
+            )
+            val leases =
+              try
+                val builder = ChunkBuilder.make[SuspensionLease]()
+                candidates.foreach { runId =>
+                  update.setString(1, owner.value)
+                  update.setString(2, token.value)
+                  update.setLong(3, leaseDuration.toMillis)
+                  update.setString(4, runId)
+                  val result = update.executeQuery()
+                  if result.next() then
+                    builder += SuspensionLease(
+                      RunId.fromString(runId).fold(message => throw IllegalStateException(message), identity),
+                      result.getString(3),
+                      SuspensionExpiry.valueOf(result.getString(4)),
+                      owner,
+                      token,
+                      result.getLong(1),
+                      result.getObject(2, classOf[java.time.OffsetDateTime]).toInstant
+                    )
+                }
+                builder.result()
+              finally update.close()
+            connection.commit()
+            leases
+          catch
+            case error: Throwable =>
+              try connection.rollback()
+              catch case rollbackError: Throwable => error.addSuppressed(rollbackError)
+              throw error
+          finally connection.setAutoCommit(true)
+        }
+        .mapError(error => databaseError("领取到期挂起失败", error))
+    }
+  }
+
+  def heartbeat(lease: SuspensionLease, leaseDuration: Duration): IO[StoreError, SuspensionLease] =
+    withConnection { connection =>
+      ZIO
+        .attemptBlocking {
+          val statement = connection.prepareStatement(
+            """UPDATE agent_suspensions
+              |SET expiry_lease_expires_at = clock_timestamp() + (? * INTERVAL '1 millisecond'),
+              |    expiry_heartbeat_at = clock_timestamp()
+              |WHERE run_id = ?::uuid AND status = 'Expired'
+              |  AND expiry_owner = ? AND expiry_token = ?::uuid AND expiry_generation = ?
+              |  AND expiry_lease_expires_at > clock_timestamp()
+              |RETURNING expiry_lease_expires_at""".stripMargin
+          )
+          try
+            statement.setLong(1, leaseDuration.toMillis)
+            statement.setString(2, lease.runId.asString)
+            statement.setString(3, lease.owner.value)
+            statement.setString(4, lease.token.value)
+            statement.setLong(5, lease.generation)
+            val result = statement.executeQuery()
+            if result.next() then
+              lease.copy(leaseExpiresAt = result.getObject(1, classOf[java.time.OffsetDateTime]).toInstant)
+            else throw AgentError.LeaseLost(lease.runId, lease.owner.value, lease.generation, "挂起到期租约已失效")
+          finally statement.close()
+        }
+        .mapError {
+          case error: AgentError.LeaseLost => error
+          case error                       => databaseError("续租到期挂起失败", error)
+        }
+    }
+
+  def abandon(lease: SuspensionLease, availableAt: Instant): IO[StoreError, Unit] = withConnection {
+    connection =>
+      val _ = availableAt
+      ZIO
+        .attemptBlocking {
+          val statement = connection.prepareStatement(
+            """UPDATE agent_suspensions
+            |SET expiry_owner = NULL, expiry_token = NULL, expiry_claimed_at = NULL,
+            |    expiry_lease_expires_at = NULL, expiry_heartbeat_at = NULL
+            |WHERE run_id = ?::uuid AND status = 'Expired'
+            |  AND expiry_owner = ? AND expiry_token = ?::uuid AND expiry_generation = ?
+            |  AND expiry_lease_expires_at > clock_timestamp()""".stripMargin
+          )
+          try
+            statement.setString(1, lease.runId.asString)
+            statement.setString(2, lease.owner.value)
+            statement.setString(3, lease.token.value)
+            statement.setLong(4, lease.generation)
+            if statement.executeUpdate() != 1 then
+              throw AgentError.LeaseLost(lease.runId, lease.owner.value, lease.generation, "挂起到期租约已失效")
+          finally statement.close()
+        }
+        .mapError {
+          case error: AgentError.LeaseLost => error
+          case error                       => databaseError("释放到期挂起失败", error)
+        }
+        .unit
+  }
+
+  def resolve(lease: SuspensionLease): IO[StoreError, Unit] = withConnection { connection =>
+    ZIO
+      .attemptBlocking {
+        val statement = connection.prepareStatement(
+          """UPDATE agent_suspensions
+            |SET status = 'Resolved',
+            |    resolved_at = COALESCE(resolved_at, clock_timestamp()),
+            |    expiry_owner = NULL, expiry_token = NULL, expiry_claimed_at = NULL,
+            |    expiry_lease_expires_at = NULL, expiry_heartbeat_at = NULL
+            |WHERE run_id = ?::uuid
+            |  AND expiry_owner = ? AND expiry_token = ?::uuid AND expiry_generation = ?""".stripMargin
+        )
+        try
+          statement.setString(1, lease.runId.asString)
+          statement.setString(2, lease.owner.value)
+          statement.setString(3, lease.token.value)
+          statement.setLong(4, lease.generation)
+          statement.executeUpdate()
+        finally statement.close()
+      }
+      .mapError(error => databaseError("完成到期挂起失败", error))
+      .unit
+  }
+
+  /** 按权威状态同步到期索引。没有挂起则删除；Expired 且仍是同一条挂起则保留 lease。 */
+  private def syncSuspensionIndex(connection: Connection, state: AgentState): Unit =
+    state.suspension match
+      case None =>
+        val statement = connection.prepareStatement("DELETE FROM agent_suspensions WHERE run_id = ?::uuid")
+        try
+          statement.setString(1, state.runId.asString)
+          statement.executeUpdate()
+        finally statement.close()
+      case Some(record) =>
+        val statement = connection.prepareStatement(
+          """INSERT INTO agent_suspensions (
+            |  run_id, kind, deadline, expiry_outcome, status, created_at
+            |) VALUES (?::uuid, ?, ?, ?, 'Pending', ?)
+            |ON CONFLICT (run_id) DO UPDATE SET
+            |  kind = EXCLUDED.kind,
+            |  deadline = EXCLUDED.deadline,
+            |  expiry_outcome = EXCLUDED.expiry_outcome,
+            |  created_at = CASE
+            |    WHEN agent_suspensions.status = 'Expired' AND agent_suspensions.created_at = EXCLUDED.created_at
+            |    THEN agent_suspensions.created_at ELSE EXCLUDED.created_at
+            |  END,
+            |  status = CASE
+            |    WHEN agent_suspensions.status = 'Expired' AND agent_suspensions.created_at = EXCLUDED.created_at
+            |    THEN agent_suspensions.status ELSE 'Pending'
+            |  END,
+            |  resolved_at = CASE
+            |    WHEN agent_suspensions.status = 'Expired' AND agent_suspensions.created_at = EXCLUDED.created_at
+            |    THEN agent_suspensions.resolved_at ELSE NULL
+            |  END,
+            |  expiry_generation = CASE
+            |    WHEN agent_suspensions.status = 'Expired' AND agent_suspensions.created_at = EXCLUDED.created_at
+            |    THEN agent_suspensions.expiry_generation ELSE 0
+            |  END,
+            |  expiry_owner = CASE
+            |    WHEN agent_suspensions.status = 'Expired' AND agent_suspensions.created_at = EXCLUDED.created_at
+            |    THEN agent_suspensions.expiry_owner ELSE NULL
+            |  END,
+            |  expiry_token = CASE
+            |    WHEN agent_suspensions.status = 'Expired' AND agent_suspensions.created_at = EXCLUDED.created_at
+            |    THEN agent_suspensions.expiry_token ELSE NULL
+            |  END,
+            |  expiry_claimed_at = CASE
+            |    WHEN agent_suspensions.status = 'Expired' AND agent_suspensions.created_at = EXCLUDED.created_at
+            |    THEN agent_suspensions.expiry_claimed_at ELSE NULL
+            |  END,
+            |  expiry_lease_expires_at = CASE
+            |    WHEN agent_suspensions.status = 'Expired' AND agent_suspensions.created_at = EXCLUDED.created_at
+            |    THEN agent_suspensions.expiry_lease_expires_at ELSE NULL
+            |  END,
+            |  expiry_heartbeat_at = CASE
+            |    WHEN agent_suspensions.status = 'Expired' AND agent_suspensions.created_at = EXCLUDED.created_at
+            |    THEN agent_suspensions.expiry_heartbeat_at ELSE NULL
+            |  END""".stripMargin
+        )
+        try
+          statement.setString(1, state.runId.asString)
+          statement.setString(2, record.kind.kind)
+          record.deadline match
+            case Some(deadline) => setInstant(statement, 3, deadline)
+            case None           => statement.setObject(3, null)
+          statement.setString(4, record.expiryOutcome.toString)
+          setInstant(statement, 5, record.createdAt)
+          statement.executeUpdate()
+        finally statement.close()
+
 final private case class VersionConflict(actual: Long)                        extends RuntimeException
 final private case class MissingRun(runId: RunId)                             extends RuntimeException
 private case object ToolLedgerConflict                                        extends RuntimeException
@@ -917,4 +1217,4 @@ final private case class ModelCallLedgerConflict(
 ) extends RuntimeException
 
 object PostgresRunStore:
-  val layer: URLayer[DataSource, RunStore] = ZLayer.fromFunction(PostgresRunStore.apply)
+  val layer: URLayer[DataSource, RunStore & SuspensionStore] = ZLayer.fromFunction(PostgresRunStore.apply)

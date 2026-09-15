@@ -13,7 +13,8 @@ final case class UsageSummary(
     outputTokens: Long = 0L,
     cachedInputTokens: Long = 0L,
     reasoningOutputTokens: Long = 0L,
-    estimatedCost: BigDecimal = BigDecimal(0)
+    estimatedCost: BigDecimal = BigDecimal(0),
+    cacheWriteInputTokens: Long = 0L
 ):
   /** 返回当前累计输入与输出 token，作为总 token 预算的比较值。 */
   def totalTokens: Long = inputTokens + outputTokens
@@ -34,7 +35,8 @@ final case class UsageSummary(
       outputTokens = outputTokens + usage.outputTokens,
       cachedInputTokens = cachedInputTokens + usage.cachedInputTokens,
       reasoningOutputTokens = reasoningOutputTokens + usage.reasoningOutputTokens,
-      estimatedCost = estimatedCost + cost
+      estimatedCost = estimatedCost + cost,
+      cacheWriteInputTokens = cacheWriteInputTokens + usage.cacheWriteInputTokens
     )
 
   /** 一次性记录若干个辅助模型调用。
@@ -59,7 +61,8 @@ final case class UsageSummary(
       outputTokens = outputTokens + usage.outputTokens,
       cachedInputTokens = cachedInputTokens + usage.cachedInputTokens,
       reasoningOutputTokens = reasoningOutputTokens + usage.reasoningOutputTokens,
-      estimatedCost = estimatedCost + cost
+      estimatedCost = estimatedCost + cost,
+      cacheWriteInputTokens = cacheWriteInputTokens + usage.cacheWriteInputTokens
     )
 
 object UsageSummary:
@@ -82,7 +85,8 @@ object BudgetState:
   * `[0, coveredMessages)`；Runtime 只会把其后的新淘汰消息追加进下一次 压缩，避免每个回合重复调用付费模型。
   *
   * @param summary
-  *   已经安全包装的摘要正文；仍可能包含业务事实，HTTP/Telemetry 不得直接投影
+  *   未附加 Provider envelope 的摘要正文；仍可能包含业务事实，HTTP/Telemetry 不得直接投影。每次组装时由
+  *   PromptCompiler 统一包装，避免 checkpoint 复用时重复转义
   * @param coveredMessages
   *   已被摘要覆盖的消息前缀长度
   * @param sourceDigest
@@ -138,16 +142,29 @@ final case class AgentState(
     steps: Chunk[AgentStep],
     usage: UsageSummary,
     budget: BudgetState,
-    pendingApproval: Option[ApprovalRequest],
+    /** Run 正在等什么外部输入；`None` 表示不在等待。
+      *
+      * 取代了原先的 `pendingApproval`：审批只是四种等待原因之一，而把"等信号"和"等时间"塞进一个名为 approval 的字段会让 `RunStatus.Suspended` 与
+      * `AgentEvent.RunSuspended` 永远无法被写入——它们此前正是两个从未被写入的空槽。
+      */
+    suspension: Option[SuspensionRecord],
     createdAt: Instant,
     updatedAt: Instant,
     version: Version,
+    /** 创建 Run 时冻结的 Agent 定义快照，确保部署配置变化后仍可准确恢复。
+      *
+      * 与 [[composition]] 同理是必填项：没有定义快照就无法重建这次 Run 的指令、工具白名单与上下文策略。
+      */
+    definition: AgentDefinition,
+    /** 创建 Run 时冻结的运行组合指纹。
+      *
+      * 这是必填项，不是 `Option`：缺少组合指纹意味着无法判断恢复时的能力是否与创建时一致，那样的状态不应该被读出来 继续执行。
+      */
+    composition: RuntimeCompositionFingerprint,
+    /** 业务会话的稳定线程 ID。 */
+    threadId: ThreadId,
     metadata: Map[String, String] = Map.empty,
     schemaVersion: Int = AgentState.CurrentSchemaVersion,
-    /** 业务会话的稳定线程 ID；Runtime 创建新状态时必须填写。 */
-    threadId: Option[ThreadId] = None,
-    /** 创建 Run 时使用的 Agent 定义快照，确保部署配置变化后仍可准确恢复。 */
-    definition: Option[AgentDefinition] = None,
     /** 由认证业务层提供的可信用户、租户和 scope 快照。 */
     runContext: RunContext = RunContext(),
     /** 模型一次返回多个工具调用时，保存完整冲突批次和下一批游标。 */
@@ -163,14 +180,17 @@ final case class AgentState(
     lastEventSequence: Long = -1L,
     /** 主模型 Intent 已提交、Settlement 尚未完成时的恢复游标；不含 prompt。 */
     pendingModelCall: Option[PendingModelCall] = None,
-    /** 创建 Run 时冻结的运行组合指纹；缺省表示 0.6.2 之前的状态，恢复不做漂移拒绝。 */
-    composition: Option[RuntimeCompositionFingerprint] = None,
     /** 上一回合 world-state section 指纹；不含正文。缺省表示尚未使用差量渲染。 */
     worldSectionCursors: Chunk[ContextSectionCursor] = Chunk.empty,
     /** 最近一次被接受的有界引用；只保留 seed 命中，上限由 reducer 截断。 */
     citations: Chunk[RunCitation] = Chunk.empty,
     retrievalEvidence: Option[RunRetrievalEvidence] = None
-)
+):
+  /** 当前待人工决定的审批请求；非审批类挂起为 `None`。
+    *
+    * 供只关心审批的调用方使用，避免它们各自解包 `Suspension`。它是**派生读**而不是第二事实源：唯一事实仍是 [[suspension]]。
+    */
+  def pendingApproval: Option[ApprovalRequest] = suspension.flatMap(_.kind.approvalRequest)
 
 /** 上一回合 world-state section 的低敏游标。只保存身份与指纹，不保存正文。 */
 final case class ContextSectionCursor(id: String, version: String, fingerprint: String) derives JsonCodec:
@@ -179,10 +199,13 @@ final case class ContextSectionCursor(id: String, version: String, fingerprint: 
   require(fingerprint.matches("[0-9a-f]{64}"), "ContextSectionCursor.fingerprint 必须是 SHA-256 十六进制")
 
 object AgentState:
-  /** v6 把审批从 callId 升级为 [[com.zyblw.agent.composition.ApprovalSubject]]，让批准绑定具体副作用；v5 增加完整工具契约 指纹与单调审批要求；v4
-    * 及更早状态只按旧恢复门禁读取。
+  /** 唯一在用的耐久状态形状。
+    *
+    * 本版本不保留任何历史 schema 的读取分支：一份状态要么符合当前形状，要么被拒绝。因此"能读出来"就等价于"全部安全 事实齐备"，不存在"字段缺失所以跳过检查"的降级路径。
+    *
+    * 升级到本版本没有原地迁移路径，需要重建数据库。
     */
-  val CurrentSchemaVersion: Int = 7
+  val CurrentSchemaVersion: Int = 1
 
   given JsonCodec[AgentState] = DeriveJsonCodec.gen[AgentState]
 

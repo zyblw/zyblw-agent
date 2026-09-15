@@ -2,13 +2,19 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-11
+> 最后核验：2026-09-16
 >
 > 事实来源：对应模块源码、测试与构建定义
 
 `AgentRuntime` 是唯一运行入口：`run`/`resume`/`recover` 返回 `RunOutcome`，对应的 `runEvents`、
 `resumeEvents`、`recoverEvents` 返回有界 `ZStream[Any, AgentError, AgentEvent]`。`inspect` 返回最新
 `AgentState`，`persistedEvents` 按 sequence 游标读取耐久事件。
+
+内部实现分为无 I/O 的 `AgentKernel` 与唯一效果外壳 `AgentRuntimeDriver`。Kernel 只根据 `AgentState` 和 Driver 已取得的事实
+决定恢复路径、验证预算、归约模型/工具结算及重建 outcome；Driver 负责 Clock、Context、Provider、Tool、Fiber/Scope 和
+`RunStore.commit/commitFenced`。Kernel 会拒绝非法源状态、模型工具调用与耐久计划不一致以及终态迟到回写；它只返回领域结算事实，
+由 Driver 翻译成 `ModelCallWrite`，因此不依赖路由或持久化 package。Kernel 不是可替换插件，也不拥有第二份状态。完整决定见
+[ADR 0028](architecture/0028-functional-kernel-runtime-driver.md)。
 
 跨节点 HTTP 订阅使用 `DurableRunEventStream`，它以数据库侧 `limit` 分页、验证 sequence 连续性，并通过
 `Last-Event-ID` 恢复；不要把单进程 `RunObserver.hub` 当成集群事实源。详细协议见

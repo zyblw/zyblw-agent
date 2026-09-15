@@ -1,5 +1,6 @@
 package com.zyblw.agent.guardrails
 
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import java.time.Instant
 import java.util.UUID
@@ -197,6 +198,8 @@ object GuardrailEngineSpec extends ZIOSpecDefault:
     AgentId("guardrail-spec")
   )
 
+  private val guardrailAgent = AgentDefinition(AgentId("guardrail-spec"), "Guardrail Spec", "回答问题")
+
   private val sampleState = AgentState(
     runId = context.runId,
     sessionId = SessionId(UUID.fromString("223e4567-e89b-12d3-a456-426614174000")),
@@ -206,10 +209,14 @@ object GuardrailEngineSpec extends ZIOSpecDefault:
     steps = Chunk.empty,
     usage = UsageSummary(),
     budget = BudgetState(RunLimits(), UsageSummary(), 0),
-    pendingApproval = None,
+    suspension = None,
     createdAt = Instant.EPOCH,
     updatedAt = Instant.EPOCH,
-    version = Version.initial
+    version = Version.initial,
+    definition = guardrailAgent,
+    composition =
+      RuntimeComposition.fingerprint(RuntimeProfile.default, guardrailAgent, guardrailAgent.modelSettings),
+    threadId = ThreadId("guardrail-thread")
   )
 
   private def namedInput(rule: String, allowed: Boolean): InputGuardrail = new InputGuardrail:

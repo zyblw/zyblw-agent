@@ -327,7 +327,7 @@ object DurableWorkerSoakProbe extends ZIOAppDefault:
       ContextCompressor.deterministic,
       DefaultContextManager.layer,
       RuntimeExtensions.emptyLayer,
-      AgentRuntimeLive.layerWithProfile(RuntimeProfile.default),
+      AgentRuntimeDriver.layerWithProfile(RuntimeProfile.default),
       AgentCommandServiceLive.configured(RuntimeProfile.default)
     )
 

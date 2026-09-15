@@ -64,9 +64,15 @@ object HumanTaskSpec extends ZIOSpecDefault:
           sumReducer,
           WorkflowExecutionPolicy(WorkerId("human-worker"))
         )
-        first     <- engine.run(10, WorkflowContext(runId, sessionId)).runCollect
-        wait      <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
-        accepted  <- store.signal(wait.key, WorkflowSignalId("human-1"), signalName, "approved")
+        first    <- engine.run(10, WorkflowContext(runId, sessionId)).runCollect
+        wait     <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
+        accepted <- store.signal(
+          wait.key,
+          WorkflowSignalId("human-1"),
+          signalName,
+          "approved",
+          com.zyblw.agent.composition.AuthorizationFingerprint.of(RunContext())
+        )
         wakeLease <- store
           .claimWakeups(testWorkflowId, testWorkflowVersion, WorkerId("wake-worker"), 30.seconds)
           .flatMap(value =>
@@ -81,6 +87,59 @@ object HumanTaskSpec extends ZIOSpecDefault:
         },
         accepted.disposition == WorkflowSignalDisposition.Accepted,
         resumed.lastOption.contains(WorkflowEvent.Completed(11))
+      )
+    }.provide(WorkflowExecutionStore.inMemory[Int]),
+    test("HumanTask 绑定期望授权指纹后拒绝其他主体的 signal") {
+      val expected = com.zyblw.agent.composition.AuthorizationFingerprint.of(
+        RunContext(tenantId = Some("tenant-a"))
+      )
+      val other = com.zyblw.agent.composition.AuthorizationFingerprint.of(
+        RunContext(tenantId = Some("tenant-b"))
+      )
+      for
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        store     <- ZIO.service[WorkflowExecutionStore[Int]]
+        approval   = NodeId("approval")
+        signalName = WorkflowSignalName("human.approve-refund")
+        human      = HumanTask
+          .node[Int](
+            approval,
+            "approve-refund",
+            Duration.ofSeconds(3600),
+            onApproved = (state, _) => state + 1,
+            onTimeout = state => state - 1,
+            expectedAuthorization = Some(expected)
+          )
+          .fold(message => throw IllegalArgumentException(message), identity)
+        definition = WorkflowDefinition
+          .make(
+            testWorkflowId,
+            testWorkflowVersion,
+            approval,
+            Map(approval -> human),
+            Map(approval -> WorkflowTransition.Complete())
+          )
+          .fold(issues => throw IllegalArgumentException(issues.map(_.message).mkString("; ")), identity)
+        engine = WorkflowEngine.makeDurable(
+          definition,
+          store,
+          sumReducer,
+          WorkflowExecutionPolicy(WorkerId("human-auth-worker"))
+        )
+        _         <- engine.run(10, WorkflowContext(runId, sessionId)).runCollect
+        wait      <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
+        accepted  <- store.signal(wait.key, WorkflowSignalId("human-other"), signalName, "approved", other)
+        wakeLease <- store
+          .claimWakeups(testWorkflowId, testWorkflowVersion, WorkerId("wake-worker"), 30.seconds)
+          .flatMap(value =>
+            ZIO.fromOption(value.headOption).orElseFail(AgentError.PersistenceFailure("wakeup missing"))
+          )
+        resumed <- engine.resumeClaimed(WorkflowContext(runId, sessionId), wakeLease).runCollect.either
+      yield assertTrue(
+        accepted.disposition == WorkflowSignalDisposition.Accepted,
+        expected != other,
+        resumed.left.exists(_.message.contains("human-task-authorization-mismatch"))
       )
     }.provide(WorkflowExecutionStore.inMemory[Int])
   )

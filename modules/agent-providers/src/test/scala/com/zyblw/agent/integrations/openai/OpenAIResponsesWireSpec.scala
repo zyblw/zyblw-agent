@@ -30,7 +30,7 @@ object OpenAIResponsesWireSpec extends ZIOSpecDefault:
       |    {"id":"msg-1","type":"message","role":"assistant","content":[{"type":"output_text","text":"需要查询","annotations":[]}]},
       |    {"id":"fc-1","type":"function_call","call_id":"call-1","name":"lookup","arguments":"{\"query\":\"zio\"}","status":"completed"}
       |  ],
-      |  "usage":{"input_tokens":12,"output_tokens":7,"input_tokens_details":{"cached_tokens":5},"output_tokens_details":{"reasoning_tokens":3}}
+      |  "usage":{"input_tokens":12,"output_tokens":7,"input_tokens_details":{"cached_tokens":5,"cache_write_tokens":2},"output_tokens_details":{"reasoning_tokens":3}}
       |} """.stripMargin
 
   /** typed SSE 样例同时覆盖工具增量、文本增量、usage 与最终完整 Response。 */
@@ -47,7 +47,7 @@ object OpenAIResponsesWireSpec extends ZIOSpecDefault:
       |
       |data: {"type":"response.output_text.delta","response_id":"resp-stream","output_index":1,"delta":"查询中"}
       |
-      |data: {"type":"response.completed","response":{"id":"resp-stream","status":"completed","output":[{"id":"fc-stream","type":"function_call","call_id":"call-stream","name":"lookup","arguments":"{\"query\":\"zio\"}","status":"completed"},{"id":"msg-stream","type":"message","role":"assistant","content":[{"type":"output_text","text":"查询中","annotations":[]}]}],"usage":{"input_tokens":9,"output_tokens":4,"input_tokens_details":{"cached_tokens":4},"output_tokens_details":{"reasoning_tokens":2}}}}
+      |data: {"type":"response.completed","response":{"id":"resp-stream","status":"completed","output":[{"id":"fc-stream","type":"function_call","call_id":"call-stream","name":"lookup","arguments":"{\"query\":\"zio\"}","status":"completed"},{"id":"msg-stream","type":"message","role":"assistant","content":[{"type":"output_text","text":"查询中","annotations":[]}]}],"usage":{"input_tokens":9,"output_tokens":4,"input_tokens_details":{"cached_tokens":4,"cache_write_tokens":1},"output_tokens_details":{"reasoning_tokens":2}}}}
       |
       |data: [DONE]
       |
@@ -83,7 +83,13 @@ object OpenAIResponsesWireSpec extends ZIOSpecDefault:
       yield assertTrue(
         decoded.message.text == "需要查询",
         decoded.message.toolCalls.map(_.id) == Chunk("call-1"),
-        decoded.usage == TokenUsage(12, 7, cachedInputTokens = 5, reasoningOutputTokens = 3),
+        decoded.usage == TokenUsage(
+          12,
+          7,
+          cachedInputTokens = 5,
+          reasoningOutputTokens = 3,
+          cacheWriteInputTokens = 2
+        ),
         decoded.finishReason == FinishReason.ToolCalls,
         json.contains("\"store\":false"),
         json.contains("\"type\":\"reasoning\""),
@@ -110,7 +116,15 @@ object OpenAIResponsesWireSpec extends ZIOSpecDefault:
             completed.length == 13,
             completed.forall(_.message.text == "查询中"),
             completed.forall(_.message.toolCalls.headOption.exists(_.name == "lookup")),
-            completed.forall(_.usage == TokenUsage(9, 4, cachedInputTokens = 4, reasoningOutputTokens = 2)),
+            completed.forall(
+              _.usage == TokenUsage(
+                9,
+                4,
+                cachedInputTokens = 4,
+                reasoningOutputTokens = 2,
+                cacheWriteInputTokens = 1
+              )
+            ),
             toolDoneCounts.forall(_ == 1)
           )
         }

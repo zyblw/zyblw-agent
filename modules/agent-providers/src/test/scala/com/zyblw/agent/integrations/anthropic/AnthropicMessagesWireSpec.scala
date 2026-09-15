@@ -27,12 +27,12 @@ object AnthropicMessagesWireSpec extends ZIOSpecDefault:
       |   {"type":"tool_use","id":"toolu-1","name":"lookup","input":{"query":"zio"}}
       | ],
       | "stop_reason":"tool_use",
-      | "usage":{"input_tokens":11,"output_tokens":7}
+      | "usage":{"input_tokens":6,"cache_creation_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":7}
       |} """.stripMargin
 
   private val streamPayload =
     """event: message_start
-      |data: {"type":"message_start","message":{"id":"msg-stream","type":"message","role":"assistant","content":[],"usage":{"input_tokens":9,"output_tokens":0}}}
+      |data: {"type":"message_start","message":{"id":"msg-stream","type":"message","role":"assistant","content":[],"usage":{"input_tokens":5,"cache_creation_input_tokens":1,"cache_read_input_tokens":3,"output_tokens":0}}}
       |
       |event: content_block_start
       |data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
@@ -80,7 +80,7 @@ object AnthropicMessagesWireSpec extends ZIOSpecDefault:
       yield assertTrue(
         decoded.message.text == "需要查询",
         decoded.message.toolCalls.map(_.id) == Chunk("toolu-1"),
-        decoded.usage == TokenUsage(11, 7),
+        decoded.usage == TokenUsage(11, 7, cachedInputTokens = 3, cacheWriteInputTokens = 2),
         decoded.finishReason == FinishReason.ToolCalls,
         decoded.message.metadata(AnthropicMessagesWire.RawContentBlocksMetadata).contains("signature"),
         json.contains("\"system\":\"系统规则\\n\\n[developer]\\n开发规则\""),
@@ -111,7 +111,9 @@ object AnthropicMessagesWireSpec extends ZIOSpecDefault:
             completed.size == 11,
             completed.forall(_.message.text == "查询中"),
             completed.forall(_.message.toolCalls.headOption.exists(_.arguments.toJson.contains("zio"))),
-            completed.forall(_.usage == TokenUsage(9, 5)),
+            completed.forall(
+              _.usage == TokenUsage(9, 5, cachedInputTokens = 3, cacheWriteInputTokens = 1)
+            ),
             toolCompletedCounts.forall(_ == 1)
           )
         }

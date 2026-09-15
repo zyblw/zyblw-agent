@@ -26,7 +26,8 @@ object HumanTask:
       taskType: String,
       ttl: Duration,
       onApproved: (S, WorkflowSignalValue) => S,
-      onTimeout: S => S
+      onTimeout: S => S,
+      expectedAuthorization: Option[com.zyblw.agent.composition.AuthorizationFingerprint] = None
   ): Either[String, WorkflowNode[Any, S]] =
     if ttl.isZero || ttl.isNegative then Left("HumanTask.ttl 必须为正")
     else
@@ -37,7 +38,11 @@ object HumanTask:
           def execute(state: S, context: WorkflowContext): ZIO[Any, WorkflowError, NodeOutcome[S]] =
             context.wakeup match
               case Some(WorkflowWakeup.SignalReceived(_, value)) if value.name == expected =>
-                ZIO.succeed(NodeOutcome.Succeeded(onApproved(state, value)))
+                expectedAuthorization match
+                  case Some(required) if value.authorization != required =>
+                    ZIO.fail(AgentError.WorkflowFailed(nodeId.value, "human-task-authorization-mismatch"))
+                  case _ =>
+                    ZIO.succeed(NodeOutcome.Succeeded(onApproved(state, value)))
               case Some(WorkflowWakeup.DeadlineElapsed(_, _)) =>
                 ZIO.succeed(NodeOutcome.Succeeded(onTimeout(state)))
               case Some(WorkflowWakeup.SignalReceived(_, _)) =>

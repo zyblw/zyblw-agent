@@ -1,7 +1,9 @@
 package com.zyblw.agent.evals
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.inspection.RunTrajectory
 import zio.*
+import zio.json.*
 
 /** Replayable 轨迹是否能从账本重建当时发给模型的请求，且公共投影不含敏感子串。 */
 final case class TrajectoryReplayEvidence(
@@ -16,7 +18,19 @@ object TrajectoryReplay:
   val Dimension: String       = "trajectory-replay"
   val SafetyDimension: String = "inspection-redaction-safety"
 
-  /** 用 Fake Model 记录、账本与 Inspector JSON 生成评测证据。不读取用户消息进入 details。 */
+  /** 用 Fake Model 记录、账本与公共轨迹投影生成评测证据。不读取用户消息进入 details。
+    *
+    * Replayable 深比较仍使用账本中的 CanonicalModelRequest（投影层故意不含正文）；脱敏门禁检查 [[RunTrajectory]] JSON， 两个断言互相独立。
+    */
+  def evidence(
+      recorded: Chunk[ChatRequest],
+      ledger: Chunk[ModelCallExecutionRecord],
+      trajectory: RunTrajectory,
+      secrets: Iterable[String]
+  ): TrajectoryReplayEvidence =
+    evidence(recorded, ledger, trajectory.toJson, secrets)
+
+  /** 兼容只持有 JSON 字符串的调用方；新代码应传入 [[RunTrajectory]]。 */
   def evidence(
       recorded: Chunk[ChatRequest],
       ledger: Chunk[ModelCallExecutionRecord],

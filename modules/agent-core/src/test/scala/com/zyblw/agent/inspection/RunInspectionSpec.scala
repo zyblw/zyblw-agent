@@ -1,5 +1,6 @@
 package com.zyblw.agent.inspection
 
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import java.time.Instant
 import java.util.UUID
@@ -74,12 +75,14 @@ object RunInspectionSpec extends ZIOSpecDefault:
     steps = Chunk.empty,
     usage = usage,
     budget = BudgetState(RunLimits(), usage, 1),
-    pendingApproval = None,
+    suspension = None,
     createdAt = startedAt,
     updatedAt = startedAt.plusMillis(40L),
     version = Version(4L),
-    threadId = Some(ThreadId("inspection-thread")),
-    definition = Some(definition),
+    definition = definition,
+    composition =
+      RuntimeComposition.fingerprint(RuntimeProfile.default, definition, definition.modelSettings),
+    threadId = ThreadId("inspection-thread"),
     lastEventSequence = 4L
   )
 
@@ -116,7 +119,7 @@ object RunInspectionSpec extends ZIOSpecDefault:
       val brokenState = state.copy(
         status = RunStatus.WaitingForApproval,
         usage = usage.copy(inputTokens = 21L),
-        pendingApproval = None
+        suspension = None
       )
       val brokenEvents = Chunk(events(0), events(2))
       val inspection   = RunInspection.build(brokenState, brokenEvents)
@@ -125,7 +128,7 @@ object RunInspectionSpec extends ZIOSpecDefault:
         !inspection.consistent,
         codes.contains("event_sequence_gap"),
         codes.contains("budget_usage_mismatch"),
-        codes.contains("waiting_without_approval")
+        codes.contains("waiting_without_suspension")
       )
     }
   )

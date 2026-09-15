@@ -7,13 +7,13 @@ import com.zyblw.agent.extension.RuntimeExtensions
 import com.zyblw.agent.guardrails.*
 import com.zyblw.agent.memory.RunStore
 import com.zyblw.agent.model.ChatModel
-import com.zyblw.agent.runtime.{AgentRuntime, AgentRuntimeLive, RunObserver}
+import com.zyblw.agent.runtime.{AgentRuntime, AgentRuntimeDriver, RunObserver}
 import com.zyblw.agent.tools.*
 import zio.*
 
 /** 内存 Runtime 装配，避免每个 spec 复制十层 ZLayer。
   *
-  * 始终走 `AgentRuntimeLive.layerWithProfile`，与生产冻结 `sourceIds` 的路径一致。不创建 WorkerHost 或 HTTP。
+  * 始终走 `AgentRuntimeDriver.layerWithProfile`，与生产冻结 `sourceIds` 的路径一致。不创建 WorkerHost 或 HTTP。
   */
 object TestAgentRuntime:
   /** 组装 `AgentRuntime` 与共享内存 `RunStore`。 */
@@ -79,7 +79,8 @@ object TestAgentRuntime:
           ZLayer.succeed(modelPolicies),
           observer,
           RuntimeExtensions.layer(extensions),
-          AgentRuntimeLive.layerWithProfile(profile)
+          com.zyblw.agent.artifacts.ArtifactStore.inMemory(),
+          AgentRuntimeDriver.layerWithProfile(profile)
         )
       case None =>
         ZLayer.make[AgentRuntime & RunStore](
@@ -95,5 +96,6 @@ object TestAgentRuntime:
           ZLayer.succeed(modelPolicies),
           observer,
           RuntimeExtensions.layer(extensions),
-          AgentRuntimeLive.layerWithProfile(profile)
+          com.zyblw.agent.artifacts.ArtifactStore.inMemory(),
+          AgentRuntimeDriver.layerWithProfile(profile)
         )

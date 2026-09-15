@@ -439,7 +439,8 @@ object WorkflowWakeWorkerSoakProbe extends ZIOAppDefault:
         wait.key,
         WorkflowSignalId(s"workflow-soak-$probeId-$round-$index"),
         signalName,
-        "ready"
+        "ready",
+        com.zyblw.agent.composition.AuthorizationFingerprint.of(RunContext())
       )
       _ <- ZIO
         .fail(AgentError.Unexpected("workflow soak signal was not accepted"))

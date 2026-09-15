@@ -1,6 +1,7 @@
 package com.zyblw.agent.memory
 
 import com.zyblw.agent.core.*
+import java.time.Instant
 import zio.*
 
 /** 与 AgentState/事件同一事务写入的主模型账本变更。 */
@@ -97,7 +98,10 @@ trait RunStore:
     */
   def appendEvents(runId: RunId, events: NonEmptyChunk[PersistedAgentEvent]): IO[StoreError, Unit]
 
-  /** 查询指定序号之后的事件并按 sequence 升序返回。
+  /** 查询指定序号之后的耐久权威事件并按 sequence 升序返回。
+    *
+    * 返回 [[PersistedAgentEvent]]，与进程内 [[com.zyblw.agent.runtime.LiveAgentEvent]] 不是同一类型：本方法不丢事件、带单调序号，是审计、恢复和
+    * [[com.zyblw.agent.inspection.RunTrajectory]] 的唯一时间线来源。
     *
     * @param runId
     *   目标运行
@@ -146,6 +150,12 @@ trait RunStore:
   /** 按 ordinal 查询一个批次的全部 pending writes，用于部分成功恢复。 */
   def getToolExecutions(runId: RunId, batchId: String): IO[StoreError, Chunk[ToolExecutionRecord]]
 
+  /** 列出一次 Run 的全部工具账本行，按 batchId 再按 ordinal 排序。
+    *
+    * 只读投影（轨迹、事故包）需要看到 attempt 与 Unknown，这两个字段不在时间线事件里。按批次查询会漏掉已提交的历史批次。
+    */
+  def listToolExecutions(runId: RunId): IO[StoreError, Chunk[ToolExecutionRecord]]
+
   def getModelCall(runId: RunId, requestId: ModelRequestId): IO[StoreError, Option[ModelCallExecutionRecord]]
 
   def getModelCalls(runId: RunId): IO[StoreError, Chunk[ModelCallExecutionRecord]]
@@ -161,8 +171,52 @@ object RunStore:
       events: Map[RunId, Vector[PersistedAgentEvent]] = Map.empty,
       cancellations: Set[RunId] = Set.empty,
       toolExecutions: Map[(RunId, String), ToolExecutionRecord] = Map.empty,
-      modelCalls: Map[(RunId, ModelRequestId), ModelCallExecutionRecord] = Map.empty
+      modelCalls: Map[(RunId, ModelRequestId), ModelCallExecutionRecord] = Map.empty,
+      suspensions: Map[RunId, MemorySuspension] = Map.empty
   )
+
+  /** 内存侧的到期索引行；lease 列要么全空要么全非空，与 PostgreSQL CHECK 对齐。 */
+  final private case class MemorySuspension(
+      kind: String,
+      deadline: Option[Instant],
+      expiryOutcome: SuspensionExpiry,
+      createdAt: Instant,
+      status: SuspensionIndexStatus,
+      resolvedAt: Option[Instant] = None,
+      generation: Long = 0L,
+      owner: Option[WorkerId] = None,
+      token: Option[LeaseToken] = None,
+      claimedAt: Option[Instant] = None,
+      leaseExpiresAt: Option[Instant] = None,
+      heartbeatAt: Option[Instant] = None,
+      availableAt: Option[Instant] = None
+  )
+
+  private object MemorySuspension:
+    def pending(record: SuspensionRecord): MemorySuspension =
+      MemorySuspension(
+        kind = record.kind.kind,
+        deadline = record.deadline,
+        expiryOutcome = record.expiryOutcome,
+        createdAt = record.createdAt,
+        status = SuspensionIndexStatus.Pending
+      )
+
+  /** 按权威状态同步到期索引：没有挂起就删除；Expired 且仍是同一条挂起则保留 lease，避免把正在处置的行打回 Pending。 */
+  private def syncSuspensionIndex(current: InMemoryData, state: AgentState): InMemoryData =
+    state.suspension match
+      case None         => current.copy(suspensions = current.suspensions - state.runId)
+      case Some(record) =>
+        val next = current.suspensions.get(state.runId) match
+          case Some(existing)
+              if existing.status == SuspensionIndexStatus.Expired && existing.createdAt == record.createdAt =>
+            existing.copy(
+              kind = record.kind.kind,
+              deadline = record.deadline,
+              expiryOutcome = record.expiryOutcome
+            )
+          case _ => MemorySuspension.pending(record)
+        current.copy(suspensions = current.suspensions.updated(state.runId, next))
 
   /** 校验状态快照与非空事件批次的基本不变量，防止 Adapter 把错误 runId、乱序或有缺口的事件写进数据库。
     *
@@ -216,278 +270,467 @@ object RunStore:
   def load(runId: RunId): ZIO[RunStore, StoreError, AgentState] = ZIO.serviceWithZIO[RunStore](_.load(runId))
 
   /** 测试和单进程开发实现；生产必须使用 PostgreSQL 或其他 durable adapter。 */
-  val inMemory: ULayer[RunStore] = ZLayer.fromZIO {
+  val inMemory: ULayer[RunStore & SuspensionStore] = ZLayer.fromZIOEnvironment {
     // ponytail: 单一状态会串行化测试 Adapter 更新；只有基准证明争用时才分片，生产始终使用 durable Adapter。
-    for data <- Ref.Synchronized.make(InMemoryData())
-    yield new RunStore:
-      /** 单个同步 Ref 同时持有状态与事件，使创建语义与 PostgreSQL 的事务边界一致。 */
-      def createWithEvents(
-          state: AgentState,
-          incoming: NonEmptyChunk[PersistedAgentEvent]
-      ): IO[StoreError, Unit] =
-        RunStore.validateEventBatch(state, incoming, requireStartAtZero = true) *>
-          data.modifyZIO { current =>
-            if current.states.contains(state.runId) then
-              ZIO.fail(AgentError.PersistenceFailure(s"Run 已存在: ${state.runId.asString}"))
-            else
-              mergeEvents(current.events, state.runId, incoming).map { nextEvents =>
-                () -> current.copy(
-                  states = current.states.updated(state.runId, state),
-                  events = nextEvents
-                )
-              }
-          }
+    Ref.Synchronized.make(InMemoryData()).map { data =>
+      val store = new RunStore with SuspensionStore {
 
-      def load(runId: RunId): IO[StoreError, AgentState] =
-        data.get.flatMap(current =>
-          ZIO.fromOption(current.states.get(runId)).orElseFail(AgentError.RunNotFound(runId))
-        )
+        /** 单个同步 Ref 同时持有状态与事件，使创建语义与 PostgreSQL 的事务边界一致。 */
+        def createWithEvents(
+            state: AgentState,
+            incoming: NonEmptyChunk[PersistedAgentEvent]
+        ): IO[StoreError, Unit] =
+          RunStore.validateEventBatch(state, incoming, requireStartAtZero = true) *>
+            data.modifyZIO { current =>
+              if current.states.contains(state.runId) then
+                ZIO.fail(AgentError.PersistenceFailure(s"Run 已存在: ${state.runId.asString}"))
+              else
+                mergeEvents(current.events, state.runId, incoming).map { nextEvents =>
+                  () -> syncSuspensionIndex(
+                    current.copy(
+                      states = current.states.updated(state.runId, state),
+                      events = nextEvents
+                    ),
+                    state
+                  )
+                }
+            }
 
-      /** `Ref.Synchronized.modifyZIO` 将比较版本和写入合并为一个原子临界区。 */
-      def save(expectedVersion: Version, state: AgentState): IO[StoreError, Version] =
-        data.modifyZIO { current =>
-          current.states.get(state.runId) match
-            case None => ZIO.fail(AgentError.RunNotFound(state.runId))
-            case Some(existing) if existing.version != expectedVersion =>
-              ZIO.fail(AgentError.OptimisticLock(expectedVersion, existing.version))
-            case Some(existing) if existing.lastEventSequence != state.lastEventSequence =>
-              ZIO.fail(
-                AgentError.PersistenceFailure(
-                  s"save 不能改变事件游标: runId=${state.runId.asString}, expected=${existing.lastEventSequence}, incoming=${state.lastEventSequence}"
-                )
-              )
-            case Some(_) =>
-              val next = expectedVersion.next
-              ZIO.succeed(
-                next -> current.copy(states = current.states.updated(state.runId, state.copy(version = next)))
-              )
-        }
+        def load(runId: RunId): IO[StoreError, AgentState] =
+          data.get.flatMap(current =>
+            ZIO.fromOption(current.states.get(runId)).orElseFail(AgentError.RunNotFound(runId))
+          )
 
-      /** 状态 CAS、事件追加和 ModelCall ledger 在同一个同步 Ref 更新中全有或全无。 */
-      def commit(
-          expectedVersion: Version,
-          state: AgentState,
-          incoming: NonEmptyChunk[PersistedAgentEvent],
-          modelCall: Option[ModelCallWrite]
-      ): IO[StoreError, Version] =
-        RunStore.validateEventBatch(state, incoming, requireStartAtZero = false) *>
+        /** `Ref.Synchronized.modifyZIO` 将比较版本和写入合并为一个原子临界区。 */
+        def save(expectedVersion: Version, state: AgentState): IO[StoreError, Version] =
           data.modifyZIO { current =>
             current.states.get(state.runId) match
               case None => ZIO.fail(AgentError.RunNotFound(state.runId))
               case Some(existing) if existing.version != expectedVersion =>
                 ZIO.fail(AgentError.OptimisticLock(expectedVersion, existing.version))
-              case Some(existing) if incoming.head.sequence != existing.lastEventSequence + 1L =>
+              case Some(existing) if existing.lastEventSequence != state.lastEventSequence =>
                 ZIO.fail(
                   AgentError.PersistenceFailure(
-                    s"事件批次没有紧接已提交游标: runId=${state.runId.asString}, previous=${existing.lastEventSequence}, first=${incoming.head.sequence}"
+                    s"save 不能改变事件游标: runId=${state.runId.asString}, expected=${existing.lastEventSequence}, incoming=${state.lastEventSequence}"
                   )
                 )
               case Some(_) =>
-                applyModelCallWrite(current.modelCalls, modelCall).flatMap { nextModelCalls =>
-                  val nextVersion = expectedVersion.next
-                  mergeEvents(current.events, state.runId, incoming).map { nextEvents =>
-                    nextVersion -> current.copy(
-                      states = current.states.updated(state.runId, state.copy(version = nextVersion)),
-                      events = nextEvents,
-                      modelCalls = nextModelCalls
-                    )
-                  }
-                }
-          }
-
-      def commitFenced(
-          lease: RunCommandLease,
-          expectedVersion: Version,
-          state: AgentState,
-          incoming: NonEmptyChunk[PersistedAgentEvent],
-          modelCall: Option[ModelCallWrite]
-      ): IO[StoreError, Version] =
-        if lease.runId != state.runId then
-          ZIO.fail(
-            AgentError.LeaseLost(state.runId, lease.owner.value, lease.generation, "租约与 AgentState 不属于同一 Run")
-          )
-        else commit(expectedVersion, state, incoming, modelCall)
-
-      private def applyModelCallWrite(
-          current: Map[(RunId, ModelRequestId), ModelCallExecutionRecord],
-          write: Option[ModelCallWrite]
-      ): IO[StoreError, Map[(RunId, ModelRequestId), ModelCallExecutionRecord]] =
-        write match
-          case None                                => ZIO.succeed(current)
-          case Some(ModelCallWrite.Insert(record)) =>
-            current.get(record.runId -> record.requestId) match
-              case Some(existing) if !RunStore.sameModelCallIdentity(existing, record) =>
-                ZIO.fail(
-                  AgentError.PersistenceFailure(
-                    s"模型调用 ${record.requestId.asString} 已属于其他 fingerprint 或模型，拒绝错误复用账本"
+                val next    = expectedVersion.next
+                val updated = state.copy(version = next)
+                ZIO.succeed(
+                  next -> syncSuspensionIndex(
+                    current.copy(states = current.states.updated(state.runId, updated)),
+                    updated
                   )
                 )
-              case Some(_) => ZIO.succeed(current)
-              case None    => ZIO.succeed(current.updated(record.runId -> record.requestId, record))
-          case Some(ModelCallWrite.Transition(expectedStatus, expectedAttempt, next)) =>
-            current.get(next.runId -> next.requestId) match
+          }
+
+        /** 状态 CAS、事件追加和 ModelCall ledger 在同一个同步 Ref 更新中全有或全无。 */
+        def commit(
+            expectedVersion: Version,
+            state: AgentState,
+            incoming: NonEmptyChunk[PersistedAgentEvent],
+            modelCall: Option[ModelCallWrite]
+        ): IO[StoreError, Version] =
+          RunStore.validateEventBatch(state, incoming, requireStartAtZero = false) *>
+            data.modifyZIO { current =>
+              current.states.get(state.runId) match
+                case None => ZIO.fail(AgentError.RunNotFound(state.runId))
+                case Some(existing) if existing.version != expectedVersion =>
+                  ZIO.fail(AgentError.OptimisticLock(expectedVersion, existing.version))
+                case Some(existing) if incoming.head.sequence != existing.lastEventSequence + 1L =>
+                  ZIO.fail(
+                    AgentError.PersistenceFailure(
+                      s"事件批次没有紧接已提交游标: runId=${state.runId.asString}, previous=${existing.lastEventSequence}, first=${incoming.head.sequence}"
+                    )
+                  )
+                case Some(_) =>
+                  applyModelCallWrite(current.modelCalls, modelCall).flatMap { nextModelCalls =>
+                    val nextVersion = expectedVersion.next
+                    mergeEvents(current.events, state.runId, incoming).map { nextEvents =>
+                      val updated = state.copy(version = nextVersion)
+                      nextVersion -> syncSuspensionIndex(
+                        current.copy(
+                          states = current.states.updated(state.runId, updated),
+                          events = nextEvents,
+                          modelCalls = nextModelCalls
+                        ),
+                        updated
+                      )
+                    }
+                  }
+            }
+
+        def commitFenced(
+            lease: RunCommandLease,
+            expectedVersion: Version,
+            state: AgentState,
+            incoming: NonEmptyChunk[PersistedAgentEvent],
+            modelCall: Option[ModelCallWrite]
+        ): IO[StoreError, Version] =
+          if lease.runId != state.runId then
+            ZIO.fail(
+              AgentError
+                .LeaseLost(state.runId, lease.owner.value, lease.generation, "租约与 AgentState 不属于同一 Run")
+            )
+          else commit(expectedVersion, state, incoming, modelCall)
+
+        private def applyModelCallWrite(
+            current: Map[(RunId, ModelRequestId), ModelCallExecutionRecord],
+            write: Option[ModelCallWrite]
+        ): IO[StoreError, Map[(RunId, ModelRequestId), ModelCallExecutionRecord]] =
+          write match
+            case None                                => ZIO.succeed(current)
+            case Some(ModelCallWrite.Insert(record)) =>
+              current.get(record.runId -> record.requestId) match
+                case Some(existing) if !RunStore.sameModelCallIdentity(existing, record) =>
+                  ZIO.fail(
+                    AgentError.PersistenceFailure(
+                      s"模型调用 ${record.requestId.asString} 已属于其他 fingerprint 或模型，拒绝错误复用账本"
+                    )
+                  )
+                case Some(_) => ZIO.succeed(current)
+                case None    => ZIO.succeed(current.updated(record.runId -> record.requestId, record))
+            case Some(ModelCallWrite.Transition(expectedStatus, expectedAttempt, next)) =>
+              current.get(next.runId -> next.requestId) match
+                case Some(existing)
+                    if existing.status == expectedStatus &&
+                      existing.attempt == expectedAttempt &&
+                      RunStore.sameModelCallIdentity(existing, next) =>
+                  ZIO.succeed(current.updated(next.runId -> next.requestId, next))
+                case _ =>
+                  ZIO.fail(
+                    AgentError.ModelCallConflict(
+                      next.runId,
+                      next.requestId.asString,
+                      expectedStatus.toString,
+                      expectedAttempt
+                    )
+                  )
+
+        /** 先验证 Run 存在，再按 EventId 去重并按 sequence 排序。 */
+        def appendEvents(runId: RunId, incoming: NonEmptyChunk[PersistedAgentEvent]): IO[StoreError, Unit] =
+          validateAppendedEvents(runId, incoming) *>
+            data.modifyZIO { current =>
+              current.states.get(runId) match
+                case None => ZIO.fail(AgentError.RunNotFound(runId))
+                case Some(state) if incoming.exists(_.sequence > state.lastEventSequence) =>
+                  ZIO.fail(
+                    AgentError.PersistenceFailure(
+                      s"appendEvents 不能推进状态事件游标: runId=${runId.asString}, stateLast=${state.lastEventSequence}, incomingMax=${incoming.map(_.sequence).max}"
+                    )
+                  )
+                case Some(_) =>
+                  mergeEvents(current.events, runId, incoming).map(next => () -> current.copy(events = next))
+            }
+
+        /** 从内存事件向量中过滤游标之后的数据，并遵守与 PostgreSQL 相同的有界分页契约。 */
+        def events(
+            runId: RunId,
+            afterSequence: Long,
+            limit: Int
+        ): IO[StoreError, Chunk[PersistedAgentEvent]] =
+          validateEventPage(afterSequence, limit) *>
+            data.get.map { current =>
+              Chunk.fromIterable(
+                current.events
+                  .getOrElse(runId, Vector.empty)
+                  .iterator
+                  .filter(_.sequence > afterSequence)
+                  .take(limit)
+                  .toVector
+              )
+            }
+
+        /** 将 runId 加入取消集合；集合天然保证重复请求幂等。 */
+        def requestCancellation(runId: RunId): IO[StoreError, Unit] =
+          data.modifyZIO { current =>
+            if current.states.contains(runId) then
+              ZIO.succeed(() -> current.copy(cancellations = current.cancellations + runId))
+            else ZIO.fail(AgentError.RunNotFound(runId))
+          }
+
+        /** 检查取消集合，同时对未知 Run 保持一致的 RunNotFound 语义。 */
+        def cancellationRequested(runId: RunId): IO[StoreError, Boolean] =
+          data.get.flatMap { current =>
+            if current.states.contains(runId) then ZIO.succeed(current.cancellations.contains(runId))
+            else ZIO.fail(AgentError.RunNotFound(runId))
+          }
+
+        /** 在单个同步 Ref 临界区验证并插入整批 Prepared 记录。 */
+        def prepareToolExecutions(records: NonEmptyChunk[ToolExecutionRecord]): IO[StoreError, Unit] =
+          validateToolBatch(records) *> data.modifyZIO { current =>
+            val runId = records.head.runId
+            if !current.states.contains(runId) then ZIO.fail(AgentError.RunNotFound(runId))
+            else
+              records.collectFirst {
+                case expected
+                    if current.toolExecutions
+                      .get(expected.runId -> expected.callId)
+                      .exists(existing => !sameToolExecutionIdentity(existing, expected)) =>
+                  expected
+              } match
+                case Some(conflicting) =>
+                  ZIO.fail(
+                    AgentError.PersistenceFailure(
+                      s"工具 callId ${conflicting.callId} 已属于其他批次或 ordinal，拒绝错误复用账本"
+                    )
+                  )
+                case None =>
+                  val next = records.foldLeft(current.toolExecutions) { (all, record) =>
+                    all.updatedWith(record.runId -> record.callId) {
+                      case existing @ Some(_) => existing
+                      case None               => Some(record)
+                    }
+                  }
+                  ZIO.succeed(() -> current.copy(toolExecutions = next))
+          }
+
+        /** status+attempt 同时匹配才允许推进，模拟 PostgreSQL 条件 UPDATE。 */
+        def transitionToolExecution(
+            expectedStatus: ToolExecutionStatus,
+            expectedAttempt: Int,
+            next: ToolExecutionRecord
+        ): IO[StoreError, ToolExecutionRecord] =
+          data.modifyZIO { current =>
+            current.toolExecutions.get(next.runId -> next.callId) match
               case Some(existing)
                   if existing.status == expectedStatus &&
                     existing.attempt == expectedAttempt &&
-                    RunStore.sameModelCallIdentity(existing, next) =>
-                ZIO.succeed(current.updated(next.runId -> next.requestId, next))
+                    sameToolExecutionIdentity(existing, next) =>
+                ZIO.succeed(
+                  next -> current
+                    .copy(toolExecutions = current.toolExecutions.updated(next.runId -> next.callId, next))
+                )
               case _ =>
                 ZIO.fail(
-                  AgentError.ModelCallConflict(
+                  AgentError.ToolExecutionConflict(
                     next.runId,
-                    next.requestId.asString,
+                    next.callId,
                     expectedStatus.toString,
                     expectedAttempt
                   )
                 )
-
-      /** 先验证 Run 存在，再按 EventId 去重并按 sequence 排序。 */
-      def appendEvents(runId: RunId, incoming: NonEmptyChunk[PersistedAgentEvent]): IO[StoreError, Unit] =
-        validateAppendedEvents(runId, incoming) *>
-          data.modifyZIO { current =>
-            current.states.get(runId) match
-              case None => ZIO.fail(AgentError.RunNotFound(runId))
-              case Some(state) if incoming.exists(_.sequence > state.lastEventSequence) =>
-                ZIO.fail(
-                  AgentError.PersistenceFailure(
-                    s"appendEvents 不能推进状态事件游标: runId=${runId.asString}, stateLast=${state.lastEventSequence}, incomingMax=${incoming.map(_.sequence).max}"
-                  )
-                )
-              case Some(_) =>
-                mergeEvents(current.events, runId, incoming).map(next => () -> current.copy(events = next))
           }
 
-      /** 从内存事件向量中过滤游标之后的数据，并遵守与 PostgreSQL 相同的有界分页契约。 */
-      def events(runId: RunId, afterSequence: Long, limit: Int): IO[StoreError, Chunk[PersistedAgentEvent]] =
-        validateEventPage(afterSequence, limit) *>
-          data.get.map { current =>
+        /** 按复合键查询执行记录。 */
+        def getToolExecution(runId: RunId, callId: String): IO[StoreError, Option[ToolExecutionRecord]] =
+          data.get.map(_.toolExecutions.get(runId -> callId))
+
+        /** 过滤同一 run/batch 并按原始 ordinal 排序。 */
+        def getToolExecutions(runId: RunId, batchId: String): IO[StoreError, Chunk[ToolExecutionRecord]] =
+          data.get.map(current =>
             Chunk.fromIterable(
-              current.events
-                .getOrElse(runId, Vector.empty)
-                .iterator
-                .filter(_.sequence > afterSequence)
-                .take(limit)
+              current.toolExecutions.valuesIterator
+                .filter(record => record.runId == runId && record.batchId == batchId)
                 .toVector
+                .sortBy(_.ordinal)
             )
+          )
+
+        def listToolExecutions(runId: RunId): IO[StoreError, Chunk[ToolExecutionRecord]] =
+          data.get.map(current =>
+            Chunk.fromIterable(
+              current.toolExecutions.valuesIterator
+                .filter(_.runId == runId)
+                .toVector
+                .sortBy(record => (record.batchId, record.ordinal))
+            )
+          )
+
+        def getModelCall(
+            runId: RunId,
+            requestId: ModelRequestId
+        ): IO[StoreError, Option[ModelCallExecutionRecord]] =
+          data.get.map(_.modelCalls.get(runId -> requestId))
+
+        def getModelCalls(runId: RunId): IO[StoreError, Chunk[ModelCallExecutionRecord]] =
+          data.get.map(current =>
+            Chunk.fromIterable(
+              current.modelCalls.valuesIterator
+                .filter(_.runId == runId)
+                .toVector
+                .sortBy(_.updatedAtEpochMilli)
+            )
+          )
+
+        def delete(runId: RunId): IO[StoreError, Unit] =
+          data.modifyZIO { current =>
+            if !current.states.contains(runId) then ZIO.fail(AgentError.RunNotFound(runId))
+            else
+              ZIO.succeed(
+                () -> current.copy(
+                  states = current.states - runId,
+                  events = current.events - runId,
+                  cancellations = current.cancellations - runId,
+                  toolExecutions =
+                    current.toolExecutions.filterNot { case ((storedRunId, _), _) => storedRunId == runId },
+                  modelCalls = current.modelCalls.filterNot { case ((storedRunId, _), _) =>
+                    storedRunId == runId
+                  },
+                  suspensions = current.suspensions - runId
+                )
+              )
           }
 
-      /** 将 runId 加入取消集合；集合天然保证重复请求幂等。 */
-      def requestCancellation(runId: RunId): IO[StoreError, Unit] =
-        data.modifyZIO { current =>
-          if current.states.contains(runId) then
-            ZIO.succeed(() -> current.copy(cancellations = current.cancellations + runId))
-          else ZIO.fail(AgentError.RunNotFound(runId))
-        }
-
-      /** 检查取消集合，同时对未知 Run 保持一致的 RunNotFound 语义。 */
-      def cancellationRequested(runId: RunId): IO[StoreError, Boolean] =
-        data.get.flatMap { current =>
-          if current.states.contains(runId) then ZIO.succeed(current.cancellations.contains(runId))
-          else ZIO.fail(AgentError.RunNotFound(runId))
-        }
-
-      /** 在单个同步 Ref 临界区验证并插入整批 Prepared 记录。 */
-      def prepareToolExecutions(records: NonEmptyChunk[ToolExecutionRecord]): IO[StoreError, Unit] =
-        validateToolBatch(records) *> data.modifyZIO { current =>
-          val runId = records.head.runId
-          if !current.states.contains(runId) then ZIO.fail(AgentError.RunNotFound(runId))
-          else
-            records.collectFirst {
-              case expected
-                  if current.toolExecutions
-                    .get(expected.runId -> expected.callId)
-                    .exists(existing => !sameToolExecutionIdentity(existing, expected)) =>
-                expected
-            } match
-              case Some(conflicting) =>
-                ZIO.fail(
-                  AgentError.PersistenceFailure(
-                    s"工具 callId ${conflicting.callId} 已属于其他批次或 ordinal，拒绝错误复用账本"
+        def expireDue(limit: Int): IO[StoreError, Chunk[RunId]] =
+          Clock.instant.flatMap { now =>
+            data.modifyZIO { current =>
+              val due = current.suspensions.toVector
+                .collect {
+                  case (runId, row)
+                      if row.status == SuspensionIndexStatus.Pending &&
+                        row.deadline.exists(deadline => !deadline.isAfter(now)) =>
+                    runId -> row
+                }
+                .sortBy { case (runId, row) => (row.deadline.get.toEpochMilli, runId.asString) }
+                .take(limit.max(0))
+              val next = due.foldLeft(current) { case (acc, (runId, row)) =>
+                acc.copy(suspensions =
+                  acc.suspensions.updated(
+                    runId,
+                    row.copy(
+                      status = SuspensionIndexStatus.Expired,
+                      resolvedAt = Some(now),
+                      availableAt = Some(now)
+                    )
                   )
                 )
-              case None =>
-                val next = records.foldLeft(current.toolExecutions) { (all, record) =>
-                  all.updatedWith(record.runId -> record.callId) {
-                    case existing @ Some(_) => existing
-                    case None               => Some(record)
+              }
+              ZIO.succeed(Chunk.fromIterable(due.map(_._1)) -> next)
+            }
+          }
+
+        def claimExpired(
+            owner: WorkerId,
+            leaseDuration: Duration,
+            limit: Int
+        ): IO[StoreError, Chunk[SuspensionLease]] =
+          Clock.instant.flatMap { now =>
+            LeaseToken.random.flatMap { token =>
+              data.modifyZIO { current =>
+                val expiresAt  = now.plusMillis(leaseDuration.toMillis)
+                val candidates = current.suspensions.toVector
+                  .collect {
+                    case (runId, row)
+                        if row.status == SuspensionIndexStatus.Expired &&
+                          row.availableAt.exists(available => !available.isAfter(now)) &&
+                          row.leaseExpiresAt.forall(expires => !expires.isAfter(now)) =>
+                      runId -> row
                   }
+                  .sortBy { case (runId, row) =>
+                    (row.deadline.map(_.toEpochMilli).getOrElse(0L), runId.asString)
+                  }
+                  .take(math.max(1, limit))
+                val (leases, next) = candidates.foldLeft(Vector.empty[SuspensionLease] -> current) {
+                  case ((claimed, acc), (runId, row)) =>
+                    val generation = row.generation + 1L
+                    val lease      = SuspensionLease(
+                      runId,
+                      row.kind,
+                      row.expiryOutcome,
+                      owner,
+                      token,
+                      generation,
+                      expiresAt
+                    )
+                    val updated = row.copy(
+                      generation = generation,
+                      owner = Some(owner),
+                      token = Some(token),
+                      claimedAt = Some(now),
+                      leaseExpiresAt = Some(expiresAt),
+                      heartbeatAt = Some(now)
+                    )
+                    (claimed :+ lease) -> acc.copy(suspensions = acc.suspensions.updated(runId, updated))
                 }
-                ZIO.succeed(() -> current.copy(toolExecutions = next))
-        }
+                ZIO.succeed(Chunk.fromIterable(leases) -> next)
+              }
+            }
+          }
 
-      /** status+attempt 同时匹配才允许推进，模拟 PostgreSQL 条件 UPDATE。 */
-      def transitionToolExecution(
-          expectedStatus: ToolExecutionStatus,
-          expectedAttempt: Int,
-          next: ToolExecutionRecord
-      ): IO[StoreError, ToolExecutionRecord] =
-        data.modifyZIO { current =>
-          current.toolExecutions.get(next.runId -> next.callId) match
-            case Some(existing)
-                if existing.status == expectedStatus &&
-                  existing.attempt == expectedAttempt &&
-                  sameToolExecutionIdentity(existing, next) =>
-              ZIO.succeed(
-                next -> current.copy(toolExecutions =
-                  current.toolExecutions.updated(next.runId -> next.callId, next)
-                )
-              )
-            case _ =>
-              ZIO.fail(
-                AgentError.ToolExecutionConflict(
-                  next.runId,
-                  next.callId,
-                  expectedStatus.toString,
-                  expectedAttempt
-                )
-              )
-        }
+        def heartbeat(lease: SuspensionLease, leaseDuration: Duration): IO[StoreError, SuspensionLease] =
+          Clock.instant.flatMap { now =>
+            data.modifyZIO { current =>
+              current.suspensions.get(lease.runId) match
+                case Some(row)
+                    if row.status == SuspensionIndexStatus.Expired &&
+                      row.owner.contains(lease.owner) &&
+                      row.token.contains(lease.token) &&
+                      row.generation == lease.generation &&
+                      row.leaseExpiresAt.exists(_.isAfter(now)) =>
+                  val expiresAt = now.plusMillis(leaseDuration.toMillis)
+                  val nextLease = lease.copy(leaseExpiresAt = expiresAt)
+                  val updated   = row.copy(leaseExpiresAt = Some(expiresAt), heartbeatAt = Some(now))
+                  ZIO.succeed(
+                    nextLease -> current.copy(suspensions = current.suspensions.updated(lease.runId, updated))
+                  )
+                case _ =>
+                  ZIO.fail(
+                    AgentError.LeaseLost(lease.runId, lease.owner.value, lease.generation, "挂起到期租约已失效")
+                  )
+            }
+          }
 
-      /** 按复合键查询执行记录。 */
-      def getToolExecution(runId: RunId, callId: String): IO[StoreError, Option[ToolExecutionRecord]] =
-        data.get.map(_.toolExecutions.get(runId -> callId))
+        def abandon(lease: SuspensionLease, availableAt: Instant): IO[StoreError, Unit] =
+          Clock.instant.flatMap { now =>
+            data.modifyZIO { current =>
+              current.suspensions.get(lease.runId) match
+                case Some(row)
+                    if row.status == SuspensionIndexStatus.Expired &&
+                      row.owner.contains(lease.owner) &&
+                      row.token.contains(lease.token) &&
+                      row.generation == lease.generation &&
+                      row.leaseExpiresAt.exists(_.isAfter(now)) =>
+                  val updated = row.copy(
+                    owner = None,
+                    token = None,
+                    claimedAt = None,
+                    leaseExpiresAt = None,
+                    heartbeatAt = None,
+                    availableAt = Some(availableAt)
+                  )
+                  ZIO.succeed(
+                    () -> current.copy(suspensions = current.suspensions.updated(lease.runId, updated))
+                  )
+                case _ =>
+                  ZIO.fail(
+                    AgentError.LeaseLost(lease.runId, lease.owner.value, lease.generation, "挂起到期租约已失效")
+                  )
+            }
+          }
 
-      /** 过滤同一 run/batch 并按原始 ordinal 排序。 */
-      def getToolExecutions(runId: RunId, batchId: String): IO[StoreError, Chunk[ToolExecutionRecord]] =
-        data.get.map(current =>
-          Chunk.fromIterable(
-            current.toolExecutions.valuesIterator
-              .filter(record => record.runId == runId && record.batchId == batchId)
-              .toVector
-              .sortBy(_.ordinal)
-          )
-        )
-
-      def getModelCall(
-          runId: RunId,
-          requestId: ModelRequestId
-      ): IO[StoreError, Option[ModelCallExecutionRecord]] =
-        data.get.map(_.modelCalls.get(runId -> requestId))
-
-      def getModelCalls(runId: RunId): IO[StoreError, Chunk[ModelCallExecutionRecord]] =
-        data.get.map(current =>
-          Chunk.fromIterable(
-            current.modelCalls.valuesIterator.filter(_.runId == runId).toVector.sortBy(_.updatedAtEpochMilli)
-          )
-        )
-
-      def delete(runId: RunId): IO[StoreError, Unit] =
-        data.modifyZIO { current =>
-          if !current.states.contains(runId) then ZIO.fail(AgentError.RunNotFound(runId))
-          else
-            ZIO.succeed(
-              () -> current.copy(
-                states = current.states - runId,
-                events = current.events - runId,
-                cancellations = current.cancellations - runId,
-                toolExecutions =
-                  current.toolExecutions.filterNot { case ((storedRunId, _), _) => storedRunId == runId },
-                modelCalls = current.modelCalls.filterNot { case ((storedRunId, _), _) =>
-                  storedRunId == runId
-                }
-              )
-            )
-        }
+        def resolve(lease: SuspensionLease): IO[StoreError, Unit] =
+          Clock.instant.flatMap { now =>
+            data.modifyZIO { current =>
+              current.suspensions.get(lease.runId) match
+                case None => ZIO.succeed(() -> current)
+                case Some(row)
+                    if row.owner.contains(lease.owner) &&
+                      row.token.contains(lease.token) &&
+                      row.generation == lease.generation =>
+                  val updated = row.copy(
+                    status = SuspensionIndexStatus.Resolved,
+                    resolvedAt = row.resolvedAt.orElse(Some(now)),
+                    owner = None,
+                    token = None,
+                    claimedAt = None,
+                    leaseExpiresAt = None,
+                    heartbeatAt = None,
+                    availableAt = None
+                  )
+                  ZIO.succeed(
+                    () -> current.copy(suspensions = current.suspensions.updated(lease.runId, updated))
+                  )
+                case _ =>
+                  ZIO.fail(
+                    AgentError.LeaseLost(lease.runId, lease.owner.value, lease.generation, "挂起到期租约已失效")
+                  )
+            }
+          }
+      }
+      ZEnvironment[RunStore](store) ++ ZEnvironment[SuspensionStore](store)
+    }
   }
 
   /** 验证整批 pending writes 的归属、状态和唯一性。 */

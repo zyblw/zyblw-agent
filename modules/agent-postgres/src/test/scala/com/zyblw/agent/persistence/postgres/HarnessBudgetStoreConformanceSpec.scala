@@ -11,7 +11,10 @@ import org.testcontainers.utility.DockerImageName
 import zio.*
 import zio.test.*
 
-/** 对同一组 Goal budget 状态机不变量分别运行内存与 PostgreSQL HarnessStore Adapter。 */
+/** 对同一组 Goal budget 状态机不变量分别运行内存与 PostgreSQL HarnessStore Adapter。
+  *
+  * 覆盖 `harness_goal_budgets` 与 `harness_budget_reservations` 的预留、结算与冲突拒绝。
+  */
 object HarnessBudgetStoreConformanceSpec extends ZIOSpecDefault:
   private val limits = RunLimits(
     maxSteps = 4,

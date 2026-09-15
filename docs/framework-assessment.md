@@ -1,7 +1,7 @@
 # zyblw-agent 能力审计、框架对照与演进判断
 
 > 状态：当前审计
-> 最后核验：2026-08-28
+> 最后核验：2026-09-15
 > 事实来源：当前源码、测试、构建、迁移、发布工作流，以及文末列出的官方框架资料
 > 演进排序的权威来源：[ADR-0019](architecture/0019-typed-extensions-and-constrained-execution.md) 的 Wave 0–3；本文用于能力现状与竞品对照，不另立路线
 
@@ -45,8 +45,8 @@ lease/fencing、PostgreSQL、RAG 引用和低敏观测已经形成可信地基�
 |---|---|---|---|
 | `sbt -batch 'scalafmtCheckAll;scalafmtSbtCheck;testFull'` | pass | 全模块格式、确定性单元和契约基线可编译、可执行 | 真实 Provider、数据库主备、长时负载 |
 | `RUN_POSTGRES_INTEGRATION=1 sbt -DRUN_POSTGRES_INTEGRATION=1 -batch postgres/testFull` | pass，105/105 | PostgreSQL 16/Testcontainers 的迁移、并发、事务、RAG ACL、embedding 身份 fail-closed、恢复契约 | 生产数据量、跨可用区故障、RPO/RTO |
-| 247 个主源码文件、178 个测试源码文件 | 事实 | 不是示例级代码库，测试投入较高 | 文件数量和测试数量本身不等于成熟度 |
-| `AgentRuntimeLive.scala` 2,155 行、`PostgresWorkflowCheckpointStore.scala` 1,879 行 | 风险信号 | 核心职责集中、改动半径较大 | 不能仅凭行数判定设计错误 |
+| 259 个主 Scala 源码文件、186 个测试 Scala 源码文件 | 事实 | 不是示例级代码库，测试投入较高 | 文件数量和测试数量本身不等于成熟度 |
+| `AgentRuntimeDriver.scala` 2,053 行、`PostgresWorkflowCheckpointStore.scala` 1,879 行 | 风险信号 | Driver 已与纯 Kernel 分离，但效果编排仍集中、需要按变化原因继续收口 | 不能仅凭行数判定设计错误 |
 
 发布候选仍必须补充精确 Central 制品的独立 consumer、真实 Provider 小额度 smoke、业务固定数据集、部署环境恢复和
 生产观测证据。测试通过只说明当前已编码契约成立，不授予未测试能力更高成熟度。

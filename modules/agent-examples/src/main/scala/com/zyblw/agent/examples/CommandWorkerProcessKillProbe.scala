@@ -1,5 +1,6 @@
 package com.zyblw.agent.examples
 
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
 import com.zyblw.agent.persistence.postgres.*
@@ -119,10 +120,15 @@ object CommandWorkerProcessKillProbe extends ZIOAppDefault:
       sessionId <- SessionId.random
       eventId   <- EventId.random
       now       <- Clock.instant
+      agent = AgentDefinition(
+        AgentId("command-worker-process-kill-probe"),
+        "kill-probe",
+        "命令 Worker 进程被杀后的恢复探针"
+      )
       state = AgentState(
         runId,
         sessionId,
-        AgentId("command-worker-process-kill-probe"),
+        agent.id,
         RunStatus.Created,
         Chunk.empty,
         Chunk.empty,
@@ -132,6 +138,9 @@ object CommandWorkerProcessKillProbe extends ZIOAppDefault:
         now,
         now,
         Version.initial,
+        agent,
+        RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings),
+        ThreadId("kill-probe-thread"),
         lastEventSequence = 0L
       )
       event = PersistedAgentEvent(

@@ -1,5 +1,6 @@
 package com.zyblw.agent.runtime
 
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import java.time.Instant
 import java.util.UUID
@@ -16,6 +17,9 @@ object DurableRunEventStreamSpec extends ZIOSpecDefault:
   private val sessionId = SessionId(UUID.randomUUID())
   private val now       = Instant.parse("2026-01-01T00:00:00Z")
 
+  private val streamAgent =
+    AgentDefinition(AgentId("durable-stream-test"), "Durable Stream", "耐久事件流测试")
+
   /** 按给定终态和 last sequence 创建最小权威状态。 */
   private def state(status: RunStatus, lastSequence: Long): AgentState =
     AgentState(
@@ -27,11 +31,14 @@ object DurableRunEventStreamSpec extends ZIOSpecDefault:
       steps = Chunk.empty,
       usage = UsageSummary(),
       budget = BudgetState(RunLimits(), UsageSummary(), 0),
-      pendingApproval = None,
+      suspension = None,
       createdAt = now,
       updatedAt = now,
       version = Version.initial,
-      threadId = Some(ThreadId("durable-stream")),
+      definition = streamAgent,
+      composition =
+        RuntimeComposition.fingerprint(RuntimeProfile.default, streamAgent, streamAgent.modelSettings),
+      threadId = ThreadId("durable-stream"),
       lastEventSequence = lastSequence
     )
 

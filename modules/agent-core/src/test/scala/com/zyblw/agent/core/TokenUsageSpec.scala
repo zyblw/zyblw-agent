@@ -7,14 +7,16 @@ import zio.test.*
 object TokenUsageSpec extends ZIOSpecDefault:
   def spec = suite("TokenUsage")(
     test("累计缓存与推理明细但总预算只计算输入输出总量") {
-      val combined = TokenUsage(10, 4, 6, 2) + TokenUsage(5, 3, 1, 1)
+      val combined = TokenUsage(10, 4, 5, 2, 1) + TokenUsage(5, 3, 1, 1, 2)
       val summary  = UsageSummary().addModel(combined)
       assertTrue(
-        combined == TokenUsage(15, 7, 7, 3),
+        combined == TokenUsage(15, 7, 6, 3, 3),
         combined.totalTokens == 22,
+        combined.freshInputTokens == 6,
         summary.totalTokens == 22,
-        summary.cachedInputTokens == 7,
-        summary.reasoningOutputTokens == 3
+        summary.cachedInputTokens == 6,
+        summary.reasoningOutputTokens == 3,
+        summary.cacheWriteInputTokens == 3
       )
     },
     test("新增 UsageSummary 字段具有默认值，可读取旧快照") {
@@ -22,7 +24,15 @@ object TokenUsageSpec extends ZIOSpecDefault:
         """{"modelCalls":1,"toolCalls":2,"inputTokens":10,"outputTokens":4,"estimatedCost":0}"""
       val decoded = legacy.fromJson[UsageSummary]
       assertTrue(
-        decoded.exists(summary => summary.cachedInputTokens == 0L && summary.reasoningOutputTokens == 0L)
+        decoded.exists(summary =>
+          summary.cachedInputTokens == 0L && summary.reasoningOutputTokens == 0L &&
+            summary.cacheWriteInputTokens == 0L
+        )
+      )
+    },
+    test("cache read/write 不能超出输入 token") {
+      assertTrue(
+        scala.util.Try(TokenUsage(inputTokens = 3, cachedInputTokens = 2, cacheWriteInputTokens = 2)).isFailure
       )
     }
   )

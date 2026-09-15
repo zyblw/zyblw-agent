@@ -9,6 +9,21 @@ object ArtifactAccessGrant:
       case ArtifactScope.User(owner, _) if owner == tenant => Right(reference)
       case ArtifactScope.User(_, _)                        => Left("artifact-tenant-mismatch")
       case ArtifactScope.Session(_)                        => Left("artifact-session-scope-not-exportable")
+      case ArtifactScope.Run(_, _)                         => Left("artifact-run-scope-not-exportable")
+
+  /** 工具读取授权：只允许当前 Run 自己外置的结果，忽略模型自报的 scope。 */
+  def authorize(
+      reference: ArtifactReference,
+      context: ToolExecutionContext
+  ): Either[String, ArtifactReference] =
+    reference.scope match
+      case ArtifactScope.Run(runId, threadId) if runId == context.runId && threadId == context.threadId =>
+        Right(reference)
+      case ArtifactScope.Run(_, _) => Left("artifact-run-scope-mismatch")
+      case ArtifactScope.User(owner, _) if context.runContext.tenantId.contains(owner.value) =>
+        Right(reference)
+      case ArtifactScope.User(_, _) => Left("artifact-tenant-mismatch")
+      case ArtifactScope.Session(_) => Left("artifact-session-scope-not-readable-via-tool")
 
   /** 过期 grant 不能再兑换字节；调用方必须用已认证租户。 */
   final case class Issued(

@@ -91,6 +91,9 @@ object PostgresApprovalSubjectIntegrationSpec extends ZIOSpecDefault:
       AuthorizationFingerprint.of(context)
     )
 
+  private val approvalAgent =
+    AgentDefinition(AgentId("postgres-approval-subject"), "Postgres", "test")
+
   private def v6State(
       runId: RunId,
       now: Instant,
@@ -101,7 +104,7 @@ object PostgresApprovalSubjectIntegrationSpec extends ZIOSpecDefault:
       "plan-pg-v6",
       Chunk(DurableToolBatch(0, Chunk(DurableToolPlanItem(0, call)))),
       toolContractFingerprints = Map("write" -> frozen.toolContract),
-      approvalSubjects = Some(Map(call.id -> frozen))
+      approvalSubjects = Map(call.id -> frozen)
     )
     AgentState(
       runId,
@@ -113,22 +116,25 @@ object PostgresApprovalSubjectIntegrationSpec extends ZIOSpecDefault:
       UsageSummary(),
       BudgetState(RunLimits(), UsageSummary(), 0),
       Some(
-        ApprovalRequest(
-          s"approval-${runId.asString}-${call.id}-${frozen.value.take(16)}",
-          runId,
-          call,
-          ToolRisk.ApprovalWrite,
-          "需要人工授权",
-          now.toEpochMilli,
-          Some(frozen)
+        SuspensionRecord.of(
+          ApprovalRequest(
+            s"approval-${runId.asString}-${call.id}-${frozen.value.take(16)}",
+            runId,
+            call,
+            ToolRisk.ApprovalWrite,
+            "需要人工授权",
+            now.toEpochMilli,
+            Some(frozen)
+          )
         )
       ),
       now,
       now,
       Version.initial,
+      approvalAgent,
+      RuntimeComposition.fingerprint(RuntimeProfile.default, approvalAgent, approvalAgent.modelSettings),
+      ThreadId("postgres-approval-thread"),
       schemaVersion = AgentState.CurrentSchemaVersion,
-      threadId = Some(ThreadId("postgres-approval-thread")),
-      definition = Some(AgentDefinition(AgentId("postgres-approval-subject"), "Postgres", "test")),
       runContext = RunContext(tenantId = Some("tenant-a")),
       pendingToolPlan = Some(plan),
       lastEventSequence = 0L
@@ -158,7 +164,7 @@ object PostgresApprovalSubjectIntegrationSpec extends ZIOSpecDefault:
           loaded       <- fixture.store.load(runId)
           schemaColumn <- readSchemaVersion(fixture.dataSource, runId)
           pending = loaded.pendingApproval.flatMap(_.subject)
-          planned = loaded.pendingToolPlan.flatMap(_.approvalSubjects).flatMap(_.get(call.id))
+          planned = loaded.pendingToolPlan.flatMap(_.approvalSubjects.get(call.id))
         yield assertTrue(
           loaded.schemaVersion == AgentState.CurrentSchemaVersion,
           schemaColumn == AgentState.CurrentSchemaVersion,
@@ -168,10 +174,10 @@ object PostgresApprovalSubjectIntegrationSpec extends ZIOSpecDefault:
           planned.exists(_.driftFrom(frozen).isEmpty),
           pending.exists(value => !value.toJson.contains(secret)),
           planned.exists(value => !value.toJson.contains(secret)),
-          loaded.pendingToolPlan.flatMap(_.frozenApprovalCallIds).contains(Set(call.id))
+          loaded.pendingToolPlan.exists(_.frozenApprovalCallIds == Set(call.id))
         )).provideLayer(fixtureLayer)
       },
-      test("关系列 schema_version 与 JSON 信封不一致时 fail-closed") {
+      test("非 1 的 schema_version 被数据库 CHECK 直接拒绝，写不进关系列") {
         val call   = ToolCall("call-pg-envelope", "write", Json.Obj())
         val frozen = subject(call)
         (for
@@ -188,16 +194,17 @@ object PostgresApprovalSubjectIntegrationSpec extends ZIOSpecDefault:
             now.toEpochMilli
           )
           _ <- fixture.store.createWithEvents(initial, NonEmptyChunk(created))
-          _ <- executeSql(
+          // 唯一在用的耐久形状就是 1，因此把它改成别的值必须在数据库层失败，而不是留给应用层解释。
+          rejected <- executeSql(
             fixture.dataSource,
             "UPDATE agent_runs SET schema_version = 5 WHERE run_id = ?::uuid",
             runId
-          )
-          result <- fixture.store.load(runId).either
-          rejected = result match
-            case Left(AgentError.PersistenceFailure(message, _)) => message.contains("schemaVersion")
-            case _                                               => false
-        yield assertTrue(rejected)).provideLayer(fixtureLayer)
+          ).exit
+          schemaColumn <- readSchemaVersion(fixture.dataSource, runId)
+        yield assertTrue(
+          rejected.isFailure,
+          schemaColumn == AgentState.CurrentSchemaVersion
+        )).provideLayer(fixtureLayer)
       }
     ) @@ TestAspect.withLiveEnvironment @@ PostgresIntegrationAspect.enabled @@
       TestAspect.timeout(2.minutes)

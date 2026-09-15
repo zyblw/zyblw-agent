@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-23
+> 最后核验：2026-09-14
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -50,7 +50,7 @@ ToolMetadata(
 调用冲突。`ToolBatchPlanner` 不跨写操作重排模型意图，而是按原 ordinal 生成连续批次。`ToolBatchExecutor` 批次间
 顺序、批次内有界并行，收集全部 typed failure，最后仍按原 ordinal 返回。
 
-主 `AgentRuntimeLive` 已接入这套规划与执行语义，但并行不是全局开关：Runtime 会把需要审批、缺 scope、未知、
+主 `AgentRuntimeDriver` 已接入这套规划与执行语义，批次状态由 `AgentKernel` 纯归约；并行不是全局开关：Runtime 会把需要审批、缺 scope、未知、
 崩溃后不可自动重放（`NeverReplay` / `RequiresApproval`）或没有完整冲突声明的工具强制降级为单调用批次。只有同时满足以下条件才真正进入批内并行：
 
 1. `parallelism = ConflictAware` 且至少声明一个冲突组；

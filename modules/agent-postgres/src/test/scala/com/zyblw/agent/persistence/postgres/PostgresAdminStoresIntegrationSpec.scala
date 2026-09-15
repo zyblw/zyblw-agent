@@ -2,6 +2,7 @@ package com.zyblw.agent.persistence.postgres
 
 import com.dimafeng.testcontainers.PostgreSQLContainer
 import com.zyblw.agent.admin.*
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeCompositionFingerprint, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
 import java.time.Instant
@@ -15,8 +16,8 @@ import zio.test.*
 
 /** 真实 PostgreSQL 管理面 Adapter 契约测试。
   *
-  * 这些语义无法用内存实现替代：`V002` 的生成列由数据库在写入时计算，keyset 翻页依赖行值比较与复合索引上的 UUID 排序，而配置覆盖的 CAS 在并发下最终由主键唯一约束拦截。CI 通过
-  * `RUN_POSTGRES_INTEGRATION=1` 显式启用。
+  * 覆盖 `agent_runtime_overrides` 与 `agent_ingestion_jobs`。这些语义无法用内存实现替代：V001 的生成列由数据库在写入时计算，keyset
+  * 翻页依赖行值比较与复合索引上的 UUID 排序，而配置覆盖的 CAS 在并发下最终由主键唯一约束拦截。CI 通过 `RUN_POSTGRES_INTEGRATION=1` 显式启用。
   */
 object PostgresAdminStoresIntegrationSpec extends ZIOSpecDefault:
   final private case class Stores(
@@ -68,6 +69,12 @@ object PostgresAdminStoresIntegrationSpec extends ZIOSpecDefault:
     requestedAtEpochMilli = 0L
   )
 
+  private def definitionOf(agentId: String): AgentDefinition =
+    AgentDefinition(AgentId(agentId), agentId, "管理面测试")
+
+  private def compositionOf(agent: AgentDefinition): RuntimeCompositionFingerprint =
+    RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings)
+
   /** 写入一个满足事件不变量的 Run，供目录查询读取。 */
   private def createRun(
       store: RunStore,
@@ -75,25 +82,45 @@ object PostgresAdminStoresIntegrationSpec extends ZIOSpecDefault:
       status: RunStatus = RunStatus.Running,
       tenantId: Option[String] = Some("acme"),
       agentId: String = "support",
-      awaitingApproval: Boolean = false
+      awaitingApproval: Boolean = false,
+      awaitingSignal: Boolean = false
   ): IO[StoreError, RunId] =
     for
       runId   <- RunId.random
       session <- SessionId.random
       eventId <- EventId.random
+      nextStatus =
+        if awaitingApproval then RunStatus.WaitingForApproval
+        else if awaitingSignal then RunStatus.Suspended
+        else status
+      suspension =
+        if awaitingApproval then Some(SuspensionRecord.of(approval(runId)))
+        else if awaitingSignal then
+          Some(
+            SuspensionRecord(
+              Suspension.Timer,
+              Instant.EPOCH,
+              deadline = Some(updatedAt.plusSeconds(60)),
+              expiryOutcome = SuspensionExpiry.FailRun
+            )
+          )
+        else None
       state = AgentState(
         runId,
         session,
         AgentId(agentId),
-        status,
+        nextStatus,
         Chunk.empty,
         Chunk.empty,
         UsageSummary(),
         BudgetState(RunLimits(), UsageSummary(), 0),
-        Option.when(awaitingApproval)(approval(runId)),
+        suspension,
         Instant.EPOCH,
         updatedAt,
         Version.initial,
+        definitionOf(agentId),
+        compositionOf(definitionOf(agentId)),
+        ThreadId("admin-thread"),
         runContext = RunContext(tenantId = tenantId, userId = Some("user-1")),
         lastEventSequence = 0L
       )
@@ -126,23 +153,28 @@ object PostgresAdminStoresIntegrationSpec extends ZIOSpecDefault:
     )
 
   def spec = suite("PostgreSQL 管理面 Adapter")(
-    test("V002 生成列从 state_json 提取租户、用户与审批等待，无需改动任何写路径") {
+    test("V001 生成列从 state_json 提取租户、用户与审批/挂起等待，无需改动任何写路径") {
       (for
         stores <- ZIO.service[Stores]
         _      <- createRun(stores.runStore, Instant.ofEpochMilli(4000L), tenantId = Some("acme"))
         _      <- createRun(stores.runStore, Instant.ofEpochMilli(3000L), tenantId = None)
         _      <- createRun(stores.runStore, Instant.ofEpochMilli(2000L), awaitingApproval = true)
+        _      <- createRun(stores.runStore, Instant.ofEpochMilli(1000L), awaitingSignal = true)
         scoped <- stores.directory.list(RunDirectoryQuery(tenantId = Some("acme")))
         // 租户为 None 的 Run 不能被租户过滤命中，也不能因为生成列为 NULL 而被误判为待审批。
         approving <- stores.directory.list(RunDirectoryQuery(awaitingApprovalOnly = true))
+        signaling <- stores.directory.list(RunDirectoryQuery(awaitingSignalOnly = true))
         overview  <- stores.directory.overview(None)
       yield assertTrue(
-        scoped.items.length == 2,
+        scoped.items.length == 3,
         scoped.items.forall(_.tenantId.contains("acme")),
         approving.items.length == 1,
         approving.items.head.pendingApprovalToolName.contains("delete_account"),
-        overview.totalRuns == 3L,
-        overview.awaitingApproval == 1L
+        signaling.items.length == 1,
+        signaling.items.head.suspensionKind.contains("timer"),
+        overview.totalRuns == 4L,
+        overview.awaitingApproval == 1L,
+        overview.awaitingSignal == 1L
       )).provideLayer(storesLayer)
     },
     test("keyset 翻页在真实 SQL 上与内存实现返回同一顺序，且不重复不跳过") {

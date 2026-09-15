@@ -1,5 +1,6 @@
 package com.zyblw.agent.rag
 
+import com.zyblw.agent.composition.{CapabilityKind, CapabilityRef, RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
 import com.zyblw.agent.observability.*
@@ -10,6 +11,8 @@ import zio.test.*
 
 /** Memory/RAG 来源解析器的租户隔离、过期过滤、引用映射和 fail-closed 测试。 */
 object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
+  private val ragAgent = AgentDefinition(AgentId("context-source-test"), "测试", "只根据资料回答")
+
   /** 创建包含可信用户/租户和最新用户问题的最小耐久状态。 */
   private def state(runId: RunId, sessionId: SessionId, tenant: Option[String]): AgentState =
     AgentState(
@@ -21,11 +24,13 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
       steps = Chunk.empty,
       usage = UsageSummary(),
       budget = BudgetState(RunLimits(), UsageSummary(), 0),
-      pendingApproval = None,
+      suspension = None,
       createdAt = Instant.EPOCH,
       updatedAt = Instant.EPOCH,
       version = Version.initial,
-      definition = Some(AgentDefinition(AgentId("context-source-test"), "测试", "只根据资料回答")),
+      definition = ragAgent,
+      composition = RuntimeComposition.fingerprint(RuntimeProfile.default, ragAgent, ragAgent.modelSettings),
+      threadId = ThreadId("context-source-thread"),
       runContext = RunContext(Some("user-a"), tenant, Set("knowledge:read"))
     )
 
@@ -83,7 +88,7 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
         invocation.exists(_._2.tenantId == TenantId("tenant-a")),
         invocation.exists(_._2.permissions == Set("knowledge:read")),
         invocation.exists(_._3 == 3),
-        resolver.sourceIds == Chunk("memory-rag@2")
+        resolver.sourceIds == Chunk(CapabilityRef(CapabilityKind.Context, "memory-rag", "2"))
       )
     }.provide(MemoryStore.inMemory),
     test("没有 tenant 时不调用 Retriever，防止退化为跨租户搜索") {

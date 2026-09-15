@@ -1,5 +1,6 @@
 package com.zyblw.agent.http
 
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.http.contract.*
 import com.zyblw.agent.memory.*
@@ -25,6 +26,7 @@ object AgentHttpApiSpec extends ZIOSpecDefault:
   private val runId     = RunId(UUID.randomUUID())
   private val sessionId = SessionId(UUID.randomUUID())
   private val now       = Instant.parse("2026-01-01T00:00:00Z")
+  private val httpAgent = AgentDefinition(AgentId("http-test"), "HTTP Test", "HTTP 适配器测试")
   private val state     = AgentState(
     runId,
     sessionId,
@@ -38,7 +40,9 @@ object AgentHttpApiSpec extends ZIOSpecDefault:
     now,
     now,
     com.zyblw.agent.core.Version.initial,
-    threadId = Some(ThreadId("http-thread")),
+    httpAgent,
+    RuntimeComposition.fingerprint(RuntimeProfile.default, httpAgent, httpAgent.modelSettings),
+    ThreadId("http-thread"),
     lastEventSequence = 0L
   )
   private val created = PersistedAgentEvent(

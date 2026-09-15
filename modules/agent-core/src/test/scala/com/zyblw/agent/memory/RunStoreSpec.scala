@@ -1,11 +1,14 @@
 package com.zyblw.agent.memory
 
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import java.time.Instant
 import zio.*
 import zio.test.*
 
 object RunStoreSpec extends ZIOSpecDefault:
+  private val storeAgent = AgentDefinition(AgentId("store-test"), "Store Test", "持久化测试")
+
   private def state(runId: RunId, sessionId: SessionId): AgentState =
     val limits = RunLimits()
     AgentState(
@@ -20,7 +23,10 @@ object RunStoreSpec extends ZIOSpecDefault:
       None,
       Instant.EPOCH,
       Instant.EPOCH,
-      Version.initial
+      Version.initial,
+      storeAgent,
+      RuntimeComposition.fingerprint(RuntimeProfile.default, storeAgent, storeAgent.modelSettings),
+      ThreadId("store-thread")
     )
 
   def spec = suite("InMemoryRunStore")(
@@ -210,6 +216,49 @@ object RunStoreSpec extends ZIOSpecDefault:
         eventsAfterConflict.map(_.sequence) == Chunk(0L, 1L),
         ledgerAfterConflict.contains(record),
         settled.value == current.version.value + 1L
+      )).provide(RunStore.inMemory)
+    },
+    test("listToolExecutions 跨批次返回全部账本行") {
+      (for
+        store     <- ZIO.service[RunStore]
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        eventId   <- EventId.random
+        created = PersistedAgentEvent(eventId, runId, 0L, AgentEvent.RunCreated(runId, sessionId, 0L), 0L)
+        _ <- store.createWithEvents(
+          state(runId, sessionId).copy(lastEventSequence = 0L),
+          NonEmptyChunk(created)
+        )
+        first = ToolExecutionRecord(
+          runId,
+          "plan-a:0",
+          0,
+          "call-a",
+          "lookup",
+          None,
+          ToolExecutionStatus.Prepared,
+          None,
+          0,
+          0L
+        )
+        second = ToolExecutionRecord(
+          runId,
+          "plan-b:0",
+          0,
+          "call-b",
+          "write",
+          None,
+          ToolExecutionStatus.Prepared,
+          None,
+          0,
+          1L
+        )
+        _      <- store.prepareToolExecutions(NonEmptyChunk(first))
+        _      <- store.prepareToolExecutions(NonEmptyChunk(second))
+        listed <- store.listToolExecutions(runId)
+      yield assertTrue(
+        listed.map(_.callId) == Chunk("call-a", "call-b"),
+        listed.map(_.batchId) == Chunk("plan-a:0", "plan-b:0")
       )).provide(RunStore.inMemory)
     }
   )

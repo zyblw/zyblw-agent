@@ -9,7 +9,8 @@
 本文说明 `zyblw-agent` 如何把内部耐久状态与对外 HTTP 协议分离，以及业务后端应该怎样安全接入和升级。当前基线是
 `/api/v1`、OpenAPI `1.2.0`；框架版本是 `0.9.0`。不保留无版本旧路径，也不为草案协议制造历史负担。加法字段包括
 `RunView.citations` / `evidence`、`GET /api/v1/runs/{runId}/citations` 与稳定 `/api/v1/knowledge/**`。
-`CitationView.sourceKind` 为可选 allowlist 字段，缺省 JSON 兼容旧客户端。
+`CitationView.sourceKind` 为可选 allowlist 字段，缺省 JSON 兼容旧客户端。`RunView.suspension` 是可选加法字段，只含
+kind / deadline / 到期决议，不含 prompt 或审批正文；审批客户端仍可读 `pendingApproval`。
 
 ## 1. 为什么单独建立 contract package
 

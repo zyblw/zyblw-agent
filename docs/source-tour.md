@@ -1,7 +1,7 @@
 # 源码阅读路线
 
 > 状态：当前
-> 最后核验：2026-08-01
+> 最后核验：2026-09-16
 > 事实来源：`build.sbt`、`modules/*/src/main`、`modules/*/src/test`
 
 本页解决“从哪个文件开始、读到什么程度、如何证明自己理解了”的问题。概念解释仍以
@@ -57,16 +57,20 @@ sbt "testkit/testOnly com.zyblw.agent.app.AgentApplicationSpec"
 
 ## 第 2 阶段：逐步跟踪唯一主循环
 
-不要一开始通读 1400 多行的 `AgentRuntimeLive.scala`。按方法追踪：
+不要一开始通读整个 `AgentRuntimeDriver.scala`。先读纯 Kernel，再按效果边界追踪：
 
 1. `AgentRuntime.scala`：先理解公开入口和同步/耐久使用边界。
-2. `AgentRuntimeLive.runWithId`：Run ID、初始状态与 `RunCreated` 如何原子建立。
-3. `startCreated`：输入 Guardrail、总时限和 `Created -> Running`。
-4. `loop`：预算、取消、Context、capability、模型调用、usage、工具计划或完成。
-5. `createDurableToolPlan`：为什么未知或高风险工具会降级为串行。
-6. `processToolPlan` / `executeDurableBatch`：审批、并行批次、账本和稳定结果顺序。
-7. `saveEvents` / `save`：乐观锁、事件序号和 lease-aware fenced commit。
-8. `recover` / `resume` / `cancel`：部分成功、人工决定与中断如何回到同一事实状态。
+2. `AgentKernel.scala`：恢复决定、预算、合法状态迁移、Model turn/耐久计划一致性和 Tool batch 如何纯归约；它不依赖路由或 Store 写入类型。
+3. `AgentRuntimeDriver.runWithId`：Run ID、初始状态与 `RunCreated` 如何原子建立。
+4. `startCreated`：输入 Guardrail、总时限和 `Created -> Running`。
+5. `loop`：预算、取消、Context、capability、模型调用、usage、工具计划或完成。
+6. `context/PromptCompiler.scala`：高权限前缀、data envelope、Secret 出站与稳定 lineage 如何在 Provider 调用前被拒绝或冻结。
+7. `createDurableToolPlan`：为什么未知或高风险工具会降级为串行。
+8. `processToolPlan` / `executeDurableBatch`：审批、并行批次、账本和稳定结果顺序。
+9. `saveEvents` / `save`：乐观锁、事件序号和 lease-aware fenced commit。
+10. `recover` / `resume` / `cancel`：部分成功、人工决定与中断如何回到同一事实状态。
+11. `core/Suspension.scala` 与 `runtime/SuspensionExpiryWorker.scala`：审批只是一种等待；到期决议如何经 `RunCommitter` 写回。
+12. `inspection/RunTrajectory.scala`：只读投影如何收成时间线、账本、挂起和组合对照，而不是第二事实源。
 
 对应测试是
 `modules/agent-testkit/src/test/scala/com/zyblw/agent/runtime/AgentRuntimeSpec.scala`。建议每次只运行一个测试标签：
@@ -87,7 +91,7 @@ sbt 'testkit/testOnly com.zyblw.agent.runtime.AgentRuntimeSpec -- -t "关键词"
 3. `memory/RunCommandStore.scala`
 4. `scheduler/CommandWorker.scala`
 5. `scheduler/WorkerHost.scala`
-6. `runtime/LeaseAwareAgentRuntime` 与 `AgentRuntimeLive.executeLeased`
+6. `runtime/LeaseAwareAgentRuntime` 与 `AgentRuntimeDriver.executeLeased`
 7. `memory/RunStore.scala`
 
 配套测试：
@@ -108,7 +112,7 @@ sbt 'testkit/testOnly com.zyblw.agent.runtime.AgentRuntimeSpec -- -t "关键词"
 | 能力 | 先读 SPI | 再读 Adapter/测试 |
 |---|---|---|
 | Provider | `model/ChatModel.scala` | `agent-providers/integrations/*` 与对应 HTTP contract spec |
-| Context | `context/ContextManager.scala` | `DefaultContextManagerSpec`、压缩器与评测 |
+| Context | `context/ContextManager.scala`、`PromptCompiler.scala` | `DefaultContextManagerSpec`、`PromptCompilerSpec`、压缩器与评测 |
 | 工具 | `tools/TypedTool.scala`、`ToolExecutionPolicy.scala` | `ToolRegistrySpec`、`ToolBatchSchedulerSpec` |
 | Guardrail | `guardrails/Guardrails.scala` | Runtime 输入/工具/输出失败场景 |
 | PostgreSQL | `memory/*Store.scala` | `PostgresAgentPersistence.scala`、迁移与 integration spec |
@@ -139,7 +143,7 @@ sbt 'testkit/testOnly com.zyblw.agent.runtime.AgentRuntimeSpec -- -t "关键词"
 
 掌握主线后，再按目标选择：
 
-- 长会话：`instruction-context-cost.md`、`context-compression.md`、`memory-governance.md`
+- 长会话：`prompt-runtime.md`、`instruction-context-cost.md`、`context-compression.md`、`memory-governance.md`
 - 知识问答：`context-memory-rag.md`、`embedding-governance.md`、`rag-evaluation.md`
 - 可靠写工具：`side-effects.md` 和 ADR 0011
 - API 服务：`http-api-versioning.md`、`http-host.md`、`durable-streaming.md`

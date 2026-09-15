@@ -27,14 +27,17 @@ object AgentPostgresMigrations:
   /** 1024 知识索引的专属 PostgreSQL schema；与核心控制面隔离 Flyway 生命周期和对象命名空间。 */
   val Knowledge1024Schema: String = "zyblw_agent_knowledge"
 
-  /** V001 创建但无 writer 的投影；V012 在空表时删除。共享 public baseline 仍把它们视为已有 agent 对象。 */
-  private val LegacyDeadRelations = Chunk("agent_messages", "agent_steps", "model_calls", "usage_records")
+  /** 早期版本创建过、当前 schema 已不再包含的表名。
+    *
+    * 保留这份清单只有一个用途：baseline 前置检查要能识别"这个 public schema 曾被旧版本框架接管过"，从而拒绝在其上直接 baseline。当前 V001 不会创建它们。
+    */
+  private val RetiredRelations = Chunk("agent_messages", "agent_steps", "model_calls", "usage_records")
 
   private val CoreRelations = Chunk(
     "agent_runs",
     "agent_events",
     "tool_executions",
-    "approval_requests",
+    "agent_suspensions",
     "agent_memories",
     "agent_memory_audit",
     "agent_run_commands",
@@ -308,9 +311,7 @@ object AgentPostgresMigrations:
         // 正常存在的 core 表误报为旧库冲突。只有 history 不存在时才执行 version-0 baseline 前检查。
         if !relationExists(connection, None, historyTable) then
           val existing =
-            (CoreRelations ++ LegacyDeadRelations).filter(relation =>
-              relationExists(connection, None, relation)
-            )
+            (CoreRelations ++ RetiredRelations).filter(relation => relationExists(connection, None, relation))
           if existing.nonEmpty then
             throw IllegalStateException(
               s"拒绝对包含既有 zyblw-agent core 表的 public schema 执行 baseline: ${existing.mkString(",")}. " +

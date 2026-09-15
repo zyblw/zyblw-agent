@@ -1,5 +1,6 @@
 package com.zyblw.agent.http
 
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeCompositionFingerprint, RuntimeProfile}
 import com.zyblw.agent.core.*
 import java.time.Instant
 import java.util.UUID
@@ -12,6 +13,12 @@ import zio.test.*
 object AgentHttpProjectionSpec extends ZIOSpecDefault:
   private val runId = RunId(UUID.randomUUID())
   private val now   = Instant.parse("2026-01-01T00:00:00Z")
+
+  private val projectionAgent = AgentDefinition(AgentId("projection-agent"), "Projection", "投影测试")
+  private val inspectionAgent = AgentDefinition(AgentId("inspection-agent"), "Inspection", "巡检测试")
+
+  private def compositionOf(agent: AgentDefinition): RuntimeCompositionFingerprint =
+    RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings)
 
   private def persisted(event: AgentEvent, sequence: Long = 0L): PersistedAgentEvent =
     PersistedAgentEvent(EventId(UUID.randomUUID()), runId, sequence, event, now.toEpochMilli)
@@ -118,11 +125,13 @@ object AgentHttpProjectionSpec extends ZIOSpecDefault:
           ),
           1
         ),
-        pendingApproval = None,
+        suspension = None,
         createdAt = now,
         updatedAt = now,
         version = Version(2),
-        threadId = Some(ThreadId("thread-1"))
+        definition = projectionAgent,
+        composition = compositionOf(projectionAgent),
+        threadId = ThreadId("thread-1")
       )
       val encoded = AgentHttpProjection.run(state).toJson
       assertTrue(
@@ -132,6 +141,39 @@ object AgentHttpProjectionSpec extends ZIOSpecDefault:
         encoded.contains("\"reasoningOutputTokens\":2"),
         !encoded.contains("private-input"),
         !encoded.contains("messages")
+      )
+    },
+    test("挂起视图只公开 kind 与到期决议，不含 prompt") {
+      val record = SuspensionRecord(
+        Suspension.HumanInput("collect-address", "secret-prompt-must-not-leak"),
+        now,
+        Some(now.plusSeconds(60)),
+        SuspensionExpiry.FailRun
+      )
+      val state = AgentState(
+        runId = runId,
+        sessionId = SessionId(UUID.randomUUID()),
+        agentId = AgentId("projection-agent"),
+        status = RunStatus.Suspended,
+        messages = Chunk(AgentMessage.user("private-input")),
+        steps = Chunk.empty,
+        usage = UsageSummary(),
+        budget = BudgetState(RunLimits(), UsageSummary(), 0),
+        suspension = Some(record),
+        createdAt = now,
+        updatedAt = now,
+        version = Version(1),
+        definition = projectionAgent,
+        composition = compositionOf(projectionAgent),
+        threadId = ThreadId("thread-1")
+      )
+      val encoded = AgentHttpProjection.run(state).toJson
+      assertTrue(
+        encoded.contains("\"kind\":\"human-input\""),
+        encoded.contains("\"expiryOutcome\":\"FailRun\""),
+        encoded.contains("\"status\":\"Suspended\""),
+        !encoded.contains("secret-prompt-must-not-leak"),
+        !encoded.contains("collect-address")
       )
     },
     test("Inspector 摘要不复用业务 RunView，不公开 threadId、最终输出或审批正文") {
@@ -144,11 +186,13 @@ object AgentHttpProjectionSpec extends ZIOSpecDefault:
         steps = Chunk.empty,
         usage = UsageSummary(),
         budget = BudgetState(RunLimits(), UsageSummary(), 0),
-        pendingApproval = None,
+        suspension = None,
         createdAt = now,
         updatedAt = now,
         version = Version(2),
-        threadId = Some(ThreadId("private-thread"))
+        definition = inspectionAgent,
+        composition = compositionOf(inspectionAgent),
+        threadId = ThreadId("private-thread")
       )
       val encoded = AgentHttpProjection.inspection(state, Chunk.empty, -1L).toJson
       assertTrue(

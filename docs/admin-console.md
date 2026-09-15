@@ -1,10 +1,10 @@
 # 管理 API 与运维控制台
 
 > 状态：当前（Beta；不属于稳定 OpenAPI 承诺，见 [HTTP API 演进 §2.1](http-api-versioning.md)）
-> 最后核验：2026-08-08
+> 最后核验：2026-09-15
 > 事实来源：`modules/agent-core/src/main/scala/com/zyblw/agent/admin/`、
 > `modules/agent-zio-http/.../AdminHttpApi.scala`、`modules/agent-dashboard/`、
-> `agent-postgres` 的 `V002__zyblw_agent_admin_surface.sql`
+> `agent-postgres` 的 `V001__zyblw_agent_0_9_baseline.sql`
 
 框架提供一个可选的管理 API 子面（`/api/v1/admin/**`）与一个消费它的浏览器端控制台
 （`modules/agent-dashboard`）。设计动机与权衡见
@@ -95,7 +95,7 @@ ZIO.scoped {
 
 ```scala
 // 工具治理
-AgentRuntimeLive.layer(...) 需要 ToolPolicySource
+AgentRuntimeDriver.layer(...) 需要 ToolPolicySource
 val toolPolicies = ZLayer.fromFunction((s: RuntimeSettingsService) => s.toolPolicySource)
 
 // 检索工作点
@@ -116,13 +116,8 @@ AgentApplication.durableGoverned(owner, config) // 同时消费 ToolPolicySource
 
 ### 1.4 数据库迁移
 
-`V002__zyblw_agent_admin_surface.sql` 为 `agent_runs` 增加租户、用户与审批等待的**生成列**及配套索引，并新建
-`agent_runtime_overrides`、`agent_ingestion_jobs` 两张表。
-
-生成列由 PostgreSQL 在写入时维护，因此运行时的写路径不需要任何改动，也不会出现读模型与权威状态不一致。
-代价是加列会重写 `agent_runs`：大表部署需要安排停机窗口。
-
-只装配了 `runs`/`ops` 而不需要配置覆盖与摄入的部署仍然会创建那两张表；它们保持为空，没有运行时开销。
+核心 `V001__zyblw_agent_0_9_baseline.sql` 已包含租户、用户、审批等待与非审批挂起的**生成列**及配套部分索引，并包含
+`agent_runtime_overrides`、`agent_ingestion_jobs`。生成列由 PostgreSQL 在写入时维护，因此运行时的写路径不需要任何改动，也不会出现读模型与权威状态不一致。0.9 无原地升级路径，宿主必须使用空数据库。
 
 ### 1.5 观测深链
 

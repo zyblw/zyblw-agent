@@ -125,7 +125,7 @@ owns concurrency, cancellation, resources and composition。zyblw-agent 的差�
 AgentApplication.submit
   → AgentCommandService.submitStart
   → RunCommandStore + WorkerHost（claim / lease / heartbeat / generation）
-  → AgentRuntimeLive（executeLeased 时 FiberRef 绑定 lease）
+  → AgentRuntimeDriver（executeLeased 时 FiberRef 绑定 lease）
   → ContextSourceResolver.resolve
   → ContextManager.build → PreparedContext
   → registry.definitions(allowedTools)
@@ -136,7 +136,7 @@ AgentApplication.submit
   → RunStore.commit 或 commitFenced(expectedVersion, state, events)
 ```
 
-主循环：[`AgentRuntimeLive.loop`](../../modules/agent-core/src/main/scala/com/zyblw/agent/runtime/AgentRuntimeLive.scala)。  
+主循环：[`AgentRuntimeDriver.loop`](../../modules/agent-core/src/main/scala/com/zyblw/agent/runtime/AgentRuntimeDriver.scala)；纯归约见 [`AgentKernel`](../../modules/agent-core/src/main/scala/com/zyblw/agent/runtime/AgentKernel.scala)。
 `ChatRequest`：[`Model.scala`](../../modules/agent-core/src/main/scala/com/zyblw/agent/core/Model.scala)。  
 工具账本：[`ToolExecutionStatus` / `ToolExecutionRecord`](../../modules/agent-core/src/main/scala/com/zyblw/agent/core/State.scala)。  
 Store SPI：[`RunStore`](../../modules/agent-core/src/main/scala/com/zyblw/agent/memory/RunStore.scala) 明确写着「不是完整 Event Sourcing 接口」。
@@ -497,7 +497,7 @@ CapturePolicy 生产默认 **MetadataOnly**。Secret、Authorization、password�
 落地时建议文件（尚未改）：
 
 - 新 ADT：`agent-core` 内 package，例如 `com.zyblw.agent.model` 或 `runtime` 旁的内部包，**不要**新 Maven artifact
-- [`AgentRuntimeLive.scala`](../../modules/agent-core/src/main/scala/com/zyblw/agent/runtime/AgentRuntimeLive.scala) 仅在 `ChatRequest` 组装到 `invokeModel` 之间插入 TX1
+- [`AgentRuntimeDriver.scala`](../../modules/agent-core/src/main/scala/com/zyblw/agent/runtime/AgentRuntimeDriver.scala) 仅在 `ChatRequest` 组装到 `invokeModel` 之间插入 TX1
 - [`RunStore.scala`](../../modules/agent-core/src/main/scala/com/zyblw/agent/memory/RunStore.scala) 扩展同一事务 API
 - Flyway **V004** 新表（名称在实现时确定，建议 `model_call_executions` 一类，不要复用低敏 `model_calls` 存正文）
 - 测试：[`ScriptedChatModel`](../../modules/agent-testkit/src/main/scala/com/zyblw/agent/testkit/ScriptedChatModel.scala)、[`AgentRuntimeSpec`](../../modules/agent-testkit/src/test/scala/com/zyblw/agent/runtime/AgentRuntimeSpec.scala)、Postgres integration spec
@@ -646,7 +646,7 @@ HTTP 声明 `AgentProtocolStability` 与 `/api/v1/experimental`，实验路径�
 
 Goal / Plan / Todo / Skill / Steering / FollowUp = durable task state。不是第二套 AgentRuntime。Goal Active 不表示进程应自动开跑。Plan ≠ Permission。Skill 有 version/trust/fingerprint，不能授予 Tool，不能把不可信 Skill 升级为 System instruction。CAS revision。
 
-**第一刀已落地：** `HarnessStore` 保存 Goal/Plan/Skill；revision CAS 防止丢失更新；`SkillMaterializer` 只投影为检索资料；`HarnessContextContributor` 经现有 Resolver 接入，不改 `AgentRuntimeLive`。Trusted Skill 可由宿主显式做成 Developer 指令，任何 Skill 都不能成为 System。
+**第一刀已落地：** `HarnessStore` 保存 Goal/Plan/Skill；revision CAS 防止丢失更新；`SkillMaterializer` 只投影为检索资料；`HarnessContextContributor` 经现有 Resolver 接入，不改 `AgentKernel` / `AgentRuntimeDriver`。Trusted Skill 可由宿主显式做成 Developer 指令，任何 Skill 都不能成为 System。
 
 **H2 已落地：** `PostgresHarnessStore` + Flyway `V005`。生产通过 `PostgresAgentPersistence.harness` 装配。
 

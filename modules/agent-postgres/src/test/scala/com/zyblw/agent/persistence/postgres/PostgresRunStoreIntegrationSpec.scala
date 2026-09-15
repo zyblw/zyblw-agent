@@ -1,6 +1,7 @@
 package com.zyblw.agent.persistence.postgres
 
 import com.dimafeng.testcontainers.PostgreSQLContainer
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
 import java.time.Instant
@@ -70,6 +71,8 @@ object PostgresRunStoreIntegrationSpec extends ZIOSpecDefault:
     * @param now
     *   数据库时间列与 JSON 状态共用的稳定时间
     */
+  private val postgresAgent = AgentDefinition(AgentId("postgres-test"), "Postgres", "test")
+
   private def state(runId: RunId, now: Instant): AgentState =
     AgentState(
       runId,
@@ -84,8 +87,9 @@ object PostgresRunStoreIntegrationSpec extends ZIOSpecDefault:
       now,
       now,
       Version.initial,
-      threadId = Some(ThreadId("postgres-thread")),
-      definition = Some(AgentDefinition(AgentId("postgres-test"), "Postgres", "test"))
+      postgresAgent,
+      RuntimeComposition.fingerprint(RuntimeProfile.default, postgresAgent, postgresAgent.modelSettings),
+      ThreadId("postgres-thread")
     )
 
   /** PostgreSQL 集成契约：事务提交、乐观锁、审批状态恢复、工具账本和并发取消。 */
@@ -117,14 +121,16 @@ object PostgresRunStoreIntegrationSpec extends ZIOSpecDefault:
           )
           waiting = initial.copy(
             status = RunStatus.WaitingForApproval,
-            pendingApproval = Some(
-              ApprovalRequest(
-                "approval-pg",
-                runId,
-                ToolCall("call-pg", "write", zio.json.ast.Json.Obj()),
-                ToolRisk.ApprovalWrite,
-                "test",
-                now.toEpochMilli
+            suspension = Some(
+              SuspensionRecord.of(
+                ApprovalRequest(
+                  "approval-pg",
+                  runId,
+                  ToolCall("call-pg", "write", zio.json.ast.Json.Obj()),
+                  ToolRisk.ApprovalWrite,
+                  "test",
+                  now.toEpochMilli
+                )
               )
             ),
             lastEventSequence = 1L

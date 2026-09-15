@@ -15,6 +15,7 @@ import type {
   AdminCompositionView,
   AdminHarnessView,
   AdminModelCallView,
+  AdminSuspensionView,
   MemoryExportView,
   CommandRetryResult,
   DeadLetterCommandView,
@@ -143,6 +144,20 @@ async function decode<T>(response: Response): Promise<T> {
   return text ? (JSON.parse(text) as T) : (undefined as T);
 }
 
+/** 404 表示资源不存在或当前没有该投影，不是传输失败。 */
+async function requestNullable<T>(
+  config: AdminClientConfig,
+  path: string,
+  init: RequestInit & { json?: unknown } = {},
+): Promise<T | null> {
+  try {
+    return await request<T>(config, path, init);
+  } catch (error) {
+    if (error instanceof AdminApiError && error.status === 404) return null;
+    throw error;
+  }
+}
+
 /** 发起一次请求；网络层失败也统一成 `AdminApiError`，避免调用方处理两种异常形态。 */
 async function request<T>(
   config: AdminClientConfig,
@@ -248,6 +263,7 @@ export const adminApi = {
         agentId: query.agentId,
         status: query.statuses,
         awaitingApproval: query.awaitingApproval ? 'true' : undefined,
+        awaitingSignal: query.awaitingSignal ? 'true' : undefined,
         updatedAfter: query.updatedAfter,
         updatedBefore: query.updatedBefore,
         cursor: query.cursor,
@@ -265,7 +281,11 @@ export const adminApi = {
   },
 
   runApproval(config: AdminClientConfig, runId: string): Promise<AdminApprovalSubjectView | null> {
-    return request(config, `${ADMIN_BASE}/runs/${encodeURIComponent(runId)}/approval`);
+    return requestNullable(config, `${ADMIN_BASE}/runs/${encodeURIComponent(runId)}/approval`);
+  },
+
+  runSuspension(config: AdminClientConfig, runId: string): Promise<AdminSuspensionView> {
+    return request(config, `${ADMIN_BASE}/runs/${encodeURIComponent(runId)}/suspension`);
   },
 
   harnessGoal(config: AdminClientConfig, goalId: string): Promise<AdminHarnessView> {

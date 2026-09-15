@@ -44,6 +44,18 @@ object ApprovalSubjectSpec extends ZIOSpecDefault:
       AuthorizationFingerprint.of(context)
     )
 
+  /** 计划里只用到 write 工具，因此契约指纹恰好覆盖该工具名。 */
+  private def planOf(
+      batches: Chunk[DurableToolBatch],
+      approvalSubjects: Map[String, ApprovalSubject]
+  ): DurableToolPlan =
+    DurableToolPlan(
+      "plan-1",
+      batches,
+      toolContractFingerprints = Map("write" -> ToolContractFingerprint.registered(writeTool())),
+      approvalSubjects = approvalSubjects
+    )
+
   def spec = suite("ApprovalSubject")(
     test("同一副作用在任意 JSON 字段书写顺序下得到同一主体") {
       val ordered  = subjectOf(call(Json.Obj("a" -> Json.Num(1), "b" -> Json.Num(2))))
@@ -129,37 +141,22 @@ object ApprovalSubjectSpec extends ZIOSpecDefault:
       )
     }
   ) + suite("DurableToolPlan 审批快照")(
-    test("同一份审批事实不能同时以 v5 callId 和 v6 主体存在") {
-      assertTrue(
-        scala.util
-          .Try(
-            DurableToolPlan(
-              "plan-1",
-              Chunk(DurableToolBatch(0, Chunk(DurableToolPlanItem(0, call())))),
-              approvalRequiredCallIds = Some(Set("call-1")),
-              approvalSubjects = Some(Map("call-1" -> subjectOf()))
-            )
-          )
-          .isFailure
-      )
-    },
     test("审批主体必须与其 callId 键一致，且只能引用计划内的调用") {
       val batches = Chunk(DurableToolBatch(0, Chunk(DurableToolPlanItem(0, call()))))
       assertTrue(
         scala.util
-          .Try(DurableToolPlan("plan-1", batches, approvalSubjects = Some(Map("other" -> subjectOf()))))
+          .Try(planOf(batches, approvalSubjects = Map("other" -> subjectOf())))
           .isFailure
       )
     },
-    test("v6 主体优先，v5 快照回落到 callId 集合，更早快照没有冻结事实") {
+    test("冻结的审批事实就是审批主体键集，空 Map 表示本计划无需审批") {
       val batches = Chunk(DurableToolBatch(0, Chunk(DurableToolPlanItem(0, call()))))
-      val v6      = DurableToolPlan("p", batches, approvalSubjects = Some(Map("call-1" -> subjectOf())))
-      val v5      = DurableToolPlan("p", batches, approvalRequiredCallIds = Some(Set("call-1")))
-      val legacy  = DurableToolPlan("p", batches)
+      val frozen  = planOf(batches, approvalSubjects = Map("call-1" -> subjectOf()))
+      val none    = planOf(batches, approvalSubjects = Map.empty)
       assertTrue(
-        v6.frozenApprovalCallIds.contains(Set("call-1")),
-        v5.frozenApprovalCallIds.contains(Set("call-1")),
-        legacy.frozenApprovalCallIds.isEmpty
+        frozen.frozenApprovalCallIds == Set("call-1"),
+        frozen.frozenApprovalCallIds == frozen.approvalSubjects.keySet,
+        none.frozenApprovalCallIds.isEmpty
       )
     }
   )

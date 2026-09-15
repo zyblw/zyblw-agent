@@ -1,5 +1,6 @@
 package com.zyblw.agent.context
 
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import java.time.Instant
 import java.util.UUID
@@ -50,10 +51,14 @@ object DefaultContextManagerSpec extends ZIOSpecDefault:
       steps = Chunk.empty,
       usage = UsageSummary(),
       budget = BudgetState(RunLimits(), UsageSummary(), 0),
-      pendingApproval = None,
+      suspension = None,
       createdAt = now,
       updatedAt = now,
-      version = Version.initial
+      version = Version.initial,
+      definition = definition,
+      composition =
+        RuntimeComposition.fingerprint(RuntimeProfile.default, definition, definition.modelSettings),
+      threadId = ThreadId("context-thread")
     )
 
   /** 固定 Agent 指令，外部来源不能覆盖。 */
@@ -109,6 +114,11 @@ object DefaultContextManagerSpec extends ZIOSpecDefault:
             prepared.usage.droppedRetrieval == 2,
             prepared.messages.exists(_.text.contains("只使用中文")),
             prepared.messages.exists(_.text.contains("黄帝内经学习资料")),
+            prepared.messages.filter(_.text.contains("只使用中文")).forall(_.role == MessageRole.User),
+            prepared.messages.filter(_.text.contains("黄帝内经学习资料")).forall(_.role == MessageRole.User),
+            !prepared.messages
+              .filter(message => message.role == MessageRole.System || message.role == MessageRole.Developer)
+              .exists(_.text.contains("黄帝内经学习资料")),
             prepared.debug.rotSignals.exists(_.code == "context-duplicate-source"),
             prepared.debug.rotSignals.exists(_.code == "context-memory-dropped"),
             prepared.debug.rotSignals.exists(_.code == "context-retrieval-dropped"),
@@ -117,7 +127,7 @@ object DefaultContextManagerSpec extends ZIOSpecDefault:
           )
       }
     },
-    test("JSON ToolResult 参与计费并在字符上限压缩，仍保留 Tool role/callId") {
+    test("超过 Context 上限但尚未外置的 ToolResult fail-closed，不在 Context 内二次改写") {
       val tool = AgentMessage.tool(
         "call-1",
         "lookup",
@@ -132,15 +142,12 @@ object DefaultContextManagerSpec extends ZIOSpecDefault:
           ContextSources(),
           policy(recent = 300, toolCharacters = 120)
         )
-        .map { prepared =>
-          val compressed = prepared.messages.find(_.role == MessageRole.Tool)
+        .exit
+        .map { exit =>
+          val error = exit.causeOption.flatMap(_.failureOption)
           assertTrue(
-            prepared.usage.truncatedToolResults == 1,
-            prepared.usage.recentTokens > 0,
-            compressed.exists(_.toolCallId.contains("call-1")),
-            compressed.exists(_.metadata.get("contextCompressed").contains("true")),
-            compressed.exists(_.text.length <= 120),
-            prepared.debug.rotSignals.exists(_.code == "context-tool-output-truncated")
+            exit.isFailure,
+            error.exists(_.message.startsWith("tool-result-not-externalized"))
           )
         }
     },
@@ -160,7 +167,7 @@ object DefaultContextManagerSpec extends ZIOSpecDefault:
           state(messages),
           definition,
           ContextSources(),
-          policy(recent = 80, toolCharacters = 1000, toolCompression = CompressionMode.Disabled)
+          policy(recent = 80, toolCharacters = 2000, toolCompression = CompressionMode.Disabled)
         )
         .map { prepared =>
           assertTrue(
@@ -202,7 +209,8 @@ object DefaultContextManagerSpec extends ZIOSpecDefault:
             prepared.debug.rotSignals.exists(_.code == "context-history-heavy-drop"),
             sectionsUsed == prepared.usage.estimatedTokens,
             prepared.debug.estimatedTokens == prepared.usage.estimatedTokens,
-            prepared.messages.exists(_.text.contains("不可信历史摘要")),
+            prepared.messages.exists(_.text.contains("历史摘要，仅作数据")),
+            prepared.messages.filter(_.text.contains("历史摘要，仅作数据")).forall(_.role == MessageRole.User),
             prepared.summaryUpdate.exists(_.coveredMessages == prepared.usage.droppedMessages)
           )
         }
@@ -242,7 +250,7 @@ object DefaultContextManagerSpec extends ZIOSpecDefault:
         prepared.usage.compressionModelCalls == 0,
         prepared.compressionUsage == TokenUsage(),
         prepared.summaryUpdate.exists(_.compressorVersion == "deterministic-v1"),
-        prepared.messages.exists(_.text.contains("不可信历史摘要")),
+        prepared.messages.exists(_.text.contains("历史摘要，仅作数据")),
         !prepared.messages.exists(_.text.contains("paid-summary"))
       )
     },
@@ -310,7 +318,7 @@ object DefaultContextManagerSpec extends ZIOSpecDefault:
         second.usage.compressionModelCalls == 0,
         second.compressionUsage == TokenUsage(),
         second.summaryUpdate.isEmpty,
-        second.messages.exists(_.text == checkpoint.summary)
+        second.messages.exists(_.text.contains(checkpoint.summary))
       )
     },
     test("已摘要消息前缀被改写时 sourceDigest 校验 fail-closed") {

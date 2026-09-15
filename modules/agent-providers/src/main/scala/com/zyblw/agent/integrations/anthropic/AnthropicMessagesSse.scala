@@ -28,6 +28,8 @@ private[anthropic] object AnthropicMessagesSse:
       blocks: Map[Int, PartialBlock] = Map.empty,
       completedCalls: Map[Int, ToolCall] = Map.empty,
       inputTokens: Long = 0L,
+      cacheReadInputTokens: Long = 0L,
+      cacheWriteInputTokens: Long = 0L,
       outputTokens: Long = 0L,
       stopReason: Option[String] = None,
       started: Boolean = false,
@@ -85,11 +87,24 @@ private[anthropic] object AnthropicMessagesSse:
     val id      = AnthropicMessagesWire.stringField(message, "id").orElse(state.responseId)
     val usage   = AnthropicMessagesWire.field(message, "usage")
     val input = usage.flatMap(AnthropicMessagesWire.longField(_, "input_tokens")).getOrElse(state.inputTokens)
-    if input < 0L then ZIO.fail(AgentError.InvalidModelResponse("message_start usage.input_tokens 不能为负数"))
-    else
-      val next    = state.copy(responseId = id, inputTokens = input, started = true)
+    val cacheRead = usage
+      .flatMap(AnthropicMessagesWire.longField(_, "cache_read_input_tokens"))
+      .getOrElse(state.cacheReadInputTokens)
+    val cacheWrite = usage
+      .flatMap(AnthropicMessagesWire.longField(_, "cache_creation_input_tokens"))
+      .getOrElse(state.cacheWriteInputTokens)
+    AnthropicMessagesWire.validatedUsage(input, 0L, "message_start usage", cacheRead, cacheWrite).map {
+      normalized =>
+      val next = state.copy(
+        responseId = id,
+        inputTokens = normalized.inputTokens,
+        cacheReadInputTokens = cacheRead,
+        cacheWriteInputTokens = cacheWrite,
+        started = true
+      )
       val emitted = if state.started then Chunk.empty else Chunk(ModelStreamEvent.ResponseStarted(id))
-      ZIO.succeed(next -> emitted)
+      next -> emitted
+    }
 
   /** 建立 text/tool_use/thinking block；tool_use 立即发出稳定 ID 与名称。 */
   private def blockStart(state: State, event: Json): IO[AgentError, (State, Chunk[ModelStreamEvent])] =
@@ -182,7 +197,14 @@ private[anthropic] object AnthropicMessagesSse:
     if output < 0L then ZIO.fail(AgentError.InvalidModelResponse("message_delta usage.output_tokens 不能为负数"))
     else
       val next       = state.copy(outputTokens = output, stopReason = stop)
-      val usageEvent = ModelStreamEvent.UsageUpdated(TokenUsage(next.inputTokens, next.outputTokens))
+      val usageEvent = ModelStreamEvent.UsageUpdated(
+        TokenUsage(
+          next.inputTokens,
+          next.outputTokens,
+          cachedInputTokens = next.cacheReadInputTokens,
+          cacheWriteInputTokens = next.cacheWriteInputTokens
+        )
+      )
       ZIO.succeed(next -> Chunk(usageEvent))
 
   /** 组装最终助手消息、原始 blocks、usage 和唯一 Completed。 */
@@ -205,7 +227,12 @@ private[anthropic] object AnthropicMessagesSse:
           Json.Arr(Chunk.fromIterable(rawBlocks)).toJson
         )
       )
-      val usage    = TokenUsage(state.inputTokens, state.outputTokens)
+      val usage = TokenUsage(
+        state.inputTokens,
+        state.outputTokens,
+        cachedInputTokens = state.cacheReadInputTokens,
+        cacheWriteInputTokens = state.cacheWriteInputTokens
+      )
       val response = ChatResponse(
         message,
         AnthropicMessagesWire.finishReason(state.stopReason, calls.nonEmpty),

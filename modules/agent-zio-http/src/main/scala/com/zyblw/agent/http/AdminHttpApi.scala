@@ -239,7 +239,7 @@ final class AdminHttpApi(
     )
   }
 
-  /** 组合指纹、ModelCall 账本和审批主体的低敏检查面。 */
+  /** 组合指纹、ModelCall 账本、挂起与审批主体的低敏检查面。 */
   private def inspectionRoutes: Routes[Any, Nothing] =
     capabilities.inspection.fold(Routes.empty) { inspection =>
       Routes(
@@ -264,6 +264,16 @@ final class AdminHttpApi(
                 )
                 views <- inspection.modelCalls(parsed, limit)
               yield Response.json(views.toList.toJson)
+            }
+          },
+        Method.GET / "api" / "v1" / "admin" / "runs" / string("runId") / "suspension" ->
+          handler { (runId: String, request: Request) =>
+            respond {
+              for
+                _      <- authorizeRead(request)
+                parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+                view   <- inspection.suspension(parsed)
+              yield view.fold(Response.status(Status.NotFound))(value => Response.json(value.toJson))
             }
           },
         Method.GET / "api" / "v1" / "admin" / "runs" / string("runId") / "approval" ->
@@ -509,6 +519,7 @@ final class AdminHttpApi(
       agentId = request.queryParam("agentId").map(_.trim).filter(_.nonEmpty),
       statuses = statuses.toSet,
       awaitingApprovalOnly = request.queryParam("awaitingApproval").contains("true"),
+      awaitingSignalOnly = request.queryParam("awaitingSignal").contains("true"),
       updatedAfterEpochMilli = longParam(request, "updatedAfter"),
       updatedBeforeEpochMilli = longParam(request, "updatedBefore"),
       cursor = cursor,

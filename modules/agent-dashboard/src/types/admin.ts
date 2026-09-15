@@ -47,16 +47,48 @@ export interface AdminCapabilitiesView {
   observability: ObservabilityLinks;
 }
 
-/** 低敏组合指纹。 */
-export interface AdminCompositionView {
-  runId: string;
+/** 进入组合指纹的一个能力贡献者身份。 */
+export interface CapabilityRef {
+  kind: string;
+  id: string;
+  version: string;
+}
+
+/** 一侧组合指纹的低敏投影。 */
+export interface CompositionFacetView {
   fingerprintPrefix: string;
   profileId: string;
+  instructionFingerprintPrefix?: string | null;
   modelRefPrefix: string;
   capturePolicy: string;
-  sourceIds: string[];
+  allowedTools: string[];
+  sourceIds: CapabilityRef[];
+  extensionIds: CapabilityRef[];
   environmentId: string;
   permissionFingerprintPrefix: string;
+  modelRoutingFingerprintPrefix?: string | null;
+  modelPricingFingerprintPrefix?: string | null;
+}
+
+/** 一个发生了变化的组合属性；只含字段名与类别，不含任一侧取值。 */
+export interface CompositionDriftField {
+  field: string;
+  kind: string;
+  securityRelevant: boolean;
+}
+
+/** 冻结组合与现场组合的对照。`live` 缺失表示没有现场读出口，此时不得显示“无漂移”。 */
+export interface CompositionComparisonView {
+  frozen: CompositionFacetView;
+  live?: CompositionFacetView | null;
+  driftKind?: string | null;
+  changedFields: CompositionDriftField[];
+}
+
+/** 低敏组合对照。 */
+export interface AdminCompositionView {
+  runId: string;
+  composition: CompositionComparisonView;
 }
 
 /** 低敏 ModelCall 账本行。 */
@@ -70,6 +102,12 @@ export interface AdminModelCallView {
   inputTokens: number;
   outputTokens: number;
   errorCategory?: string | null;
+  requestedProfile?: string | null;
+  routePolicyVersion?: string | null;
+  routeDecisionCodes?: string[];
+  estimatedRouteCost?: string | null;
+  pricingFingerprintPrefix?: string | null;
+  explicitModelPinned?: boolean | null;
 }
 
 /** 低敏 Harness 投影。 */
@@ -117,6 +155,21 @@ export interface AdminApprovalSubjectView {
   subjectFingerprintPrefix?: string | null;
 }
 
+/** 一次挂起记录的低敏投影。 */
+export interface AdminSuspensionRecordView {
+  kind: string;
+  createdAtEpochMilli: number;
+  deadlineEpochMilli?: number | null;
+  expiryOutcome: string;
+  approval?: AdminApprovalSubjectView | null;
+}
+
+/** Run 存在时的挂起信封；`record` 为空表示当前没有等待。 */
+export interface AdminSuspensionView {
+  runId: string;
+  record?: AdminSuspensionRecordView | null;
+}
+
 /** Run 目录列表项的低敏用量摘要。 */
 export interface RunDirectoryUsage {
   modelCalls: number;
@@ -125,6 +178,7 @@ export interface RunDirectoryUsage {
   outputTokens: number;
   totalTokens: number;
   cachedInputTokens: number;
+  cacheWriteInputTokens: number;
   reasoningOutputTokens: number;
   /** BigDecimal 字符串，不要 parseFloat 后再显示。 */
   estimatedCost: string;
@@ -141,6 +195,9 @@ export interface RunSummaryView {
   awaitingApproval: boolean;
   pendingApprovalToolName?: string | null;
   pendingApprovalRisk?: string | null;
+  awaitingSignal: boolean;
+  suspensionKind?: string | null;
+  suspensionDeadlineEpochMilli?: number | null;
   tenantId?: string | null;
   userId?: string | null;
   usage: RunDirectoryUsage;
@@ -163,6 +220,7 @@ export interface RunDirectoryOverview {
   totalRuns: number;
   countsByStatus: Record<string, number>;
   awaitingApproval: number;
+  awaitingSignal?: number;
 }
 
 /** 管理事件中的审批元数据；跨租户视图故意不含审批原因。 */
@@ -214,6 +272,7 @@ export interface RunDirectoryQuery {
   agentId?: string;
   statuses?: string[];
   awaitingApproval?: boolean;
+  awaitingSignal?: boolean;
   updatedAfter?: number;
   updatedBefore?: number;
   cursor?: string;
@@ -318,6 +377,10 @@ export interface ModelCapabilitiesView {
   usageReporting: boolean;
   maxInputTokens?: number | null;
   maxOutputTokens?: number | null;
+  promptCacheKind: string;
+  reportsCacheReadTokens: boolean;
+  reportsCacheWriteTokens: boolean;
+  promptCacheRetention: string[];
 }
 
 /** 单价；金额是 BigDecimal 字符串，直接展示，不要 parseFloat 后再格式化。 */
@@ -326,6 +389,7 @@ export interface ModelPriceView {
   outputPerMillionTokens: string;
   cachedInputPerMillionTokens?: string | null;
   currency: string;
+  cacheWriteInputPerMillionTokens?: string | null;
 }
 
 /** 目录中的一个可选模型。 */

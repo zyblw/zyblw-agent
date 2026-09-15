@@ -26,11 +26,11 @@ migration 下进行。
 
 | 表 | 事实与用途 | 主要保留策略 |
 |---|---|---|
-| `agent_runs` | Run 当前状态、版本、取消位；异步创建的作用域哈希、客户端幂等键和请求指纹 | 按租户业务合规要求归档/删除 |
+| `agent_runs` | Run 当前状态、版本、取消位；异步创建的作用域哈希、客户端幂等键和请求指纹。生成列 `tenant_id` / `user_id` / `awaiting_approval` / `awaiting_signal` 只服务管理面过滤，不是第二份正文 | 按租户业务合规要求归档/删除 |
 | `agent_events` | 可审计的状态转换事件 | 可冷归档；不能早于 Run 排障窗口删除 |
 | `tool_executions` | Prepared/Running/Unknown/Succeeded/Failed 副作用账本 | 至少覆盖副作用追溯与幂等窗口 |
 | `model_call_executions` | 主模型 Intent/Settlement 账本（Prepared/Dispatched/Succeeded/Failed/Unknown）；Replayable 才保存 CanonicalModelRequest | 与 Run 级联；MetadataOnly 不含 prompt |
-| `approval_requests` | 人工审批请求和决定 | 涉及敏感操作时按审计政策保留 |
+| `agent_suspensions` | 挂起的到期索引与 lease；每 Run 至多一行，只含 kind/deadline/决议动作等低敏字段 | 随 Run 级联；挂起正文在 `state_json` |
 | 不属于 0.9 基线的旧投影（`agent_messages` / `agent_steps` / `model_calls` / `usage_records`） | 当前 V001 不创建；结构探针发现旧关系即拒绝启动 | 权威消息在 `state_json`，权威模型账本在 `model_call_executions` |
 | `agent_run_commands` | Start/Recover/ResumeApproval/Cancel/Retry 正文、幂等键、优先级、尝试与死信审计 | 随 Run 级联；DeadLetter 需先完成排障 |
 | `agent_run_dispatch` | 每 Run 一个串行租约槽、currentCommand、owner/token/generation | 随 Run 级联；Idle 行可长期保留 |

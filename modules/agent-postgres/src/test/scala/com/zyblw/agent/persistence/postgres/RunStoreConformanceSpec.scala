@@ -1,6 +1,7 @@
 package com.zyblw.agent.persistence.postgres
 
 import com.dimafeng.testcontainers.PostgreSQLContainer
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
 import com.zyblw.agent.model.*
@@ -13,7 +14,10 @@ import org.testcontainers.utility.DockerImageName
 import zio.*
 import zio.test.*
 
-/** 对同一组 RunStore 不变量分别运行内存与 PostgreSQL Adapter。 */
+/** 对同一组 RunStore 不变量分别运行内存与 PostgreSQL Adapter。
+  *
+  * 覆盖 `agent_runs`、`agent_events`、`tool_executions` 与 `model_call_executions`，含组合漂移事件耐久读回。
+  */
 object RunStoreConformanceSpec extends ZIOSpecDefault:
   private val postgres: ZLayer[Any, Throwable, RunStore] =
     ZLayer.scoped {
@@ -39,6 +43,9 @@ object RunStoreConformanceSpec extends ZIOSpecDefault:
       yield persistence.get[RunStore]
     }
 
+  private val conformanceAgent =
+    AgentDefinition(AgentId("store-conformance"), "Store Conformance", "存储一致性测试")
+
   private def state(runId: RunId, sessionId: SessionId): AgentState =
     AgentState(
       runId,
@@ -52,7 +59,11 @@ object RunStoreConformanceSpec extends ZIOSpecDefault:
       None,
       Instant.EPOCH,
       Instant.EPOCH,
-      Version.initial
+      Version.initial,
+      conformanceAgent,
+      RuntimeComposition
+        .fingerprint(RuntimeProfile.default, conformanceAgent, conformanceAgent.modelSettings),
+      ThreadId("store-conformance-thread")
     )
 
   private def stableRunId(name: String): RunId =
@@ -330,11 +341,13 @@ object RunStoreConformanceSpec extends ZIOSpecDefault:
             )
             .exit
           preserved <- store.getToolExecution(runId, tool.callId)
+          listed    <- store.listToolExecutions(runId)
         yield assertTrue(
           orphanRejected.isFailure,
           identityConflict.isFailure,
           statusConflict.isFailure,
-          preserved.contains(tool)
+          preserved.contains(tool),
+          listed == Chunk(tool)
         )
       },
       test("EventId 跨 Run 或 payload 复用必须失败且不污染另一 Run") {
@@ -489,6 +502,40 @@ object RunStoreConformanceSpec extends ZIOSpecDefault:
           saved.lastEventSequence == 1L,
           events.map(_.sequence) == Chunk(0L, 1L),
           Set(first.eventId, second.eventId).contains(events.last.eventId)
+        )
+      },
+      test("组合漂移事件按原样耐久，可供轨迹与事故包读回") {
+        import com.zyblw.agent.composition.{CapabilityKind, CompositionDriftField}
+        for
+          store <- ZIO.service[RunStore]
+          runId = stableRunId("composition-drift")
+          sessionId <- SessionId.random
+          createdId = stableEventId("composition-drift-created")
+          driftId   = stableEventId("composition-drift-detected")
+          created   = PersistedAgentEvent(
+            createdId,
+            runId,
+            0L,
+            AgentEvent.RunCreated(runId, sessionId, 0L),
+            0L
+          )
+          initial = state(runId, sessionId).copy(lastEventSequence = 0L)
+          _ <- store.createWithEvents(initial, NonEmptyChunk(created))
+          field = CompositionDriftField("allowedTools", CapabilityKind.Tool, securityRelevant = true)
+          drift = PersistedAgentEvent(
+            driftId,
+            runId,
+            1L,
+            AgentEvent.CompositionDriftDetected(runId, "incompatible", Chunk(field), 1L),
+            1L
+          )
+          _      <- store.commit(Version.initial, initial.copy(lastEventSequence = 1L), NonEmptyChunk(drift))
+          events <- store.events(runId)
+        yield assertTrue(
+          events.collect {
+            case PersistedAgentEvent(_, _, _, AgentEvent.CompositionDriftDetected(_, kind, changed, _), _) =>
+              kind -> changed.map(_.field)
+          } == Chunk("incompatible" -> Chunk("allowedTools"))
         )
       }
     ).provideLayerShared(layer)

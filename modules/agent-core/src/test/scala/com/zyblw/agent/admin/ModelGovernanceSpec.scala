@@ -111,6 +111,20 @@ object ModelGovernanceSpec extends ZIOSpecDefault:
         // 重复计费会得到 10 + 0.9 = 10.9
         assertTrue(price.estimate(usage) == BigDecimal("1.9"))
       },
+      test("缓存写入 token 按独立单价计费且不重复收费") {
+        val price = ModelPrice(
+          inputPerMillionTokens = BigDecimal(10),
+          outputPerMillionTokens = BigDecimal(30),
+          cachedInputPerMillionTokens = Some(BigDecimal(1)),
+          cacheWriteInputPerMillionTokens = Some(BigDecimal("12.5"))
+        )
+        val usage = TokenUsage(
+          inputTokens = 1_000_000,
+          cachedInputTokens = 500_000,
+          cacheWriteInputTokens = 100_000
+        )
+        assertTrue(price.estimate(usage) == BigDecimal("5.75"))
+      },
       test("未声明缓存单价时缓存 token 按普通输入价计算") {
         val price = ModelPrice(BigDecimal(10), BigDecimal(30))
         val usage = TokenUsage(inputTokens = 1_000_000, cachedInputTokens = 500_000)

@@ -6,7 +6,7 @@
 >
 > 决策来源：[ADR-0021](0021-provider-neutral-model-protocol.md) … [ADR-0026](0026-provider-capability-model.md)
 >
-> 事实来源： [现状审计](model-runtime-current-state.md)、现行 `ChatModel` / `AgentRuntimeLive` / `ModelCall`
+> 事实来源： [现状审计](model-runtime-current-state.md)、现行 `ChatModel` / `AgentRuntimeDriver` / `AgentKernel` / `ModelCall`
 >
 > 配套： [路由](model-routing.md) · [预算](model-budget-and-cost.md) · [多模型执行](multi-model-execution.md)
 
@@ -14,7 +14,7 @@
 
 已实现的入口是 `RuntimeProfile.modelRouting: Option[ModelRoutingPolicy]`，默认 `None`。
 开启后主调用走 `ModelRequirement → 固定候选顺序/硬过滤 → RouteDecision → ModelCall TX1 → ChatModel → TX2`。
-运行编排仍内聚在 `AgentRuntimeLive`；此阶段不新增 `ModelRuntime` Service 或模块。
+运行编排仍内聚在 `AgentRuntimeDriver`；纯状态归约由 `AgentKernel` 承担。此阶段不新增 `ModelRuntime` Service 或模块。
 
 - `ModelProfile` 仅 Fast / Standard / Reasoning。Vision 是能力要求；其余档位待真实调用与 Eval 再增加。
 - `ModelSettings.requirement` 可选；未开启路由却声明需求会显式失败。Role 的旧冻结绑定继续按显式模型处理。
@@ -41,7 +41,7 @@ val routing = ModelRoutingPolicy(
   sensitivityFloor = DataSensitivity.Internal
 )
 val profile = RuntimeProfile(modelRouting = Some(routing))
-// 将 profile 传入已有 AgentApplicationConfig 或 AgentRuntimeLive.layerWithProfile。
+// 将 profile 传入已有 AgentApplicationConfig 或 AgentRuntimeDriver.layerWithProfile。
 // primary/secondary 必须是已有 Adapter 的注册身份，不能是密钥或任意 URL。
 ```
 
@@ -205,7 +205,7 @@ agent-core/src/main/scala/com/zyblw/agent/model/
 
 ## 接入现有 Runtime
 
-唯一第一刀生产接合点：`AgentRuntimeLive.persistAndInvokeModel` / `invokeModel`。
+唯一第一刀生产接合点：`AgentRuntimeDriver.persistAndInvokeModel` / `invokeModel`。
 
 ```text
 loop

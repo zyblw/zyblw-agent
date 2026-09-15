@@ -62,6 +62,8 @@ enum AgentMetric:
     *   输入中由 Prompt Cache 命中的 token 子集
     * @param reasoningOutputTokens
     *   输出中用于内部推理的 token 子集；只记录计数，不记录推理正文
+    * @param cacheWriteInputTokens
+    *   输入中本次写入 Prompt Cache 的 token 子集
     */
   case ModelCallFinished(
       provider: String,
@@ -71,7 +73,8 @@ enum AgentMetric:
       inputTokens: Long,
       outputTokens: Long,
       cachedInputTokens: Long = 0L,
-      reasoningOutputTokens: Long = 0L
+      reasoningOutputTokens: Long = 0L,
+      cacheWriteInputTokens: Long = 0L
   )
 
   /** 一次工具执行结束。

@@ -12,7 +12,9 @@ object CapabilityMatrixSpec extends ZIOSpecDefault:
       assertTrue(
         matrix.requireConsistent("openai", "gpt-4.1", declared).isRight,
         matrix.requireConsistent("openai", "gpt-4.1", declared.copy(vision = true)).isLeft,
-        matrix.requireConsistent("openai", "gpt-4.1", declared.copy(promptCache = true)).isLeft,
+        matrix
+          .requireConsistent("openai", "gpt-4.1", declared.copy(promptCache = PromptCacheCapability.implicitRead))
+          .isLeft,
         matrix.requireConsistent("openai", "missing", declared).isLeft
       )
     },

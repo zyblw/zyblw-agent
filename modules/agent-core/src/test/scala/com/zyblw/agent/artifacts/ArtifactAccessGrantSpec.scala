@@ -40,5 +40,17 @@ object ArtifactAccessGrantSpec extends ZIOSpecDefault:
         cross == Left("artifact-tenant-mismatch"),
         issued.flatMap(ArtifactAccessGrant.redeem(_, tenant, 12L)).contains(userRef)
       )
+    },
+    test("工具读取只允许当前 Run 域，拒绝模型自报的其他隔离域") {
+      val runId    = RunId(UUID.fromString("00000000-0000-0000-0000-000000000401"))
+      val thread   = ThreadId("thread-a")
+      val context  = ToolExecutionContext(runId, thread, "call-1", RunContext(tenantId = Some(tenant.value)))
+      val runRef   = userRef.copy(scope = ArtifactScope.Run(runId, thread))
+      val otherRun = userRef.copy(scope = ArtifactScope.Run(runId, ThreadId("other")))
+      assertTrue(
+        ArtifactAccessGrant.authorize(runRef, context).contains(runRef),
+        ArtifactAccessGrant.authorize(otherRun, context) == Left("artifact-run-scope-mismatch"),
+        ArtifactAccessGrant.authorize(runRef, tenant) == Left("artifact-run-scope-not-exportable")
+      )
     }
   )

@@ -9,7 +9,7 @@ import zio.json.*
   * 该分类只描述控制面发生了什么，不包含 Prompt、消息正文、工具参数、工具结果或隐藏推理，可安全作为调试 API 和 运维界面的基础读模型。
   */
 enum RunTimelinePhase derives JsonCodec:
-  case Lifecycle, Context, Model, Tool, Guardrail, Approval, Persistence
+  case Lifecycle, Context, Model, Tool, Guardrail, Approval, Persistence, Composition
 
 /** 时间线事件的低敏结果语义。 */
 enum RunTimelineOutcome derives JsonCodec:
@@ -114,7 +114,7 @@ object RunInspection:
       status = state.status,
       stateVersion = state.version,
       lastEventSequence = state.lastEventSequence,
-      instructionFingerprint = state.definition.flatMap(_.instructionSet).map(_.fingerprint),
+      instructionFingerprint = state.definition.instructionSet.map(_.fingerprint),
       timeline = timeline,
       diagnostics = diagnostics,
       nextCursor = nextCursor,
@@ -178,26 +178,43 @@ object RunInspection:
       )
     Chunk.fromIterable(List(wrongRun, gap, cursorAhead, missingPage, partial).flatten)
 
+  /** 等待状态与挂起记录必须严格互推。
+    *
+    * 三个方向都要查，因为 `Suspension` 自己决定了状态：状态说在等但没有记录（不知道在等谁）、有记录但状态不在等（唤醒协议已丢失）、 以及记录与状态互相矛盾（例如状态是 `Suspended`
+    * 但记录说在等审批，于是 `resume(decision)` 永远找不到它）。
+    */
+  private def suspensionDiagnostic(state: AgentState): Option[RunDiagnostic] =
+    val waiting = state.status == RunStatus.WaitingForApproval || state.status == RunStatus.Suspended
+    (waiting, state.suspension) match
+      case (true, None) =>
+        Some(
+          RunDiagnostic(
+            "waiting_without_suspension",
+            RunDiagnosticSeverity.Error,
+            "Run 正在等待外部输入，但权威状态没有挂起记录。"
+          )
+        )
+      case (false, Some(_)) =>
+        Some(
+          RunDiagnostic(
+            "suspension_outside_waiting_state",
+            RunDiagnosticSeverity.Error,
+            "Run 不在等待状态，但仍保留挂起记录。"
+          )
+        )
+      case (true, Some(record)) if record.runStatus != state.status =>
+        Some(
+          RunDiagnostic(
+            "suspension_status_mismatch",
+            RunDiagnosticSeverity.Error,
+            s"挂起类别 ${record.kind.kind} 要求状态 ${record.runStatus}，实际为 ${state.status}。"
+          )
+        )
+      case _ => None
+
   private def stateDiagnostics(state: AgentState): Chunk[RunDiagnostic] =
-    val approvalMismatch =
-      if state.status == RunStatus.WaitingForApproval && state.pendingApproval.isEmpty then
-        Some(
-          RunDiagnostic(
-            "waiting_without_approval",
-            RunDiagnosticSeverity.Error,
-            "Run 正在等待审批，但权威状态没有待审批记录。"
-          )
-        )
-      else if state.status != RunStatus.WaitingForApproval && state.pendingApproval.nonEmpty then
-        Some(
-          RunDiagnostic(
-            "approval_outside_waiting_state",
-            RunDiagnosticSeverity.Error,
-            "Run 不在等待审批状态，但仍保留待审批记录。"
-          )
-        )
-      else None
-    val usageMismatch =
+    val approvalMismatch = suspensionDiagnostic(state)
+    val usageMismatch    =
       Option.when(state.usage != state.budget.consumed)(
         RunDiagnostic(
           "budget_usage_mismatch",
@@ -205,25 +222,16 @@ object RunInspection:
           "Run usage 与预算累计值不一致。"
         )
       )
-    val legacyDefinition =
-      Option.when(state.definition.isEmpty)(
-        RunDiagnostic(
-          "definition_snapshot_missing",
-          RunDiagnosticSeverity.Warning,
-          "Run 缺少创建时的 AgentDefinition 快照，可能来自旧版数据。"
-        )
-      )
+    // 未使用结构化 instructionSet 时无法把回答关联到具体指令版本，趋势分析会缺一条线索。这不是数据损坏，只是可观测性缺口。
     val unversionedInstructions =
-      Option.when(state.definition.exists(_.instructionSet.isEmpty))(
+      Option.when(state.definition.instructionSet.isEmpty)(
         RunDiagnostic(
           "instruction_fingerprint_missing",
           RunDiagnosticSeverity.Warning,
-          "AgentDefinition 使用旧式单块指令，无法关联 instruction fingerprint 趋势。"
+          "AgentDefinition 使用单块指令，无法关联 instruction fingerprint 趋势。"
         )
       )
-    Chunk.fromIterable(
-      List(approvalMismatch, usageMismatch, legacyDefinition, unversionedInstructions).flatten
-    )
+    Chunk.fromIterable(List(approvalMismatch, usageMismatch, unversionedInstructions).flatten)
 
   private def fullHistoryDiagnostics(
       state: AgentState,
@@ -283,7 +291,8 @@ object RunTimeline:
               inputTokens = usage.inputTokens,
               outputTokens = usage.outputTokens,
               cachedInputTokens = usage.cachedInputTokens,
-              reasoningOutputTokens = usage.reasoningOutputTokens
+              reasoningOutputTokens = usage.reasoningOutputTokens,
+              cacheWriteInputTokens = usage.cacheWriteInputTokens
             )
           )
         )
@@ -314,7 +323,8 @@ object RunTimeline:
               inputTokens = usage.inputTokens,
               outputTokens = usage.outputTokens,
               cachedInputTokens = usage.cachedInputTokens,
-              reasoningOutputTokens = usage.reasoningOutputTokens
+              reasoningOutputTokens = usage.reasoningOutputTokens,
+              cacheWriteInputTokens = usage.cacheWriteInputTokens
             )
           )
         )
@@ -333,34 +343,35 @@ object RunTimeline:
 
   /** 内部事件到稳定公开名称的单一映射，避免 HTTP、CLI 与调试界面因重构产生不同名称。 */
   def eventType(event: AgentEvent): String = event match
-    case _: AgentEvent.RunCreated             => "RunCreated"
-    case _: AgentEvent.RunStarted             => "RunStarted"
-    case _: AgentEvent.RunResumed             => "RunResumed"
-    case _: AgentEvent.StepStarted            => "StepStarted"
-    case _: AgentEvent.ContextPrepared        => "ContextPrepared"
-    case _: AgentEvent.ContextCompacted       => "ContextCompacted"
-    case _: AgentEvent.ModelCallStarted       => "ModelCallStarted"
-    case _: AgentEvent.ModelCallPrepared      => "ModelCallPrepared"
-    case _: AgentEvent.ModelCallUnknown       => "ModelCallUnknown"
-    case _: AgentEvent.ModelTextDelta         => "ModelTextDelta"
-    case _: AgentEvent.ModelToolCallDelta     => "ModelToolCallDelta"
-    case _: AgentEvent.ModelCallCompleted     => "ModelCallCompleted"
-    case _: AgentEvent.ToolCallRequested      => "ToolCallRequested"
-    case _: AgentEvent.ToolBatchPlanned       => "ToolBatchPlanned"
-    case _: AgentEvent.ToolBatchStarted       => "ToolBatchStarted"
-    case _: AgentEvent.ToolBatchCommitted     => "ToolBatchCommitted"
-    case _: AgentEvent.ToolApprovalRequired   => "ToolApprovalRequired"
-    case _: AgentEvent.ToolExecutionStarted   => "ToolExecutionStarted"
-    case _: AgentEvent.ToolExecutionCompleted => "ToolExecutionCompleted"
-    case _: AgentEvent.ToolExecutionFailed    => "ToolExecutionFailed"
-    case _: AgentEvent.GuardrailEvaluated     => "GuardrailEvaluated"
-    case _: AgentEvent.UsageUpdated           => "UsageUpdated"
-    case _: AgentEvent.CheckpointSaved        => "CheckpointSaved"
-    case _: AgentEvent.RunSuspended           => "RunSuspended"
-    case _: AgentEvent.RunCompleted           => "RunCompleted"
-    case _: AgentEvent.RunFailed              => "RunFailed"
-    case _: AgentEvent.RunCancelled           => "RunCancelled"
-    case _: AgentEvent.RetrievalCited         => "RetrievalCited"
+    case _: AgentEvent.RunCreated               => "RunCreated"
+    case _: AgentEvent.RunStarted               => "RunStarted"
+    case _: AgentEvent.RunResumed               => "RunResumed"
+    case _: AgentEvent.StepStarted              => "StepStarted"
+    case _: AgentEvent.ContextPrepared          => "ContextPrepared"
+    case _: AgentEvent.ContextCompacted         => "ContextCompacted"
+    case _: AgentEvent.ModelCallStarted         => "ModelCallStarted"
+    case _: AgentEvent.ModelCallPrepared        => "ModelCallPrepared"
+    case _: AgentEvent.ModelCallUnknown         => "ModelCallUnknown"
+    case _: AgentEvent.ModelTextDelta           => "ModelTextDelta"
+    case _: AgentEvent.ModelToolCallDelta       => "ModelToolCallDelta"
+    case _: AgentEvent.ModelCallCompleted       => "ModelCallCompleted"
+    case _: AgentEvent.ToolCallRequested        => "ToolCallRequested"
+    case _: AgentEvent.ToolBatchPlanned         => "ToolBatchPlanned"
+    case _: AgentEvent.ToolBatchStarted         => "ToolBatchStarted"
+    case _: AgentEvent.ToolBatchCommitted       => "ToolBatchCommitted"
+    case _: AgentEvent.ToolApprovalRequired     => "ToolApprovalRequired"
+    case _: AgentEvent.ToolExecutionStarted     => "ToolExecutionStarted"
+    case _: AgentEvent.ToolExecutionCompleted   => "ToolExecutionCompleted"
+    case _: AgentEvent.ToolExecutionFailed      => "ToolExecutionFailed"
+    case _: AgentEvent.GuardrailEvaluated       => "GuardrailEvaluated"
+    case _: AgentEvent.UsageUpdated             => "UsageUpdated"
+    case _: AgentEvent.CheckpointSaved          => "CheckpointSaved"
+    case _: AgentEvent.CompositionDriftDetected => "CompositionDriftDetected"
+    case _: AgentEvent.RunSuspended             => "RunSuspended"
+    case _: AgentEvent.RunCompleted             => "RunCompleted"
+    case _: AgentEvent.RunFailed                => "RunFailed"
+    case _: AgentEvent.RunCancelled             => "RunCancelled"
+    case _: AgentEvent.RetrievalCited           => "RetrievalCited"
 
   private def phase(event: AgentEvent): RunTimelinePhase = event match
     case _: AgentEvent.RunCreated | _: AgentEvent.RunStarted | _: AgentEvent.RunResumed |
@@ -381,6 +392,7 @@ object RunTimeline:
     case _: AgentEvent.GuardrailEvaluated                           => RunTimelinePhase.Guardrail
     case _: AgentEvent.UsageUpdated | _: AgentEvent.CheckpointSaved =>
       RunTimelinePhase.Persistence
+    case _: AgentEvent.CompositionDriftDetected => RunTimelinePhase.Composition
 
   private def outcome(event: AgentEvent): RunTimelineOutcome = event match
     case _: AgentEvent.RunCreated | _: AgentEvent.RunStarted | _: AgentEvent.RunResumed |
@@ -397,6 +409,8 @@ object RunTimeline:
       RunTimelineOutcome.Succeeded
     case _: AgentEvent.ToolApprovalRequired | _: AgentEvent.RunSuspended =>
       RunTimelineOutcome.Waiting
-    case _: AgentEvent.ToolExecutionFailed | _: AgentEvent.RunFailed | _: AgentEvent.ModelCallUnknown =>
+    // 漂移检测本身是 fail-closed 的拒绝，不是"进度"：归入 Failed 让时间线一眼看出这一轮没有继续。
+    case _: AgentEvent.ToolExecutionFailed | _: AgentEvent.RunFailed | _: AgentEvent.ModelCallUnknown |
+        _: AgentEvent.CompositionDriftDetected =>
       RunTimelineOutcome.Failed
     case _: AgentEvent.RunCancelled => RunTimelineOutcome.Cancelled

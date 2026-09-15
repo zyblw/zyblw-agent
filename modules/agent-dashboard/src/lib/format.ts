@@ -81,14 +81,19 @@ export function parseList(input: string): string[] {
 /** Run 状态到语义色的映射；未知状态回退到中性色而不是崩溃。 */
 export function runStatusTone(status: string): string {
   switch (status) {
-    case 'Succeeded':
+    case 'Completed':
       return 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30';
     case 'Failed':
+    case 'TimedOut':
+    case 'BudgetExceeded':
       return 'text-rose-300 bg-rose-500/10 ring-rose-500/30';
     case 'Cancelled':
+    case 'Created':
       return 'text-slate-300 bg-slate-500/10 ring-slate-500/30';
-    case 'AwaitingApproval':
+    case 'WaitingForApproval':
       return 'text-amber-300 bg-amber-500/10 ring-amber-500/30';
+    case 'Suspended':
+      return 'text-violet-300 bg-violet-500/10 ring-violet-500/30';
     case 'Running':
       return 'text-sky-300 bg-sky-500/10 ring-sky-500/30';
     default:

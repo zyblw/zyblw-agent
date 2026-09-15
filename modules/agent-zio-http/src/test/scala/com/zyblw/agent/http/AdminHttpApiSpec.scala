@@ -1,6 +1,7 @@
 package com.zyblw.agent.http
 
 import com.zyblw.agent.admin.*
+import com.zyblw.agent.composition.{CompositionComparisonView, RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.http.contract.AgentHttpProtocol
 import com.zyblw.agent.tools.{ApprovalPolicy, ToolPolicyConfig}
@@ -209,26 +210,37 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
     def composition(runId: RunId): IO[StoreError, Option[AdminCompositionView]] =
       calls
         .update(_ :+ s"composition:${runId.asString}")
-        .as(
-          Some(
-            AdminCompositionView(
-              runId.asString,
-              "abcd1234abcd1234",
-              "default",
-              "model-ref-prefix",
-              "MetadataOnly",
-              List("memory-rag@2"),
-              "local",
-              "perm-prefix"
-            )
-          )
-        )
+        .as(Some(AdminCompositionView(runId.asString, RecordingInspection.compositionView)))
 
     def modelCalls(runId: RunId, limit: Int): IO[StoreError, Chunk[AdminModelCallView]] =
       calls.update(_ :+ s"model-calls:${runId.asString}:$limit").as(Chunk.empty)
 
     def approval(runId: RunId): IO[StoreError, Option[AdminApprovalSubjectView]] =
       calls.update(_ :+ s"approval:${runId.asString}").as(None)
+
+    def suspension(runId: RunId): IO[StoreError, Option[AdminSuspensionView]] =
+      calls
+        .update(_ :+ s"suspension:${runId.asString}")
+        .as(Some(AdminSuspensionView(runId.asString, Some(RecordingInspection.suspensionRecord))))
+
+  private object RecordingInspection:
+    /** 现场侧带一处漂移，使路由能证明 diff 真的被序列化出去。 */
+    val compositionView: CompositionComparisonView =
+      val frozen = RuntimeComposition.fingerprint(
+        RuntimeProfile.default,
+        AgentDefinition(AgentId("admin"), "Admin", "回答", allowedTools = Set("echo")),
+        ModelSettings()
+      )
+      CompositionComparisonView.of(frozen, Some(frozen.copy(profileId = "eval")))
+
+    val suspensionRecord: AdminSuspensionRecordView =
+      AdminSuspensionRecordView(
+        kind = "timer",
+        createdAtEpochMilli = streamAt,
+        deadlineEpochMilli = Some(streamAt + 60_000L),
+        expiryOutcome = "FailRun",
+        approval = None
+      )
 
   final private class RecordingHarness(val calls: Ref[Chunk[String]]) extends HarnessInspectionAdmin:
     def goal(goalId: com.zyblw.agent.harness.GoalId): IO[StoreError, Option[AdminHarnessView]] =
@@ -826,12 +838,39 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
         yield assertTrue(
           denied.status == Status.Forbidden,
           composition.status == Status.Ok,
-          body.contains("abcd1234abcd1234"),
+          body.contains("\"composition\""),
+          body.contains(RecordingInspection.compositionView.frozen.fingerprintPrefix),
+          // live 侧与结构化 diff 必须真的出现在响应里，否则管理面只能看到"变了"而说不出变了什么。
+          body.contains("\"live\""),
+          body.contains("\"changedFields\""),
+          body.contains("profileId"),
           !body.contains(streamSecret),
           harness.status == Status.Ok,
           harnessBody.contains("学习伤寒论"),
           recorded.exists(_.startsWith("composition:")),
           recorded.exists(_.startsWith("harness-goal:"))
+        )
+      },
+      test("挂起投影只在读权限下返回 kind 与到期，不含 prompt") {
+        for
+          tuple <- fullApi
+          (api, calls) = tuple
+          denied  <- api.routes.runZIO(Request.get(admin / "runs" / streamRunId.asString / "suspension"))
+          allowed <- api.routes.runZIO(
+            withScopes(
+              Request.get(admin / "runs" / streamRunId.asString / "suspension"),
+              AdminAuthorization.ReadScope
+            )
+          )
+          body     <- allowed.body.asString
+          recorded <- calls.get
+        yield assertTrue(
+          denied.status == Status.Forbidden,
+          allowed.status == Status.Ok,
+          body.contains("\"kind\":\"timer\""),
+          body.contains("FailRun"),
+          !body.contains(streamSecret),
+          recorded.exists(_.startsWith("suspension:"))
         )
       }
     )

@@ -20,8 +20,8 @@ object RunObserver:
 
   /** 构建进程内实时事件 Hub。
     *
-    * `Hub.sliding` 在慢订阅者落后时保留最新 1024 项，不允许 SSE 客户端反向阻塞 Durable Runtime。 需要断线续传、审计或恢复时必须读取
-    * `RunStore.events`，不能依赖本 Hub。
+    * `Hub.sliding` 在慢订阅者落后时保留最新 1024 项，不允许 SSE 客户端反向阻塞 Durable Runtime。输出类型是 [[LiveAgentEvent]]，不能当作
+    * [[PersistedAgentEvent]] 使用。需要断线续传、审计或恢复时必须读取 `RunStore.events`。
     */
   val hub: ULayer[RunObserver & RunEventStream] =
     ZLayer.fromZIOEnvironment {
@@ -29,7 +29,8 @@ object RunObserver:
         val observer = new RunObserver:
           def emit(event: AgentEvent): UIO[Unit] = eventHub.publish(event).unit
         val stream = new RunEventStream:
-          def events: ZStream[Any, Nothing, AgentEvent] = ZStream.fromHub(eventHub)
+          def liveEvents: ZStream[Any, Nothing, LiveAgentEvent] =
+            ZStream.fromHub(eventHub).map(LiveAgentEvent(_))
         ZEnvironment[RunObserver](observer) ++ ZEnvironment[RunEventStream](stream)
       }
     }
@@ -44,9 +45,12 @@ object RunObserver:
   def combine(observers: RunObserver*): RunObserver =
     (event: AgentEvent) => ZIO.foreachDiscard(observers)(_.emit(event))
 
+/** 进程内实时事件。不能与 [[PersistedAgentEvent]] 互相赋值：前者会丢、没有 sequence，后者是耐久权威。 */
+final case class LiveAgentEvent(event: AgentEvent)
+
+/** 会丢事件的进程内实时流。审计、恢复、事故包与轨迹必须改读 `RunStore.events`（`PersistedAgentEvent`）。 */
 trait RunEventStream:
-  /** 订阅进程内全部运行的实时事件；审计与断线续传应改用 `RunStore.events`。 */
-  def events: ZStream[Any, Nothing, AgentEvent]
+  def liveEvents: ZStream[Any, Nothing, LiveAgentEvent]
 
 /** 把 Durable Runtime 的 `AgentEvent` 转换为厂商无关 `TelemetryEvent`。
   *
@@ -126,7 +130,9 @@ object TelemetryRunObserver:
               ),
               Map(
                 "gen_ai.usage.input_tokens"  -> usage.inputTokens.toDouble,
-                "gen_ai.usage.output_tokens" -> usage.outputTokens.toDouble
+                "gen_ai.usage.output_tokens" -> usage.outputTokens.toDouble,
+                "agent.usage.cache_read_input_tokens"  -> usage.cacheReadInputTokens.toDouble,
+                "agent.usage.cache_write_input_tokens" -> usage.cacheWriteInputTokens.toDouble
               )
             )
             Some(event) -> current.copy(models = current.models.removed(runId))
@@ -522,6 +528,22 @@ object TelemetryRunObserver:
         some(runId, "agent.usage.updated", at, measurements = usageMeasurements(usage))
       case AgentEvent.CheckpointSaved(runId, version, at) =>
         some(runId, "agent.checkpoint.saved", at, Map("agent.checkpoint.version" -> version.value.toString))
+      // 只导出 kind 与属性名：两者都是有界低基数集合，不含任何一侧取值。
+      case AgentEvent.CompositionDriftDetected(runId, kind, changedFields, at) =>
+        some(
+          runId,
+          "agent.composition.drift",
+          at,
+          Map(
+            "agent.composition.drift.kind"   -> kind,
+            "agent.composition.drift.fields" -> changedFields
+              .map(_.field)
+              .toList
+              .sorted
+              .mkString(","),
+            "langfuse.observation.level" -> "WARNING"
+          )
+        )
       case AgentEvent.RunSuspended(runId, _, at) =>
         some(runId, "agent.run.suspended", at, Map("agent.status" -> "suspended"))
       case AgentEvent.RunCompleted(runId, _, usage, at) =>
@@ -599,6 +621,7 @@ object TelemetryRunObserver:
       "gen_ai.usage.input_tokens"           -> usage.inputTokens.toDouble,
       "gen_ai.usage.output_tokens"          -> usage.outputTokens.toDouble,
       "agent.usage.cached_input_tokens"     -> usage.cachedInputTokens.toDouble,
+      "agent.usage.cache_write_input_tokens" -> usage.cacheWriteInputTokens.toDouble,
       "agent.usage.reasoning_output_tokens" -> usage.reasoningOutputTokens.toDouble,
       "agent.usage.estimated_cost"          -> usage.estimatedCost.toDouble
     )
@@ -684,7 +707,8 @@ object MetricsRunObserver:
               inputTokens = usage.inputTokens.max(0L),
               outputTokens = usage.outputTokens.max(0L),
               cachedInputTokens = usage.cachedInputTokens.max(0L),
-              reasoningOutputTokens = usage.reasoningOutputTokens.max(0L)
+              reasoningOutputTokens = usage.reasoningOutputTokens.max(0L),
+              cacheWriteInputTokens = usage.cacheWriteInputTokens.max(0L)
             )
             Chunk(point) -> current.copy(models = current.models.removed(runId))
           case None =>
@@ -697,7 +721,8 @@ object MetricsRunObserver:
               inputTokens = usage.inputTokens.max(0L),
               outputTokens = usage.outputTokens.max(0L),
               cachedInputTokens = usage.cachedInputTokens.max(0L),
-              reasoningOutputTokens = usage.reasoningOutputTokens.max(0L)
+              reasoningOutputTokens = usage.reasoningOutputTokens.max(0L),
+              cacheWriteInputTokens = usage.cacheWriteInputTokens.max(0L)
             )
             Chunk(point) -> current
 
@@ -774,12 +799,12 @@ object MetricsRunObserver:
       case AgentEvent.RunCompleted(runId, _, usage, at) =>
         finishRun(current, runId, MetricOutcome.Succeeded, at, usage.estimatedCost.toDouble)
 
-      case AgentEvent.RunFailed(runId, category, message, at) =>
-        val (finished, next) = finishRun(current, runId, outcomeFromCategory(category), at, 0.0)
-        val extra            =
-          if message.contains("组合已不兼容") then Chunk(AgentMetric.CompositionDriftDetected("incompatible"))
-          else Chunk.empty
-        (extra ++ finished) -> next
+      // 漂移由 CompositionDriftDetected 单独计数，不再从 RunFailed 的错误文本反推。
+      case AgentEvent.CompositionDriftDetected(_, kind, _, _) =>
+        Chunk(AgentMetric.CompositionDriftDetected(kind)) -> current
+
+      case AgentEvent.RunFailed(runId, category, _, at) =>
+        finishRun(current, runId, outcomeFromCategory(category), at, 0.0)
 
       case AgentEvent.RunCancelled(runId, at) =>
         finishRun(current, runId, MetricOutcome.Cancelled, at, 0.0)
@@ -855,7 +880,8 @@ object MetricsRunObserver:
           inputTokens = 0L,
           outputTokens = 0L,
           cachedInputTokens = 0L,
-          reasoningOutputTokens = 0L
+          reasoningOutputTokens = 0L,
+          cacheWriteInputTokens = 0L
         )
       )
     val toolPoints = current.tools.iterator.collect {

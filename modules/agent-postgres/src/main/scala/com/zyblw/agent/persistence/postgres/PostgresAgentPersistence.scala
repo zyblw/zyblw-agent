@@ -1,7 +1,7 @@
 package com.zyblw.agent.persistence.postgres
 
 import com.zyblw.agent.artifacts.ArtifactStore
-import com.zyblw.agent.memory.{MemoryStore, RunCommandStore, RunStore, RunSubmissionStore}
+import com.zyblw.agent.memory.{MemoryStore, RunCommandStore, RunStore, RunSubmissionStore, SuspensionStore}
 import com.zyblw.agent.rag.{
   EmbeddingCacheStore,
   EmbeddingQuotaStore,
@@ -29,22 +29,32 @@ import zio.json.JsonCodec
   */
 object PostgresAgentPersistence:
   /** 同时暴露 Runtime、WorkerHost 和 AgentCommandService 所需的三个持久化 SPI。 */
-  val layer: URLayer[DataSource, RunStore & RunCommandStore & RunSubmissionStore] =
-    PostgresRunStore.layer ++ PostgresRunCommandStore.layer ++ PostgresRunSubmissionStore.layer
+  val layer: URLayer[
+    DataSource,
+    RunStore & RunCommandStore & RunSubmissionStore & SuspensionStore & ArtifactStore
+  ] =
+    PostgresRunStore.layer ++ PostgresRunCommandStore.layer ++ PostgresRunSubmissionStore.layer ++
+      PostgresArtifactStore.layer
 
   /** 自动迁移后再构造核心持久化 Adapter 的便捷生产层。
     *
     * 该层只在 ZLayer 构建阶段执行一次 Flyway migrate/validate 和关键表探针；失败会阻止应用及 Worker 启动，绝不回退到内存。 已由宿主部署任务统一执行 migration
     * 的大型宿主可继续使用 [[layer]]，避免应用账号持有 DDL 权限。
     */
-  val migratedLayer: RLayer[DataSource, RunStore & RunCommandStore & RunSubmissionStore] =
+  val migratedLayer: RLayer[
+    DataSource,
+    RunStore & RunCommandStore & RunSubmissionStore & SuspensionStore & ArtifactStore
+  ] =
     ZLayer.fromZIOEnvironment {
       for
         dataSource <- ZIO.service[DataSource]
         _          <- AgentPostgresMigrations.migrate(dataSource)
-      yield ZEnvironment[RunStore](PostgresRunStore(dataSource)) ++
+        runStore = PostgresRunStore(dataSource)
+      yield ZEnvironment[RunStore](runStore) ++
+        ZEnvironment[SuspensionStore](runStore) ++
         ZEnvironment[RunCommandStore](PostgresRunCommandStore(dataSource)) ++
-        ZEnvironment[RunSubmissionStore](PostgresRunSubmissionStore(dataSource))
+        ZEnvironment[RunSubmissionStore](PostgresRunSubmissionStore(dataSource)) ++
+        ZEnvironment[ArtifactStore](PostgresArtifactStore(dataSource))
     }
 
   /** 在控制面基础上加入长期 MemoryStore。
@@ -63,10 +73,14 @@ object PostgresAgentPersistence:
       for
         dataSource <- ZIO.service[DataSource]
         _          <- AgentPostgresMigrations.migrate(dataSource)
-      yield ZEnvironment[RunStore](PostgresRunStore(dataSource)) ++
-        ZEnvironment[RunCommandStore](PostgresRunCommandStore(dataSource)) ++
-        ZEnvironment[RunSubmissionStore](PostgresRunSubmissionStore(dataSource)) ++
-        ZEnvironment[MemoryStore](PostgresMemoryStore(dataSource))
+      yield
+        val runStore = PostgresRunStore(dataSource)
+        ZEnvironment[RunStore](runStore) ++
+          ZEnvironment[SuspensionStore](runStore) ++
+          ZEnvironment[RunCommandStore](PostgresRunCommandStore(dataSource)) ++
+          ZEnvironment[RunSubmissionStore](PostgresRunSubmissionStore(dataSource)) ++
+          ZEnvironment[MemoryStore](PostgresMemoryStore(dataSource)) ++
+          ZEnvironment[ArtifactStore](PostgresArtifactStore(dataSource))
     }
 
   /** Embedding 治理持久化组合层。

@@ -94,7 +94,7 @@ TelemetryContributor
 
 约束（合同级，不可协商）：
 
-- Extension 只拿 Host 显式提供的稳定输入、ID 和自己的 extension state，**永远拿不到** `AgentRuntimeLive` 或可变 Runtime 内部。
+- Extension 只拿 Host 显式提供的稳定输入、ID 和自己的 extension state，**永远拿不到** `AgentRuntimeDriver` 或可变 Runtime 内部。
 - Extension 不能：绕过权限、绕过审批、无 fencing 提交状态、任意修改 RunState、修改已审批 effect、在 canonical compiler 之外改动最终 Provider 请求。
 - Kernel owns lifecycle；Extension contributes capability。
 - 组合方式是 Scala `trait` + `ZLayer`，组合可 introspect（沿用 RuntimeProfile / 组合指纹）。

@@ -56,7 +56,7 @@ object RuntimeCompositionRuntimeSpec extends ZIOSpecDefault:
 
   private def seedCreated(
       store: RunStore,
-      composition: Option[RuntimeCompositionFingerprint]
+      composition: RuntimeCompositionFingerprint
   ): IO[AgentError, RunId] =
     for
       now     <- Clock.instant
@@ -99,11 +99,11 @@ object RuntimeCompositionRuntimeSpec extends ZIOSpecDefault:
 
   private def seedRunning(
       store: RunStore,
-      composition: Option[RuntimeCompositionFingerprint],
-      toolContractFingerprints: Map[String, ToolContractFingerprint] = Map.empty,
-      approvalRequiredCallIds: Option[Set[String]] = None,
-      approvalSubjects: Option[Map[String, ApprovalSubject]] = None,
-      schemaVersion: Int = AgentState.CurrentSchemaVersion
+      composition: RuntimeCompositionFingerprint,
+      toolContractFingerprints: Map[String, ToolContractFingerprint] = Map(
+        "echo" -> ToolContractFingerprint.missing("echo")
+      ),
+      approvalSubjects: Map[String, ApprovalSubject] = Map.empty
   ): IO[AgentError, RunId] =
     for
       now     <- Clock.instant
@@ -121,14 +121,12 @@ object RuntimeCompositionRuntimeSpec extends ZIOSpecDefault:
         "plan-echo",
         Chunk(DurableToolBatch(0, Chunk(DurableToolPlanItem(0, echoCall)))),
         toolContractFingerprints = toolContractFingerprints,
-        approvalRequiredCallIds = approvalRequiredCallIds,
         approvalSubjects = approvalSubjects
       )
       state = created.copy(
         status = RunStatus.Running,
         updatedAt = now,
-        pendingToolPlan = Some(plan),
-        schemaVersion = schemaVersion
+        pendingToolPlan = Some(plan)
       )
       event = PersistedAgentEvent(
         eventId,
@@ -155,9 +153,8 @@ object RuntimeCompositionRuntimeSpec extends ZIOSpecDefault:
         yield state)
           .provideLayer(layers(model, ModelPolicySource.default, tools = List(echoTool("stable echo"))))
       yield assertTrue(
-        result.composition.contains(
+        result.composition ==
           RuntimeComposition.freeze(RuntimeProfile.default, agent, ModelPolicySource.default)
-        )
       )
     },
     test("连续运行中模型覆盖漂移在下一次调用前 fail-closed") {
@@ -194,8 +191,39 @@ object RuntimeCompositionRuntimeSpec extends ZIOSpecDefault:
       yield assertTrue(
         count == 1,
         exit.causeOption.flatMap(_.failureOption).exists {
-          case AgentError.CompositionIncompatible(_, reason) => reason.contains("模型")
-          case _                                             => false
+          case AgentError.CompositionIncompatible(_, changed, _) =>
+            changed.map(_.field).contains("modelRef")
+          case _ => false
+        }
+      )
+    },
+    test("漂移拒绝会发出 CompositionDriftDetected，只含 kind 与属性名") {
+      val frozen  = RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings)
+      val drifted = ModelPolicySource.static(ModelPolicy(model = Some("cheap-model")))
+      for
+        model    <- ScriptedChatModel.make(Chunk(finalResponse("should-not-run")))
+        observed <- Ref.make(Chunk.empty[AgentEvent])
+        recorder = ZLayer.succeed[RunObserver](event => observed.update(_ :+ event))
+        _ <- (for
+          store   <- ZIO.service[RunStore]
+          runtime <- ZIO.service[AgentRuntime]
+          runId   <- seedCreated(store, frozen)
+          _       <- runtime.recover(runId).exit
+        yield ()).provideLayer(
+          TestAgentRuntime.inMemory(model, Nil, modelPolicies = drifted, observer = recorder)
+        )
+        events <- observed.get
+      yield assertTrue(
+        events
+          .collect { case drift: AgentEvent.CompositionDriftDetected => drift }
+          .exists(drift =>
+            drift.kind == "incompatible" && drift.changedFields.map(_.field).contains("modelRef")
+          ),
+        // 事件不得携带任何一侧取值：这里 cheap-model 是"新模型名"，出现即为泄漏。
+        !events.exists {
+          case drift: AgentEvent.CompositionDriftDetected =>
+            drift.toString.contains("cheap-model") || drift.toString.contains("defined-model")
+          case _ => false
         }
       )
     },
@@ -207,7 +235,7 @@ object RuntimeCompositionRuntimeSpec extends ZIOSpecDefault:
         result <- (for
           store   <- ZIO.service[RunStore]
           runtime <- ZIO.service[AgentRuntime]
-          runId   <- seedCreated(store, Some(frozen))
+          runId   <- seedCreated(store, frozen)
           exit    <- runtime.recover(runId).exit
           state   <- store.load(runId)
         yield (exit, state)).provideLayer(layers(model, drifted))
@@ -224,13 +252,14 @@ object RuntimeCompositionRuntimeSpec extends ZIOSpecDefault:
         exit  <- (for
           store   <- ZIO.service[RunStore]
           runtime <- ZIO.service[AgentRuntime]
-          runId   <- seedRunning(store, Some(frozen))
+          runId   <- seedRunning(store, frozen)
           result  <- runtime.recover(runId).exit
         yield result).provideLayer(layers(model, ModelPolicySource.default))
       yield assertTrue(
         exit.causeOption.flatMap(_.failureOption).exists {
-          case AgentError.CompositionIncompatible(_, reason) => reason.contains("echo")
-          case _                                             => false
+          case AgentError.CompositionIncompatible(_, changed, _) =>
+            changed.map(_.field).contains("requiredToolsMissing")
+          case _ => false
         }
       )
     },
@@ -245,20 +274,16 @@ object RuntimeCompositionRuntimeSpec extends ZIOSpecDefault:
         result <- (for
           store   <- ZIO.service[RunStore]
           runtime <- ZIO.service[AgentRuntime]
-          runId   <- seedRunning(
-            store,
-            Some(frozenComposition),
-            frozenContracts,
-            approvalSubjects = Some(Map.empty)
-          )
-          exit  <- runtime.recover(runId).exit
-          state <- store.load(runId)
+          runId   <- seedRunning(store, frozenComposition, frozenContracts)
+          exit    <- runtime.recover(runId).exit
+          state   <- store.load(runId)
         yield (exit, state)).provideLayer(layers(model, ModelPolicySource.default, List(changedTool)))
         (exit, state) = result
       yield assertTrue(
         exit.causeOption.flatMap(_.failureOption).exists {
-          case AgentError.CompositionIncompatible(_, reason) => reason.contains("Schema")
-          case _                                             => false
+          case AgentError.CompositionIncompatible(_, changed, _) =>
+            changed.map(_.field).contains("toolContractFingerprint")
+          case _ => false
         },
         state.pendingToolPlan.exists(_.toolContractFingerprints == frozenContracts),
         state.steps.isEmpty
@@ -295,10 +320,9 @@ object RuntimeCompositionRuntimeSpec extends ZIOSpecDefault:
         state.pendingToolPlan.exists(
           _.toolContractFingerprints.get("echo").contains(ToolContractFingerprint.registered(approvalTool))
         ),
-        state.pendingToolPlan.flatMap(_.frozenApprovalCallIds).contains(Set("call-echo")),
+        state.pendingToolPlan.exists(_.frozenApprovalCallIds == Set("call-echo")),
         state.pendingToolPlan
-          .flatMap(_.approvalSubjects)
-          .flatMap(_.get("call-echo"))
+          .flatMap(_.approvalSubjects.get("call-echo"))
           .contains(approvalSubjectFor(approvalTool, policy)),
         // 暂停请求必须带上主体，否则批准无法绑定到具体副作用。
         state.pendingApproval
@@ -326,9 +350,9 @@ object RuntimeCompositionRuntimeSpec extends ZIOSpecDefault:
           runtime <- ZIO.service[AgentRuntime]
           runId   <- seedRunning(
             store,
-            Some(frozenComposition),
+            frozenComposition,
             contracts,
-            approvalSubjects = Some(Map("call-echo" -> approvalSubjectFor(writeTool, strict)))
+            approvalSubjects = Map("call-echo" -> approvalSubjectFor(writeTool, strict))
           )
           outcome <- runtime.recover(runId)
           state   <- store.load(runId)
@@ -342,56 +366,24 @@ object RuntimeCompositionRuntimeSpec extends ZIOSpecDefault:
         state.pendingApproval.exists(_.toolCall.id == "call-echo")
       )
     },
-    test("v6 不完整工具快照 fail-closed，更早版本的计划仍按旧门禁恢复") {
-      val frozenComposition =
-        RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings)
-      val writeTool = echoTool(
-        "legacy write contract",
-        ToolMetadata(ToolRisk.ApprovalWrite, SideEffect.NonIdempotentWrite)
-      )
-      val policy = ToolPolicyConfig(allowedTools = Set(ToolName("echo")))
+    test("组合指纹一致的 Created Run 可以正常恢复到完成") {
+      val frozen = RuntimeComposition.freeze(RuntimeProfile.default, agent, ModelPolicySource.default)
       for
-        model  <- ScriptedChatModel.make(Chunk(finalResponse("should-not-run"), finalResponse("unused")))
-        result <- (for
-          store       <- ZIO.service[RunStore]
-          runtime     <- ZIO.service[AgentRuntime]
-          currentRun  <- seedRunning(store, Some(frozenComposition))
-          currentExit <- runtime.recover(currentRun).exit
-          legacyRun   <- seedRunning(
-            store,
-            Some(frozenComposition),
-            schemaVersion = AgentState.CurrentSchemaVersion - 1
-          )
-          legacyOutcome <- runtime.recover(legacyRun)
-          legacyState   <- store.load(legacyRun)
-        yield (currentExit, legacyOutcome, legacyState)).provideLayer(
-          layers(model, ModelPolicySource.default, List(writeTool), policy)
-        )
-        (currentExit, legacyOutcome, legacyState) = result
-      yield assertTrue(
-        currentExit.causeOption.flatMap(_.failureOption).exists {
-          case AgentError.PersistenceFailure(message, _) => message.contains("v6 工具计划")
-          case _                                         => false
-        },
-        legacyOutcome.isInstanceOf[RunOutcome.Suspended],
-        legacyState.status == RunStatus.WaitingForApproval
-      )
-    },
-    test("缺少冻结指纹的旧 Run 仍允许恢复") {
-      for
-        model  <- ScriptedChatModel.make(Chunk(finalResponse("legacy")))
+        model  <- ScriptedChatModel.make(Chunk(finalResponse("ok")))
         result <- (for
           store   <- ZIO.service[RunStore]
           runtime <- ZIO.service[AgentRuntime]
-          runId   <- seedCreated(store, None)
+          runId   <- seedCreated(store, frozen)
           outcome <- runtime.recover(runId)
           state   <- store.load(runId)
-        yield (outcome, state)).provideLayer(layers(model, ModelPolicySource.default))
+        yield (outcome, state)).provideLayer(
+          layers(model, ModelPolicySource.default, tools = List(echoTool("stable echo")))
+        )
         (outcome, state) = result
       yield assertTrue(
         outcome.isInstanceOf[RunOutcome.Completed],
         state.status == RunStatus.Completed,
-        state.composition.isEmpty
+        state.composition == frozen
       )
     }
   )

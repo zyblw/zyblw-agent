@@ -6,20 +6,9 @@ import java.time.Instant
 import zio.*
 import zio.json.*
 
-/** Artifact 的可信隔离域。
-  *
-  * Session 与 User 两种域刻意复用长期 Memory 的隔离语义：用户级 Artifact 必须同时带 tenant，避免同名用户跨租户读写。此类型只描述 存储键；HTTP、CLI 或 Tool
-  * Adapter 仍必须从已经认证的 `RunContext`/`AgentState` 推导它，不能接受模型或请求正文自报的域。
-  */
-enum ArtifactScope derives JsonCodec:
-  case Session(sessionId: SessionId)
-  case User(tenantId: TenantId, userId: UserId)
+export com.zyblw.agent.core.{ArtifactReference, ArtifactScope}
 
-  /** 不含 Artifact 名称或正文的稳定诊断标签。 */
-  def diagnostic: String = this match
-    case ArtifactScope.Session(sessionId)     => s"session:${sessionId.asString}"
-    case ArtifactScope.User(tenantId, userId) => s"user:${tenantId.value}:${userId.value}"
-
+/** Artifact 的可信隔离域、引用已下沉到 `core`，避免 tools → artifacts → core 成环。 */
 /** 交给 Artifact Store 的二进制与应用私有 metadata。
   *
   * Artifact 适合报告、图片、音频和其它不应塞进 `AgentState` 或模型 Context 的大对象。metadata 也可能含业务数据，不得自动投影到 Prompt、 telemetry 或公开
@@ -47,51 +36,18 @@ final case class ArtifactDescriptor(
   require(sha256.matches("[0-9a-f]{64}"), "Artifact sha256 必须是小写 SHA-256")
 
   /** 删除私有 metadata 与时间，只保留可耐久引用的不可变内容身份。 */
-  def reference: ArtifactReference = ArtifactReference.fromDescriptor(this)
+  def reference: ArtifactReference = ArtifactReference(
+    scope,
+    name,
+    version,
+    mediaType,
+    byteSize,
+    sha256
+  )
 
-/** Artifact 的低敏、不可变引用。
-  *
-  * 引用不携带二进制、私有 metadata 或创建时间，也不授予读取权限。调用方仍必须从已认证上下文推导并授权 scope；sha256/大小/mediaType 用于读取后验证名称与版本没有被错误 Adapter
-  * 重新绑定。
-  */
-final case class ArtifactReference(
-    scope: ArtifactScope,
-    name: ArtifactName,
-    version: Long,
-    mediaType: String,
-    byteSize: Long,
-    sha256: String
-) derives JsonCodec:
-  require(version > 0L && byteSize >= 0L, "ArtifactReference version 必须为正，byteSize 不能为负")
-  require(ArtifactReference.validMediaType(mediaType), "ArtifactReference mediaType 必须是有界 type/subtype")
-  require(sha256.matches("[0-9a-f]{64}"), "ArtifactReference sha256 必须是小写 SHA-256")
-
+extension (reference: ArtifactReference)
   /** 精确比较读取结果；metadata 与 createdAt 不属于引用身份。 */
-  def matches(descriptor: ArtifactDescriptor): Boolean =
-    scope == descriptor.scope &&
-      name == descriptor.name &&
-      version == descriptor.version &&
-      mediaType == descriptor.mediaType &&
-      byteSize == descriptor.byteSize &&
-      sha256 == descriptor.sha256
-
-object ArtifactReference:
-  def fromDescriptor(descriptor: ArtifactDescriptor): ArtifactReference =
-    ArtifactReference(
-      descriptor.scope,
-      descriptor.name,
-      descriptor.version,
-      descriptor.mediaType,
-      descriptor.byteSize,
-      descriptor.sha256
-    )
-
-  private[artifacts] def validMediaType(value: String): Boolean =
-    value.length <= 127 &&
-      value.count(_ == '/') == 1 &&
-      value.indexOf('/') > 0 &&
-      value.lastIndexOf('/') < value.length - 1 &&
-      !value.exists(_.isControl)
+  def matches(descriptor: ArtifactDescriptor): Boolean = reference == descriptor.reference
 
 /** 读取时才出现的二进制内容。它没有 JSON codec，防止框架把大对象意外嵌进运行状态或 HTTP 事件。 */
 final case class Artifact(descriptor: ArtifactDescriptor, bytes: Chunk[Byte])

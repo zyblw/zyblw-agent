@@ -75,7 +75,8 @@ object AgentApplicationConfigLoader:
           Config.int("max_calls_per_step").withDefault(8) ++
           Config.int("max_parallelism").withDefault(4) ++
           Config.duration("default_timeout").withDefault(30.seconds) ++
-          Config.long("max_result_bytes").withDefault(256L * 1024L)
+          Config.long("max_result_bytes").withDefault(256L * 1024L) ++
+          Config.long("externalize_above_bytes").withDefault(32L * 1024L)
       ).map(ToolLimits.apply)
     val policies = (approvalPolicyDescription ++ retryPolicyDescription).map(ToolPolicies.apply)
 
@@ -93,6 +94,7 @@ object AgentApplicationConfigLoader:
           maxParallelism = limits.maxParallelism,
           defaultTimeout = limits.defaultTimeout,
           maxResultBytes = limits.maxResultBytes,
+          externalizeAboveBytes = limits.externalizeAboveBytes,
           retryPolicy = policies.retry,
           approvalPolicy = policies.approval
         )
@@ -230,7 +232,8 @@ object AgentApplicationConfigLoader:
       maxCallsPerStep: Int,
       maxParallelism: Int,
       defaultTimeout: Duration,
-      maxResultBytes: Long
+      maxResultBytes: Long,
+      externalizeAboveBytes: Long
   )
 
   /** 审批与重试策略的中间配置产品。 */

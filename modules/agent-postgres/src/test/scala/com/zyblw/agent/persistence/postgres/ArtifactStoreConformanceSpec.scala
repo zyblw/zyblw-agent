@@ -10,7 +10,10 @@ import org.testcontainers.utility.DockerImageName
 import zio.*
 import zio.test.*
 
-/** 内存与 PostgreSQL ArtifactStore 共用删除、保留期和审计不变量。 */
+/** 内存与 PostgreSQL ArtifactStore 共用删除、保留期和审计不变量。
+  *
+  * 覆盖 `agent_artifacts` / `agent_artifact_versions` / `agent_artifact_audit`，含 Run 域外置读回。
+  */
 object ArtifactStoreConformanceSpec extends ZIOSpecDefault:
   private val session =
     ArtifactScope.Session(SessionId(UUID.fromString("00000000-0000-0000-0000-000000000021")))
@@ -64,6 +67,27 @@ object ArtifactStoreConformanceSpec extends ZIOSpecDefault:
           audits.exists(_.action == ArtifactAuditAction.Delete),
           !audits.exists(_.reasonCode.contains("pdf"))
         )).provide(layer)
+      },
+      test("Run 域外置结果可按引用读回，并与 Session 域隔离") {
+        val runScope = ArtifactScope.Run(
+          RunId(UUID.fromString("00000000-0000-0000-0000-000000000031")),
+          ThreadId("artifact-run")
+        )
+        val payload = Chunk.fromArray("tool-result-body".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        (for
+          store      <- ZIO.service[ArtifactStore]
+          descriptor <- store.save(
+            runScope,
+            ArtifactName("tool-results/call.json"),
+            ArtifactInput(payload, "application/json")
+          )
+          loaded <- store.read(descriptor.reference)
+          leaked <- store.read(session, ArtifactName("tool-results/call.json"))
+        yield assertTrue(
+          loaded.exists(_.bytes == payload),
+          leaked.isEmpty,
+          descriptor.scope == runScope
+        )).provide(layer)
       }
     ) @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(3.minutes)
 
@@ -77,6 +101,23 @@ object ArtifactStoreConformanceSpec extends ZIOSpecDefault:
             _     <- store.save(session, name, ArtifactInput(Chunk(2.toByte), "application/pdf"))
             gone  <- store.delete(session, name, 1L)
           yield assertTrue(gone == 1L)).provide(ArtifactStore.inMemory())
+        },
+        test("内存 Run 域外置结果可按引用读回") {
+          val runScope = ArtifactScope.Run(
+            RunId(UUID.fromString("00000000-0000-0000-0000-000000000032")),
+            ThreadId("memory-run")
+          )
+          val payload =
+            Chunk.fromArray("inline-then-externalized".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+          (for
+            store      <- ZIO.service[ArtifactStore]
+            descriptor <- store.save(
+              runScope,
+              ArtifactName("tool-results/call.json"),
+              ArtifactInput(payload, "application/json")
+            )
+            loaded <- store.read(descriptor.reference)
+          yield assertTrue(loaded.exists(_.bytes == payload))).provide(ArtifactStore.inMemory())
         }
       ),
       contract("postgres", postgres)

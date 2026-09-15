@@ -1,5 +1,6 @@
 package com.zyblw.agent.rag
 
+import com.zyblw.agent.composition.{CapabilityKind, CapabilityRef}
 import com.zyblw.agent.context.*
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
@@ -57,7 +58,8 @@ final class MemoryRagContextSourceResolver(
     policy: MemoryRagContextPolicy,
     operationTelemetry: Option[AgentOperationTelemetry] = None
 ) extends ContextSourceResolver:
-  override val sourceIds: Chunk[String] = Chunk("memory-rag@2")
+  override val sourceIds: Chunk[CapabilityRef] =
+    Chunk(CapabilityRef(CapabilityKind.Context, "memory-rag", "2"))
 
   /** 为当前回合解析来源。检索 query 使用最近一条非空 User 消息，避免把工具输出误当用户意图。
     */

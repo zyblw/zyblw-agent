@@ -12,6 +12,9 @@ object AgentSchemaCensusSpec extends ZIOSpecDefault:
         dead.intersect(living).isEmpty,
         living.contains("model_call_executions"),
         living.contains("agent_artifacts"),
+        living.contains("agent_runtime_overrides"),
+        living.contains("agent_ingestion_jobs"),
+        living.contains("agent_embedding_quota_windows"),
         dead.contains("model_calls"),
         AgentSchemaInventory.relations.size == dead.size + living.size
       )

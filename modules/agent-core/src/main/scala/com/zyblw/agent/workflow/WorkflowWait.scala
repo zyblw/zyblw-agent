@@ -103,12 +103,17 @@ final case class WorkflowWakeQueueSnapshot(
     "可领取 wakeup 与最早年龄必须同时存在或同时为空"
   )
 
-/** signal 胜出后保存的有界结果。payload 可能包含业务数据，不能进入日志、timeline 或通用指标。 */
+/** signal 胜出后保存的有界结果。payload 可能包含业务数据，不能进入日志、timeline 或通用指标。
+  *
+  * @param authorization
+  *   发送该 signal 的可信授权上下文摘要。没有这个绑定，任意持有 wait key 的调用方都能用裸 payload 推进人工任务。
+  */
 final case class WorkflowSignalValue(
     id: WorkflowSignalId,
     name: WorkflowSignalName,
     payload: String,
-    receivedAt: Instant
+    receivedAt: Instant,
+    authorization: com.zyblw.agent.composition.AuthorizationFingerprint
 )
 
 /** 权威耐久等待记录。 */

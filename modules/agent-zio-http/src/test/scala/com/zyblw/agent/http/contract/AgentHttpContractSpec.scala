@@ -57,6 +57,7 @@ object AgentHttpContractSpec extends ZIOSpecDefault:
     "totalTokens",
     "estimatedCost",
     "pendingApproval",
+    "suspension",
     "stateVersion",
     "eventId",
     "sequence",

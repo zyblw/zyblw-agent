@@ -1,5 +1,6 @@
 package com.zyblw.agent.context
 
+import com.zyblw.agent.composition.{CapabilityKind, CapabilityRef, RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import java.time.Instant
 import zio.*
@@ -26,7 +27,9 @@ object ContextContributorSpec extends ZIOSpecDefault:
       Instant.EPOCH,
       Instant.EPOCH,
       Version.initial,
-      definition = Some(agent),
+      agent,
+      RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings),
+      ThreadId("contributor-thread"),
       runContext = RunContext(Some("user-a"), Some("tenant-a"))
     )
 
@@ -44,13 +47,16 @@ object ContextContributorSpec extends ZIOSpecDefault:
       ZIO.succeed(ContextSources(safetyInstructions = Chunk("资料不足时拒绝编造")))
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("ContextContributor")(
-    test("多个贡献者按声明顺序合并，并暴露 id@version") {
+    test("多个贡献者按声明顺序合并，并暴露带能力类别的身份") {
       val resolver = ContextContributor.resolver(memories, safety)
       for
         current <- state
         sources <- resolver.resolve(current, agent)
       yield assertTrue(
-        resolver.sourceIds == Chunk("static-memory@1", "static-safety@2"),
+        resolver.sourceIds == Chunk(
+          CapabilityRef(CapabilityKind.Context, "static-memory", "1"),
+          CapabilityRef(CapabilityKind.Context, "static-safety", "2")
+        ),
         sources.memories.map(_.key) == Chunk("语言"),
         sources.safetyInstructions == Chunk("资料不足时拒绝编造"),
         sources.priorTurns.isEmpty

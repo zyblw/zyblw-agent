@@ -126,7 +126,10 @@ object OpenAIResponsesChatModel:
 private[openai] object OpenAIResponsesWire:
   private val RawOutputItemsMetadata = "openai.responses.output_items"
 
-  final private case class InputTokensDetailsDto(cached_tokens: Option[Long]) derives JsonDecoder
+  final private case class InputTokensDetailsDto(
+      cached_tokens: Option[Long],
+      cache_write_tokens: Option[Long]
+  ) derives JsonDecoder
   final private case class OutputTokensDetailsDto(reasoning_tokens: Option[Long]) derives JsonDecoder
   final private case class UsageDto(
       input_tokens: Long,
@@ -245,6 +248,13 @@ private[openai] object OpenAIResponsesWire:
               value.input_tokens_details
                 .flatMap(_.cached_tokens)
                 .forall(token => token >= 0L && token <= value.input_tokens) &&
+              value.input_tokens_details
+                .flatMap(_.cache_write_tokens)
+                .forall(token => token >= 0L && token <= value.input_tokens) &&
+              value.input_tokens_details.fold(true)(details =>
+                BigInt(details.cached_tokens.getOrElse(0L)) +
+                  BigInt(details.cache_write_tokens.getOrElse(0L)) <= BigInt(value.input_tokens)
+              ) &&
               value.output_tokens_details
                 .flatMap(_.reasoning_tokens)
                 .forall(token => token >= 0L && token <= value.output_tokens) =>
@@ -253,7 +263,8 @@ private[openai] object OpenAIResponsesWire:
               value.input_tokens,
               value.output_tokens,
               value.input_tokens_details.flatMap(_.cached_tokens).getOrElse(0L),
-              value.output_tokens_details.flatMap(_.reasoning_tokens).getOrElse(0L)
+              value.output_tokens_details.flatMap(_.reasoning_tokens).getOrElse(0L),
+              value.input_tokens_details.flatMap(_.cache_write_tokens).getOrElse(0L)
             )
           )
         case Some(value) =>

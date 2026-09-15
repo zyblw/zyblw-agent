@@ -3,6 +3,7 @@ package com.zyblw.agent.core
 import zio.*
 import zio.json.*
 import zio.json.ast.Json
+import zio.json.EncoderOps
 
 enum MessageRole derives JsonCodec:
   case System, Developer, User, Assistant, Tool
@@ -70,15 +71,71 @@ object AgentMessage:
   def tool(callId: String, name: String, result: ToolResult): AgentMessage =
     AgentMessage(
       role = MessageRole.Tool,
-      content = Chunk(ContentPart.JsonValue(result.value)),
+      content = Chunk(ContentPart.JsonValue(result.contextPayload)),
       toolCallId = Some(callId),
       name = Some(name),
-      metadata = Map("isError" -> result.isError.toString)
+      metadata = Map("isError" -> result.isError.toString) ++
+        (if result.isExternalized then Map("externalized" -> "true") else Map.empty)
     )
 
   /** 内部统一构造纯文本消息，避免各角色工厂重复初始化默认字段。 */
   private def textMessage(role: MessageRole, text: String): AgentMessage =
     AgentMessage(role, Chunk(ContentPart.Text(text)))
 
-final case class ToolResult(value: Json, isError: Boolean = false, metadata: Map[String, String] = Map.empty)
-    derives JsonCodec
+/** 工具调用的结构化结果。大结果外置后只保留有界 preview 与引用，正文不进入 State / 事件 / 模型上下文。 */
+enum ToolResult derives JsonCodec:
+  case Inline(value: Json, isError: Boolean = false, metadata: Map[String, String] = Map.empty)
+  case Externalized(
+      reference: ArtifactReference,
+      preview: String,
+      isError: Boolean = false,
+      metadata: Map[String, String] = Map.empty
+  )
+
+object ToolResult:
+  /** 构造内联结果；保留历史 `ToolResult(json)` 调用点。 */
+  def apply(value: Json, isError: Boolean = false, metadata: Map[String, String] = Map.empty): ToolResult =
+    Inline(value, isError, metadata)
+
+  /** 进入模型上下文与事件的有界 JSON：外置结果只有 preview 与内容身份，不含二进制。 */
+  val PreviewLimit: Int = 512
+
+  def previewOf(json: Json): String =
+    val raw = json.toJson
+    if raw.length <= PreviewLimit then raw else raw.take(PreviewLimit)
+
+  extension (result: ToolResult)
+    def isError: Boolean = result match
+      case Inline(_, isError, _)          => isError
+      case Externalized(_, _, isError, _) => isError
+
+    def metadata: Map[String, String] = result match
+      case Inline(_, _, metadata)          => metadata
+      case Externalized(_, _, _, metadata) => metadata
+
+    def isExternalized: Boolean = result match
+      case _: Externalized => true
+      case _: Inline       => false
+
+    /** 内联 JSON；外置结果退回 preview 包装前的检查载荷。 */
+    def value: Json = inspectionJson
+
+    /** Guardrail 与硬上限使用的 UTF-8 JSON；外置分支只含 preview，因此必须在外置前对 Inline 全文检查。 */
+    def inspectionJson: Json = result match
+      case Inline(value, _, _)            => value
+      case Externalized(_, preview, _, _) => Json.Str(preview)
+
+    def utf8ByteSize: Long =
+      inspectionJson.toJson.getBytes(java.nio.charset.StandardCharsets.UTF_8).length.toLong
+
+    /** 写入消息历史与公共事件的载荷：内联给全文，外置给 preview + 内容身份。 */
+    def contextPayload: Json = result match
+      case Inline(value, _, _)                    => value
+      case Externalized(reference, preview, _, _) =>
+        Json.Obj(
+          "preview"  -> Json.Str(preview),
+          "name"     -> Json.Str(reference.name.value),
+          "version"  -> Json.Num(BigDecimal(reference.version)),
+          "sha256"   -> Json.Str(reference.sha256),
+          "byteSize" -> Json.Num(BigDecimal(reference.byteSize))
+        )

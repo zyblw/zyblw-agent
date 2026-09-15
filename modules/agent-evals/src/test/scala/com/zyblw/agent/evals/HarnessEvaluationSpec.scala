@@ -29,7 +29,6 @@ object HarnessEvaluationSpec extends ZIOSpecDefault:
       "change-1",
       "eval-team",
       EvalDatasetReviewStatus.Approved,
-      Some("reviewer-1"),
       Some(Instant.parse("2026-08-21T00:00:00Z")),
       AgentEvalDataset.contentSha256(cases),
       reviewerIds = Set("reviewer-1", "reviewer-2")

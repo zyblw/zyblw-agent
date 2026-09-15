@@ -15,14 +15,14 @@
 - 慢客户端不应阻塞模型或工具 Fiber；
 - 审批可能暂停数小时，不能让一个原始 HTTP Fiber 承担 Run 生命周期。
 
-因此框架明确保留两条不同语义的流：
+因此框架明确保留两条不同语义、**不同类型**的流：
 
-| 流 | 数据来源 | 适合内容 | 崩溃后恢复 |
-|---|---|---|---|
-| `RunEventStream` | 单进程滑动 Hub | token delta、瞬时进度、开发调试 | 否 |
-| `DurableRunEventStream` | `AgentState/RunStore` | 状态转换、工具批次、审批、usage、完成/失败 | 是 |
+| 流 | 数据来源 | 元素类型 | 适合内容 | 崩溃后恢复 |
+|---|---|---|---|---|
+| `RunEventStream.liveEvents` | 单进程滑动 Hub | `LiveAgentEvent`（会丢、无 sequence） | token delta、瞬时进度、开发调试 | 否 |
+| `RunStore.events` / `DurableRunEventStream` | `AgentState/RunStore` | `PersistedAgentEvent`（耐久权威） | 状态转换、工具批次、审批、usage、完成/失败、`RunTrajectory` | 是 |
 
-不能把瞬时 Hub 称为耐久流，也不应把每个 token 都写进 PostgreSQL。需要跨节点逐 token 转发时，应增加有界的
+不能把 `LiveAgentEvent` 传入轨迹投影、事故包或恢复路径，也不应把每个 token 都写进 PostgreSQL。需要跨节点逐 token 转发时，应增加有界的
 Kafka/NATS/Redis Streams 等 relay Adapter，并继续以 PostgreSQL 事件序号作为恢复事实，而不是创建第二套 Run 状态。
 
 ## 2. 核心契约

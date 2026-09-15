@@ -1,8 +1,9 @@
 # 指令、Context 与成本工程
 
-> 状态：当前说明  
-> 最后核验：2026-07-25  
-> 事实来源：`Instructions.scala`、`AgentDefinitionBuilder.scala`、`ContextManager.scala`、Provider Adapter、Runtime 与测试
+> 状态：当前说明
+> 最后核验：2026-09-16
+> 事实来源：`Instructions.scala`、`AgentDefinitionBuilder.scala`、`ContextManager.scala`、`PromptCompiler.scala`、Provider Adapter、Runtime 与测试
+> 详细契约：[Prompt Runtime](prompt-runtime.md)、[ADR-0029](architecture/0029-context-authority-prompt-lineage.md)
 
 Agent 质量不只取决于模型。运行时每一轮实际发送了哪些可信规则、哪些不可信事实、多少历史、多少工具结果，以及哪些 token
 命中了缓存，都会改变结果和成本。本章用当前代码解释这条链路。
@@ -67,17 +68,17 @@ Fingerprint 是规范化指令的 SHA-256，可用于：
 当前顺序是：
 
 ```text
-System 指令
-→ 运行时安全约束
-→ Developer 指令
-→ 长期 Memory
-→ RAG 文档
-→ 已持久化历史摘要
-→ 最近完整消息组
+System/Developer policy
+→ session-stable Memory（User data envelope）
+→ durable history summary（User data envelope）
+→ dynamic world-state/RAG（User data envelope）
+→ recent conversation / native Tool evidence
+→ Runtime Status（仅 recent 分区有剩余空间时）
 ```
 
 每个分区有独立预算，最终还要通过总输入预算。工具调用与对应结果作为原子组裁剪，避免留下孤立 Tool message。
-模型辅助压缩产生的 usage 和 checkpoint 会进入 Run 状态；相同历史前缀恢复时复用 checkpoint，不重复付费。
+已外置的 ToolResult 只保留 preview 与 Artifact 引用，Context 不再二次压缩 Tool 消息。
+模型辅助压缩产生的 usage 和 checkpoint 会进入 Run 状态；相同历史前缀恢复时复用 checkpoint，不重复付费。生产默认仍是确定性压缩。
 
 ## 5. TokenUsage 的语义
 
@@ -85,22 +86,23 @@ System 指令
 TokenUsage(
   inputTokens = 1200,
   outputTokens = 300,
-  cachedInputTokens = 800,
-  reasoningOutputTokens = 120
+  cachedInputTokens = 800,      // cache read；JSON 字段名保留兼容
+  reasoningOutputTokens = 120,
+  cacheWriteInputTokens = 50
 )
 ```
 
 其中：
 
-- `cachedInputTokens <= inputTokens`；
+- `cacheReadInputTokens + cacheWriteInputTokens <= inputTokens`；
+- `freshInputTokens = inputTokens - cacheRead - cacheWrite`；
 - `reasoningOutputTokens <= outputTokens`；
 - `totalTokens = inputTokens + outputTokens`；
-- 两个明细字段不能再次加入总数。
+- 明细字段不能再次加入总数；硬 token 预算始终使用逻辑总输入，不因缓存折扣放宽。
 
 Provider 不返回明细时值为零，含义是“未知/未报告”，不是“确认没有缓存或推理”。框架不会离线估算后冒充 Provider 账单。
 
-OpenAI Chat Completions 与 Responses 当前会读取缓存/推理明细。其他 Provider 在各自 wire contract 明确且测试完成前保持零，
-避免用相似字段名猜测账单语义。
+当前 OpenAI Responses 与 Gemini Interactions 读取 cache-read（及协议提供时的 write）；Anthropic decoder 可安全读取 read/write 字段，但在 `cache_control` wire contract 完成前 capability 仍为 Unsupported。其他 Adapter 在各自 contract 明确且测试完成前保持零。
 
 ## 6. 观测什么
 

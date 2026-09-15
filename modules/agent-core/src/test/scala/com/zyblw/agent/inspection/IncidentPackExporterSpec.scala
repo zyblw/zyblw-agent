@@ -1,5 +1,6 @@
 package com.zyblw.agent.inspection
 
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.RunStore
 import java.time.Instant
@@ -12,6 +13,8 @@ object IncidentPackExporterSpec extends ZIOSpecDefault:
   private val sessionId = SessionId(UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"))
   private val startedAt = Instant.parse("2026-08-22T00:00:00Z")
 
+  private val exportAgent = AgentDefinition(AgentId("incident-export"), "Incident Export", "导出事故包")
+
   private val state = AgentState(
     runId = runId,
     sessionId = sessionId,
@@ -21,10 +24,14 @@ object IncidentPackExporterSpec extends ZIOSpecDefault:
     steps = Chunk.empty,
     usage = UsageSummary(),
     budget = BudgetState(RunLimits(), UsageSummary(), 0),
-    pendingApproval = None,
+    suspension = None,
     createdAt = startedAt,
     updatedAt = startedAt,
     version = Version.initial,
+    definition = exportAgent,
+    composition =
+      RuntimeComposition.fingerprint(RuntimeProfile.default, exportAgent, exportAgent.modelSettings),
+    threadId = ThreadId("incident-export-thread"),
     lastEventSequence = 0L
   )
 

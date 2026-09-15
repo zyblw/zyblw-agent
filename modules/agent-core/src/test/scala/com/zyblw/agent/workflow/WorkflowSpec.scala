@@ -12,6 +12,8 @@ object WorkflowSpec extends ZIOSpecDefault:
 
   private def context(runId: RunId, sessionId: SessionId) = WorkflowContext(runId, sessionId)
 
+  private val signalAuth = com.zyblw.agent.composition.AuthorizationFingerprint.of(RunContext())
+
   def spec = suite("WorkflowEngine")(
     test("Workflow、版本和节点 ID 在配置边界使用有界安全格式") {
       assertTrue(
@@ -471,8 +473,9 @@ object WorkflowSpec extends ZIOSpecDefault:
               waitKey: WorkflowWaitKey,
               signalId: WorkflowSignalId,
               name: WorkflowSignalName,
-              payload: String
-          ) = baseStore.signal(waitKey, signalId, name, payload)
+              payload: String,
+              authorization: com.zyblw.agent.composition.AuthorizationFingerprint
+          ) = baseStore.signal(waitKey, signalId, name, payload, authorization)
           def expireDue(limit: Int) = baseStore.expireDue(limit)
           def claimWakeups(
               workflowId: WorkflowId,
@@ -588,16 +591,18 @@ object WorkflowSpec extends ZIOSpecDefault:
           wait.key,
           WorkflowSignalId("signal-1"),
           signalName,
-          "approved"
+          "approved",
+          signalAuth
         )
         duplicate <- store.signal(
           wait.key,
           WorkflowSignalId("signal-1"),
           signalName,
-          "approved"
+          "approved",
+          signalAuth
         )
         conflicting <- store
-          .signal(wait.key, WorkflowSignalId("signal-1"), signalName, "different")
+          .signal(wait.key, WorkflowSignalId("signal-1"), signalName, "different", signalAuth)
           .either
         dispatchableQueue <- store.wakeQueueSnapshot(testWorkflowId, testWorkflowVersion)
         wakeLease         <- store
@@ -638,6 +643,58 @@ object WorkflowSpec extends ZIOSpecDefault:
         completedQueue.pendingWaits == 0L,
         completedQueue.dispatchableWakeups == 0L,
         completedQueue.leasedWakeups == 0L
+      )
+    }.provide(WorkflowExecutionStore.inMemory[Int]),
+    test("相同 signalId 换授权指纹视为冲突而不是重复") {
+      val otherAuth = com.zyblw.agent.composition.AuthorizationFingerprint.of(
+        RunContext(tenantId = Some("other-tenant"))
+      )
+      for
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        store     <- ZIO.service[WorkflowExecutionStore[Int]]
+        approval   = NodeId("auth-gate")
+        signalName = WorkflowSignalName("review.approved")
+        definition = validDefinition(
+          approval,
+          Map(
+            approval -> nodeWithContext(approval) { (state, workflowContext) =>
+              workflowContext.wakeup match
+                case Some(WorkflowWakeup.SignalReceived(_, value)) if value.name == signalName =>
+                  ZIO.succeed(NodeOutcome.Succeeded(state + 1))
+                case _ =>
+                  Clock.instant.map(now =>
+                    NodeOutcome.Awaiting(
+                      state,
+                      WorkflowWaitRequest(WorkflowWaitCondition.Signal(signalName), now.plusSeconds(3600))
+                    )
+                  )
+            }
+          ),
+          Map(approval -> WorkflowTransition.Complete())
+        )
+        engine = WorkflowEngine.makeDurable(
+          definition,
+          store,
+          sumReducer,
+          WorkflowExecutionPolicy(WorkerId("auth-worker"))
+        )
+        _        <- engine.run(10, context(runId, sessionId)).runCollect
+        wait     <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
+        accepted <- store.signal(
+          wait.key,
+          WorkflowSignalId("signal-auth"),
+          signalName,
+          "approved",
+          signalAuth
+        )
+        conflict <- store
+          .signal(wait.key, WorkflowSignalId("signal-auth"), signalName, "approved", otherAuth)
+          .either
+      yield assertTrue(
+        accepted.disposition == WorkflowSignalDisposition.Accepted,
+        conflict.left.exists(_.category == ErrorCategory.Conflict),
+        signalAuth != otherAuth
       )
     }.provide(WorkflowExecutionStore.inMemory[Int]),
     test("恢复会拒绝 Store 注入另一节点身份的 wait") {
@@ -689,8 +746,9 @@ object WorkflowSpec extends ZIOSpecDefault:
               waitKey: WorkflowWaitKey,
               signalId: WorkflowSignalId,
               name: WorkflowSignalName,
-              payload: String
-          ) = baseStore.signal(waitKey, signalId, name, payload)
+              payload: String,
+              authorization: com.zyblw.agent.composition.AuthorizationFingerprint
+          ) = baseStore.signal(waitKey, signalId, name, payload, authorization)
           def expireDue(limit: Int) = baseStore.expireDue(limit)
           def claimWakeups(
               workflowId: WorkflowId,
@@ -754,7 +812,7 @@ object WorkflowSpec extends ZIOSpecDefault:
         wait    <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
         _       <- TestClock.adjust(61.seconds)
         results <- store
-          .signal(wait.key, WorkflowSignalId("late-signal"), signalName, "late")
+          .signal(wait.key, WorkflowSignalId("late-signal"), signalName, "late", signalAuth)
           .zipPar(store.expireDue())
         resolved  <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
         wakeLease <- store
@@ -876,7 +934,7 @@ object WorkflowSpec extends ZIOSpecDefault:
         )
         _          <- engine.run(1, context(runId, sessionId)).runDrain
         wait       <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
-        _          <- store.signal(wait.key, WorkflowSignalId("long-wake-1"), signalName, "ready")
+        _          <- store.signal(wait.key, WorkflowSignalId("long-wake-1"), signalName, "ready", signalAuth)
         fiber      <- worker.runOnce.fork
         _          <- TestClock.adjust(41.seconds)
         cycle      <- fiber.join
@@ -918,7 +976,7 @@ object WorkflowSpec extends ZIOSpecDefault:
         )
         _     <- engine.run(1, context(runId, sessionId)).runDrain
         wait  <- store.currentWait(runId).someOrFail(AgentError.PersistenceFailure("wait missing"))
-        _     <- store.signal(wait.key, WorkflowSignalId("wake-1"), signalName, "ready")
+        _     <- store.signal(wait.key, WorkflowSignalId("wake-1"), signalName, "ready", signalAuth)
         first <- store
           .claimWakeups(testWorkflowId, testWorkflowVersion, WorkerId("wake-a"), 30.seconds)
           .flatMap(value =>

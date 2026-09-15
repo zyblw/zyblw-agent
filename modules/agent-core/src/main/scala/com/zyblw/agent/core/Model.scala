@@ -45,8 +45,8 @@ enum FinishReason derives JsonCodec:
 
 /** 一次模型调用的 Provider-neutral Token 用量。
   *
-  * `cachedInputTokens` 是 `inputTokens` 的子集，`reasoningOutputTokens` 是 `outputTokens` 的子集，因此 `totalTokens`
-  * 只计算输入与输出总量，不能再次累加两个明细字段。Provider 未返回明细时保持零，框架不会把估算值 冒充供应商账单事实。
+  * cache read/write 都是 `inputTokens` 的子集，`reasoningOutputTokens` 是 `outputTokens` 的子集，因此 `totalTokens`
+  * 只计算输入与输出总量，不能再次累加明细字段。Provider 未返回明细时保持零，框架不会把估算值冒充供应商账单事实。
   *
   * @param inputTokens
   *   Provider 报告的全部输入 token
@@ -56,13 +56,33 @@ enum FinishReason derives JsonCodec:
   *   输入 token 中由 Prompt Cache 命中的数量
   * @param reasoningOutputTokens
   *   输出 token 中用于内部推理的数量；不得记录推理正文
+  * @param cacheWriteInputTokens
+  *   本次写入 Prompt Cache 的输入 token；旧 Provider 不报告时为零
   */
 final case class TokenUsage(
     inputTokens: Long = 0L,
     outputTokens: Long = 0L,
     cachedInputTokens: Long = 0L,
-    reasoningOutputTokens: Long = 0L
+    reasoningOutputTokens: Long = 0L,
+    cacheWriteInputTokens: Long = 0L
 ) derives JsonCodec:
+  require(inputTokens >= 0L, "inputTokens 不能为负数")
+  require(outputTokens >= 0L, "outputTokens 不能为负数")
+  require(cachedInputTokens >= 0L, "cachedInputTokens 不能为负数")
+  require(reasoningOutputTokens >= 0L, "reasoningOutputTokens 不能为负数")
+  require(cacheWriteInputTokens >= 0L, "cacheWriteInputTokens 不能为负数")
+  require(
+    BigInt(cachedInputTokens) + BigInt(cacheWriteInputTokens) <= BigInt(inputTokens),
+    "cache read/write token 之和不能大于 inputTokens"
+  )
+  require(reasoningOutputTokens <= outputTokens, "reasoningOutputTokens 不能大于 outputTokens")
+
+  /** 含义明确的 cache-read 名称；保留 cachedInputTokens 字段以兼容 0.9.x 源码和 JSON。 */
+  def cacheReadInputTokens: Long = cachedInputTokens
+
+  /** 未从缓存读取或写入缓存的输入 token。 */
+  def freshInputTokens: Long = inputTokens - cacheReadInputTokens - cacheWriteInputTokens
+
   /** 返回输入与输出 token 总和，供总预算和成本估算使用。 */
   def totalTokens: Long = inputTokens + outputTokens
 
@@ -77,7 +97,8 @@ final case class TokenUsage(
       inputTokens + that.inputTokens,
       outputTokens + that.outputTokens,
       cachedInputTokens + that.cachedInputTokens,
-      reasoningOutputTokens + that.reasoningOutputTokens
+      reasoningOutputTokens + that.reasoningOutputTokens,
+      cacheWriteInputTokens + that.cacheWriteInputTokens
     )
 
 /** 模型完成结果，保留 usage、finish reason 和可选厂商 request ID 以便审计。 */

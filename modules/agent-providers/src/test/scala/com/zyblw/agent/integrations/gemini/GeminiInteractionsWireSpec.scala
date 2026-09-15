@@ -27,7 +27,7 @@ object GeminiInteractionsWireSpec extends ZIOSpecDefault:
       |   {"type":"function_call","id":"call-1","name":"lookup","arguments":{"query":"zio"},"signature":"signed-call"}
       | ],
       | "status":"requires_action",
-      | "usage":{"total_input_tokens":12,"total_output_tokens":6,"total_thought_tokens":3,"total_tokens":21}
+      | "usage":{"total_input_tokens":12,"total_cached_tokens":5,"total_output_tokens":6,"total_thought_tokens":3,"total_tokens":21}
       |} """.stripMargin
 
   private val streamPayload =
@@ -62,7 +62,7 @@ object GeminiInteractionsWireSpec extends ZIOSpecDefault:
       |data: {"index":2,"event_type":"step.stop"}
       |
       |event: interaction.requires_action
-      |data: {"interaction":{"id":"int-stream","status":"requires_action","usage":{"total_input_tokens":8,"total_output_tokens":4}},"event_type":"interaction.requires_action"}
+      |data: {"interaction":{"id":"int-stream","status":"requires_action","usage":{"total_input_tokens":8,"total_cached_tokens":3,"total_output_tokens":4}},"event_type":"interaction.requires_action"}
       |
       |""".stripMargin
 
@@ -86,7 +86,7 @@ object GeminiInteractionsWireSpec extends ZIOSpecDefault:
       yield assertTrue(
         decoded.message.text == "需要查询",
         decoded.message.toolCalls.map(_.id) == Chunk("call-1"),
-        decoded.usage == TokenUsage(12, 6),
+        decoded.usage == TokenUsage(12, 6, cachedInputTokens = 5),
         decoded.finishReason == FinishReason.ToolCalls,
         decoded.message.metadata(GeminiInteractionsWire.RawStepsMetadata).contains("signed-thought"),
         body.contains("\"store\":false"),
@@ -114,7 +114,7 @@ object GeminiInteractionsWireSpec extends ZIOSpecDefault:
             completed.forall(_.message.text == "正在查询"),
             completed.forall(_.message.toolCalls.map(_.id) == Chunk("call-stream")),
             completed.forall(_.message.toolCalls.head.arguments.toJson.contains("zio")),
-            completed.forall(_.usage == TokenUsage(8, 4)),
+            completed.forall(_.usage == TokenUsage(8, 4, cachedInputTokens = 3)),
             completed.forall(
               _.message.metadata(GeminiInteractionsWire.RawStepsMetadata).contains("thought-signature")
             ),

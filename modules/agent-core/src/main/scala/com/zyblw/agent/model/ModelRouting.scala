@@ -60,7 +60,7 @@ final case class RouteDecision(
     policyVersion: String,
     policyFingerprint: String,
     candidates: Chunk[ModelCandidateDecision],
-    legacyExplicitModel: Boolean,
+    explicitModelPinned: Boolean,
     estimatedInputTokens: Long,
     maxOutputTokens: Int,
     pricingFingerprint: String,

@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-repository_root="$(git rev-parse --show-toplevel)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd "$script_dir/../.." && pwd)"
 cd "$repository_root"
 
 mode="${1:---manifest}"
@@ -54,11 +55,43 @@ for mechanism in eval_data.get("mechanisms", []):
             raise SystemExit(f"{mechanism.get('id')}: missing or unsafe evidence path {raw!r}")
 eval_pending = sum(item.get("status") == "pending_host" for item in eval_data.get("hostEvidence", []))
 
+census_path = pathlib.Path("modules/agent-postgres/src/main/scala/com/zyblw/agent/persistence/postgres/AgentSchemaCensus.scala")
+census = census_path.read_text(encoding="utf-8")
+authoritative_block = census.split("val Authoritative: Chunk[String] = Chunk(", 1)
+if len(authoritative_block) != 2:
+    raise SystemExit("could not parse AgentSchemaInventory.Authoritative")
+authoritative_src = authoritative_block[1].split(")", 1)[0]
+tables = [line.strip().strip(",").strip('"') for line in authoritative_src.splitlines() if '"' in line]
+if not tables:
+    raise SystemExit("Authoritative table list is empty")
+
+v001 = pathlib.Path(
+    "modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/migration/V001__zyblw_agent_0_9_baseline.sql"
+).read_text(encoding="utf-8")
+missing_ddl = [table for table in tables if f"CREATE TABLE {table}" not in v001]
+if missing_ddl:
+    raise SystemExit("authoritative tables missing V001 DDL: " + ", ".join(missing_ddl))
+
+test_root = pathlib.Path("modules/agent-postgres/src/test/scala")
+spec_files = list(test_root.rglob("*ConformanceSpec.scala")) + list(
+    test_root.rglob("*IntegrationSpec.scala")
+)
+if not spec_files:
+    raise SystemExit("no postgres ConformanceSpec or IntegrationSpec files found")
+spec_corpus = "\n".join(path.read_text(encoding="utf-8") for path in spec_files)
+missing_specs = [table for table in tables if table not in spec_corpus]
+if missing_specs:
+    raise SystemExit(
+        "authoritative tables missing ConformanceSpec/IntegrationSpec evidence: "
+        + ", ".join(missing_specs)
+    )
+
 print(json.dumps({
     "manifest": "valid",
     "items": len(items),
     "pendingExternal": pending,
-    "pendingEvalHost": eval_pending
+    "pendingEvalHost": eval_pending,
+    "authoritativeTables": len(tables)
 }, separators=(",", ":")))
 PY
 

@@ -31,7 +31,7 @@ trait AgentCommandService:
       idempotencyKey: String
   ): IO[AgentError, RunCommandRecord]
 
-  /** 为当前 pendingApproval 提交批准或拒绝决定。 */
+  /** 为当前审批类挂起提交批准或拒绝决定。 */
   def submitApproval(
       runId: RunId,
       decision: ApprovalDecision,
@@ -103,16 +103,14 @@ final class AgentCommandServiceLive(
           request,
           idempotencyKey,
           toolPolicies.current().maxCallsPerRun,
-          Some(
-            RuntimeComposition.freeze(
-              profile,
-              resolved,
-              modelPolicies,
-              contextSources.sourceIds,
-              extensions.sourceIds,
-              extensions.environment.id.value,
-              extensions.environment.permissions.fingerprint
-            )
+          RuntimeComposition.freeze(
+            profile,
+            resolved,
+            modelPolicies,
+            contextSources.sourceIds,
+            extensions.sourceIds,
+            extensions.environment.id.value,
+            extensions.environment.permissions.fingerprint
           )
         )
       }

@@ -123,6 +123,16 @@ final class OpenTelemetryAgentMetrics(
     )
     .build()
 
+  private val cacheWriteInputTokenUsage = meter
+    .histogramBuilder("zyblw.agent.model.cache.write.input.token.count")
+    .ofLongs()
+    .setDescription("Provider 明确报告的 Prompt Cache 写入 token")
+    .setUnit("{token}")
+    .setExplicitBucketBoundariesAdvice(
+      longBuckets(1L, 4L, 16L, 64L, 256L, 1024L, 4096L, 16384L, 65536L, 262144L, 1048576L)
+    )
+    .build()
+
   private val reasoningOutputTokenUsage = meter
     .histogramBuilder("zyblw.agent.model.reasoning.output.token.count")
     .ofLongs()
@@ -279,7 +289,8 @@ final class OpenTelemetryAgentMetrics(
             inputTokens,
             outputTokens,
             cachedInputTokens,
-            reasoningOutputTokens
+            reasoningOutputTokens,
+            cacheWriteInputTokens
           ) =>
         val attributes = modelAttributes(provider, model, outcome)
         modelCallCount.add(1L, attributes)
@@ -287,6 +298,7 @@ final class OpenTelemetryAgentMetrics(
         recordTokens(inputTokens, TokenDirection.Input, attributes)
         recordTokens(outputTokens, TokenDirection.Output, attributes)
         if cachedInputTokens > 0L then cachedInputTokenUsage.record(cachedInputTokens, attributes)
+        if cacheWriteInputTokens > 0L then cacheWriteInputTokenUsage.record(cacheWriteInputTokens, attributes)
         if reasoningOutputTokens > 0L then reasoningOutputTokenUsage.record(reasoningOutputTokens, attributes)
 
       case AgentMetric.ToolCallFinished(toolName, risk, outcome, durationSeconds) =>

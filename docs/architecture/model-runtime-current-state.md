@@ -29,7 +29,7 @@ Phase 1 已新增的主调用路由、最小账本、准入检查，以及 Qwen 
 |---|---|---|
 | `agent-core` / `model` | `ChatModel` SPI、`ModelCapabilities`、`RoutedChatModel`、`FallbackChatModel`、`ModelRole` | Foundation |
 | `agent-core` / `core` | `ChatRequest` / `ChatResponse`、`ModelSettings`、`ModelCall` 账本、`ModelPolicy`、`ModelPriceBook`、`RunLimits` | Foundation / Beta |
-| `agent-core` / `runtime` | `AgentRuntimeLive.persistAndInvokeModel` / `invokeModel`；预算、组合指纹、工具计划 | Foundation |
+| `agent-core` / `runtime` | `AgentRuntimeDriver.persistAndInvokeModel` / `invokeModel`；纯预算/结算在 `AgentKernel` | Foundation |
 | `agent-core` / `context`、`memory.llm` | `ContextManager`、`LlmContextCompressor`、`LlmMemoryExtractor`（旁路 `ChatModel` 调用） | Beta |
 | `agent-core` / `admin` | `ModelCatalog` 视图、运行时稀疏覆盖、探活入口 | Beta |
 | `agent-core` / `workflow`、`harness` | 显式图与 Goal 预算；**没有** `ModelProfile` 节点 | Experimental |
@@ -60,7 +60,7 @@ AgentApplication / AgentCommandService.submitStart
   → AgentState Created + RunCreated + Start command
 
 WorkerHost / CommandWorker.claim
-  → AgentRuntimeLive.executeLeased
+  → AgentRuntimeDriver.executeLeased
   → loop:
        ensureBudget
        guardrails
@@ -80,7 +80,7 @@ flowchart LR
   AgentDef[AgentDefinition]
   Role[ModelRoleCatalog]
   Policy[ModelPolicySource]
-  Loop[AgentRuntimeLive.loop]
+  Loop[AgentRuntimeDriver.loop]
   Ctx[ContextManager]
   Invoke[invokeModel]
   Chat[ChatModel]
@@ -146,7 +146,7 @@ Provider 流事件
   ToolCallStarted / ToolCallDelta / ToolCallCompleted
     → 归一化为 core.ToolCall(id, name, arguments)
     → ChatResponse.message = assistantToolCalls
-    → AgentRuntimeLive.createDurableToolPlan
+    → AgentRuntimeDriver.createDurableToolPlan
     → ToolCallRequested
     → whitelist / schema / risk / approval / budget / idempotency
     → ToolExecutor
@@ -300,7 +300,7 @@ Created → Running
 |---|---|---|
 | Provider-neutral Chat SPI | 已完成 | `ChatModel` |
 | 归一化 ToolCall / Stream | 已完成 | `ModelStreamEvent`、`ToolCall` |
-| Tool proposal → 执行控制面 | 已完成 | `AgentRuntimeLive` + tool ledger |
+| Tool proposal → 执行控制面 | 已完成 | `AgentRuntimeDriver` + `AgentKernel` + tool ledger |
 | ModelCall 耐久账本 | 部分完成 | 代码在；生产 soak / Replayable 证据不足 |
 | 能力预检 | 已完成 | `CapabilityValidator` |
 | 任务角色 1:1 绑定 | 已完成 | `ModelRoleCatalog` |
@@ -333,7 +333,8 @@ Created → Running
 - `modules/agent-core/src/main/scala/com/zyblw/agent/core/ModelCall.scala`
 - `modules/agent-core/src/main/scala/com/zyblw/agent/core/Error.scala`
 - `modules/agent-core/src/main/scala/com/zyblw/agent/core/Policy.scala`
-- `modules/agent-core/src/main/scala/com/zyblw/agent/runtime/AgentRuntimeLive.scala`
+- `modules/agent-core/src/main/scala/com/zyblw/agent/runtime/AgentRuntimeDriver.scala`
+- `modules/agent-core/src/main/scala/com/zyblw/agent/runtime/AgentKernel.scala`
 - `modules/agent-core/src/main/scala/com/zyblw/agent/model/FallbackChatModel.scala`
 - `modules/agent-providers/src/main/scala/com/zyblw/agent/integrations/ProviderRouter.scala`
 

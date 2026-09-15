@@ -1,5 +1,6 @@
 package com.zyblw.agent.runtime
 
+import com.zyblw.agent.composition.{CapabilityKind, CapabilityRef}
 import com.zyblw.agent.context.*
 import com.zyblw.agent.core.*
 import com.zyblw.agent.guardrails.*
@@ -154,7 +155,8 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
       ZLayer.succeed(ToolPolicySource.static(ToolPolicyConfig.secureDefault)),
       ModelPolicySource.defaultLayer,
       RunObserver.noop,
-      AgentRuntimeLive.layer,
+      com.zyblw.agent.artifacts.ArtifactStore.inMemory(),
+      AgentRuntimeDriver.layer,
       AgentCommandServiceLive.layer
     )
 
@@ -625,7 +627,7 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
       yield assertTrue(
         result._1.isInstanceOf[RunOutcome.Suspended],
         recovered.isInstanceOf[RunOutcome.Suspended],
-        recovered.asInstanceOf[RunOutcome.Suspended].approval.reason.contains("破坏性"),
+        recovered.asInstanceOf[RunOutcome.Suspended].approval.exists(_.reason.contains("破坏性")),
         result._3.exists(_.status == ToolExecutionStatus.Unknown),
         result._4 == 1
       )
@@ -797,7 +799,7 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
         text              = requests.head.messages.map(_.text).mkString("\n")
       yield assertTrue(
         text.contains("[cite-2] 贡献者注入的资料"),
-        state.composition.exists(_.sourceIds == Chunk("classic-book@1"))
+        state.composition.sourceIds == Chunk(CapabilityRef(CapabilityKind.Context, "classic-book", "1"))
       )
     },
     test("显式取消中断活动模型 Fiber，并把同一 AgentState 持久化为 Cancelled") {

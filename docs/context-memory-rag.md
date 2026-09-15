@@ -2,7 +2,7 @@
 
 > 状态：0.9.0 当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-23
+> 最后核验：2026-09-16
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -14,7 +14,7 @@
 - `Retriever` 从外部知识索引返回带 tenant、permission、source 和 score 的资料。
 - `ContextSourceResolver` 负责“本回合选择哪些来源”。
 - `ContextContributor` 是一类来源的插件；Kernel 不认识 Memory/RAG/Skill。用 `ContextContributor.resolver(...)` 组成 Resolver。Goal/Plan/Skill 使用 `HarnessContextContributor`，经同一插件接入。
-- `ContextManager` 最后执行 token 分区、稳定前缀排序、历史裁剪与压缩。
+- `ContextManager` 最后执行 token 分区、稳定前缀排序、历史裁剪与压缩，并经 `PromptCompiler` 校验权限与 lineage；完整契约见 [Prompt Runtime](prompt-runtime.md)。
 
 因此，业务不应直接把数据库查询结果拼成 System Prompt，也不应让向量相似度绕过权限过滤。
 
@@ -55,7 +55,7 @@ val applicationLayer = ZLayer.make[AgentApplication.Services](
 
 `AgentApplication.durable` 内部固定使用 `layerWithContextSources`，并把 `ContextSourceResolver` 设为生产强制依赖。业务如果
 配置了 Retriever 却没有提供 resolver，ZLayer 会在编译期缺少依赖；Retriever 不会被隐式猜测或从全局单例读取。直接
-使用 `AgentRuntimeLive.layerWithContextSources` 仍是高级低层入口，但业务接入优先使用 Application 层。
+使用 `AgentRuntimeDriver.layerWithContextSources` 仍是高级低层入口，但业务接入优先使用 Application 层。
 
 若 Agent 的 `ContextPolicy` 使用 `CompressionMode.ModelAssisted`，应把最后一层改为
 `AgentApplication.durableWithContextCompressor`，并提供 `LlmContextCompressor.configured(config)`。普通
@@ -73,7 +73,7 @@ val applicationLayer = ZLayer.make[AgentApplication.Services](
 6. 将 RetrievalHit 与 Citation 一一配对，低于最低分数的块不进入上下文。
 7. Retriever 明确返回 `NoCandidates`/`BelowMinimumScore` 等不足状态且策略为 `RequireExplicitRefusal` 时，加入固定、
    不含 query/正文的 trusted safety instruction；模型必须说明证据不足，而不是用参数知识补写“有依据”的答案。
-8. `ContextManager` 以“Agent 指令→安全约束→记忆→检索资料→历史摘要→最近消息”构建最终请求。
+8. `ContextManager` 以“System/Developer 指令 → 会话稳定 Memory → 历史摘要 → 动态 world-state/RAG → 最近对话与工具证据 → 可选 Runtime Status”构建最终请求。Memory、RAG、world-state 与摘要使用转义后的 `User` `<context-data>` envelope，不能成为 System/Developer 指令。`PromptCompiler` 拒绝后置高权限指令、Secret 出站和伪造 role。
 
 任何 Memory/Retriever 错误都会转换为 `ContextBuildFailed` 并终止本回合，而不是悄悄省略依据后让模型自由回答。
 业务如果希望“检索降级为纯模型”必须实现一个显式、有遥测记录的 resolver 策略。

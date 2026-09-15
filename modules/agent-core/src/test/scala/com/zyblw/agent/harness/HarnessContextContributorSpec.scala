@@ -1,6 +1,7 @@
 package com.zyblw.agent.harness
 
 import com.zyblw.agent.artifacts.*
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.context.*
 import com.zyblw.agent.core.*
 import java.time.Instant
@@ -41,7 +42,9 @@ object HarnessContextContributorSpec extends ZIOSpecDefault:
       Instant.EPOCH,
       Instant.EPOCH,
       Version.initial,
-      definition = Some(agent),
+      agent,
+      RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings),
+      ThreadId("harness-contributor-thread"),
       runContext = RunContext(Some("user-a"), Some("tenant-a"))
     )
 

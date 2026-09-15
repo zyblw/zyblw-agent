@@ -2,13 +2,12 @@ package com.zyblw.agent.evals
 
 import com.zyblw.agent.composition.RuntimeProfile
 import com.zyblw.agent.core.*
-import com.zyblw.agent.inspection.RunInspection
+import com.zyblw.agent.inspection.RunTrajectory
 import com.zyblw.agent.memory.RunStore
 import com.zyblw.agent.model.*
 import com.zyblw.agent.runtime.*
 import com.zyblw.agent.testkit.*
 import zio.*
-import zio.json.*
 import zio.test.*
 
 /** 把 ModelCall Replayable 账本接到 eval 轨迹门禁。 */
@@ -40,10 +39,10 @@ object TrajectoryReplayEvalSpec extends ZIOSpecDefault:
           ledger   <- store.getModelCalls(runId)
           events   <- store.events(runId)
           state    <- store.load(runId)
-          inspectionJson = RunInspection.build(state, events).toJson
-          evidence       = TrajectoryReplay.evidence(recorded, ledger, inspectionJson, List(secret))
-          evalCase       = AgentEvalCase("replay-1", "v1", "脱敏输入")
-          observation    = AgentEvalObservation(
+          trajectory  = RunTrajectory.build(state, events, ledger)
+          evidence    = TrajectoryReplay.evidence(recorded, ledger, trajectory, List(secret))
+          evalCase    = AgentEvalCase("replay-1", "v1", "脱敏输入")
+          observation = AgentEvalObservation(
             Chunk.empty,
             Set.empty,
             recovered = false,

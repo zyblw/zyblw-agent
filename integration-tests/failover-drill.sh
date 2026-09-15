@@ -150,6 +150,21 @@ run_soak "jdbc:postgresql://127.0.0.1:${standby_port}/zyblw" "$standby_log"
 final_runs=$(count_table standby agent_runs)
 final_commands=$(count_table standby agent_run_commands)
 
+path_log="$report_dir/durable-path.log"
+run_path_probe() {
+  local jdbc_url=$1
+  local output=$2
+  local common_env="\"ZYBLW_AGENT_JDBC_URL\" -> \"$jdbc_url\", \"ZYBLW_AGENT_DB_USER\" -> \"zyblw\", \"ZYBLW_AGENT_DB_PASSWORD\" -> \"local-ha-only\", \"ZYBLW_AGENT_SOAK_CONFIRM_DISPOSABLE\" -> \"true\""
+  (
+    cd "$repo_root"
+    sbt -batch \
+      ";set examples / Compile / run / fork := true; set examples / Compile / run / envVars := Map($common_env); examples/runMain com.zyblw.agent.examples.FailoverDurablePathProbe"
+  ) | tee "$output"
+}
+run_path_probe "jdbc:postgresql://127.0.0.1:${standby_port}/zyblw" "$path_log"
+post_suspensions=$(count_table standby agent_suspensions)
+post_artifacts=$(count_table standby agent_artifact_versions)
+
 python3 - "$report_file" "$primary_log" "$standby_log" \
   "$primary_lsn" "$standby_replay_lsn" \
   "$pre_runs" "$pre_commands" "$pre_model_calls" \
@@ -257,4 +272,33 @@ if not report["passed"]:
 
 pathlib.Path(report_path).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 print(json.dumps({"localFailoverDrill": "passed", "report": report_path}, separators=(",", ":")))
+PY
+
+python3 - "$report_file" "$path_log" "$post_suspensions" "$post_artifacts" <<'PY'
+import json
+import pathlib
+import sys
+
+report_path, path_log, suspensions, artifacts = sys.argv[1:]
+report = json.loads(pathlib.Path(report_path).read_text(encoding="utf-8"))
+
+def path_report(path):
+    for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines():
+        marker = "FAILOVER_PATH_REPORT "
+        if marker in line:
+            return json.loads(line.split(marker, 1)[1])
+    raise SystemExit(f"missing FAILOVER_PATH_REPORT in {path}")
+
+probe = path_report(path_log)
+probe["agent_suspensions"] = int(suspensions)
+probe["agent_artifact_versions"] = int(artifacts)
+report["durablePaths"] = probe
+report["passed"] = bool(report.get("passed")) and all(
+    probe.get(key) is True
+    for key in ("artifactWritten", "artifactReadBack", "suspensionExpired", "runTimedOut")
+) and int(artifacts) >= 1
+if not report["passed"]:
+    raise SystemExit("failover drill durable path probe failed: " + json.dumps(probe, ensure_ascii=False))
+pathlib.Path(report_path).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print(json.dumps({"localFailoverPath": "passed"}, separators=(",", ":")))
 PY

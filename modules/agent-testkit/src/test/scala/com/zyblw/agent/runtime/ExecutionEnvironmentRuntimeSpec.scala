@@ -80,7 +80,7 @@ object ExecutionEnvironmentRuntimeSpec extends ZIOSpecDefault:
         outcome.isInstanceOf[RunOutcome.Suspended],
         calls.isEmpty,
         state.pendingApproval.flatMap(_.subject).exists(_.environment == ExecutionEnvironmentId.mcpSandbox),
-        state.composition.exists(_.executionEnvironmentId == "mcp-sandbox")
+        state.composition.executionEnvironmentId == "mcp-sandbox"
       )
     },
     test("local 冻结的 Run 换到 mcp-sandbox 后恢复 Incompatible") {
@@ -101,7 +101,7 @@ object ExecutionEnvironmentRuntimeSpec extends ZIOSpecDefault:
             RunRequest(ThreadId("env-drift"), AgentMessage.user("hello")),
             32,
             now,
-            Some(frozen)
+            frozen
           )
           event = PersistedAgentEvent(
             eventId,
@@ -122,8 +122,9 @@ object ExecutionEnvironmentRuntimeSpec extends ZIOSpecDefault:
         )
       yield assertTrue(
         result.causeOption.flatMap(_.failureOption).exists {
-          case AgentError.CompositionIncompatible(_, reason) => reason.contains("执行环境")
-          case _                                             => false
+          case AgentError.CompositionIncompatible(_, changed, _) =>
+            changed.map(_.field).contains("executionEnvironmentId")
+          case _ => false
         }
       )
     }

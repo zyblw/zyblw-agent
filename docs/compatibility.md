@@ -1,7 +1,7 @@
 # 当前兼容性与版本边界
 
 > 状态：0.9.0 全新安装基线
-> 最后核验：2026-09-13
+> 最后核验：2026-09-16
 
 ## 唯一安装基线
 
@@ -14,9 +14,11 @@
 ## 当前公共契约
 
 - Scala：十一项公开 Maven artifact 使用同一精确版本，禁止版本范围和 SNAPSHOT 进入生产。
-- HTTP：稳定业务协议是 `/api/v1` 与 OpenAPI `1.2.0`；`/api/v1/admin/**` 是 Beta 管理面。
-- State：`AgentState` schemaVersion 7，包含有界 citation 与 retrieval evidence。
-- Database：核心、知识各有独立 schema/history；知识向量固定为 1024 维。
+- HTTP：稳定业务协议是 `/api/v1` 与 OpenAPI `1.2.0`；`/api/v1/admin/**` 是 Beta 管理面。`RunView.suspension` 为可选加法字段。
+- State：`AgentState` schemaVersion 1，包含有界 citation、retrieval evidence 与 `suspension`。
+- ModelCall：`lineage` 增加 compiler/layout 版本、稳定前缀数量与指纹、整体 plan 指纹；不保存 Prompt 正文。
+- TokenUsage：`cachedInputTokens` 仍是 JSON 字段名（含义为 cache read），另加 `cacheWriteInputTokens`；硬预算使用逻辑 `inputTokens`。
+- Database：核心、知识各有独立 schema/history；知识向量固定为 1024 维。`approval_requests` 归位为 `agent_suspensions`。
 - Retrieval：支持 Hybrid、VectorOnly、LexicalOnly 与 Phrase，ACL 在打分和 fetch 前强制执行。
 - Provider：业务只依赖 provider-neutral SPI；密钥只由宿主环境注入。
 

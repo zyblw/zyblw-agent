@@ -1,6 +1,7 @@
 package com.zyblw.agent.memory
 
 import com.zyblw.agent.harness.HarnessStore
+import com.zyblw.agent.artifacts.ArtifactStore
 import zio.*
 
 /** 单进程开发所需持久化 SPI 的便捷装配入口。
@@ -11,11 +12,12 @@ import zio.*
 object AgentPersistence:
   /** 创建进程内状态、命令队列和 Start 原子提交服务。 每次提供该 Layer 都会得到一套隔离状态，适合测试，不适合作为多副本生产存储。
     */
-  val inMemory: ULayer[RunStore & RunCommandStore & RunSubmissionStore] =
-    ZLayer.make[RunStore & RunCommandStore & RunSubmissionStore](
+  val inMemory: ULayer[RunStore & RunCommandStore & RunSubmissionStore & ArtifactStore] =
+    ZLayer.make[RunStore & RunCommandStore & RunSubmissionStore & ArtifactStore](
       RunStore.inMemory,
       RunCommandStore.inMemory,
-      RunSubmissionStore.inMemory
+      RunSubmissionStore.inMemory,
+      ArtifactStore.inMemory()
     )
 
   /** Harness 开发装配：以不可中断顺序和补偿回滚连接 Goal 预算与异步 Start；仍是进程内、非生产持久化。 */

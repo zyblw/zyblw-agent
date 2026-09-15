@@ -82,7 +82,8 @@ object DurableWorkflowWakeExample extends ZIOAppDefault:
         wait.key,
         WorkflowSignalId("example-webhook-1"),
         signalName,
-        "approved"
+        "approved",
+        com.zyblw.agent.composition.AuthorizationFingerprint.of(RunContext())
       )
       worker = WorkflowWakeWorker(
         WorkerId("approval-wake-worker"),

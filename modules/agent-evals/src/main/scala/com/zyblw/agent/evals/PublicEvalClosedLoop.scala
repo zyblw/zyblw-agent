@@ -35,7 +35,6 @@ object PublicEvalClosedLoop:
         changeId = "eval-closed-loop-2026-08-22",
         ownerId = "zyblw-maintainer",
         reviewStatus = EvalDatasetReviewStatus.Approved,
-        reviewerId = None,
         reviewedAt = Some(Instant.parse("2026-08-22T00:00:00Z")),
         contentSha256 = AgentEvalDataset.contentSha256(values),
         reviewerIds = Set("maintainer-a", "maintainer-b"),
@@ -95,7 +94,8 @@ object PublicEvalClosedLoop:
         state.usage.inputTokens,
         state.usage.outputTokens,
         state.usage.cachedInputTokens,
-        state.usage.reasoningOutputTokens
+        state.usage.reasoningOutputTokens,
+        state.usage.cacheWriteInputTokens
       ),
       estimatedCost = state.usage.estimatedCost,
       outcomeLabels = labelsFromAnswer(answer)

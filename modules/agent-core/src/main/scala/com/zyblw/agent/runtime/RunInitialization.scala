@@ -36,7 +36,7 @@ object RunInitialization:
       request: RunRequest,
       idempotencyKey: String,
       maxToolCalls: Int,
-      composition: Option[RuntimeCompositionFingerprint] = None
+      composition: RuntimeCompositionFingerprint
   ): IO[AgentError, RunStartSubmission] =
     for
       normalizedKey <- validateIdempotencyKey(idempotencyKey)
@@ -65,7 +65,7 @@ object RunInitialization:
       request: RunRequest,
       idempotencyKey: String,
       maxToolCalls: Int,
-      composition: Option[RuntimeCompositionFingerprint] = None
+      composition: RuntimeCompositionFingerprint
   ): IO[AgentError, RunStartSubmission] =
     for
       submission <- prepare(agent, request, idempotencyKey, maxToolCalls, composition)
@@ -94,7 +94,7 @@ object RunInitialization:
       request: RunRequest,
       maxToolCalls: Int,
       now: java.time.Instant,
-      composition: Option[RuntimeCompositionFingerprint] = None
+      composition: RuntimeCompositionFingerprint
   ): AgentState =
     val usage = UsageSummary()
     AgentState(
@@ -106,12 +106,12 @@ object RunInitialization:
       steps = Chunk.empty,
       usage = usage,
       budget = BudgetState(effectiveLimits(request.limits, maxToolCalls), usage, 0),
-      pendingApproval = None,
+      suspension = None,
       createdAt = now,
       updatedAt = now,
       version = Version.initial,
-      threadId = Some(request.threadId),
-      definition = Some(agent),
+      threadId = request.threadId,
+      definition = agent,
       runContext = request.context,
       lastEventSequence = 0L,
       composition = composition

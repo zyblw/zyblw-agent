@@ -65,7 +65,7 @@ private trait PostgresAdminSupport:
 
 /** Run 目录的 PostgreSQL 实现。
   *
-  * 过滤全部下推到 SQL，并命中 V002 建立的生成列索引；只有最终一页的 `state_json` 会被解码。这一点很重要： 内存实现会把全部 Run 加载进堆，而管理台在生产环境面对的可能是数百万条 Run。
+  * 过滤全部下推到 SQL，并命中 V001 生成列索引；只有最终一页的 `state_json` 会被解码。这一点很重要： 内存实现会把全部 Run 加载进堆，而管理台在生产环境面对的可能是数百万条 Run。
   *
   * 排序固定为 `(updated_at DESC, run_id DESC)`，与 `RunDirectory` 契约和内存实现完全一致，因此同一个游标 在两种实现下含义相同。
   */
@@ -94,6 +94,7 @@ final class PostgresRunDirectory(protected val dataSource: DataSource)
         statement.setArray(index, statement.getConnection.createArrayOf("text", values.map(identity[Object])))
       )
     if query.awaitingApprovalOnly then conditions += "awaiting_approval"
+    if query.awaitingSignalOnly then conditions += "awaiting_signal"
     query.updatedAfterEpochMilli.foreach { millis =>
       conditions += "updated_at >= ?"
       binders += ((statement, index) => setInstant(statement, index, Instant.ofEpochMilli(millis)))
@@ -163,27 +164,31 @@ final class PostgresRunDirectory(protected val dataSource: DataSource)
       ZIO
         .attemptBlocking {
           val statement = connection.prepareStatement(
-            s"""SELECT status, COUNT(*) AS total, COUNT(*) FILTER (WHERE awaiting_approval) AS approving
+            s"""SELECT status, COUNT(*) AS total,
+             |       COUNT(*) FILTER (WHERE awaiting_approval) AS approving,
+             |       COUNT(*) FILTER (WHERE awaiting_signal) AS signaling
              |FROM agent_runs$filter GROUP BY status""".stripMargin
           )
           try
             tenantId.foreach(statement.setString(1, _))
-            val result   = statement.executeQuery()
-            val counts   = scala.collection.mutable.Map.empty[String, Long]
-            var total    = 0L
-            var awaiting = 0L
+            val result    = statement.executeQuery()
+            val counts    = scala.collection.mutable.Map.empty[String, Long]
+            var total     = 0L
+            var awaiting  = 0L
+            var signaling = 0L
             while result.next() do
               val status = result.getString("status")
               val count  = result.getLong("total")
               counts.update(status, count)
               total += count
               awaiting += result.getLong("approving")
-            (counts.toMap, total, awaiting)
+              signaling += result.getLong("signaling")
+            (counts.toMap, total, awaiting, signaling)
           finally statement.close()
         }
         .mapError(databaseError("聚合 Run 目录总览失败", _))
-        .flatMap { case (counts, total, awaiting) =>
-          Clock.instant.map(now => RunDirectoryOverview(now.toEpochMilli, total, counts, awaiting))
+        .flatMap { case (counts, total, awaiting, signaling) =>
+          Clock.instant.map(now => RunDirectoryOverview(now.toEpochMilli, total, counts, awaiting, signaling))
         }
   }
 

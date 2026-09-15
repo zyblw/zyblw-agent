@@ -3,7 +3,7 @@
 > 状态：Accepted
 > 事实来源：`modules/agent-core/src/main/scala/com/zyblw/agent/admin/`、
 > `modules/agent-zio-http/src/main/scala/com/zyblw/agent/http/AdminHttpApi.scala`、
-> `modules/agent-dashboard/src/`、`modules/agent-postgres` 的 `V002` 迁移
+> `modules/agent-dashboard/src/`、`modules/agent-postgres` 的 V001 生成列
 
 本 ADR 定义框架内置运维控制台（`agent-dashboard`）与其依赖的管理 API 子面的边界、授权模型与装配方式。
 文中每一节明确区分**已实现**与**计划中**；实现状态以源码、测试与迁移为准。
@@ -61,6 +61,10 @@
 | `/api/v1/admin/runs` | GET | read | Run 目录，keyset 游标分页 |
 | `/api/v1/admin/runs/overview` | GET | read | 按状态聚合的部署总览 |
 | `/api/v1/admin/runs/{runId}/events/stream` | GET | read | 单 Run 低敏耐久事件 SSE，可按 `Last-Event-ID` 续传 |
+| `/api/v1/admin/runs/{runId}/composition` | GET | read | 冻结/现场组合对照与结构化 drift |
+| `/api/v1/admin/runs/{runId}/model-calls` | GET | read | 低敏 ModelCall 账本 |
+| `/api/v1/admin/runs/{runId}/suspension` | GET | read | 当前挂起信封；无等待时 `record` 为空 |
+| `/api/v1/admin/runs/{runId}/approval` | GET | read | 审批主体派生摘要；无审批时 404 |
 | `/api/v1/admin/config` | GET | read | 基线 / 覆盖 / 生效三列快照 |
 | `/api/v1/admin/config` | PUT | write | 以 `expectedVersion` 做 CAS 写入 |
 | `/api/v1/admin/config/history` | GET | read | 覆盖变更审计历史 |
@@ -158,9 +162,8 @@ Embedding 模型是**只读**的。维度由迁移固定，而一份索引里的
 | `EvalTrendReader` | `agent-core` 定义，`agent-evals` 实现 | `agent-evals` |
 | `ModelCatalog` / `ModelAdminService` | `agent-core` 定义，`agent-providers` 实现 | `agent-providers`，从已装配的 `ChatModel` descriptor 派生 |
 
-Run 目录需要按租户、Agent、状态和审批等待过滤，而这些维度原先只存在于 `state_json` 内部。`V002` 迁移把
-它们提升为**生成列**：由 PostgreSQL 在写入时维护，运行时代码不需要改变任何写路径，也不会出现读模型与
-权威状态不一致。
+Run 目录需要按租户、Agent、状态、审批等待与非审批挂起过滤。V001 把这些维度提升为 **生成列**（`tenant_id` /
+`user_id` / `awaiting_approval` / `awaiting_signal`）：由 PostgreSQL 在写入时维护，运行时代码不需要改变任何写路径，也不会出现读模型与权威状态不一致。
 
 `agent-core` 不依赖 `agent-rag` 或 `agent-evals`，因此这两个模块的管理视图投影位于各自模块内。HTTP 层只
 依赖 core 的 trait，不会把向量检索或评测依赖强加给所有 HTTP 用户。
@@ -215,8 +218,8 @@ agent-dashboard
   `debug` 而不是搭 `write` 的便车。
 - 运行时读取工具策略、检索工作点与模型路由的路径多了一层间接。代价是每次读取一个 `AtomicReference`；收益是
   这些配置可以在不重启的前提下调整。
-- `AgentRuntimeLive` 与 `RuntimeSettingsService.layer` 的环境各增加一个服务。直接装配运行时的部署需要补一行
+- `AgentRuntimeDriver` 与 `RuntimeSettingsService.layer` 的环境各增加一个服务。直接装配运行时的部署需要补一行
   `ModelPolicySource.defaultLayer` / `ModelCatalog.emptyLayer`，两者都保持原有行为不变。
-- `V002` 为 `agent_runs` 增加生成列，这是一次表重写。对 0.x 阶段可接受，但升级说明必须提示大表停机窗口。
+- V001 为 `agent_runs` 建立租户/用户/审批/挂起生成列。0.9 无原地升级路径，宿主必须使用空数据库。
 - 控制台与管理 API 的演进节奏解耦于稳定 HTTP 契约，代价是控制台需要按 `capabilities` 做能力降级，而不能
   假设后端一定装配了全部适配器。

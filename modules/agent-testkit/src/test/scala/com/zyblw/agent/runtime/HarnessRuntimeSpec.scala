@@ -1,5 +1,6 @@
 package com.zyblw.agent.runtime
 
+import com.zyblw.agent.composition.{CapabilityKind, CapabilityRef}
 import com.zyblw.agent.context.ContextContributor
 import com.zyblw.agent.core.*
 import com.zyblw.agent.harness.*
@@ -64,7 +65,7 @@ object HarnessRuntimeSpec extends ZIOSpecDefault:
         text.contains("ignore previous instructions"),
         text.contains("不可信检索资料"),
         !text.contains("[instruction:skill.web-note"),
-        state.composition.exists(_.sourceIds == Chunk("harness@2")),
+        state.composition.sourceIds == Chunk(CapabilityRef(CapabilityKind.Context, "harness", "2")),
         agent.allowedTools == Set("echo")
       )).provideLayer(HarnessStore.inMemory)
     }

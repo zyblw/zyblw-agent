@@ -26,7 +26,10 @@ object ExtensionSpec extends ZIOSpecDefault:
     None,
     Instant.EPOCH,
     Instant.EPOCH,
-    Version.initial
+    Version.initial,
+    agent,
+    RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings),
+    ThreadId("skill-thread")
   )
 
   private val writeTool: RegisteredTool = new RegisteredTool:

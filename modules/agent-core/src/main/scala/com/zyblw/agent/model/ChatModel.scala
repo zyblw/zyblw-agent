@@ -10,6 +10,35 @@ enum ToolCallingCapability:
 enum StructuredOutputCapability:
   case Unsupported, JsonObject, JsonSchemaStrict
 
+/** Prompt Cache 的 Provider 协议形态；缓存只是可丢失的计算优化。 */
+enum PromptCacheKind:
+  case Unsupported, Implicit, Explicit, Hybrid
+
+/** Core 中的稳定 retention 语义；具体 TTL 名称由 Provider adapter 翻译。 */
+enum PromptCacheRetention:
+  case Ephemeral, Extended
+
+/** 只描述当前 Adapter 已通过 contract test 的缓存能力。 */
+final case class PromptCacheCapability(
+    kind: PromptCacheKind,
+    reportsReadTokens: Boolean = false,
+    reportsWriteTokens: Boolean = false,
+    supportedRetention: Set[PromptCacheRetention] = Set.empty
+):
+  require(
+    kind != PromptCacheKind.Unsupported || supportedRetention.isEmpty,
+    "Unsupported Prompt Cache 不能声明 retention"
+  )
+
+object PromptCacheCapability:
+  val unsupported: PromptCacheCapability = PromptCacheCapability(PromptCacheKind.Unsupported)
+
+  val implicitRead: PromptCacheCapability = PromptCacheCapability(
+    PromptCacheKind.Implicit,
+    reportsReadTokens = true,
+    supportedRetention = Set(PromptCacheRetention.Ephemeral)
+  )
+
 /** 模型能力必须按 Provider + Model 描述，runtime 不再假设所有兼容接口都支持相同参数。
   */
 final case class ModelCapabilities(
@@ -23,7 +52,7 @@ final case class ModelCapabilities(
     audio: Boolean = false,
     parallelToolCalls: Boolean = false,
     usageReporting: Boolean = true,
-    promptCache: Boolean = false,
+    promptCache: PromptCacheCapability = PromptCacheCapability.unsupported,
     reasoningTokens: Boolean = false,
     serverContinuation: Boolean = false,
     maxInputTokens: Option[Long] = None,

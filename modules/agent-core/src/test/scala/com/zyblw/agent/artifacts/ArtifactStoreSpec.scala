@@ -134,5 +134,18 @@ object ArtifactStoreSpec extends ZIOSpecDefault:
         invalid = ArtifactName.fromString("../outside.bin")
         version <- store.read(sessionScope, report, Some(0L)).exit
       yield assertTrue(invalid.isLeft, version.isFailure)).provide(ArtifactStore.inMemory())
+    },
+    test("Run 域与 Session 域完全隔离") {
+      val runScope = ArtifactScope.Run(
+        RunId(UUID.fromString("00000000-0000-0000-0000-000000000301")),
+        ThreadId("thread-run")
+      )
+      (for
+        store <- ZIO.service[ArtifactStore]
+        _     <- store.save(runScope, report, input(Chunk(9.toByte), "application/json"))
+        same  <- store.read(runScope, report)
+        other <- store.read(sessionScope, report)
+      yield assertTrue(same.map(_.bytes) == Some(Chunk(9.toByte)), other.isEmpty))
+        .provide(ArtifactStore.inMemory())
     }
   )

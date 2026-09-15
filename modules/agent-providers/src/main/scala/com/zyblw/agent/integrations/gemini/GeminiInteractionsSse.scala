@@ -302,10 +302,16 @@ private[gemini] object GeminiInteractionsSse:
         .longField(json, "total_output_tokens")
         .orElse(GeminiInteractionsWire.longField(json, "completion_tokens"))
         .getOrElse(fallback.outputTokens)
-      if input >= 0L && output >= 0L then ZIO.succeed(TokenUsage(input, output))
+      val cached = GeminiInteractionsWire
+        .longField(json, "total_cached_tokens")
+        .getOrElse(fallback.cachedInputTokens)
+      if input >= 0L && output >= 0L && cached >= 0L && cached <= input then
+        ZIO.succeed(TokenUsage(input, output, cachedInputTokens = cached))
       else
         ZIO.fail(
-          AgentError.InvalidModelResponse(s"Gemini stream usage 包含负 token: input=$input, output=$output")
+          AgentError.InvalidModelResponse(
+            s"Gemini stream usage 包含无效 token: input=$input, output=$output, cache_read=$cached"
+          )
         )
 
   /** Provider 的流内错误只保留稳定类别，不把完整事件写入错误消息。 */

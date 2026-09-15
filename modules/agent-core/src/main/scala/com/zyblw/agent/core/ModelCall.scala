@@ -37,6 +37,16 @@ object CanonicalModelRequest:
   def toolDefinitionsFingerprint(tools: Chunk[ToolDefinition]): String =
     digest(tools.toJson)
 
+  /** 摘要 Provider 可复用的连续消息前缀与冻结工具定义；动态尾部不参与。 */
+  def stablePrefixFingerprint(request: ChatRequest, prefixMessages: Int): String =
+    digest(
+      CanonicalModelRequest(
+        request.messages.take(prefixMessages.max(0)),
+        request.tools,
+        request.settings
+      ).toJson
+    )
+
   private def digest(canonical: String): String =
     MessageDigest
       .getInstance("SHA-256")
@@ -58,7 +68,12 @@ final case class ModelCallContextLineage(
     /** 本次实际 dispatch 的完整 ModelSettings 规范摘要；旧账本缺失时为 None。 */
     effectiveModelSettingsFingerprint: Option[String] = None,
     /** 本次实际发给模型的工具定义指纹；恢复不得改用 live registry 推断历史合同。 */
-    toolDefinitionsFingerprint: Option[String] = None
+    toolDefinitionsFingerprint: Option[String] = None,
+    promptCompilerVersion: Option[String] = None,
+    promptLayoutVersion: Option[String] = None,
+    stablePrefixMessages: Option[Int] = None,
+    stablePrefixFingerprint: Option[String] = None,
+    promptPlanFingerprint: Option[String] = None
 ) derives JsonCodec
 
 /** 主模型调用账本。`canonicalRequest` 仅在 Replayable 时出现，恢复不得把它投影到公共 API。 */

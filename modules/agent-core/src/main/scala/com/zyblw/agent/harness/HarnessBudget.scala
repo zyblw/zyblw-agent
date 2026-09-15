@@ -90,12 +90,15 @@ object GoalBudgetAmount:
       "inputTokens"           -> BigInt(usage.inputTokens),
       "outputTokens"          -> BigInt(usage.outputTokens),
       "cachedInputTokens"     -> BigInt(usage.cachedInputTokens),
+      "cacheWriteInputTokens" -> BigInt(usage.cacheWriteInputTokens),
       "reasoningOutputTokens" -> BigInt(usage.reasoningOutputTokens)
     )
     counts
       .collectFirst { case (name, value) if value < 0 => s"$name 不能为负数" }
       .orElse(
-        Option.when(usage.cachedInputTokens > usage.inputTokens)("cachedInputTokens 不能大于 inputTokens")
+        Option.when(
+          BigInt(usage.cachedInputTokens) + BigInt(usage.cacheWriteInputTokens) > BigInt(usage.inputTokens)
+        )("cache read/write token 之和不能大于 inputTokens")
       )
       .orElse(
         Option.when(usage.reasoningOutputTokens > usage.outputTokens)(

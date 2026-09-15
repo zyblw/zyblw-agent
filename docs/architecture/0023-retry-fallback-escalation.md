@@ -2,7 +2,7 @@
 
 > 状态：**Accepted 原则 / 分阶段实施**（Retry/Fallback 在 Phase 3；Escalation 在 Phase 6）
 > 日期：2026-09-05
-> 影响：`AgentError`、`FallbackChatModel`、`AgentRuntimeLive.invokeModel`、工具账本隔离
+> 影响：`AgentError`、`FallbackChatModel`、`AgentRuntimeDriver.invokeModel`、工具账本隔离
 > 配套：[multi-model-execution.md](multi-model-execution.md)
 
 ## Context

@@ -1,6 +1,6 @@
 package com.zyblw.agent.runtime
 
-import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile, ToolContractFingerprint}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
 import com.zyblw.agent.tools.{ToolPolicyConfig, ToolPolicySource}
@@ -12,6 +12,8 @@ import zio.test.*
 /** 验证控制面在入队前完成 approvalId、状态、幂等键与租户/用户归属校验。 */
 object AgentCommandServiceSpec extends ZIOSpecDefault:
   private val now = Instant.parse("2026-01-01T00:00:00Z")
+
+  private val commandAgent = AgentDefinition(AgentId("command-test"), "Command Test", "控制面测试")
 
   /** 组装共享同一 RunStore/RunCommandStore 的内存原子提交 Adapter。 */
   private def makeService(
@@ -41,7 +43,12 @@ object AgentCommandServiceSpec extends ZIOSpecDefault:
       eventId   <- EventId.random
       call     = ToolCall("call-approval", "write-profile", Json.Obj())
       approval = ApprovalRequest("approval-1", runId, call, ToolRisk.ApprovalWrite, "需要确认", now.toEpochMilli)
-      plan = DurableToolPlan("plan-approval", Chunk(DurableToolBatch(0, Chunk(DurableToolPlanItem(0, call)))))
+      plan     = DurableToolPlan(
+        "plan-approval",
+        Chunk(DurableToolBatch(0, Chunk(DurableToolPlanItem(0, call)))),
+        toolContractFingerprints = Map("write-profile" -> ToolContractFingerprint.missing("write-profile")),
+        approvalSubjects = Map.empty
+      )
       state = AgentState(
         runId,
         sessionId,
@@ -51,11 +58,13 @@ object AgentCommandServiceSpec extends ZIOSpecDefault:
         Chunk.empty,
         UsageSummary(),
         BudgetState(RunLimits(), UsageSummary(), 0),
-        Some(approval),
+        Some(SuspensionRecord.of(approval)),
         now,
         now,
         Version.initial,
-        threadId = Some(ThreadId("command-thread")),
+        commandAgent,
+        RuntimeComposition.fingerprint(RuntimeProfile.default, commandAgent, commandAgent.modelSettings),
+        ThreadId("command-thread"),
         runContext = RunContext(Some(user), Some(tenant)),
         pendingToolPlan = Some(plan),
         lastEventSequence = 0L
@@ -152,10 +161,9 @@ object AgentCommandServiceSpec extends ZIOSpecDefault:
         first.runId == same.runId,
         first.payload == RunCommandPayload.Start,
         initial.status == RunStatus.Created,
-        initial.definition.contains(agent),
-        initial.composition.contains(
-          RuntimeComposition.freeze(RuntimeProfile.default, agent, ModelPolicySource.default)
-        ),
+        initial.definition == agent,
+        initial.composition ==
+          RuntimeComposition.freeze(RuntimeProfile.default, agent, ModelPolicySource.default),
         events.map(_.sequence) == Chunk(0L),
         conflict.isFailure
       )

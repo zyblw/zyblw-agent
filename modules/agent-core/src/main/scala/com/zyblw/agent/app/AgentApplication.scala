@@ -164,7 +164,7 @@ object AgentApplication:
   /** 生产装配必须显式提供的依赖；任何一项缺失都会在编译期表现为 ZIO 环境未满足。 */
   type DurableDependencies =
     ChatModel & RegisteredToolRegistry & RunStore & RunCommandStore & RunSubmissionStore &
-      ContextSourceResolver & GuardrailEngine & RunObserver
+      ContextSourceResolver & GuardrailEngine & RunObserver & com.zyblw.agent.artifacts.ArtifactStore
 
   /** 接入宿主管理面的生产装配依赖。
     *
@@ -237,7 +237,7 @@ object AgentApplication:
       ContextCompressor.deterministic,
       DefaultContextManager.layer,
       RuntimeExtensions.emptyLayer,
-      AgentRuntimeLive.layerWithProfile(config.profile, config.roleCatalog),
+      AgentRuntimeDriver.layerWithProfile(config.profile, config.roleCatalog),
       AgentCommandServiceLive.configured(config.profile, config.roleCatalog),
       WorkerHost.layer(owner, config.worker),
       live
@@ -259,7 +259,7 @@ object AgentApplication:
       ContextCompressor.deterministic,
       DefaultContextManager.layer,
       RuntimeExtensions.emptyLayer,
-      AgentRuntimeLive.layerWithProfile(config.profile, config.roleCatalog),
+      AgentRuntimeDriver.layerWithProfile(config.profile, config.roleCatalog),
       AgentCommandServiceLive.configured(config.profile, config.roleCatalog),
       WorkerHost.layer(owner, config.worker),
       live
@@ -289,7 +289,7 @@ object AgentApplication:
       TokenCounter.approximate,
       DefaultContextManager.layer,
       RuntimeExtensions.emptyLayer,
-      AgentRuntimeLive.layerWithProfile(config.profile, config.roleCatalog),
+      AgentRuntimeDriver.layerWithProfile(config.profile, config.roleCatalog),
       AgentCommandServiceLive.configured(config.profile, config.roleCatalog),
       WorkerHost.layer(owner, config.worker),
       live
@@ -309,7 +309,7 @@ object AgentApplication:
       ContextCompressor.deterministic,
       DefaultContextManager.layer,
       RuntimeExtensions.emptyLayer,
-      AgentRuntimeLive.layerWithProfile(config.profile, config.roleCatalog),
+      AgentRuntimeDriver.layerWithProfile(config.profile, config.roleCatalog),
       AgentCommandServiceLive.configured(config.profile, config.roleCatalog),
       WorkerHost.layer(owner, config.worker),
       live
@@ -331,7 +331,7 @@ object AgentApplication:
       TokenCounter.approximate,
       DefaultContextManager.layer,
       RuntimeExtensions.emptyLayer,
-      AgentRuntimeLive.layerWithProfile(config.profile, config.roleCatalog),
+      AgentRuntimeDriver.layerWithProfile(config.profile, config.roleCatalog),
       AgentCommandServiceLive.configured(config.profile, config.roleCatalog),
       WorkerHost.layer(owner, config.worker),
       live
@@ -358,7 +358,7 @@ object AgentApplication:
       ContextCompressor.deterministic,
       DefaultContextManager.layer,
       RuntimeExtensions.emptyLayer,
-      AgentRuntimeLive.layerWithProfile(config.profile, config.roleCatalog),
+      AgentRuntimeDriver.layerWithProfile(config.profile, config.roleCatalog),
       AgentCommandServiceLive.configured(config.profile, config.roleCatalog),
       WorkerHost.layer(owner, config.worker),
       live
@@ -385,7 +385,7 @@ object AgentApplication:
       TokenCounter.approximate,
       DefaultContextManager.layer,
       RuntimeExtensions.emptyLayer,
-      AgentRuntimeLive.layerWithProfile(config.profile, config.roleCatalog),
+      AgentRuntimeDriver.layerWithProfile(config.profile, config.roleCatalog),
       AgentCommandServiceLive.configured(config.profile, config.roleCatalog),
       WorkerHost.layer(owner, config.worker),
       live

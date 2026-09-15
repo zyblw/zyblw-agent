@@ -55,6 +55,14 @@
         "modules/agent-evals/src/main/scala/com/zyblw/agent/evals/BookCorpusRagEval.scala",
         "modules/agent-evals/src/test/scala/com/zyblw/agent/evals/BookCorpusRagEvalSpec.scala"
       ]
+    },
+    {
+      "id": "tool-search-on-demand-catalog-gate",
+      "status": "verified_ci",
+      "evidence": [
+        "modules/agent-evals/src/main/scala/com/zyblw/agent/evals/ToolSearchEvaluation.scala",
+        "modules/agent-evals/src/test/scala/com/zyblw/agent/evals/ToolSearchEvaluationSpec.scala"
+      ]
     }
   ],
   "hostEvidence": [

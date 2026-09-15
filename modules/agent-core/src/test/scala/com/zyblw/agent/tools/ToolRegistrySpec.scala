@@ -60,18 +60,21 @@ object ToolRegistrySpec extends ZIOSpecDefault:
         unsafeCalls <- Ref.make(0)
         safeTool    <- RegisteredTool.make(flaky(SideEffect.None, safeCalls))
         unsafeTool  <- RegisteredTool.make(flaky(SideEffect.NonIdempotentWrite, unsafeCalls))
-        executor    <- ToolExecutor.make(
-          ToolPolicyConfig(
-            allowedTools = Set(ToolName("flaky")),
-            retryPolicy = ToolRetryPolicy.IdempotentOnly(
-              RetryPolicy(
-                maxAttempts = 3,
-                initialDelay = 1.millis,
-                maxDelay = 2.millis,
-                jitter = 0.0,
-                maxElapsed = 1.second
+        executor    <- ZIO.serviceWithZIO[com.zyblw.agent.artifacts.ArtifactStore](
+          ToolExecutor.make(
+            ToolPolicyConfig(
+              allowedTools = Set(ToolName("flaky")),
+              retryPolicy = ToolRetryPolicy.IdempotentOnly(
+                RetryPolicy(
+                  maxAttempts = 3,
+                  initialDelay = 1.millis,
+                  maxDelay = 2.millis,
+                  jitter = 0.0,
+                  maxElapsed = 1.second
+                )
               )
-            )
+            ),
+            _
           )
         )
         context = ToolExecutionContext(
@@ -96,10 +99,13 @@ object ToolRegistrySpec extends ZIOSpecDefault:
       for
         calls    <- Ref.make(0)
         tool     <- RegisteredTool.make(flaky(SideEffect.None, calls))
-        executor <- ToolExecutor.make(
-          ToolPolicyConfig(
-            allowedTools = Set(ToolName("flaky")),
-            retryPolicy = ToolRetryPolicy.Never
+        executor <- ZIO.serviceWithZIO[com.zyblw.agent.artifacts.ArtifactStore](
+          ToolExecutor.make(
+            ToolPolicyConfig(
+              allowedTools = Set(ToolName("flaky")),
+              retryPolicy = ToolRetryPolicy.Never
+            ),
+            _
           )
         )
         context = ToolExecutionContext(
@@ -116,18 +122,21 @@ object ToolRegistrySpec extends ZIOSpecDefault:
       for
         calls    <- Ref.make(0)
         tool     <- RegisteredTool.make(flaky(SideEffect.Destructive, calls))
-        executor <- ToolExecutor.make(
-          ToolPolicyConfig(
-            allowedTools = Set(ToolName("flaky")),
-            retryPolicy = ToolRetryPolicy.IdempotentOnly(
-              RetryPolicy(
-                maxAttempts = 3,
-                initialDelay = 1.millis,
-                maxDelay = 2.millis,
-                jitter = 0.0,
-                maxElapsed = 1.second
+        executor <- ZIO.serviceWithZIO[com.zyblw.agent.artifacts.ArtifactStore](
+          ToolExecutor.make(
+            ToolPolicyConfig(
+              allowedTools = Set(ToolName("flaky")),
+              retryPolicy = ToolRetryPolicy.IdempotentOnly(
+                RetryPolicy(
+                  maxAttempts = 3,
+                  initialDelay = 1.millis,
+                  maxDelay = 2.millis,
+                  jitter = 0.0,
+                  maxElapsed = 1.second
+                )
               )
-            )
+            ),
+            _
           )
         )
         context = ToolExecutionContext(
@@ -140,4 +149,4 @@ object ToolRegistrySpec extends ZIOSpecDefault:
         count <- calls.get
       yield assertTrue(exit.isFailure, count == 1)
     } @@ TestAspect.withLiveClock
-  )
+  ).provide(com.zyblw.agent.artifacts.ArtifactStore.inMemory())

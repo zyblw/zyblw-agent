@@ -175,7 +175,9 @@ final case class UsageView(
     /** inputTokens 中由 Provider 明确报告的缓存命中子集；未知时为零。 */
     cachedInputTokens: Long = 0L,
     /** outputTokens 中由 Provider 明确报告的推理 token 子集；不包含隐藏推理正文。 */
-    reasoningOutputTokens: Long = 0L
+    reasoningOutputTokens: Long = 0L,
+    /** inputTokens 中由 Provider 明确报告的 Prompt Cache 写入子集。 */
+    cacheWriteInputTokens: Long = 0L
 ) derives JsonCodec
 object UsageView:
   given Schema[UsageView] = DeriveSchema.gen[UsageView]
@@ -203,6 +205,23 @@ final case class ApprovalView(
 object ApprovalView:
   given Schema[ApprovalView] = DeriveSchema.gen[ApprovalView]
 
+/** 等待外部输入时公开的最小挂起视图。不含 prompt、信号 payload 或审批正文。
+  *
+  * @param kind
+  *   低敏等待类别：`approval` / `human-input` / `external-signal` / `timer`
+  * @param deadlineEpochMilli
+  *   到期时刻；缺省表示无限期等待
+  * @param expiryOutcome
+  *   到期决议：`FailRun` 或 `ResumeWithDefault`
+  */
+final case class SuspensionView(
+    kind: String,
+    deadlineEpochMilli: Option[Long],
+    expiryOutcome: String
+) derives JsonCodec
+object SuspensionView:
+  given Schema[SuspensionView] = DeriveSchema.gen[SuspensionView]
+
 /** Run 查询的版本化公共投影。
   *
   * 它故意不直接序列化框架内部的耐久状态对象：消息历史、工具参数、内部步骤、Context metadata 和恢复游标都不是公共协议。
@@ -223,6 +242,8 @@ object ApprovalView:
   *   最近可公开的助手输出；尚未产生时为空
   * @param pendingApproval
   *   等待人工处理时的最小审批摘要
+  * @param suspension
+  *   当前挂起的低敏摘要；审批类等待同时保留 `pendingApproval` 以便现有客户端继续工作
   * @param createdAtEpochMilli
   *   Run 创建 UTC epoch 毫秒
   * @param updatedAtEpochMilli
@@ -239,6 +260,7 @@ final case class RunView(
     usage: UsageView,
     output: Option[String],
     pendingApproval: Option[ApprovalView],
+    suspension: Option[SuspensionView] = None,
     createdAtEpochMilli: Long,
     updatedAtEpochMilli: Long,
     stateVersion: Long,

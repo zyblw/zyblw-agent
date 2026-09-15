@@ -655,6 +655,7 @@ object ModelCallRuntimeSpec extends ZIOSpecDefault:
       transitionToolExecution,
       getToolExecution,
       getToolExecutions,
+      listToolExecutions,
       getModelCall,
       getModelCalls,
       delete

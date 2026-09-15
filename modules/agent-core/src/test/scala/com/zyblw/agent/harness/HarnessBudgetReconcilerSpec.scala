@@ -1,5 +1,6 @@
 package com.zyblw.agent.harness
 
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.{ModelCallWrite, RunStore}
 import java.time.Instant
@@ -7,6 +8,9 @@ import zio.*
 import zio.test.*
 
 object HarnessBudgetReconcilerSpec extends ZIOSpecDefault:
+  private val reconcilerAgent =
+    AgentDefinition(AgentId("budget-reconciler"), "Budget Reconciler", "预算对账")
+
   private val limits = RunLimits(
     maxSteps = 4,
     maxModelCalls = 2,
@@ -144,6 +148,10 @@ object HarnessBudgetReconcilerSpec extends ZIOSpecDefault:
         now,
         now,
         Version.initial,
+        reconcilerAgent,
+        RuntimeComposition
+          .fingerprint(RuntimeProfile.default, reconcilerAgent, reconcilerAgent.modelSettings),
+        ThreadId("budget-reconciler-thread"),
         lastEventSequence = 0L
       )
       created = PersistedAgentEvent(

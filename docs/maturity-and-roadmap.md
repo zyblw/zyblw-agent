@@ -1,7 +1,7 @@
 # zyblw-agent 成熟度、取舍与路线
 
 > 状态：路线图
-> 最后核验：2026-09-10
+> 最后核验：2026-09-16
 > 事实来源：`build.sbt`、模块源码、测试、发布工作流、迁移与当前文档
 
 ## 成熟度语义
@@ -26,12 +26,12 @@
 | 类型化工具与策略 | core / `tools`,`guardrails` | Foundation | schema、allowlist、风险和结果测试；v5 durable plan 冻结工具契约摘要与单调审批要求，恢复漂移 fail-closed | policy 管理 UX 与历史计划人工重校验流程 |
 | 管理面与运维控制台 | core / `admin`；zio-http；agent-dashboard | Beta | scope fail-closed、CAS 覆盖写入与审计、keyset 游标（含亚毫秒回归）、能力探测、七个面板、无真实凭据的 Playwright 浏览器契约 | SSE 调试器、跨 Run 成本聚合、嵌入式部署 |
 | 模型治理与运行时切换 | core / `admin`,`core`；providers | Beta | 覆盖到达真实请求、目录 fail-closed 校验、探活不泄漏凭据、HTTP 错误稳定分类、计费口径、模型页浏览器契约 | 按 Agent 粒度覆盖、Provider 自动降级链 |
-| 单 Agent loop | core / `runtime` | Foundation | budget、工具、审批、恢复、遥测测试 | 长运行与大负载故障注入 |
+| 单 Agent loop | core / `runtime` | Foundation | `AgentKernel` 纯决定 + `AgentRuntimeDriver` 效果外壳；budget、工具、审批、恢复、遥测测试 | 长运行与大负载故障注入 |
 | durable command worker | core / `app`,`scheduler`,`runtime` | Foundation | 有界多 Run lane、同 Run 串行、claim/lease/heartbeat/fencing、三实例 drain、中断重领、独立 JVM `SIGKILL` + 同实例 PostgreSQL restart 后接管、正式 Runtime 3 Worker/6 lane/120 Run 有界 soak 与低敏 P95 报告 | 长时多节点 soak、节点/主备丢失、容量曲线、生产 SLO/dashboard |
-| HTTP v1 公共协议 | zio-http / `http.contract`,`http` | Foundation/Beta | 独立 DTO、Endpoint、OpenAPI、route test | 客户端 SDK、兼容升级演练 |
-| Run Inspector / Timeline | core + zio-http / `inspection` | Foundation/Beta | 低敏投影、分页、授权、结构诊断与泄漏测试；`IncidentPackCliApp` 可从文件/stdin 再编码并查泄漏 | UI、筛选导出、真实事故验证 |
-| Context | core / `context` | Beta | 有界装配、确定性压缩测试 | 真实长会话数据集 |
-| Artifact | core / `artifacts`；postgres | Beta | session/user 隔离、不可变版本、容量与 metadata 限制；内存与 `PostgresArtifactStore`（V011）共用删除/过期/审计 conformance；Goal/Plan/Todo 保存有界 typed reference，Context 不加载正文；`ImageArtifact` + tenant grant | 真实对象存储 Adapter、线上保留期与容量演练 |
+| HTTP v1 公共协议 | zio-http / `http.contract`,`http` | Foundation/Beta | 独立 DTO、Endpoint、OpenAPI、route test；`RunView.suspension` 为可选加法字段 | 客户端 SDK、兼容升级演练 |
+| Run Inspector / Timeline | core + zio-http / `inspection` | Foundation/Beta | 低敏投影、分页、授权、结构诊断与泄漏测试；`RunTrajectory` 统一时间线/账本/挂起/命令；`IncidentPackCliApp` 可从文件/stdin 再编码并查泄漏 | UI、筛选导出、真实事故验证 |
+| Context | core / `context` | Beta | 有界装配、确定性压缩、`PromptCompiler` 权限/lineage、Memory/RAG/摘要 User envelope、Runtime Status 尾部投影 | 真实长会话数据集、显式 Provider cache dialect |
+| Artifact | core / `artifacts`；postgres | Beta | session/user/run 隔离、不可变版本、容量与 metadata 限制；`ToolResult.Externalized` + `read_artifact`；内存与 `PostgresArtifactStore`（0.9 V001）共用删除/过期/审计 conformance；Goal/Plan/Todo 保存有界 typed reference，Context 不加载正文；`ImageArtifact` + tenant grant | 真实对象存储 Adapter、range/page、线上保留期与容量演练 |
 | 模型辅助压缩 | core / `context.llm` | Beta | evidence 校验和 eval | 多 Provider 质量/成本基线 |
 | Memory | core / `memory`,`memory.llm` | Beta | Store/SPI 与治理设计 | 用户查看/删除 UX、长期质量 |
 | RAG | rag、document-loaders、rerank | Beta | `RagApplication`、宿主 Source resolver、稳定幂等重建、Docling Markdown+JSON、提取质量门禁、Tika→OCR→VLM 级联、可选逐页视觉转录（JPEG 经 Artifact 绑定）、page/bbox lineage、cl100k 结构切分、hybrid/vector/lexical/phrase + ACL 前置过滤、rerank/谱系扩展、完整评测 census + Space CAS Profile 切换/回滚、EvidenceBundle 到工具/管理 API/Inspector、阶段 span、state v7 citation、稳定 `/api/v1/knowledge/**`、`KnowledgeQaHost`、book-corpus eval；OCR 抽出注入按检索资料拦截 | 真实 Tesseract/Docling smoke、100–300 条领域金标与人工校准、容量/故障/线上质量和 SLO |

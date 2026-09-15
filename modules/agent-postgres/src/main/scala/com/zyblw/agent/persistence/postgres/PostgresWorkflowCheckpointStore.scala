@@ -272,7 +272,8 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
       waitKey: WorkflowWaitKey,
       signalId: WorkflowSignalId,
       name: WorkflowSignalName,
-      payload: String
+      payload: String,
+      authorization: com.zyblw.agent.composition.AuthorizationFingerprint
   ): IO[StoreError, WorkflowSignalReceipt] =
     for
       payloadHash <- validateSignalPayload(payload)
@@ -281,7 +282,9 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
           existing <- selectSignal(connection, waitKey, signalId)
           result   <- existing match
             case Some(row) =>
-              if row.name == name.value && row.payloadSha256 == payloadHash && row.payload == payload then
+              if row.name == name.value && row.payloadSha256 == payloadHash && row.payload == payload &&
+                row.authorization == authorization.value
+              then
                 ZIO.succeed(
                   WorkflowSignalReceipt(
                     waitKey,
@@ -291,7 +294,8 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
                   )
                 )
               else ZIO.fail(waitConflict(waitKey.runId, "signal-id-payload-conflict"))
-            case None => receiveSignal(connection, waitKey, signalId, name, payload, payloadHash)
+            case None =>
+              receiveSignal(connection, waitKey, signalId, name, payload, payloadHash, authorization)
         yield result
       }
     yield receipt
@@ -453,7 +457,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         """SELECT run_id::text, step, node_id, workflow_id, definition_version, session_id::text,
           | condition_kind, signal_name, deadline, status, accepted_signal_id,
           | accepted_signal_payload, accepted_signal_sha256, signal_received_at,
-          | created_at, resolved_at, consumed_at
+          | created_at, resolved_at, consumed_at, accepted_signal_authorization
           |FROM agent_workflow_waits
           |WHERE workflow_id = ? AND definition_version = ?
           |  AND status IN ('Signaled', 'TimedOut')
@@ -528,7 +532,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         s"""SELECT run_id::text, step, node_id, workflow_id, definition_version, session_id::text,
            | condition_kind, signal_name, deadline, status, accepted_signal_id,
            | accepted_signal_payload, accepted_signal_sha256, signal_received_at,
-           | created_at, resolved_at, consumed_at
+           | created_at, resolved_at, consumed_at, accepted_signal_authorization
            |FROM agent_workflow_waits
            |WHERE run_id = ?::uuid AND status <> 'Consumed'
            |ORDER BY step ASC, node_id COLLATE "C" ASC
@@ -557,7 +561,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         s"""SELECT run_id::text, step, node_id, workflow_id, definition_version, session_id::text,
            | condition_kind, signal_name, deadline, status, accepted_signal_id,
            | accepted_signal_payload, accepted_signal_sha256, signal_received_at,
-           | created_at, resolved_at, consumed_at
+           | created_at, resolved_at, consumed_at, accepted_signal_authorization
            |FROM agent_workflow_waits
            |WHERE run_id = ?::uuid AND step = ? AND node_id = ?$lock""".stripMargin
       )
@@ -588,7 +592,8 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
       Option(result.getObject(14, classOf[OffsetDateTime])).map(_.toInstant),
       result.getObject(15, classOf[OffsetDateTime]).toInstant,
       Option(result.getObject(16, classOf[OffsetDateTime])).map(_.toInstant),
-      Option(result.getObject(17, classOf[OffsetDateTime])).map(_.toInstant)
+      Option(result.getObject(17, classOf[OffsetDateTime])).map(_.toInstant),
+      Option(result.getString(18))
     )
 
   private def decodeWait(row: StoredWaitRow): IO[StoreError, WorkflowWaitRecord] =
@@ -623,9 +628,10 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         row.acceptedSignalId,
         row.acceptedSignalPayload,
         row.acceptedSignalSha256,
-        row.signalReceivedAt
+        row.signalReceivedAt,
+        row.acceptedSignalAuthorization
       ) match
-        case (Some(id), Some(payload), Some(checksum), Some(receivedAt)) =>
+        case (Some(id), Some(payload), Some(checksum), Some(receivedAt), Some(authorization)) =>
           for
             signalId <- ZIO
               .fromEither(WorkflowSignalId.fromString(id))
@@ -639,9 +645,12 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
                 payload.getBytes(StandardCharsets.UTF_8).length <= config.maxSignalBytes &&
                   checksum == sha256(payload.getBytes(StandardCharsets.UTF_8))
               )
-          yield Some(WorkflowSignalValue(signalId, signalName, payload, receivedAt))
-        case (None, None, None, None) => ZIO.none
-        case _                        => ZIO.fail(waitCorrupted("partial-signal"))
+            fingerprint <- ZIO
+              .attempt(com.zyblw.agent.composition.AuthorizationFingerprint(authorization))
+              .mapError(_ => waitCorrupted("accepted-signal-authorization"))
+          yield Some(WorkflowSignalValue(signalId, signalName, payload, receivedAt, fingerprint))
+        case (None, None, None, None, None) => ZIO.none
+        case _                              => ZIO.fail(waitCorrupted("partial-signal"))
       record <- ZIO
         .attempt(
           WorkflowWaitRecord(
@@ -668,7 +677,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
   ): IO[StoreError, Option[StoredSignalRow]] =
     jdbc("signal-load") {
       val statement = connection.prepareStatement(
-        """SELECT signal_name, payload, payload_sha256, disposition, received_at
+        """SELECT signal_name, payload, payload_sha256, disposition, received_at, authorization_fingerprint
           |FROM agent_workflow_signals
           |WHERE run_id = ?::uuid AND wait_step = ? AND wait_node_id = ? AND signal_id = ?""".stripMargin
       )
@@ -685,7 +694,8 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
               result.getString(2),
               result.getString(3),
               result.getString(4),
-              result.getObject(5, classOf[OffsetDateTime]).toInstant
+              result.getObject(5, classOf[OffsetDateTime]).toInstant,
+              result.getString(6)
             )
           )
         else None
@@ -698,7 +708,8 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
       signalId: WorkflowSignalId,
       name: WorkflowSignalName,
       payload: String,
-      payloadHash: String
+      payloadHash: String,
+      authorization: com.zyblw.agent.composition.AuthorizationFingerprint
   ): IO[StoreError, WorkflowSignalReceipt] =
     for
       row <- selectWait(connection, key, forUpdate = true)
@@ -713,13 +724,13 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
       now         <- databaseNow(connection)
       disposition <- wait.status match
         case WorkflowWaitStatus.Pending if now.isBefore(wait.deadline) =>
-          updateWaitSignaled(connection, key, signalId, payload, payloadHash, now)
+          updateWaitSignaled(connection, key, signalId, payload, payloadHash, authorization, now)
             .as(WorkflowSignalDisposition.Accepted)
         case WorkflowWaitStatus.Pending =>
           updateWaitTimedOut(connection, key, now).as(WorkflowSignalDisposition.Late)
         case _ => ZIO.succeed(WorkflowSignalDisposition.AlreadyResolved)
       receipt = WorkflowSignalReceipt(key, signalId, disposition, now)
-      _ <- insertSignal(connection, receipt, name, payload, payloadHash)
+      _ <- insertSignal(connection, receipt, name, payload, payloadHash, authorization)
     yield receipt
 
   private def updateWaitSignaled(
@@ -728,26 +739,28 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
       signalId: WorkflowSignalId,
       payload: String,
       payloadHash: String,
+      authorization: com.zyblw.agent.composition.AuthorizationFingerprint,
       now: Instant
   ): IO[StoreError, Unit] =
     jdbc("wait-signal") {
       val statement = connection.prepareStatement(
         """UPDATE agent_workflow_waits
           |SET status = 'Signaled', accepted_signal_id = ?, accepted_signal_payload = ?,
-          |    accepted_signal_sha256 = ?, signal_received_at = ?, resolved_at = ?,
-          |    wake_available_at = ?
+          |    accepted_signal_sha256 = ?, accepted_signal_authorization = ?, signal_received_at = ?,
+          |    resolved_at = ?, wake_available_at = ?
           |WHERE run_id = ?::uuid AND step = ? AND node_id = ? AND status = 'Pending'""".stripMargin
       )
       try
         statement.setString(1, signalId.value)
         statement.setString(2, payload)
         statement.setString(3, payloadHash)
-        statement.setObject(4, OffsetDateTime.ofInstant(now, java.time.ZoneOffset.UTC))
+        statement.setString(4, authorization.value)
         statement.setObject(5, OffsetDateTime.ofInstant(now, java.time.ZoneOffset.UTC))
         statement.setObject(6, OffsetDateTime.ofInstant(now, java.time.ZoneOffset.UTC))
-        statement.setString(7, key.runId.asString)
-        statement.setInt(8, key.step)
-        statement.setString(9, key.nodeId.value)
+        statement.setObject(7, OffsetDateTime.ofInstant(now, java.time.ZoneOffset.UTC))
+        statement.setString(8, key.runId.asString)
+        statement.setInt(9, key.step)
+        statement.setString(10, key.nodeId.value)
         if statement.executeUpdate() != 1 then throw IllegalStateException("wait signal transition lost")
       finally statement.close()
     }
@@ -778,14 +791,15 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
       receipt: WorkflowSignalReceipt,
       name: WorkflowSignalName,
       payload: String,
-      payloadHash: String
+      payloadHash: String,
+      authorization: com.zyblw.agent.composition.AuthorizationFingerprint
   ): IO[StoreError, Unit] =
     jdbc("signal-insert") {
       val statement = connection.prepareStatement(
         """INSERT INTO agent_workflow_signals
           |(run_id, wait_step, wait_node_id, signal_id, signal_name, payload, payload_sha256,
-          | disposition, received_at)
-          |VALUES (?::uuid, ?, ?, ?, ?, ?, ?, ?, ?)""".stripMargin
+          | authorization_fingerprint, disposition, received_at)
+          |VALUES (?::uuid, ?, ?, ?, ?, ?, ?, ?, ?, ?)""".stripMargin
       )
       try
         statement.setString(1, receipt.waitKey.runId.asString)
@@ -795,8 +809,9 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         statement.setString(5, name.value)
         statement.setString(6, payload)
         statement.setString(7, payloadHash)
-        statement.setString(8, receipt.disposition.toString)
-        statement.setObject(9, OffsetDateTime.ofInstant(receipt.receivedAt, java.time.ZoneOffset.UTC))
+        statement.setString(8, authorization.value)
+        statement.setString(9, receipt.disposition.toString)
+        statement.setObject(10, OffsetDateTime.ofInstant(receipt.receivedAt, java.time.ZoneOffset.UTC))
         statement.executeUpdate()
       finally statement.close()
     }.unit
@@ -823,7 +838,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
           |SELECT run_id::text, step, node_id, workflow_id, definition_version, session_id::text,
           | condition_kind, signal_name, deadline, status, accepted_signal_id,
           | accepted_signal_payload, accepted_signal_sha256, signal_received_at,
-          | created_at, resolved_at, consumed_at
+          | created_at, resolved_at, consumed_at, accepted_signal_authorization
           |FROM updated
           |ORDER BY deadline ASC, run_id ASC, step ASC, node_id COLLATE "C" ASC""".stripMargin
       )
@@ -1797,14 +1812,16 @@ object PostgresWorkflowCheckpointStore:
       signalReceivedAt: Option[Instant],
       createdAt: Instant,
       resolvedAt: Option[Instant],
-      consumedAt: Option[Instant]
+      consumedAt: Option[Instant],
+      acceptedSignalAuthorization: Option[String]
   )
   final private case class StoredSignalRow(
       name: String,
       payload: String,
       payloadSha256: String,
       disposition: String,
-      receivedAt: Instant
+      receivedAt: Instant,
+      authorization: String
   )
   private enum SaveResult:
     case Written

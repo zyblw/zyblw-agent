@@ -20,13 +20,14 @@ private[http] object AgentHttpProjection:
     val output = state.messages.reverse.find(_.role == MessageRole.Assistant).map(_.text).filter(_.nonEmpty)
     RunView(
       runId = state.runId.asString,
-      threadId = state.threadId.fold("")(_.value),
+      threadId = state.threadId.value,
       agentId = state.agentId.value,
       status = state.status.toString,
       steps = state.budget.steps,
       usage = usage(state.usage),
       output = output,
       pendingApproval = state.pendingApproval.map(approval),
+      suspension = state.suspension.map(suspensionView),
       createdAtEpochMilli = state.createdAt.toEpochMilli,
       updatedAtEpochMilli = state.updatedAt.toEpochMilli,
       stateVersion = state.version.value,
@@ -70,7 +71,8 @@ private[http] object AgentHttpProjection:
               totalTokens = value.totalTokens,
               estimatedCost = "0",
               cachedInputTokens = value.cachedInputTokens,
-              reasoningOutputTokens = value.reasoningOutputTokens
+              reasoningOutputTokens = value.reasoningOutputTokens,
+              cacheWriteInputTokens = value.cacheWriteInputTokens
             )
           ),
           message = Some(s"已压缩 $covered 条历史消息")
@@ -141,7 +143,14 @@ private[http] object AgentHttpProjection:
         base.copy(stage = Some(bounded(stage)), category = Some(if allowed then "allowed" else "denied"))
       case AgentEvent.UsageUpdated(_, value, _)      => base.copy(usage = Some(usage(value)))
       case AgentEvent.CheckpointSaved(_, version, _) => base.copy(stateVersion = Some(version.value))
-      case AgentEvent.RunSuspended(_, _, _)          => base.copy(status = Some(RunStatus.Suspended.toString))
+      // 只投影 kind 与属性名。两者都是有界词汇表，不含任何一侧取值，因此可以进入公共 SSE。
+      case AgentEvent.CompositionDriftDetected(_, kind, changedFields, _) =>
+        base.copy(
+          stage = Some("composition"),
+          category = Some(bounded(kind)),
+          message = Some(bounded(changedFields.map(_.field).toList.sorted.mkString(","), 512))
+        )
+      case AgentEvent.RunSuspended(_, _, _) => base.copy(status = Some(RunStatus.Suspended.toString))
       case AgentEvent.RunCompleted(_, answer, value, _) =>
         base.copy(
           status = Some(RunStatus.Completed.toString),
@@ -204,7 +213,8 @@ private[http] object AgentHttpProjection:
     value.totalTokens,
     value.estimatedCost.bigDecimal.toPlainString,
     value.cachedInputTokens,
-    value.reasoningOutputTokens
+    value.reasoningOutputTokens,
+    value.cacheWriteInputTokens
   )
 
   /** 单次模型调用用量不会伪造成累计调用次数之外的业务计费。 */
@@ -216,7 +226,8 @@ private[http] object AgentHttpProjection:
     totalTokens = value.totalTokens,
     estimatedCost = "0",
     cachedInputTokens = value.cachedInputTokens,
-    reasoningOutputTokens = value.reasoningOutputTokens
+    reasoningOutputTokens = value.reasoningOutputTokens,
+    cacheWriteInputTokens = value.cacheWriteInputTokens
   )
 
   /** 核心 Inspector 条目到稳定 wire DTO；只复制 allow-list 字段。 */
@@ -268,6 +279,13 @@ private[http] object AgentHttpProjection:
     value.risk.toString,
     bounded(value.reason, 512),
     value.requestedAtEpochMilli
+  )
+
+  /** 挂起视图只公开 kind / deadline / 到期决议，不含 prompt 或信号正文。 */
+  private def suspensionView(value: SuspensionRecord): SuspensionView = SuspensionView(
+    kind = bounded(value.kind.kind, 32),
+    deadlineEpochMilli = value.deadline.map(_.toEpochMilli),
+    expiryOutcome = value.expiryOutcome.toString
   )
 
   /** 防御自定义 Provider/工具把无界动态名称投影到公共事件。 */

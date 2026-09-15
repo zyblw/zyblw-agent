@@ -89,3 +89,64 @@ object DangerousActionTool:
     None,
     ToolMetadata(ToolRisk.AdminApproval, SideEffect.Destructive)
   )((_, _) => ZIO.succeed(DangerousActionOutput(executed = true)))
+
+final case class ReadArtifactInput(name: String, version: Option[Long] = None) derives JsonCodec
+
+/** 读取当前 Run 外置的工具结果。scope 只从执行上下文派生，模型不能自报隔离域。 */
+object ReadArtifactTool:
+  val Name: ToolName = ToolName("read_artifact")
+
+  val schema: Json.Obj = Json.Obj(
+    "type"       -> Json.Str("object"),
+    "properties" -> Json.Obj(
+      "name"    -> Json.Obj("type" -> Json.Str("string")),
+      "version" -> Json.Obj("type" -> Json.Str("integer"))
+    ),
+    "required"             -> Json.Arr(Json.Str("name")),
+    "additionalProperties" -> Json.Bool(false)
+  )
+
+  def live(store: com.zyblw.agent.artifacts.ArtifactStore): Tool[Any, ReadArtifactInput, AgentError, Json] =
+    Tool.json(
+      Name,
+      "读取当前 Run 已外置的工具结果正文",
+      schema,
+      None,
+      ToolMetadata(ToolRisk.ReadOnly, SideEffect.None)
+    ) { (input, context) =>
+      val scope = ArtifactScope.of(context)
+      for
+        name <- ZIO
+          .fromEither(ArtifactName.fromString(input.name))
+          .mapError(message => AgentError.ToolInputInvalid(Name.value, message))
+        loaded <- store
+          .read(scope, name, input.version)
+          .mapError(error =>
+            AgentError.ToolExecutionFailed(
+              Name.value,
+              if error.safeToExpose then error.message else "读取外置结果失败",
+              retryable = false
+            )
+          )
+        artifact <- ZIO
+          .fromOption(loaded)
+          .orElseFail(AgentError.ToolInputInvalid(Name.value, "artifact-not-found"))
+        reference = artifact.descriptor.reference
+        _ <- ZIO
+          .fromEither(com.zyblw.agent.artifacts.ArtifactAccessGrant.authorize(reference, context))
+          .mapError(reason => AgentError.PermissionDenied(Name.value, reason))
+        json <- ZIO
+          .fromEither(
+            new String(artifact.bytes.toArray, java.nio.charset.StandardCharsets.UTF_8).fromJson[Json]
+          )
+          .orElseSucceed(
+            Json.Obj(
+              "bytes"     -> Json.Num(BigDecimal(artifact.bytes.length)),
+              "mediaType" -> Json.Str(artifact.descriptor.mediaType)
+            )
+          )
+      yield json
+    }
+
+  def registered(store: com.zyblw.agent.artifacts.ArtifactStore): UIO[RegisteredTool] =
+    RegisteredTool.make(live(store))

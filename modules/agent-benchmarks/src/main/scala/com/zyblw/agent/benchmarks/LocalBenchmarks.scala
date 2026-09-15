@@ -1,5 +1,6 @@
 package com.zyblw.agent.benchmarks
 
+import com.zyblw.agent.composition.{RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
 import java.time.Instant
@@ -9,6 +10,9 @@ import zio.*
   */
 object LocalBenchmarks extends ZIOAppDefault:
   private val iterations = 10_000
+
+  /** 基准只测量存储路径，Agent 定义保持最小；它必须存在是因为状态必须自带定义与组合快照。 */
+  private val agent = AgentDefinition(AgentId("benchmark"), "benchmark", "benchmark agent")
 
   def run =
     (for
@@ -33,6 +37,13 @@ object LocalBenchmarks extends ZIOAppDefault:
             Instant.EPOCH,
             Instant.EPOCH,
             Version.initial,
+            LocalBenchmarks.agent,
+            RuntimeComposition.fingerprint(
+              RuntimeProfile.default,
+              LocalBenchmarks.agent,
+              LocalBenchmarks.agent.modelSettings
+            ),
+            ThreadId("benchmark-thread"),
             lastEventSequence = 0L
           )
           event = PersistedAgentEvent(

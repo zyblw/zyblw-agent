@@ -1,7 +1,7 @@
 # zyblw-agent 文档地图
 
 > 状态：当前
-> 最后核验：2026-09-05
+> 最后核验：2026-09-16
 > 事实来源：`build.sbt`、发布工作流、模块源码、测试与数据库迁移
 
 ## 按目标选择阅读路径
@@ -31,11 +31,12 @@
 3. [Agent Application Runtime ADR](architecture/0016-agent-application-runtime.md)
 4. [agent-dashboard 与管理 API 边界 ADR](architecture/0017-agent-dashboard-architecture.md)
 5. [下一代 Runtime Kernel ADR](architecture/0018-next-generation-runtime-kernel.md)、[Typed Extensions 与 Constrained Execution ADR](architecture/0019-typed-extensions-and-constrained-execution.md)、[现代化基线 ADR](architecture/0020-modernization-baseline.md) 与 [开发手册](architecture/next-generation-runtime.md) — P0、P1 与 P2 Harness 已落地；Wave 1 与 Wave 2 安全切片已落地；后续 Wave 3 分支与编排仍为 Proposed。Wave 0 宿主环境证据仍待。
-6. [Model Runtime 现状审计](architecture/model-runtime-current-state.md) 与 [目标架构](architecture/model-runtime-target.md) — Phase 0 文档；补推理资源调度面，不另起执行内核。路由 / Provider 契约 / 预算 / 多模型执行见同目录；ADR-0021…0026 演进 ADR-0004/0018。[ADR-0027 RAG Runtime 绿场基线](architecture/0027-rag-retrieval-runtime.md)。
-7. [运行时](runtime.md)
-8. [工具](tools.md) 与 [可靠写工具](side-effects.md)
-9. [持久化](persistence.md) 与 [数据库 Schema](database-schema.md)
-10. [声明式 Workflow](workflow.md)
+6. [Functional Kernel / Runtime Driver ADR](architecture/0028-functional-kernel-runtime-driver.md) 与 [Context Authority / Prompt Lineage ADR](architecture/0029-context-authority-prompt-lineage.md) — 纯 `AgentKernel` + 唯一 `AgentRuntimeDriver` 已落地；Memory/RAG/摘要不再走 System 通道，Prompt Cache 不是事实源。
+7. [Model Runtime 现状审计](architecture/model-runtime-current-state.md) 与 [目标架构](architecture/model-runtime-target.md) — Phase 0 文档；补推理资源调度面，不另起执行内核。路由 / Provider 契约 / 预算 / 多模型执行见同目录；ADR-0021…0026 演进 ADR-0004/0018。[ADR-0027 RAG Runtime 绿场基线](architecture/0027-rag-retrieval-runtime.md)。
+8. [运行时](runtime.md) 与 [Prompt Runtime、Context Authority 与 Cache](prompt-runtime.md)
+9. [工具](tools.md) 与 [可靠写工具](side-effects.md)
+10. [持久化](persistence.md) 与 [数据库 Schema](database-schema.md)
+11. [声明式 Workflow](workflow.md)
 
 ### 我要深入读源码和参与开发
 
@@ -48,6 +49,9 @@
 7. [能力审计与框架对照](framework-assessment.md)
 8. [成熟度与路线](maturity-and-roadmap.md)
 9. [下一代 Runtime 开发手册](architecture/next-generation-runtime.md)（含 Wave 0–3 路线、Adoption Matrix 与 Phase 0 审计证据表）
+10. [0914 架构说明审查与演进裁决](0914-architecture-review.md)（逐项对照当前实现，区分采纳、深化、暂缓与拒绝）
+11. [Runtime、Context 与 Prompt Cache 一体化演进方案](architecture/runtime-context-evolution-plan.md)（0915 输入的裁剪基线；Phase 0–1 与 Phase 2/3 核心切片已落地，显式 Provider cache dialect 仍待）
+12. [0914/0915 日期式输入稿](文档说明/README.md)（咨询与演进输入，不是当前契约）
 
 ### 我要接入知识库
 
@@ -103,6 +107,7 @@
 
 - [RAG / Knowledge Retrieval Runtime 目标架构与实施规范](architecture/rag-runtime-target.md)（Proposed）
 - [指令、Context 与成本工程](instruction-context-cost.md)
+- [Prompt Runtime、Context Authority 与 Cache](prompt-runtime.md)
 - [Context、Memory 与 RAG](context-memory-rag.md)
 - [确定性/模型辅助 Context 压缩](context-compression.md)
 - [Context 压缩评测](context-compression-evaluation.md)

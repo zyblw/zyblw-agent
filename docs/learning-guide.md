@@ -1,7 +1,7 @@
 # 从 ZIO 到可靠智能体：zyblw-agent 深入学习指南
 
 > 状态：学习指南
-> 最后核验：2026-07-28
+> 最后核验：2026-09-14
 > 事实来源：当前模块源码、测试、ADR，以及 ZIO/ZIO HTTP、OpenAI、Anthropic、MCP 官方资料
 
 阅读本篇前，建议先看 [能力审计、框架对照与演进判断](framework-assessment.md)，避免把“代码里存在一个 SPI”
@@ -370,7 +370,7 @@ Instructions 讲目标、边界和工具使用；硬安全规则仍在代码。�
 ## 17. 学习练习
 
 1. 阅读 `AgentDefinition` 和 `AgentState`，画出不可变定义与可变运行状态的边界。
-2. 跟踪 `AgentRuntimeLive.run -> startCreated -> loop`，记录每个持久化点与中断点。
+2. 先读 `AgentKernel` 的纯决定，再跟踪 `AgentRuntimeDriver.run -> startCreated -> loop`，记录每个持久化点与中断点。
 3. 用一个未知工具测试 case，解释为何返回结构化错误而不是丢弃。
 4. 模拟 Worker lease 过期，解释 generation fencing 如何阻止旧提交。
 5. 对比 `qa_message` 与 `agent_events`，说明产品投影和控制面状态为何分离。
