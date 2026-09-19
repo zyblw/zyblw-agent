@@ -11,7 +11,7 @@ import org.testcontainers.utility.DockerImageName
 import zio.*
 import zio.test.*
 
-/** 使用真实 PostgreSQL 16 验证评测趋势仓库的多节点生产语义。
+/** 使用真实 PostgreSQL 18 验证评测趋势仓库的多节点生产语义。
   *
   * 普通内存或 mock JDBC 无法证明唯一索引竞争、`ON CONFLICT` 等待、JSONB、部分索引查询和 Flyway SQL 真实可执行， 因此本套件通过
   * `RUN_POSTGRES_INTEGRATION=1` 显式开启 Testcontainers。测试不会调用任何模型 Provider。
@@ -42,7 +42,7 @@ object PostgresEvalTrendStoreIntegrationSpec extends ZIOSpecDefault:
       container <- ZIO.acquireRelease(
         ZIO.attemptBlocking {
           val value =
-            PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:16-alpine"))
+            PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:18-alpine"))
           value.start()
           value
         }

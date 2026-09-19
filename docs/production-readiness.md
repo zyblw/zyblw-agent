@@ -2,7 +2,7 @@
 
 > 状态：当前运行手册
 >
-> 最后核验：2026-08-29
+> 最后核验：2026-09-17
 >
 > 事实来源：源码、测试、0.9 空库 V001、CI/发布工作流与本项目成熟度矩阵
 
@@ -19,7 +19,7 @@ PostgreSQL 直连**；7 项宿主环境证据已延期。新业务统一基于�
 **`0.9.0` 是当前全新安装基线（尚未推 Central）**：核心与 1024 知识各一份 V001；适合本机 Compose 演练后进入
 受限生产验收，而不是已经通过任意规模验证的通用 GA：
 
-- 核心与 1024 知识各一份 0.9 V001；业务 HTTP v1 / OpenAPI 1.2.0、state v7 与知识检索 mode 是当前契约；
+- 核心与 1024 知识各一份 0.9 V001；业务 HTTP v1 / OpenAPI 1.2.0、fresh-install state schema v1 与知识检索 mode 是当前契约；
 - RAG 固定使用独立 1024 knowledge schema/history；所有新索引都按同一模型身份、维度与 lexical strategy 建立；
 - 稳定知识面是 `/api/v1/knowledge/**`；管理面（`/api/v1/admin/**`）与控制台是 **Beta 且完全可选**；
 - 投产前用本机 bundled Postgres（`compose.staging.yml`）或生产小流量验收 sibling 源码 / 精确 `0.9.0-local`；不要求常开产品 Test 站；
@@ -29,6 +29,30 @@ PostgreSQL 直连**；7 项宿主环境证据已延期。新业务统一基于�
 
 业务仓库不要使用移动分支、版本范围或 `latest.release`。验证未发布提交时才使用唯一的内部
 `0.9.0-local` 候选，且不得上传 Central。
+
+### 当前能力采用判定
+
+| 能力面 | 当前判定 | 生产使用边界 |
+|---|---|---|
+| 单 Agent Runtime、预算、取消、审批、恢复 | 可进入受限生产验收 | 固定组合与预算，先只读/低风险工具；必须跑业务 Eval 与故障演练 |
+| PostgreSQL 状态、事件、命令、lease/fencing | 可作为耐久主线 | 真实 PostgreSQL 18 门禁必跑；宿主负责连接池、备份、主备和 RPO/RTO |
+| OpenAI/DeepSeek/Qwen/GLM/Kimi/Anthropic/Gemini/中转站 | 可接业务开发 | 只开放逐模型已声明能力；每个实际 endpoint/model/profile 必须跑真实 smoke |
+| HTTP/SSE、管理只读投影、OTel | 可接入 | 身份、TLS、租户限流和 Collector 由宿主提供；管理面独立暴露和授权 |
+| RAG、Memory、模型辅助压缩 | Beta，可小流量验收 | 固定索引/数据集；验证 ACL、注入、撤回、保留期、质量与成本趋势 |
+| Workflow、Harness、MCP/Sandbox、多 Agent | Experimental | 不随核心主线默认开放；逐能力完成独立威胁模型、恢复与业务收益证据 |
+
+这里的“可接业务开发”表示框架边界和本地契约足以构建垂直切片，不表示某个厂商账号、业务数据、部署拓扑或 SLO 已由
+框架仓库替宿主验证。
+
+### 最新表结构与重建语义
+
+当前源码只有两份版本化 SQL：核心 `V001__zyblw_agent_0_9_baseline.sql` 与独立 1024 维知识
+`V001__agent_knowledge_0_9_baseline.sql`；其余两份 `R__*comments.sql` 只维护数据字典。`verify-local-evidence.sh` 会扫描
+migration 目录全集，出现 V002、旧 V001 或额外 SQL 即失败，防止新代码继续背负未发布历史。
+
+“不需要旧版本迁移”不等于“不执行 migration”：新环境仍必须在空 schema/新数据库执行当前 V001 来创建表、约束、索引和
+Flyway history。已有 0.8 或更早数据库不能原地升级到本工作树；应新建数据库，从业务事实源重新提交业务数据，并重建
+Memory/RAG 等派生数据。`resetAll` 是破坏性测试/本地重建工具，不是生产升级命令。
 
 启用管理面时，它本身也是一条需要单独验收的暴露面：管理路由必须只对运维身份开放，`agent:admin:debug` 会产生真实
 Provider 费用，管理台的地址不应与业务 API 共用同一条公网入口和限流策略。
@@ -42,7 +66,7 @@ Provider 费用，管理台的地址不应与业务 API 共用同一条公网入
 业务 ZIO HTTP Routes ── AgentHttpApi ── PostgreSQL（唯一耐久事实源）
         │                                  │
         ├─ AgentHttpHost / WorkerHost ─────┘
-        │        ├─ Provider（有超时、额度、降级与 smoke）
+        │        ├─ Provider/中转站（HTTPS、Secret 引用、逐模型能力、超时、额度与 smoke）
         │        ├─ Typed Tools（权限、幂等、审批、outbox/inbox）
         │        └─ RAG/Memory（ACL 前置、引用、撤回与保留）
         │
@@ -74,6 +98,9 @@ AgentApplication.durable(workerId, applicationConfig)
 对外提供异步 API 时再组合 `AgentHttpApi`；独立部署使用 `AgentHttpHost`，嵌入既有服务则只合并 routes。完整类型安全接线见
 [AgentApplication 与 Builder](application-builder.md)和[ZIO HTTP 生产宿主](http-host.md)。发布流水线中的独立 Maven
 consumer 会从制品重新编译这条生产装配，而不是引用仓库源码。
+
+模型中转站不降低准入要求：同一 URL/Key 下不同 wire 方言必须拆成独立逻辑 Provider；完整响应、SSE、usage、工具调用、
+推理回放和错误分类按实际模型分别验证。中转站的数据保留、地域、上游供应商、模型版本固定和 SLA 是宿主责任。
 
 ## 容量与过载边界
 
@@ -145,7 +172,7 @@ Worker、节点逻辑或数据库；该快照按定义聚合且不含业务身�
 
 - `0.9.0` 从空核心 schema 执行唯一 core V001；需要 RAG 时在 `zyblw_agent_knowledge` 专属 schema/history
   执行唯一 1024 Space/Profile knowledge V001。启动只接受当前空库基线，业务数据和知识均从最新来源创建；
-- 格式、`testFull`、PostgreSQL 16、`publishM2` 和独立 Maven consumer 全部通过；启用控制台时另加类型检查、lint、
+- 格式、`testFull`、PostgreSQL 18、`publishM2` 和独立 Maven consumer 全部通过；启用控制台时另加类型检查、lint、
   生产构建与 Playwright 浏览器契约；
 - CHANGELOG、升级指南、tag、远端 main 和 Maven 制品来自同一提交；
 - 先 canary，再受限租户/只读工具，最后开放写工具；每一步都有回滚或停止扩流条件。
@@ -166,7 +193,6 @@ sbt -batch 'set ThisBuild / version := "0.9.0-local"; publishM2'
 
 ```bash
 ./scripts/verify-business-ready.sh
-RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
 sbt -batch 'set ThisBuild / version := "0.9.0-local"; publishM2'
 cd integration-tests/maven-consumer
 ZYBLW_AGENT_VERSION=0.9.0-local sbt -batch 'clean; compile'

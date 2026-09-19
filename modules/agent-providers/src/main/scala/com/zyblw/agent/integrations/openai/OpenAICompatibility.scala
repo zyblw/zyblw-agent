@@ -8,10 +8,30 @@ enum DeveloperRoleMode:
   case Native, MapToSystem
 
 enum StrictToolSchemaMode:
-  case Include, Omit
+  case Include, Omit, Disable
 
 enum ToolChoiceMode:
   case Full, AutoOnly, Omit
+
+/** OpenAI-compatible Chat Completions 中已通过契约测试的推理控制方言。 */
+enum ReasoningWireMode:
+  /** 不发送通用推理字段；厂商私有选项仍可作为受控迁移出口。 */
+  case Unsupported
+
+  /** OpenAI Chat Completions 的 `reasoning_effort`，`Max` 映射为 `xhigh`。 */
+  case OpenAIEffort
+
+  /** 直接使用 `reasoning_effort`，`Max` 保持为 `max`。 */
+  case StandardEffort
+
+  /** DeepSeek：`thinking.type` 控制开关，非 None 档位另发 `reasoning_effort`。 */
+  case ThinkingObjectEffort
+
+  /** Qwen Chat Completions：typed 档位只投影为 `enable_thinking` 开关。 */
+  case EnableThinking
+
+  /** Kimi Chat Completions：typed 档位只投影为 `thinking.type` 开关。 */
+  case ThinkingObjectToggle
 
 final case class OpenAICompatibility(
     descriptor: ProviderDescriptor,
@@ -19,7 +39,8 @@ final case class OpenAICompatibility(
     strictToolSchemaMode: StrictToolSchemaMode,
     toolChoiceMode: ToolChoiceMode,
     outputTokenField: String = "max_tokens",
-    preserveReasoningContent: Boolean = false
+    preserveReasoningContent: Boolean = false,
+    reasoningWireMode: ReasoningWireMode = ReasoningWireMode.Unsupported
 )
 
 object OpenAICompatibility:
@@ -35,13 +56,21 @@ object OpenAICompatibility:
         developerRole = true,
         thinking = true,
         vision = true,
-        streaming = true
+        streaming = true,
+        reasoningEfforts = Set(
+          com.zyblw.agent.core.ReasoningEffort.None,
+          com.zyblw.agent.core.ReasoningEffort.Low,
+          com.zyblw.agent.core.ReasoningEffort.Medium,
+          com.zyblw.agent.core.ReasoningEffort.High,
+          com.zyblw.agent.core.ReasoningEffort.Max
+        )
       )
     ),
     DeveloperRoleMode.Native,
     StrictToolSchemaMode.Include,
     ToolChoiceMode.Full,
-    outputTokenField = "max_completion_tokens"
+    outputTokenField = "max_completion_tokens",
+    reasoningWireMode = ReasoningWireMode.OpenAIEffort
   )
 
   val deepSeek: OpenAICompatibility = OpenAICompatibility(
@@ -55,13 +84,20 @@ object OpenAICompatibility:
         specificToolChoice = false,
         developerRole = false,
         thinking = true,
-        streaming = true
+        streaming = true,
+        reasoningEfforts = Set(
+          com.zyblw.agent.core.ReasoningEffort.None,
+          com.zyblw.agent.core.ReasoningEffort.Low,
+          com.zyblw.agent.core.ReasoningEffort.High,
+          com.zyblw.agent.core.ReasoningEffort.Max
+        )
       )
     ),
     DeveloperRoleMode.MapToSystem,
     StrictToolSchemaMode.Omit,
     ToolChoiceMode.Omit,
-    preserveReasoningContent = true
+    preserveReasoningContent = true,
+    reasoningWireMode = ReasoningWireMode.ThinkingObjectEffort
   )
 
   val glm: OpenAICompatibility = OpenAICompatibility(
@@ -80,7 +116,9 @@ object OpenAICompatibility:
     ),
     DeveloperRoleMode.MapToSystem,
     StrictToolSchemaMode.Omit,
-    ToolChoiceMode.AutoOnly
+    ToolChoiceMode.AutoOnly,
+    preserveReasoningContent = true,
+    reasoningWireMode = ReasoningWireMode.StandardEffort
   )
 
   /** Alibaba Cloud Model Studio 的 Qwen OpenAI Chat Completions 兼容档案。
@@ -104,7 +142,36 @@ object OpenAICompatibility:
     ),
     DeveloperRoleMode.MapToSystem,
     StrictToolSchemaMode.Omit,
-    ToolChoiceMode.Full
+    ToolChoiceMode.Full,
+    preserveReasoningContent = true,
+    reasoningWireMode = ReasoningWireMode.EnableThinking
+  )
+
+  /** Moonshot Kimi Open Platform 的 OpenAI Chat Completions 兼容档案。
+    *
+    * 思考模式下工具选择只声明 `auto`，并保留 `reasoning_content` 用于工具回填。视觉、strict schema 与可切换推理档位均随 模型变化，不在 Provider
+    * 默认能力中猜测；宿主可通过 `ProviderEndpointDeclaration.models` 逐模型声明。
+    */
+  val kimi: OpenAICompatibility = OpenAICompatibility(
+    ProviderDescriptor(
+      "kimi",
+      "Moonshot Kimi",
+      "openai-chat-completions",
+      ModelCapabilities(
+        toolCalls = true,
+        strictToolSchema = false,
+        specificToolChoice = false,
+        developerRole = false,
+        thinking = true,
+        streaming = true,
+        usageReporting = true
+      )
+    ),
+    DeveloperRoleMode.MapToSystem,
+    StrictToolSchemaMode.Disable,
+    ToolChoiceMode.AutoOnly,
+    preserveReasoningContent = true,
+    reasoningWireMode = ReasoningWireMode.ThinkingObjectToggle
   )
 
   /** 通用中转站档案：任意本地 Provider id，协议仍走 OpenAI Chat Completions。

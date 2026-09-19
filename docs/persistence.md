@@ -92,7 +92,7 @@ idempotency key 或 token；业务可经 `AgentApplication.queueSnapshot` 定时
 与 Engine，共同领取 durable signal；报告只保留 wake/execution claim 数、参与 Worker 数、并发高水位、双 generation
 重领、异常周期、未完成量和延迟直方图。脚本同样只允许一次性数据库，不产生新的队列表、Runtime 或公开 Store API。
 
-Testcontainers 已使用 PostgreSQL 16 真库验证 migration、事务、JSONB/UUID/TIMESTAMPTZ、乐观锁、审批状态、工具账本、
+Testcontainers 已使用 PostgreSQL 18.6 真库验证 migration、事务、JSONB/UUID/TIMESTAMPTZ、乐观锁、审批状态、工具账本、
 状态/事件/Tool/ModelCall 持久化信封篡改拒绝、
 并发取消、三实例六 lane drain、Worker 中断后过期重领、Worker 消失 + PostgreSQL pause/unpause 组合故障后的 generation 接管、
 command 与 Workflow 两条路径的独立 JVM `SIGKILL` + 同实例 PostgreSQL restart 后跨进程重领、连接恢复及

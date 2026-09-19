@@ -18,13 +18,13 @@ object PostgresMemoryStoreIntegrationSpec extends ZIOSpecDefault:
   /** DataSource 用于额外确认删除后数据库不再保存 value/search_text 正文。 */
   final private case class Harness(store: PostgresMemoryStore, dataSource: DataSource)
 
-  /** 启动 PostgreSQL 16 并执行正式 V001 baseline。 */
+  /** 启动 PostgreSQL 18 并执行正式 V001 baseline。 */
   private val harnessLayer: ZLayer[Any, Throwable, Harness] = ZLayer.scoped {
     for
       container <- ZIO.acquireRelease(
         ZIO.attemptBlocking {
           val value =
-            PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:16-alpine"))
+            PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:18-alpine"))
           value.start()
           value
         }

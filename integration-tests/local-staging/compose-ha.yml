@@ -1,10 +1,10 @@
-# 本地 PostgreSQL 16 流复制对，只证明库在主库丢失后能提升备库并继续写入。
+# 本地 PostgreSQL 18 流复制对，只证明库在主库丢失后能提升备库并继续写入。
 # 这不是云厂商托管 HA、不是自动故障转移器，也不是生产 SLO。
 name: zyblw-agent-local-ha
 
 services:
   postgres-primary:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     command:
       - postgres
       - -c
@@ -26,7 +26,7 @@ services:
     ports:
       - "127.0.0.1:${ZYBLW_HA_PRIMARY_PORT:-55433}:5432"
     volumes:
-      - primary-data:/var/lib/postgresql/data
+      - primary-data:/var/lib/postgresql
       - ./ha/primary-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U zyblw -d zyblw"]
@@ -35,7 +35,7 @@ services:
       retries: 40
 
   postgres-standby:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     depends_on:
       postgres-primary:
         condition: service_healthy
@@ -44,29 +44,29 @@ services:
     ports:
       - "127.0.0.1:${ZYBLW_HA_STANDBY_PORT:-55434}:5432"
     volumes:
-      - standby-data:/var/lib/postgresql/data
+      - standby-data:/var/lib/postgresql
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -eux
         until pg_isready -h postgres-primary -U zyblw -d zyblw; do sleep 1; done
-        mkdir -p /var/lib/postgresql/data
-        chown -R postgres:postgres /var/lib/postgresql/data
-        if [ ! -f /var/lib/postgresql/data/PG_VERSION ]; then
-          find /var/lib/postgresql/data -mindepth 1 -delete || true
+        mkdir -p /var/lib/postgresql/18/docker
+        chown -R postgres:postgres /var/lib/postgresql
+        if [ ! -f /var/lib/postgresql/18/docker/PG_VERSION ]; then
+          find /var/lib/postgresql/18/docker -mindepth 1 -delete || true
           su-exec postgres pg_basebackup \
             -h postgres-primary \
             -U replicator \
-            -D /var/lib/postgresql/data \
+            -D /var/lib/postgresql/18/docker \
             -Fp \
             -Xs \
             -P \
             -R \
             -v
         fi
-        # Docker volume 默认 0755，PostgreSQL 16 要求数据目录 0700 或 0750。
-        chmod 0750 /var/lib/postgresql/data
-        chown postgres:postgres /var/lib/postgresql/data
+        # Docker volume 默认 0755，PostgreSQL 18 要求数据目录 0700 或 0750。
+        chmod 0750 /var/lib/postgresql/18/docker
+        chown postgres:postgres /var/lib/postgresql/18/docker
         exec su-exec postgres postgres -c hot_standby=on -c max_connections=40
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U zyblw -d zyblw"]

@@ -1,8 +1,8 @@
 # ADR-0015：独立公开仓库与私有业务消费边界
 
-> 状态：决策记录  
-> 最后核验：2026-07-26  
-> 事实来源：`build.sbt`、`.github/workflows/*.yml`、`docs/releasing.md`、独立 Maven consumer
+> 状态：决策记录（公开仓库边界仍有效；Platform 的 Maven 消费方式已被固定 sibling source pin 取代）
+> 最后核验：2026-09-17
+> 事实来源：`build.sbt`、`.github/workflows/*.yml`、`docs/releasing.md`、独立 Maven consumer 与 Platform `.github/zyblw-agent.sha`
 
 ## 决策
 
@@ -10,8 +10,9 @@
 `zyblw/zyblw-platform` 业务仓库。
 
 - 公共框架不依赖、读取或测试私有业务源码。
-- 私有 server 在 CI 与生产中只消费 Maven Central 的精确版本。
-- 本地跨仓框架开发可以使用 sibling checkout 或 Maven-local，但必须是显式开关。
+- 对外业务使用 Maven Central 精确版本；`zyblw-platform` 是特殊的一等验证宿主，本地、CI 与生产镜像只消费
+  `.github/zyblw-agent.sha` 固定的 sibling source commit。
+- Platform 不再提供 Maven-local/Central/source 切换；Agent 自己仍用 Maven-local 独立 consumer 验证将发布的二进制。
 - GitHub Release、Git tag、issue、PR、许可证与安全报告都由公开框架仓库独立拥有。
 - 首版 Maven group 保持 `io.github.zyblw`，源码和 SCM 指向 `zyblw/zyblw-agent`。
 
@@ -22,8 +23,8 @@ zyblw-agent (public)
   -> ZIO / ZIO HTTP / PostgreSQL driver / optional adapters
   -> public Maven artifacts
 
-zyblw-server (private)
-  -> exact zyblw-agent Maven version
+zyblw-server (private first-party host)
+  -> pinned sibling zyblw-agent source commit
   -> private product domain and adapters
 
 zyblw-web (private)
@@ -61,6 +62,6 @@ zyblw-web (private)
 1. 公开仓库只包含框架源码、公开文档、示例、CI 和发布配置。
 2. 公开 CI 不需要私有仓库、私有 token 或真实 Provider key。
 3. `v0.1.0` 可生成签名的 binary、source、Scaladoc 和 POM，并从 Maven Central 解析。
-4. 私有 server 只使用 `io.github.zyblw` 的精确版本完成测试。
+4. 私有 server、Dashboard 与镜像从同一个固定 Agent commit 构建；公开制品由 Agent 独立 consumer 验证。
 5. 私有仓库不再保留第二份可修改的 Agent 源码。
 6. 两个仓库都禁止 force-push/delete `main`，发布 tag 只在公开仓库创建。

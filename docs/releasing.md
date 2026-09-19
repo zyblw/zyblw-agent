@@ -1,7 +1,7 @@
 # 开源发布与版本维护
 
 > 状态：运行手册  
-> 最后核验：2026-08-28
+> 最后核验：2026-09-17
 > 事实来源：`build.sbt`、`project/plugins.sbt`、`.github/workflows/*.yml`、`integration-tests/maven-consumer`
 
 ## 两档门禁
@@ -10,7 +10,7 @@
 
 | 档位 | 目的 | 必过 | 不做 |
 |---|---|---|---|
-| 业务接入 | 业务仓库用 Docker + 自管 PostgreSQL 引入框架 | `scripts/verify-business-ready.sh`：格式、`testFull`、问答契约、证据清单结构。可选 `RUN_POSTGRES_INTEGRATION=1 postgres/testFull`。然后 `publishM2` 得到 `0.9.0-local`，或 `compose.business.yml` 启动 | 长时 soak、主备、PgBouncer、滚动发布、备份 RPO/RTO、SLO owner |
+| 业务接入 | 业务仓库用 Docker + 自管 PostgreSQL 引入框架 | `scripts/verify-business-ready.sh`：格式、`testFull`、问答契约、证据清单结构与 PostgreSQL 18 全量契约。然后 `publishM2` 得到 `0.9.0-local`，或 `compose.business.yml` 启动 | 长时 soak、主备、PgBouncer、滚动发布、备份 RPO/RTO、SLO owner |
 | 公开发布 | annotated tag 上 Maven Central | 现有 release workflow：`testFull`、`publishM2`、Maven consumer、签名、Portal | 在没有宿主环境时不把 7 项证据改成 `verified_host`，也不因此阻塞业务接入 |
 
 业务项目固定精确版本，不要写版本范围或 `SNAPSHOT`。当前全新安装和发布候选均为 `0.9.0`。
@@ -95,17 +95,18 @@ Central artifact 不可覆盖；失败修复必须用新版本。
    release workflow 会通过 `.github/scripts/verify-release.sh` fail-closed 校验。
 3. `sbt -batch testFull` 成功。
 4. `RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull` 成功。
-5. `integration-tests/command-worker-kill-recovery.sh --restart-postgres` 与 `integration-tests/workflow-wake-worker-kill-recovery.sh --restart-postgres` 均成功，旧/新 JVM PID 不同且数据库重启后 generation 按预期接管。
-6. `integration-tests/durable-worker-soak.sh` 成功；全部 Run/command 完成、多个 Worker/lane 实际参与、无 reclaim/retry/过期/死信、最终队列归零，且 P95 回归阈值通过。
-7. `integration-tests/workflow-wake-worker-soak.sh` 成功；wake/execution claim 与终态 cycle 一一对应，多个独立 Store/Worker 参与，无 generation reclaim、abandon、lease loss 或失败；正式 wake queue 快照的 due/expired/final-depth 门禁与 P95 回归阈值通过。
-8. `sbt -batch publishM2` 成功，所有公开模块生成 POM/source/doc。
-9. `integration-tests/maven-consumer` 设置 `ZYBLW_AGENT_VERSION` 后仅依赖本地发布物也能编译。
-10. 空 PostgreSQL 上核心与 1024 knowledge V001 可幂等执行，结构、维度、权限与注释审计全部通过。
-11. 启用控制台时，`modules/agent-dashboard` 的 `typecheck`、`lint`、`build` 与 Playwright 浏览器契约全部通过。
-12. POM 包含 name、description、URL、license、developer 和 SCM。
-13. 无密钥、真实用户数据或敏感 trace 进入 Git 历史和 artifact。
-14. 私有业务仓库使用同一固定 commit 的 sibling 源码候选完成空库与真实业务回归；私有源码、token 和日志不得进入公开 workflow。
-15. Central Portal 显示 Published 后，验证 Maven consumer 能从 Central 解析当前精确版本。
+5. `./scripts/test-public-pdf-rag.sh` 成功；该真实公开 PDF 门禁当前独立于普通 CI，使用确定性 Embedding，不替代真实 OCR/模型质量验收。
+6. `integration-tests/command-worker-kill-recovery.sh --restart-postgres` 与 `integration-tests/workflow-wake-worker-kill-recovery.sh --restart-postgres` 均成功，旧/新 JVM PID 不同且数据库重启后 generation 按预期接管。
+7. `integration-tests/durable-worker-soak.sh` 成功；全部 Run/command 完成、多个 Worker/lane 实际参与、无 reclaim/retry/过期/死信、最终队列归零，且 P95 回归阈值通过。
+8. `integration-tests/workflow-wake-worker-soak.sh` 成功；wake/execution claim 与终态 cycle 一一对应，多个独立 Store/Worker 参与，无 generation reclaim、abandon、lease loss 或失败；正式 wake queue 快照的 due/expired/final-depth 门禁与 P95 回归阈值通过。
+9. `sbt -batch publishM2` 成功，所有公开模块生成 POM/source/doc。
+10. `integration-tests/maven-consumer` 设置 `ZYBLW_AGENT_VERSION` 后仅依赖本地发布物也能编译。
+11. 空 PostgreSQL 上核心与 1024 knowledge V001 可幂等执行，结构、维度、权限与注释审计全部通过。
+12. 启用控制台时，`modules/agent-dashboard` 的 `typecheck`、`lint`、`build` 与 Playwright 浏览器契约全部通过。
+13. POM 包含 name、description、URL、license、developer 和 SCM。
+14. 无密钥、真实用户数据或敏感 trace 进入 Git 历史和 artifact。
+15. 私有业务仓库使用同一固定 commit 的 sibling 源码候选完成空库与真实业务回归；私有源码、token 和日志不得进入公开 workflow。
+16. Central Portal 显示 Published 后，验证 Maven consumer 能从 Central 解析当前精确版本。
 
 框架的 Scaladoc 会读取多个 source root 的 TASTy；仓库通过 `.jvmopts` 为 sbt 构建 JVM 提供 3 GiB 上限和 G1GC。
 CI 不应以更小的 `SBT_OPTS/JAVA_OPTS` 覆盖该基线。若 `packageDoc` 失败，发布必须失败；不能用空 doc JAR 掩盖 API

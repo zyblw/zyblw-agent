@@ -15,7 +15,7 @@ import zio.json.*
 import zio.json.ast.Json
 import zio.test.*
 
-/** 真实 PostgreSQL 16 可靠副作用契约。
+/** 真实 PostgreSQL 18 可靠副作用契约。
   *
   * 覆盖 `agent_business_operations`、`agent_outbox_events`、`agent_inbox_messages` 与
   * `agent_compensations`。这些测试不能由 内存 Map 或 H2 取代，因为它们验证的正是 transaction rollback、唯一约束等待、`SKIP
@@ -41,7 +41,7 @@ object PostgresSideEffectIntegrationSpec extends ZIOSpecDefault:
       container <- ZIO.acquireRelease(
         ZIO.attemptBlocking {
           val value =
-            PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:16-alpine"))
+            PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:18-alpine"))
           value.start()
           value
         }

@@ -9,7 +9,7 @@
 
 - `scalafmtCheckAll; scalafmtSbtCheck; testFull`
 - `scripts/verify-business-ready.sh`
-- PostgreSQL 16 Store conformance（`RUN_POSTGRES_INTEGRATION=1` 时）
+- PostgreSQL 18 Store conformance（业务接入脚本默认必跑）
 - command/workflow 有界 soak 与 kill-recovery（CI 机制证据，不是宿主实测）
 - `publishM2` + 独立 Maven consumer
 - `.github/scripts/verify-local-evidence.sh --manifest`

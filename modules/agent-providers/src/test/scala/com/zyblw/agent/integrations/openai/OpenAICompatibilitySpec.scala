@@ -1,6 +1,6 @@
 package com.zyblw.agent.integrations.openai
 
-// 以纯编解码方式验证 OpenAI、DeepSeek、GLM、Qwen 的字段兼容矩阵，不依赖真实 API Key 和网络。
+// 以纯编解码方式验证 OpenAI、DeepSeek、GLM、Qwen、Kimi 的字段兼容矩阵，不依赖真实 API Key 和网络。
 
 import com.zyblw.agent.core.*
 import zio.*
@@ -51,6 +51,36 @@ object OpenAICompatibilitySpec extends ZIOSpecDefault:
         replay.exists(_.toString.contains("reasoning_content"))
       )
     },
+    test("DeepSeek typed reasoning overrides preset thinking and maps verified effort values") {
+      val enabled = OpenAIWire
+        .encodeRequest(
+          ChatRequest(
+            Chunk(AgentMessage.user("question")),
+            settings = ModelSettings(reasoningEffort = Some(ReasoningEffort.High))
+          ),
+          ProviderPresets.DeepSeekDefaultModel,
+          OpenAICompatibility.deepSeek,
+          ProviderPresets.deepSeek("test-key").defaultOptions
+        )
+        .map(_.toString)
+      val disabled = OpenAIWire
+        .encodeRequest(
+          ChatRequest(
+            Chunk(AgentMessage.user("question")),
+            settings = ModelSettings(reasoningEffort = Some(ReasoningEffort.None))
+          ),
+          ProviderPresets.DeepSeekDefaultModel,
+          OpenAICompatibility.deepSeek,
+          ProviderPresets.deepSeek("test-key").defaultOptions
+        )
+        .map(_.toString)
+      assertTrue(
+        enabled.exists(_.contains("\"thinking\":{\"type\":\"enabled\"}")),
+        enabled.exists(_.contains("\"reasoning_effort\":\"high\"")),
+        disabled.exists(_.contains("\"thinking\":{\"type\":\"disabled\"}")),
+        disabled.forall(!_.contains("reasoning_effort"))
+      )
+    },
     test("GLM rejects non-auto tool choice before the HTTP request") {
       val request = ChatRequest(
         Chunk(AgentMessage.user("question")),
@@ -85,13 +115,94 @@ object OpenAICompatibilitySpec extends ZIOSpecDefault:
       val request = ChatRequest(
         Chunk(AgentMessage.user("question")),
         Chunk(tool),
-        ModelSettings(maxOutputTokens = Some(128))
+        ModelSettings(maxOutputTokens = Some(128), reasoningEffort = Some(ReasoningEffort.High))
       )
       val encoded =
         OpenAIWire.encodeRequest(request, "gpt-5.4-mini", OpenAICompatibility.openAI).map(_.toString)
       assertTrue(
         encoded.exists(_.contains("strict")),
-        encoded.exists(_.contains("max_completion_tokens"))
+        encoded.exists(_.contains("max_completion_tokens")),
+        encoded.exists(_.contains("\"reasoning_effort\":\"high\""))
+      )
+    },
+    test("models without a declared effort set reject typed reasoning before HTTP") {
+      val request = ChatRequest(
+        Chunk(AgentMessage.user("question")),
+        settings = ModelSettings(reasoningEffort = Some(ReasoningEffort.High))
+      )
+      val encoded = OpenAIWire.encodeRequest(
+        request,
+        ProviderPresets.GlmDefaultModel,
+        OpenAICompatibility.glm
+      )
+      assertTrue(encoded.left.exists(_.isInstanceOf[AgentError.UnsupportedModelCapability]))
+    },
+    test("per-model Qwen capabilities drive enable_thinking on the wire") {
+      val base          = OpenAICompatibility.qwen.descriptor.capabilities
+      val compatibility = OpenAICompatibility.qwen.copy(
+        descriptor = OpenAICompatibility.qwen.descriptor.copy(
+          models = Map(
+            "qwen-reasoning" -> base.copy(
+              thinking = true,
+              reasoningEfforts = Set(ReasoningEffort.None, ReasoningEffort.High)
+            )
+          )
+        )
+      )
+      val enabled = OpenAIWire
+        .encodeRequest(
+          ChatRequest(
+            Chunk(AgentMessage.user("question")),
+            settings = ModelSettings(
+              model = Some("qwen-reasoning"),
+              reasoningEffort = Some(ReasoningEffort.High)
+            )
+          ),
+          "qwen-default",
+          compatibility
+        )
+        .map(_.toString)
+      assertTrue(enabled.exists(_.contains("\"enable_thinking\":true")))
+    },
+    test("Kimi uses conservative tools and replays reasoning_content for tool continuation") {
+      val base          = OpenAICompatibility.kimi.descriptor.capabilities
+      val compatibility = OpenAICompatibility.kimi.copy(
+        descriptor = OpenAICompatibility.kimi.descriptor.copy(
+          models = Map(
+            "kimi-test" -> base.copy(
+              reasoningEfforts = Set(ReasoningEffort.None, ReasoningEffort.High)
+            )
+          )
+        )
+      )
+      val response =
+        """{"id":"req-k","choices":[{"message":{"content":"","reasoning_content":"continuation-state","tool_calls":[{"id":"c1","function":{"name":"lookup","arguments":"{\"query\":\"x\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":2}}"""
+      for
+        decoded <- OpenAIWire.decodeResponse(response, compatibility)
+        replay = OpenAIWire.encodeRequest(
+          ChatRequest(
+            Chunk(decoded.message, AgentMessage.tool("c1", "lookup", ToolResult(Json.Str("ok")))),
+            Chunk(tool),
+            ModelSettings(model = Some("kimi-test"), reasoningEffort = Some(ReasoningEffort.High))
+          ),
+          "kimi-test",
+          compatibility
+        )
+        required = OpenAIWire.encodeRequest(
+          ChatRequest(
+            Chunk(AgentMessage.user("question")),
+            Chunk(tool),
+            ModelSettings(model = Some("kimi-test"), toolChoice = ToolChoice.Required)
+          ),
+          "kimi-test",
+          compatibility
+        )
+      yield assertTrue(
+        decoded.message.metadata.get("reasoning_content").contains("continuation-state"),
+        replay.exists(_.toString.contains("reasoning_content")),
+        replay.exists(_.toString.contains("\"thinking\":{\"type\":\"enabled\"}")),
+        replay.exists(_.toString.contains("\"strict\":false")),
+        required.left.exists(_.isInstanceOf[AgentError.UnsupportedModelCapability])
       )
     },
     test("OpenAI encodes vision content parts instead of stringifying image URLs") {

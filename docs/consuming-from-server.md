@@ -1,14 +1,20 @@
 # 业务项目接入 zyblw-agent 0.9
 
 > 状态：当前运行手册
-> 最后核验：2026-09-13
+> 最后核验：2026-09-17
 > 事实来源：`build.sbt`、`integration-tests/maven-consumer`、公开 CI consumer job
 
 ## 当前业务接入方式
 
 `zyblw-platform` 只消费 sibling `zyblw-agent` 源码，并在 `.github/zyblw-agent.sha` 固定精确 commit。业务构建、
-本地 Compose 与 CI 必须读取同一个 checkout；路径缺失、commit 不匹配或工作树不干净时立即失败。这样可以在 `0.9.0`
-正式发布前验证最新框架，同时避免动态分支或开发机 Maven 缓存造成漂移。
+本地 Compose 与 CI 使用同一种源码 ProjectRef/镜像构建路径，不提供 Maven-local、Central 或历史版本旁路。开发中允许直接消费 sibling 未提交变更；发布门禁必须以 `VERIFY_AGENT_CLEAN=1` 拒绝未提交工作树，并要求 pin 指向包含这些变更的不可变 commit。路径缺失则构建失败。
+
+当前平台已按最新框架契约接入：
+
+- `QaProviderConfigLoader` 从同一次装配生成 `ChatModel`、`ProviderRegistry`、默认 provider/model 身份和计价声明；
+- 命名档案支持 DeepSeek、Qwen、GLM、Kimi、OpenAI、Anthropic 和 Gemini；`ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON` 支持多个 OpenAI-compatible 官方端点或中转站；
+- 平台消费必填 `AgentState.threadId`、冻结 `definition` / `composition`、`suspension`、citations 与 retrieval evidence，不保留旧状态形状的兼容分支；
+- 命名档案的 additional provider 仅是显式路由目标，不得宣称为自动 failover。
 
 公开制品发布后，独立消费者可固定精确坐标：
 

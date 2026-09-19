@@ -2,7 +2,7 @@
 
 > 状态：Experimental
 > 最后核验：2026-08-01
-> 事实来源：`core.workflow` 源码、`WorkflowSpec`、PostgreSQL 16 集成测试与 `GraphWorkflowExample`
+> 事实来源：`core.workflow` 源码、`WorkflowSpec`、PostgreSQL 18 集成测试与 `GraphWorkflowExample`
 
 `zyblw-agent` 的 Workflow 是一个小型、类型化、可恢复的 StateGraph。它用于“步骤和控制边在运行前可以声明”的确定性长流程，
 不是把普通 Agent loop 包装成图，也不是通用分布式调度平台。
@@ -195,7 +195,7 @@ val receipt = executionStore.signal(
 - signal 仅能在 deadline 前胜出；PostgreSQL 用数据库时钟和行锁裁决 signal/timeout，恰好等于 deadline 时 timeout 胜出；
 - payload 上限默认 64 KiB，不进入 timeline、通用指标或日志；
 - `currentWait` 只返回尚未消费的当前等待；Pending 状态下普通 `resume` 返回 `workflow-wait-pending`；已决议等待则返回
-  `workflow-wakeup-claim-required`，不能绕过租约直接恢复。真实 PostgreSQL 16 契约还验证 wake Worker 消失与数据库 pause/recover 同时发生后，只有新 generation 能 heartbeat/恢复，旧 fence 不得改写 wait。
+  `workflow-wakeup-claim-required`，不能绕过租约直接恢复。真实 PostgreSQL 18 契约还验证 wake Worker 消失与数据库 pause/recover 同时发生后，只有新 generation 能 heartbeat/恢复，旧 fence 不得改写 wait。
 
 框架把 Signaled/TimedOut wait 行本身作为 durable wake command，避免“先决议 wait、再写队列表”形成双写崩溃窗口。
 `WorkflowWakeWorker` 每轮先用有界 `expireDue(limit)` 决议 timer，再按 workflow/version 使用 owner/token/generation/expiry
@@ -291,7 +291,7 @@ sbt -batch "examples/runMain com.zyblw.agent.examples.DurableWorkflowWakeExample
 ## 当前边界与下一步
 
 当前已经实现“可验证图内核 + PostgreSQL checkpoint + 节点 execution ledger/pending outcome/fencing + 低敏 timeline +
-耐久 timer/signal + 受监督 wake worker”，并用故障注入证明 prepare 后崩溃可恢复且节点不重复执行；真实 PostgreSQL 16
+耐久 timer/signal + 受监督 wake worker”，并用故障注入证明 prepare 后崩溃可恢复且节点不重复执行；真实 PostgreSQL 18
 独立进程演练还在旧 JVM 同时持有 wake 与 node execution generation 1 时发送 `SIGKILL`，随后重启同一 PostgreSQL
 容器并重新发现宿主端口，验证新 JVM 以双 generation 2 消费 wait、提交 execution ledger 和终态 checkpoint；
 Testcontainers 还证明两个 Store 并发只会领取一次、过期重领递增 generation 且旧 fence 无法写入。当前仍未完成：

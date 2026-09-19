@@ -27,10 +27,13 @@ final private[agent] class ModelRouterGateway(
   ): IO[AgentError, Routing] =
     profile.modelRouting match
       case None =>
-        ZIO
-          .fail(AgentError.InvalidConfiguration("ModelRequirement 需要显式启用 modelRouting"))
-          .when(request.settings.requirement.nonEmpty)
-          .as(Routing(request, model, None))
+        for
+          _ <- ZIO
+            .fail(AgentError.InvalidConfiguration("ModelRequirement 需要显式启用 modelRouting"))
+            .when(request.settings.requirement.nonEmpty)
+          capabilities <- model.capabilities(request.settings.model)
+          _            <- CapabilityValidator.validate(request, capabilities)
+        yield Routing(request, model, capabilities, None)
       case Some(policy) => routeWithin(policy, state, request, estimatedInputTokens, prices)
 
   private def routeWithin(
@@ -86,7 +89,7 @@ final private[agent] class ModelRouterGateway(
             state.budget,
             prices.price(candidate.ref.provider, candidate.ref.model)
           )
-        yield (ModelCandidateDecision(candidate.ref, codes), adapter, next)
+        yield (ModelCandidateDecision(candidate.ref, codes), adapter, next, caps)
       }
       selected <- ZIO.fromEither(ModelRouter.select(evaluated.map(_._1), state.budget.limits))
       chosen   <- ZIO
@@ -96,6 +99,7 @@ final private[agent] class ModelRouterGateway(
     yield Routing(
       chosen._3,
       chosen._2,
+      chosen._4,
       Some(
         RouteDecision(
           requirement,
@@ -116,11 +120,12 @@ final private[agent] class ModelRouterGateway(
 private[agent] object ModelRouterGateway:
   /** 一次路由的完整结论：发什么、发给谁、以及冻结的路由决定。
     *
-    * `decision` 为 `None` 表示未启用路由的直连调用；此时调用方仍需自行校验 Provider 能力。
+    * `decision` 为 `None` 表示未启用路由的直连调用；两种路径都已在 Gateway 内校验并冻结 Provider 能力。
     */
   final case class Routing(
       request: ChatRequest,
       adapter: ChatModel,
+      capabilities: ModelCapabilities,
       decision: Option[RouteDecision]
   ):
     def routed: Boolean = decision.nonEmpty

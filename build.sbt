@@ -6,7 +6,7 @@ import sbt.Keys.*
 // ---------------------------------------------------------------------------
 
 ThisBuild / organization  := "io.github.zyblw"
-ThisBuild / scalaVersion  := "3.8.4"
+ThisBuild / scalaVersion  := "3.9.0"
 ThisBuild / versionScheme := Some("early-semver")
 ThisBuild / homepage      := Some(url("https://github.com/zyblw/zyblw-agent"))
 ThisBuild / licenses      := List(
@@ -50,14 +50,14 @@ Global / concurrentRestrictions += Tags.limit(Tags.Test, 1)
 // ---------------------------------------------------------------------------
 
 lazy val zioVersion            = "2.1.26"
-lazy val zioJsonVersion        = "0.9.2"
-lazy val zioSchemaVersion      = "1.8.5"
-lazy val zioHttpVersion        = "3.11.3"
+lazy val zioJsonVersion        = "1.1.0"
+lazy val zioSchemaVersion      = "1.8.7"
+lazy val zioHttpVersion        = "3.11.6"
 lazy val postgresVersion       = "42.7.13"
-lazy val openTelemetryVersion  = "1.63.0"
+lazy val openTelemetryVersion  = "1.66.0"
 lazy val testContainersVersion = "0.44.1"
-lazy val flywayVersion         = "13.0.0"
-lazy val tikaVersion           = "3.3.1"
+lazy val flywayVersion         = "13.7.0"
+lazy val tikaVersion           = "4.0.0"
 lazy val commonSettings        = Seq(
   description := s"Provider-neutral Scala 3 and ZIO 2 agent framework module: ${name.value}",
   Compile / packageBin / packageOptions ++= Seq(

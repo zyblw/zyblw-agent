@@ -10,13 +10,13 @@ import org.testcontainers.utility.DockerImageName
 import zio.*
 import zio.test.*
 
-/** 真实 PostgreSQL 16 上验证 0.9 全新基线：死投影表不存在、bytes 可外置。 */
+/** 真实 PostgreSQL 18 上验证 0.9 全新基线：死投影表不存在、bytes 可外置。 */
 object SchemaFreshInstallIntegrationSpec extends ZIOSpecDefault:
   private val dataSourceLayer: ZLayer[Any, Throwable, DataSource] = ZLayer.scoped {
     for container <- ZIO.acquireRelease(
         ZIO.attemptBlocking {
           val value =
-            PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:16-alpine"))
+            PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:18-alpine"))
           value.start()
           value
         }

@@ -6,6 +6,7 @@ import com.zyblw.agent.core.*
 import com.zyblw.agent.guardrails.*
 import com.zyblw.agent.http.*
 import com.zyblw.agent.http.host.*
+import com.zyblw.agent.integrations.{ProviderEndpoints, ProviderEndpointsConfig}
 import com.zyblw.agent.integrations.openai.{OpenAICompatibleChatModel, ProviderPresets}
 import com.zyblw.agent.memory.*
 import com.zyblw.agent.model.*
@@ -137,10 +138,14 @@ object ProductionSupportLayers:
 
   def liveModel: ZLayer[Client, AgentError, ChatModel] =
     ZLayer.fromZIO {
-      for
-        config <- ProviderPresets.openAIFromEnvironment
-        client <- ZIO.service[Client]
-      yield OpenAICompatibleChatModel(client, config)
+      ProviderEndpointsConfig.fromEnvironmentOption.flatMap {
+        case Some(endpoints) => ProviderEndpoints.assemble(endpoints).map(_._1: ChatModel)
+        case None            =>
+          for
+            config <- ProviderPresets.openAIFromEnvironment
+            client <- ZIO.service[Client]
+          yield OpenAICompatibleChatModel(client, config)
+      }
     }
 
   def observer(config: ProductionSupportConfig): ZLayer[Any, AgentError, RunObserver] =

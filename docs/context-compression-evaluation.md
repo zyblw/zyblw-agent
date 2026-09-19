@@ -257,7 +257,7 @@ ZYBLW_SMOKE_PROVIDER=deepseek \
   sbt "examples/runMain com.zyblw.agent.examples.ContextCompressionLiveSmokeExample"
 ```
 
-它支持 DeepSeek、GLM、OpenAI Chat/Responses、Anthropic 和 Gemini，并在计费前检查工具能力，关闭确定性 fallback，
+它支持 DeepSeek、GLM、Qwen、Kimi、OpenAI Chat/Responses、Anthropic 和 Gemini，并在计费前检查工具能力，关闭确定性 fallback，
 主动中断超时 Fiber。完整价格与预算变量见 [真实 Provider 小流量 Smoke](provider-live-smoke.md)。
 
 建议把每份报告与下列版本同时归档：
@@ -277,7 +277,7 @@ ZYBLW_SMOKE_PROVIDER=deepseek \
   基线执行 fail-closed CI 比较；
 - starter dataset 只证明 harness 可用，不代表中医问答、审批或业务写工具已经达到质量门槛；
 - 仍需建立来自真实业务失败样本、经脱敏和人工标注的版本化数据集；
-- 五类协议/六个 Provider 选择目标的统一小流量入口已经完成，但当前环境没有真实密钥，仍缺各部署账号实际通过报告；
+- 五类协议/九个 Provider/中转选择目标的统一小流量入口已经完成，但当前环境没有真实密钥，仍缺各部署账号实际通过报告；
 - 当前硬门禁采用逐字证据，语义等价改写不会自动得分；未来可增加独立 Judge，但不能替代禁止内容和引用硬门禁；
 - Provider 在失败前已经计费却未返回 usage 时，报告只能标记未知成本，无法凭空恢复供应商账单。
 

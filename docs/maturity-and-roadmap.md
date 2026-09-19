@@ -1,7 +1,7 @@
 # zyblw-agent 成熟度、取舍与路线
 
 > 状态：路线图
-> 最后核验：2026-09-16
+> 最后核验：2026-09-19
 > 事实来源：`build.sbt`、模块源码、测试、发布工作流、迁移与当前文档
 
 ## 成熟度语义
@@ -34,9 +34,9 @@
 | Artifact | core / `artifacts`；postgres | Beta | session/user/run 隔离、不可变版本、容量与 metadata 限制；`ToolResult.Externalized` + `read_artifact`；内存与 `PostgresArtifactStore`（0.9 V001）共用删除/过期/审计 conformance；Goal/Plan/Todo 保存有界 typed reference，Context 不加载正文；`ImageArtifact` + tenant grant | 真实对象存储 Adapter、range/page、线上保留期与容量演练 |
 | 模型辅助压缩 | core / `context.llm` | Beta | evidence 校验和 eval | 多 Provider 质量/成本基线 |
 | Memory | core / `memory`,`memory.llm` | Beta | Store/SPI 与治理设计 | 用户查看/删除 UX、长期质量 |
-| RAG | rag、document-loaders、rerank | Beta | `RagApplication`、宿主 Source resolver、稳定幂等重建、Docling Markdown+JSON、提取质量门禁、Tika→OCR→VLM 级联、可选逐页视觉转录（JPEG 经 Artifact 绑定）、page/bbox lineage、cl100k 结构切分、hybrid/vector/lexical/phrase + ACL 前置过滤、rerank/谱系扩展、完整评测 census + Space CAS Profile 切换/回滚、EvidenceBundle 到工具/管理 API/Inspector、阶段 span、state v7 citation、稳定 `/api/v1/knowledge/**`、`KnowledgeQaHost`、book-corpus eval；OCR 抽出注入按检索资料拦截 | 真实 Tesseract/Docling smoke、100–300 条领域金标与人工校准、容量/故障/线上质量和 SLO |
+| RAG | rag、document-loaders、rerank | Beta | `RagApplication`、宿主 Source resolver、稳定幂等重建、Docling Markdown+JSON、提取质量门禁、Tika→OCR→VLM 级联、可选逐页视觉转录（JPEG 经 Artifact 绑定）、page/bbox lineage、cl100k 结构切分、hybrid/vector/lexical/phrase + ACL 前置过滤、rerank/谱系扩展、完整评测 census + Space CAS Profile 切换/回滚、EvidenceBundle 到工具/管理 API/Inspector、阶段 span、fresh-install state schema v1 citation、稳定 `/api/v1/knowledge/**`、`KnowledgeQaHost`、book-corpus eval；OCR 抽出注入按检索资料拦截 | 真实 Tesseract/Docling smoke、100–300 条领域金标与人工校准、容量/故障/线上质量和 SLO |
 | PostgreSQL | postgres | Beta | Testcontainers、迁移、并发、连接耗尽、pause/recover、command/Workflow 同实例 restart、Worker JVM `SIGKILL` 恢复、pg_dump/restore | 大库升级、主备切换、节点级故障、性能/RTO |
-| OpenAI-compatible | providers / `integrations.openai` | Beta | stream/tool/error stub 与 smoke | 长期真实 Provider 观测 |
+| OpenAI-compatible | providers / `integrations.openai` | Beta | DeepSeek/Qwen/GLM/Kimi 档案、逐模型能力、stream/tool/error stub 与 smoke | 各部署模型的长期真实 Provider 观测 |
 | Anthropic/Gemini | providers / 对应 package | Beta | Provider contract tests | zyblw QA 业务尚未启用 |
 | OTLP/Langfuse | opentelemetry | Beta | 基数、脱敏、stub tests | 生产告警与 SLO |
 | Cache/Reasoning token | core/providers/opentelemetry | Beta | OpenAI 两类协议、状态累计、指标测试 | 其他 Provider 明细语义与真实成本基线 |
@@ -129,7 +129,7 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
 5. **部分完成**：HTTP/OpenAPI 兼容测试、格式门禁、兼容面文档和 tag/main/CHANGELOG/升级指南一致性门禁已建立；
    结构化 OpenAPI diff 与真实历史 artifact 的二进制 diff 仍待自动化。
 6. **已转向生产参考**：无数据库五分钟 Quickstart 已删除；权威入口是 `ProductionSupportHost` 与
-  `docs/postgres-quickstart.md`。PostgreSQL 16/pgvector CI job 已定义；Docker/VM 包在 `deploy/docker/`。
+  `docs/postgres-quickstart.md`。PostgreSQL 18/pgvector 0.8.6 CI job 已定义；Docker/VM 包在 `deploy/docker/`。
   Wave 0 宿主实测仍待。
 7. **部分完成**：安全 timeline/inspection 读模型与故障诊断文档已落地；CLI、轻量 UI 和真实事故验证仍待完成。
 
@@ -152,7 +152,7 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
 1. **已完成 Q0**：`AgentEvalRunner.runRepeated` 对用例 × attempt 使用一个共享的有界并发 job 集合，保留确定顺序；
 2. **已完成 Q0**：报告逐次成功率、至少一次成功的 `pass@k` 估算和连续全成功的 `pass^k` 估算；
 3. **已完成 Q1**：`EvalAxis` 显式区分 outcome、trajectory、safety 与 resource；禁止工具、重复副作用、轨迹重建和 Inspector 脱敏分别门禁，结果正确不自动证明过程安全；
-4. **已完成 Q1**：`AgentReliability` 独立低敏 kind 纳入趋势仓库与发布策略；Wilson 95% 区间、最小样本、观察成功率分别门禁，V007 扩展 PostgreSQL kind CHECK；
+4. **已完成 Q1**：`AgentReliability` 独立低敏 kind 纳入趋势仓库与发布策略；Wilson 95% 区间、最小样本、观察成功率分别门禁；数据库约束已折叠进 0.9 V001；
 5. **已完成 Q2 治理地基**：`AgentEvalDataset` 用来源类别、change/owner/reviewer、审查时间与确定性 SHA-256 绑定整批用例；草稿、版本漂移、重复 ID 或审查后篡改在任何 Provider/工具调用前 fail-closed；
 6. **下一步 Q2 数据闭环**：以真实失败、事故和人工分歧持续扩充 capability/regression 数据集，执行双人标注或分歧仲裁，并定期阅读 transcript 校准 grader。治理清单不能替代真实样本与人工判断。
 
@@ -162,13 +162,13 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
 
 这是 [ADR-0018](architecture/0018-next-generation-runtime-kernel.md) 定义的下一代 Kernel 第一刀。详细步骤见 [开发手册](architecture/next-generation-runtime.md)。
 
-1. **已完成**：ModelCall `Dispatched → Succeeded|Failed|Unknown`；与 `RunStore.commit` 同一事务写入 `model_call_executions`（V004）。
+1. **已完成**：ModelCall `Dispatched → Succeeded|Failed|Unknown`；与 `RunStore.commit` 同一事务写入 `model_call_executions`（已折叠进 0.9 V001）。
 2. **已完成**：`CanonicalModelRequest` 在 `CapturePolicy.Replayable` 下与 `ScriptedChatModel.recordedRequests` 深比较相等。
 3. **已完成**：TX1 之后崩溃恢复为 Unknown，不自动重放 Provider；公共 Inspector / HTTP 投影无 prompt。
 4. **已完成**：`ToolRetryPolicy`（在线 429/timeout）与 `ToolRecoveryPolicy`（崩溃重放）拆分；未改工具账本表。
 5. **已完成**：确定性 crash matrix（Disabled、settlement 失败、Complete 窗口、lease lost、Context 后预算保留）；Postgres stale fenced ModelCall 拒绝（需集成开关）。
 6. **已完成修复**：in-memory `RunStore` 以单一 `Ref.Synchronized` 原子更新 state/event/tool/model-call 数据；ModelCall 冲突失败后不再留下已推进状态或事件。
-7. **已完成硬化**：同一套 `RunStore` conformance 在内存与真实 PostgreSQL 16 上验证 ModelCall 冲突原子回滚、事件分页/幂等/级联删除、工具账本身份冲突、EventId 跨 Run 漂移拒绝、`save` 游标漂移/跨批 sequence gap 的原子回滚、同 version/sequence 并发提交唯一胜者，以及负 sequence/非法游标/超限页面拒绝。
+7. **已完成硬化**：同一套 `RunStore` conformance 在内存与真实 PostgreSQL 18 上验证 ModelCall 冲突原子回滚、事件分页/幂等/级联删除、工具账本身份冲突、EventId 跨 Run 漂移拒绝、`save` 游标漂移/跨批 sequence gap 的原子回滚、同 version/sequence 并发提交唯一胜者，以及负 sequence/非法游标/超限页面拒绝。
 8. **已完成持久化信封校验**：PostgreSQL 读取 `AgentState`、`PersistedAgentEvent`、Tool ledger 与 ModelCall ledger 时交叉核对关系列和 JSON 负载；真实数据库篡改测试证明 status/sequence 漂移不会被静默接受。
 9. **部分完成、继续推进**：command 与 Workflow Worker 的本机独立 JVM kill/reclaim 均已有一键证据；下一步仍是生产 soak、部署节点丢失与数据库 failover（P0-B）；Eval 使用 Replayable 轨迹。
 10. **不在本项**：Conversation Tree、Harness Goal/Plan/Skill、独立 Trajectory 权威、重写 Tool ledger。
@@ -228,13 +228,13 @@ Harness 不是第二套 Agent Runtime，而是长任务的 Provider-neutral 支�
 
 1. **已有地基**：Artifact、Workspace/Sandbox、Context/Memory、Approval、Inspector 可独立组合；
 2. **已完成 H1 第一刀**：Goal、Plan、Todo 与按需 Skill 的小型 ADT/`HarnessStore` SPI（内存 CAS）；经 `HarnessContextContributor` 注入上下文，不改 Kernel。Goal Active 不自动开跑；Plan 不是权限；Skill 不能授工具、不能升为 System。
-3. **已完成 H2 Adapter**：`PostgresHarnessStore` 与 Flyway `V005`；CAS、Goal 外键、Skill 指纹冲突与内存实现一致。
-4. **已完成 Steering/FollowUp 第一刀**：追加式 `InteractionInput`，与 Cancel/Recover/Approval/Retry 分离；Flyway `V006`。
-5. **已完成 H3-A 查询边界**：Interaction Store 以排他 `beforeSequence` 倒序取最近页、最多 512 条并按 sequence 升序交付；Contributor 只向 Store 请求最近 16 条，不再加载 Goal 全历史。内存与 PostgreSQL 16 测试覆盖分页和非法 limit。
+3. **已完成 H2 Adapter**：`PostgresHarnessStore` 已折叠进 0.9 V001；CAS、Goal 外键、Skill 指纹冲突与内存实现一致。
+4. **已完成 Steering/FollowUp 第一刀**：追加式 `InteractionInput`，与 Cancel/Recover/Approval/Retry 分离；持久化已折叠进 0.9 V001。
+5. **已完成 H3-A 查询边界**：Interaction Store 以排他 `beforeSequence` 倒序取最近页、最多 512 条并按 sequence 升序交付；Contributor 只向 Store 请求最近 16 条，不再加载 Goal 全历史。内存与 PostgreSQL 18 测试覆盖分页和非法 limit。
 6. **下一步 H3-A 生命周期**：在明确租户合规窗口和 Goal 删除入口后补交互归档/删除策略；当前只保证随 Goal 外键级联删除，不增加无业务依据的自动 TTL。
-7. **已完成 H3-B**：Goal/Plan/Todo 保存有界 typed `ArtifactReference`；引用不含正文、二进制和私有 metadata，也不授予读取权限。`harness@2` 只把不含 scope 的低敏引用元数据投影到 Context；Flyway `V008` 与真实 PostgreSQL 16 往返测试已通过。
-8. **已完成 H3-C 基础设施**：`HarnessEvalRunner` 在同一已审查 dataset/case/attempt 上成对比较 baseline 与 Harness，衡量四轴、Wilson 可靠性、人工介入以及 latency/token/cost 倍率；安全失败不可被收益抵消。低敏 `HarnessComparison` 趋势通过 V009 与其它 kind 隔离。
-9. **已完成 H3-D 任务预算**：不可变 `GoalBudgetPolicy` + 稳定 Run 预留/结算/释放；内存 `Ref.Synchronized` 与 PostgreSQL V010 行锁语义一致，并由同一套 Harness budget conformance 防止 Adapter 漂移。费用总限要求 Run 明确费用额度；超出预留的真实 usage 记为 `Exceeded`，不能回滚隐藏。`HarnessCommandService` 将预留与 Created/首事件/Start/dispatcher 同事务提交；`HarnessBudgetReconciler` 有界循环扫描并只结算耐久终态，非终态/缺失 Run 不自动释放。
+7. **已完成 H3-B**：Goal/Plan/Todo 保存有界 typed `ArtifactReference`；引用不含正文、二进制和私有 metadata，也不授予读取权限。`harness@2` 只把不含 scope 的低敏引用元数据投影到 Context；0.9 V001 与真实 PostgreSQL 18 往返测试已通过。
+8. **已完成 H3-C 基础设施**：`HarnessEvalRunner` 在同一已审查 dataset/case/attempt 上成对比较 baseline 与 Harness，衡量四轴、Wilson 可靠性、人工介入以及 latency/token/cost 倍率；安全失败不可被收益抵消。低敏 `HarnessComparison` 趋势在 0.9 V001 中与其它 kind 隔离。
+9. **已完成 H3-D 任务预算**：不可变 `GoalBudgetPolicy` + 稳定 Run 预留/结算/释放；内存 `Ref.Synchronized` 与 PostgreSQL 0.9 V001 行锁语义一致，并由同一套 Harness budget conformance 防止 Adapter 漂移。费用总限要求 Run 明确费用额度；超出预留的真实 usage 记为 `Exceeded`，不能回滚隐藏。`HarnessCommandService` 将预留与 Created/首事件/Start/dispatcher 同事务提交；`HarnessBudgetReconciler` 有界循环扫描并只结算耐久终态，非终态/缺失 Run 不自动释放。
 10. **下一步 H3-C 业务证据**：用真实脱敏长任务样本和人工校准执行成对试验；只有持续通过显式策略，才能声称 Harness 带来收益。基础设施的合成测试不构成产品效果证据。
 11. 在两个以上真实独立消费者证明依赖或生命周期边界前，不拆新的 Harness artifact。
 

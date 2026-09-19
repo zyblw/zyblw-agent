@@ -53,6 +53,7 @@ object AgentHttpContractSpec extends ZIOSpecDefault:
     "inputTokens",
     "outputTokens",
     "cachedInputTokens",
+    "cacheWriteInputTokens",
     "reasoningOutputTokens",
     "totalTokens",
     "estimatedCost",

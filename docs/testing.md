@@ -2,9 +2,12 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-22
+> 最后核验：2026-09-19
 >
 > 事实来源：对应模块源码、测试与构建定义
+
+> 本页“最近一次完整本地证据”之后保留了按日期记录的历史验证日志，其中 V004–V011 等名称只是 0.9 候选期的开发谱系；
+> 当前可执行安装路径只有核心与知识各一份 0.9 V001，现行结构以 `database-migrations.md` 为准。
 
 ## 聚合测试的资源隔离
 
@@ -19,7 +22,9 @@
 ./scripts/verify-business-ready.sh
 ```
 
-业务接入只要求这一档：格式、`testFull`、证据清单结构。长时 soak、主备、PgBouncer 和滚动发布不在当前门禁里。
+业务接入只要求这一档：格式、`testFull`、证据清单结构与 PostgreSQL 18 全量契约。长时 soak、主备、PgBouncer 和
+滚动发布不在当前门禁里。没有 Docker/PostgreSQL 时可设置 `SKIP_POSTGRES_INTEGRATION=1` 只做开发预检，但脚本会以非零
+状态结束，不能把该结果作为业务接入证据。
 
 ```bash
 sbt "scalafmtCheckAll; scalafmtSbtCheck"
@@ -55,6 +60,17 @@ Space/Profile knowledge 两条唯一 V001 绿场基线验证该约束。
 - 与候选一致的 `0.9.x-local publishM2`、独立 Maven consumer 与关键示例成功。
 
 ### 最近一次完整本地证据
+
+2026-09-19 当前基线复核：
+
+- Scala 3.9.0 LTS、ZIO 2.1.26、ZIO HTTP 3.11.6、zio-schema 1.8.7、zio-json 1.1.0、Tika 4.0.0、Flyway 13.7.0 与 OpenTelemetry 1.66.0 组合编译通过；`zio-schema` 固定为 ZIO HTTP 3.11.6 官方依赖线，而不是越过兼容边界追逐 1.9.0；
+- `documentLoaders/testFull; rag/testFull; evals/testFull; postgres/compile; opentelemetry/testFull` 全部通过、0 失败；公开 PDF 用例在普通测试中按设计忽略，不用易漂移的测试数量代替命令结果；
+- `./scripts/test-public-pdf-rag.sh` 对三个固定 SHA-256 的真实 PDF 运行两项端到端契约：Docling 技术报告样本经 Tika/PDFBox（非 Docling Serve）完成解析、分页/结构、切分、索引、检索与 citation；Open RAG Benchmark 固定 qrel 的正例在固定负例之前返回；
+- `RUN_POSTGRES_INTEGRATION=1 postgres/testFull` 使用 PostgreSQL 18.6 和 pgvector 0.8.6 镜像执行唯一 V001、事务、并发、lease/fencing、ACL、向量与治理契约；
+- PostgreSQL 18 官方镜像使用 `/var/lib/postgresql/18/docker`，Compose 因而把持久卷挂载到 `/var/lib/postgresql`；旧 17/16 数据目录不能原地复用，绿场基线应删除测试卷后重建。
+
+公开 PDF 门禁是确定性基础设施回归，不调用远程模型，也不声称评估生成答案、OCR/视觉解析或业务领域正确率。Open RAG
+Benchmark 为 CC-BY-NC-4.0，仅用于测试，不随 Maven 制品或容器分发。
 
 > 以下按日期保存当时尚未折叠的增量 migration 与版本证据，仅用于审计历史；当前安装拓扑始终以本页上方
 > 0.9 双 V001 门禁、`docs/compatibility.md` 和实际 migration 目录为准。
@@ -203,7 +219,10 @@ Space/Profile knowledge 两条唯一 V001 绿场基线验证该约束。
 - `0.1.0-local publishM2`：11 个公开 artifact 均生成 POM、binary、sources 与 Scaladoc JAR；
 - `zyblw-server` 源码 ProjectRef 与 Maven-local 二进制两种模式各 28 项通过；两项 server 自身的远程数据库用例未启用。
 
-上述是可重复的本地发布候选证据，不是 GitHub Actions 已经跑过的结果，也不是生产容量结论。OpenAI、DeepSeek、GLM、
+上述双模式是当时的历史证据。当前 Platform 已收敛为 `.github/zyblw-agent.sha` 固定的 sibling source 唯一路径，不再提供
+Maven-local/Central 切换；Maven-local 只由本仓库的独立 consumer 验证公开制品。
+
+上述是可重复的本地发布候选证据，不是 GitHub Actions 已经跑过的结果，也不是生产容量结论。当时 OpenAI、DeepSeek、GLM、
 Anthropic 与 Gemini 密钥均未配置，因此没有执行真实付费 Provider smoke；默认 stub/协议测试不能替代这一证据。
 
 当前确定性测试不访问真实网络或 API Key，覆盖：

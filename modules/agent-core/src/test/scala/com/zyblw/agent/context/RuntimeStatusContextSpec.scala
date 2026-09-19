@@ -13,7 +13,7 @@ object RuntimeStatusContextSpec extends ZIOSpecDefault:
     test("只投影低敏 typed 事实，不泄露 run/session/tenant 标识") {
       val definition = AgentDefinition(AgentId("status-agent"), "Status", "policy")
       val now        = Instant.parse("2026-09-16T00:00:00Z")
-      val state = AgentState(
+      val state      = AgentState(
         RunId(UUID.fromString("123e4567-e89b-12d3-a456-426614174000")),
         SessionId(UUID.fromString("223e4567-e89b-12d3-a456-426614174000")),
         definition.id,

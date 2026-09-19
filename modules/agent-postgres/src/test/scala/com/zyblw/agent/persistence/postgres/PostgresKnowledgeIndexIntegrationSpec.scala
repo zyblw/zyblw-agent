@@ -27,12 +27,14 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
       knowledgeVersion: Option[String]
   )
 
-  /** 启动 `pgvector/pgvector:pg16`，依次执行 public 核心基线和专属 schema 中的知识库基线。 */
+  /** 启动 `pgvector/pgvector:0.8.6-pg18-bookworm`，依次执行 public 核心基线和专属 schema 中的知识库基线。 */
   private val harnessLayer: ZLayer[Any, Throwable, Harness] = ZLayer.scoped {
     for
       container <- ZIO.acquireRelease(
         ZIO.attemptBlocking {
-          val image = DockerImageName.parse("pgvector/pgvector:pg16").asCompatibleSubstituteFor("postgres")
+          val image = DockerImageName
+            .parse("pgvector/pgvector:0.8.6-pg18-bookworm")
+            .asCompatibleSubstituteFor("postgres")
           val value = PostgreSQLContainer(dockerImageNameOverride = image)
           value.start()
           value

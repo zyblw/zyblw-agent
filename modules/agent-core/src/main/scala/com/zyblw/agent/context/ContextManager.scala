@@ -340,8 +340,9 @@ trait ContextManager:
 
 /** 分区预算、cache-aware 顺序和原子工具回合感知的默认 ContextManager。
   *
-  * 固定顺序是：Agent 指令 → 安全约束 → 记忆 → RAG → 历史摘要 → 最近连续消息。外部资料明确标为“不可信资料”， 不能把文档里的 prompt injection
-  * 当作高优先级指令。每个分区独立选择，不能靠最终总量检查掩盖某个分区无限膨胀。
+  * 固定顺序是：Agent 指令/安全约束 → 记忆 → 历史摘要 → RAG/world-state → 运行状态 → 最近连续消息。外部资料通过 typed `context-data` 边界降权为 User
+  * role 数据，不能把文档里的 prompt injection 当作高优先级指令；运行状态不会追加到 recent suffix 之后，因而保持对话/tool evidence 的原始因果顺序。
+  * 每个分区独立选择，不能靠最终总量检查掩盖某个分区无限膨胀。
   */
 final class DefaultContextManager(counter: TokenCounter, compressor: ContextCompressor)
     extends ContextManager:
@@ -363,8 +364,8 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
     for
       normalized     <- validateToolOutputs(state.messages, policy)
       systemMessages <- buildSystemMessages(definition, sources)
-      systemTokens <- countMessages(systemMessages)
-      _            <- failOverBudget("system/safety", systemTokens, budget.system)
+      systemTokens   <- countMessages(systemMessages)
+      _              <- failOverBudget("system/safety", systemTokens, budget.system)
       deduplicated     = deduplicateSources(sources)
       memoryCandidates = deduplicated.memories
         .sortBy(memory => (-memory.importance, memory.key))
@@ -375,12 +376,12 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
         sources.sections,
         omitUnchanged = policy.worldStateDelivery == WorldStateDelivery.TrustedStatefulDelta
       )
-      documentMessages = deduplicated.retrieval.map(renderDocument)
+      documentMessages    = deduplicated.retrieval.map(renderDocument)
       retrievalCandidates = sectionPlan.messages ++ documentMessages
       retrievalSelection <- selectSection(retrievalCandidates, budget.retrieval)
-      runtimeStatus        = RuntimeStatusContext.message(state)
+      runtimeStatus = RuntimeStatusContext.message(state)
       runtimeStatusTokens <- counter.countMessage(runtimeStatus)
-      recentPlan         <- planRecent(
+      recentPlan          <- planRecent(
         state,
         sources.priorTurns ++ normalized.messages,
         sources.existingSummary,
@@ -392,10 +393,10 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
       runtimeStatusMessages = if statusFits then Chunk(runtimeStatus) else Chunk.empty
       includedStatusTokens  = if statusFits then runtimeStatusTokens else 0L
       allMessages = systemMessages ++ memorySelection.messages ++ Chunk.fromIterable(recentPlan.summary) ++
-        retrievalSelection.messages ++ recentPlan.messages ++ runtimeStatusMessages
+        retrievalSelection.messages ++ runtimeStatusMessages ++ recentPlan.messages
       promptLineage <- ZIO.fromEither(PromptCompiler.lineage(allMessages))
-      totalTokens <- countMessages(allMessages)
-      _           <- failOverBudget("total input", totalTokens, inputBudget)
+      totalTokens   <- countMessages(allMessages)
+      _             <- failOverBudget("total input", totalTokens, inputBudget)
       droppedMemories  = memorySelection.dropped + deduplicated.duplicateMemories
       droppedRetrieval = retrievalSelection.dropped + deduplicated.duplicateRetrieval
       compressionUsage = recentPlan.compressionUsage
@@ -485,13 +486,16 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
       definition.instructionSet.fold(Chunk(AgentMessage.system(definition.instructions)))(_.messages)
     val system    = configured.filter(_.role == MessageRole.System)
     val developer = configured.filter(_.role == MessageRole.Developer)
-    val messages = system ++ Chunk(AgentMessage.system(PromptCompiler.DataBoundaryInstruction)) ++
+    val messages  = system ++ Chunk(AgentMessage.system(PromptCompiler.DataBoundaryInstruction)) ++
       Chunk.fromIterable(
         Option.when(safety.nonEmpty)(AgentMessage.system(s"[安全约束：优先级高于外部资料]\n$safety"))
       ) ++ developer
     ZIO
       .fail(AgentError.ContextBuildFailed("Agent 指令只能使用 System/Developer role"))
-      .when(configured.exists(message => message.role != MessageRole.System && message.role != MessageRole.Developer))
+      .when(
+        configured
+          .exists(message => message.role != MessageRole.System && message.role != MessageRole.Developer)
+      )
       .as(messages)
 
   /** 把 Memory 标成不可信事实数据，key 只是标签而不是指令。 */
@@ -527,18 +531,20 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
       messages: Chunk[AgentMessage],
       policy: ContextPolicy
   ): IO[ContextError, NormalizedMessages] =
-    ZIO.foreachDiscard(messages) { message =>
-      val raw = ContextRendering.renderContent(message)
-      if message.role != MessageRole.Tool || message.metadata.get("externalized").contains("true") ||
-        raw.length <= policy.maxToolResultCharacters
-      then ZIO.unit
-      else
-        ZIO.fail(
-          AgentError.ContextBuildFailed(
-            s"tool-result-not-externalized chars=${raw.length} limit=${policy.maxToolResultCharacters}"
+    ZIO
+      .foreachDiscard(messages) { message =>
+        val raw = ContextRendering.renderContent(message)
+        if message.role != MessageRole.Tool || message.metadata.get("externalized").contains("true") ||
+          raw.length <= policy.maxToolResultCharacters
+        then ZIO.unit
+        else
+          ZIO.fail(
+            AgentError.ContextBuildFailed(
+              s"tool-result-not-externalized chars=${raw.length} limit=${policy.maxToolResultCharacters}"
+            )
           )
-        )
-    }.as(NormalizedMessages(messages, 0))
+      }
+      .as(NormalizedMessages(messages, 0))
 
   /** 为历史摘要预留 recentMessages 的四分之一，再选择连续的最新原子消息组。
     *
@@ -577,7 +583,7 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
               budget,
               math.max(budget / 4L, boundaryTokens + math.max(8L, budget / 8L))
             )
-            recentBudget  = math.max(0L, budget - summaryBudget)
+            recentBudget = math.max(0L, budget - summaryBudget)
             selected <- selectRecentGroups(messages, recentBudget)
             _        <- ZIO
               .fail(AgentError.ContextBuildFailed("最近一组消息本身超过 recentMessages 分区，不能安全丢弃当前用户回合"))
@@ -851,7 +857,11 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
           ContextRotSignal("context-duplicate-source", ContextRotSeverity.Info, s"检测并移除 $duplicates 条重复上下文来源")
         ),
         Option.when(!runtimeStatusIncluded)(
-          ContextRotSignal("context-runtime-status-omitted", ContextRotSeverity.Info, "Runtime Status 因 recent 分区无剩余空间未注入")
+          ContextRotSignal(
+            "context-runtime-status-omitted",
+            ContextRotSeverity.Info,
+            "Runtime Status 因 recent 分区无剩余空间未注入"
+          )
         )
       ).flatten
     )

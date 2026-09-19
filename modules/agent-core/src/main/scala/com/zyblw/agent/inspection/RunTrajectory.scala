@@ -26,7 +26,8 @@ final case class ModelCallLineageView(
     promptLayoutVersion: Option[String] = None,
     stablePrefixMessages: Option[Int] = None,
     stablePrefixFingerprintPrefix: Option[String] = None,
-    promptPlanFingerprintPrefix: Option[String] = None
+    promptPlanFingerprintPrefix: Option[String] = None,
+    modelCapabilitiesFingerprintPrefix: Option[String] = None
 ) derives JsonCodec
 
 object ModelCallLineageView:
@@ -49,7 +50,8 @@ object ModelCallLineageView:
       promptLayoutVersion = lineage.promptLayoutVersion,
       stablePrefixMessages = lineage.stablePrefixMessages,
       stablePrefixFingerprintPrefix = lineage.stablePrefixFingerprint.map(_.take(PrefixLength)),
-      promptPlanFingerprintPrefix = lineage.promptPlanFingerprint.map(_.take(PrefixLength))
+      promptPlanFingerprintPrefix = lineage.promptPlanFingerprint.map(_.take(PrefixLength)),
+      modelCapabilitiesFingerprintPrefix = lineage.modelCapabilitiesFingerprint.map(_.take(PrefixLength))
     )
 
 /** 主模型账本轨迹行；不含 CanonicalModelRequest。 */

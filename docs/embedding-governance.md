@@ -114,7 +114,7 @@ Provider HTTP 调用永远发生在这两个数据库短事务之外。
 
 ## 6. PostgreSQL 原子性与清理
 
-V001/V003 演进后包含三张治理表：
+0.9 fresh-install V001 直接包含三张治理表：
 
 | 表 | 作用 | 关键不变量 |
 |---|---|---|
@@ -133,7 +133,7 @@ requestId 永久占用。缓存读取不更新 last-access，防止热点 key �
 ## 7. 已验证能力与剩余生产边界
 
 `EmbeddingCacheStore.inMemory` 与 `EmbeddingQuotaStore.inMemory` 是并发正确的参考实现，只适合测试和单实例。多 Worker
-部署应使用已经提供的 PostgreSQL Adapter。真实 PostgreSQL 16 Testcontainers 已验证：Flyway SQL、批量 REAL[]
+部署应使用已经提供的 PostgreSQL Adapter。真实 PostgreSQL 18.6 Testcontainers 已验证：Flyway SQL、批量 REAL[]
 编解码、跨 Store 实例缓存命中、tenant 隔离、并发 Worker 只有一个通过硬配额、幂等冲突不计费、窗口清理级联释放
 requestId。执行命令见 [testing.md](testing.md)。
 

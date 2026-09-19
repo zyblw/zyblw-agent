@@ -73,7 +73,9 @@ final case class ModelCallContextLineage(
     promptLayoutVersion: Option[String] = None,
     stablePrefixMessages: Option[Int] = None,
     stablePrefixFingerprint: Option[String] = None,
-    promptPlanFingerprint: Option[String] = None
+    promptPlanFingerprint: Option[String] = None,
+    /** 路由时只读一次的 Provider+Model 能力合同指纹。 */
+    modelCapabilitiesFingerprint: Option[String] = None
 ) derives JsonCodec
 
 /** 主模型调用账本。`canonicalRequest` 仅在 Replayable 时出现，恢复不得把它投影到公共 API。 */

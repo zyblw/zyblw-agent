@@ -1,6 +1,7 @@
 package com.zyblw.agent.examples
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.integrations.*
 import com.zyblw.agent.integrations.anthropic.*
 import com.zyblw.agent.integrations.gemini.*
 import com.zyblw.agent.integrations.openai.*
@@ -20,10 +21,13 @@ import zio.json.*
   *   - `deepseek`：`DEEPSEEK_API_KEY`、可选 `DEEPSEEK_MODEL`；
   *   - `glm`：`GLM_API_KEY`、可选 `GLM_MODEL`；
   *   - `qwen`：`QWEN_API_KEY`、`QWEN_BASE_URL`、`QWEN_MODEL`；
+  *   - `kimi`：`MOONSHOT_API_KEY`、`KIMI_MODEL`、可选 `KIMI_BASE_URL`；
   *   - `openai-chat`：`OPENAI_API_KEY`、`OPENAI_MODEL`；
   *   - `openai-responses`：`OPENAI_API_KEY`、`OPENAI_MODEL`；
   *   - `anthropic`：`ANTHROPIC_API_KEY`、`ANTHROPIC_MODEL`；
-  *   - `gemini`：`GEMINI_API_KEY`、`GEMINI_MODEL`。
+  *   - `gemini`：`GEMINI_API_KEY`、`GEMINI_MODEL`；
+  *   - `relay` / `endpoints`：`ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON`，可选 `ZYBLW_SMOKE_PROVIDER_ID` 选择其中一个逻辑
+  *     Provider，缺省验证 `defaultProvider`。
   */
 object ProviderSmokeExample extends ZIOAppDefault:
 
@@ -34,7 +38,7 @@ object ProviderSmokeExample extends ZIOAppDefault:
     */
   val run: ZIO[Any, Any, Any] = program.provide(Client.default)
 
-  private val program: ZIO[Client, AgentError | java.io.IOException, Unit] =
+  private lazy val program: ZIO[Client, AgentError | java.io.IOException, Unit] =
     for
       provider <- required("ZYBLW_SMOKE_PROVIDER").map(_.trim.toLowerCase)
       client   <- ZIO.service[Client]
@@ -65,6 +69,10 @@ object ProviderSmokeExample extends ZIOAppDefault:
       ProviderPresets.qwenFromEnvironment.map(config =>
         Target(OpenAICompatibleChatModel(client, config), config.defaultModel)
       )
+    case "kimi" =>
+      ProviderPresets.kimiFromEnvironment.map(config =>
+        Target(OpenAICompatibleChatModel(client, config), config.defaultModel)
+      )
     case "openai-chat" =>
       ProviderPresets.openAIFromEnvironment.map(config =>
         Target(OpenAICompatibleChatModel(client, config), config.defaultModel)
@@ -81,10 +89,24 @@ object ProviderSmokeExample extends ZIOAppDefault:
       GeminiInteractionsConfig.fromEnvironment.map(config =>
         Target(GeminiInteractionsChatModel(client, config), config.defaultModel)
       )
+    case "relay" | "endpoints" =>
+      for
+        config   <- ProviderEndpointsConfig.fromEnvironment
+        selected <- ZIO
+          .config(Config.string("ZYBLW_SMOKE_PROVIDER_ID").optional)
+          .mapError(error => AgentError.InvalidConfiguration(s"中转站 smoke 目标无效: $error"))
+          .map(_.map(_.trim).filter(_.nonEmpty).getOrElse(config.defaultProvider))
+        assembled    <- ProviderEndpoints.assemble(config).provideEnvironment(ZEnvironment(client))
+        registration <- ZIO
+          .fromOption(assembled._2.registrations.find(_.provider == selected))
+          .orElseFail(
+            AgentError.InvalidConfiguration("ZYBLW_SMOKE_PROVIDER_ID 必须指向已声明的 Provider")
+          )
+      yield Target(registration.chatModel, registration.defaultModel)
     case _ =>
       ZIO.fail(
         AgentError.InvalidConfiguration(
-          "ZYBLW_SMOKE_PROVIDER 必须是 deepseek/glm/qwen/openai-chat/openai-responses/anthropic/gemini"
+          "ZYBLW_SMOKE_PROVIDER 必须是 deepseek/glm/qwen/kimi/openai-chat/openai-responses/anthropic/gemini/relay"
         )
       )
 

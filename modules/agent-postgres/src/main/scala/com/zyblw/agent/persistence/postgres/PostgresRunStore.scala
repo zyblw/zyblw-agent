@@ -849,26 +849,6 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
       .flatMap(count => if count == 1 then ZIO.unit else ZIO.fail(AgentError.RunNotFound(runId)))
   }
 
-  /** 读取当前版本与事件游标，专用于准确区分 OptimisticLock、非法 save 与 RunNotFound。 */
-  private def currentRunPosition(connection: Connection, runId: RunId): IO[StoreError, (Version, Long)] =
-    ZIO
-      .attemptBlocking {
-        val statement = connection.prepareStatement(
-          """SELECT version, COALESCE(state_json ->> 'lastEventSequence', '-1')::bigint
-            |FROM agent_runs WHERE run_id = ?::uuid""".stripMargin
-        )
-        try
-          statement.setString(1, runId.asString)
-          val result = statement.executeQuery()
-          if result.next() then Version(result.getLong(1)) -> result.getLong(2)
-          else throw java.util.NoSuchElementException(runId.asString)
-        finally statement.close()
-      }
-      .mapError {
-        case _: java.util.NoSuchElementException => AgentError.RunNotFound(runId)
-        case error                               => AgentError.PersistenceFailure("读取版本与事件游标失败", Some(error))
-      }
-
   /** 在当前事务中验证并锁住有效租约行。
     *
     * `FOR SHARE` 不会阻塞其他只读诊断，但会阻止 claim/heartbeat/complete/abandon 对该行的 UPDATE，直到短事务提交。 参数必须同时匹配
@@ -1126,7 +1106,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
           statement.setString(2, lease.owner.value)
           statement.setString(3, lease.token.value)
           statement.setLong(4, lease.generation)
-          statement.executeUpdate()
+          statement.executeUpdate(): Unit
         finally statement.close()
       }
       .mapError(error => databaseError("完成到期挂起失败", error))
@@ -1140,7 +1120,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
         val statement = connection.prepareStatement("DELETE FROM agent_suspensions WHERE run_id = ?::uuid")
         try
           statement.setString(1, state.runId.asString)
-          statement.executeUpdate()
+          statement.executeUpdate(): Unit
         finally statement.close()
       case Some(record) =>
         val statement = connection.prepareStatement(
@@ -1196,7 +1176,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
             case None           => statement.setObject(3, null)
           statement.setString(4, record.expiryOutcome.toString)
           setInstant(statement, 5, record.createdAt)
-          statement.executeUpdate()
+          statement.executeUpdate(): Unit
         finally statement.close()
 
 final private case class VersionConflict(actual: Long)                        extends RuntimeException

@@ -218,8 +218,8 @@ report = {
     "classification": "local_docker_ha_regression_only",
     "generatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "topology": {
-        "primaryImage": "postgres:16-alpine",
-        "standbyImage": "postgres:16-alpine",
+        "primaryImage": "postgres:18-alpine",
+        "standbyImage": "postgres:18-alpine",
         "replication": "physical_streaming",
         "primaryPort": int(primary_port),
         "standbyPort": int(standby_port),

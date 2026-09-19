@@ -76,7 +76,10 @@ object OpenAIResponsesWireSpec extends ZIOSpecDefault:
               )
             )
           ),
-          settings = ModelSettings(toolChoice = ToolChoice.Specific("lookup"))
+          settings = ModelSettings(
+            toolChoice = ToolChoice.Specific("lookup"),
+            reasoningEffort = Some(ReasoningEffort.Max)
+          )
         )
         encoded <- ZIO.fromEither(OpenAIResponsesWire.encodeRequest(request, config, streaming = false))
         json = encoded.toJson
@@ -96,6 +99,7 @@ object OpenAIResponsesWireSpec extends ZIOSpecDefault:
         json.contains("\"type\":\"function_call_output\""),
         json.contains("\"call_id\":\"call-1\""),
         json.contains("\"name\":\"lookup\""),
+        json.contains("\"reasoning\":{\"effort\":\"xhigh\"}"),
         !json.contains("\"function\":{\"name\":\"lookup\"")
       )
     },

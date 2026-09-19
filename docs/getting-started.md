@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-28
+> 最后核验：2026-09-17
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -97,6 +97,15 @@ lease/heartbeat 参数。默认环境变量前缀为 `ZYBLW_AGENT_`；完整字�
 ## 5. 接入真实模型
 
 复制 `.env.example`，只设置环境变量；不要把 API Key 放入 AgentDefinition、日志或文档。配置说明见 [providers.md](providers.md)。
+
+生产参考宿主支持两种互斥入口：
+
+- 未设置或留空 `ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON`：读取单一 `OPENAI_*`；
+- 设置非空 JSON：装配多个官方兼容端点或中转站，Key 只通过每项的 `apiKeyEnv` 引用。
+
+同一网关承载多家模型时，按实际 wire 方言拆成多个 `providerId`，不要让一个含糊 profile 同时发送 OpenAI、DeepSeek、
+Qwen 和 Kimi 的私有推理字段。上线前对每个实际组合运行
+[真实 Provider smoke](provider-live-smoke.md)；基础 smoke 通过不代表工具调用或 Context 压缩已经通过。
 
 ## 6. 使用耐久 RunStore
 

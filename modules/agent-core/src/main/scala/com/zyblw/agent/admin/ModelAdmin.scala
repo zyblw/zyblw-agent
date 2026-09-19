@@ -33,7 +33,8 @@ final case class ModelCapabilitiesView(
     promptCacheKind: String = "Unsupported",
     reportsCacheReadTokens: Boolean = false,
     reportsCacheWriteTokens: Boolean = false,
-    promptCacheRetention: Chunk[String] = Chunk.empty
+    promptCacheRetention: Chunk[String] = Chunk.empty,
+    supportedReasoningEfforts: Chunk[String] = Chunk.empty
 ) derives JsonCodec
 
 /** 目录中的一个可选模型。

@@ -381,6 +381,7 @@ export interface ModelCapabilitiesView {
   reportsCacheReadTokens: boolean;
   reportsCacheWriteTokens: boolean;
   promptCacheRetention: string[];
+  supportedReasoningEfforts: string[];
 }
 
 /** 单价；金额是 BigDecimal 字符串，直接展示，不要 parseFloat 后再格式化。 */

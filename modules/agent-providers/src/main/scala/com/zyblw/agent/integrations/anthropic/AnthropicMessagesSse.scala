@@ -95,15 +95,15 @@ private[anthropic] object AnthropicMessagesSse:
       .getOrElse(state.cacheWriteInputTokens)
     AnthropicMessagesWire.validatedUsage(input, 0L, "message_start usage", cacheRead, cacheWrite).map {
       normalized =>
-      val next = state.copy(
-        responseId = id,
-        inputTokens = normalized.inputTokens,
-        cacheReadInputTokens = cacheRead,
-        cacheWriteInputTokens = cacheWrite,
-        started = true
-      )
-      val emitted = if state.started then Chunk.empty else Chunk(ModelStreamEvent.ResponseStarted(id))
-      next -> emitted
+        val next = state.copy(
+          responseId = id,
+          inputTokens = normalized.inputTokens,
+          cacheReadInputTokens = cacheRead,
+          cacheWriteInputTokens = cacheWrite,
+          started = true
+        )
+        val emitted = if state.started then Chunk.empty else Chunk(ModelStreamEvent.ResponseStarted(id))
+        next -> emitted
     }
 
   /** 建立 text/tool_use/thinking block；tool_use 立即发出稳定 ID 与名称。 */

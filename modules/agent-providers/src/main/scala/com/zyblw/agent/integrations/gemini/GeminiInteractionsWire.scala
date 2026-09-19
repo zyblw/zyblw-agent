@@ -68,6 +68,17 @@ private[gemini] object GeminiInteractionsWire:
         )
       else if request.settings.toolChoice.isInstanceOf[ToolChoice.Specific] then
         Left(AgentError.UnsupportedModelCapability("gemini", "specific tool choice", "当前原生适配器尚未承诺该契约"))
+      else if request.settings.reasoningEffort.exists(
+          !GeminiInteractionsDescriptor.value.capabilities.reasoningEfforts.contains(_)
+        )
+      then
+        Left(
+          AgentError.UnsupportedModelCapability(
+            "gemini",
+            "reasoning effort",
+            s"请求档位=${request.settings.reasoningEffort.get}"
+          )
+        )
       else
         sequence(request.messages.filterNot(isInstruction).map(encodeMessage)).map { encoded =>
           val steps    = encoded.flatten
@@ -216,6 +227,7 @@ private[gemini] object GeminiInteractionsWire:
     val fields = List(
       request.settings.temperature.map(value => "temperature" -> Json.Num(value)),
       request.settings.maxOutputTokens.map(value => "max_output_tokens" -> Json.Num(value)),
+      request.settings.reasoningEffort.map(value => "thinking_level" -> Json.Str(value.toString.toLowerCase)),
       Option.when(request.tools.nonEmpty)("tool_choice" -> Json.Str(request.settings.toolChoice match
         case ToolChoice.Auto        => "auto"
         case ToolChoice.None        => "none"

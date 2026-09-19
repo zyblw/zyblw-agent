@@ -87,7 +87,7 @@ object KnowledgeQaHost extends ZIOAppDefault:
       if knowledge.hasPending then knowledge.pendingVersions.mkString(",") else "none"
     val verdict =
       if readiness.schema.hasPending || knowledge.hasPending then "先 migrate 空库或补齐 pending，再 serve。"
-      else if readiness.drainRequired then "schema 已是 0.8 基线，但仍有进行中工作，切换进程前先 drain。"
+      else if readiness.drainRequired then "schema 已是当前 0.9 基线，但仍有进行中工作，切换进程前先 drain。"
       else "可以 serve 或继续摄入。"
     s"""问答宿主预检
   核心 schema: $core

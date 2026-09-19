@@ -88,6 +88,7 @@ private[gemini] object GeminiInteractionsDescriptor:
       streaming = true,
       parallelToolCalls = true,
       usageReporting = true,
-      promptCache = PromptCacheCapability.implicitRead
+      promptCache = PromptCacheCapability.implicitRead,
+      reasoningEfforts = Set(ReasoningEffort.Low, ReasoningEffort.Medium, ReasoningEffort.High)
     )
   )

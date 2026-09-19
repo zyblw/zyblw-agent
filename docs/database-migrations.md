@@ -1,8 +1,8 @@
 # PostgreSQL 自动迁移、结构校验与知识库基线
 
 > 状态：0.9.0 单文件全新基线
-> 最后核验：2026-08-28
-> 事实来源：`AgentPostgresMigrations.scala`、migration resource、PostgreSQL 16 集成测试
+> 最后核验：2026-09-17
+> 事实来源：`AgentPostgresMigrations.scala`、migration resource、PostgreSQL 18 集成测试
 
 ## 默认模型
 
@@ -74,9 +74,9 @@ heading/page/bbox/block lineage；`R__agent_knowledge_1024_comments.sql` 幂等�
 Flyway checksum 负责发现已执行脚本被修改；结构探针负责发现 history 仍在但关键表/列被人工删除。这不是通用 schema diff，生产仍应禁止手工 DDL并监控
 Flyway/数据库审计。
 
-## 0.3.0 只支持 fresh install
+## 0.9.0 只支持 fresh install
 
-不支持把 `0.2.x` 的 V001/V007/V008/V009 history 原地升级为新的 V001。必须创建空 schema/新数据库；不得使用 Flyway
+不支持把 `0.8.x` 或更早 history 原地升级为当前 0.9 V001。必须创建空 schema/新数据库；不得使用 Flyway
 `repair`、删除 history、伪造 checksum 或 `baselineOnMigrate` 隐藏未知表。旧数据库是否删除属于宿主的数据治理决策，
 框架不会自动清理。
 
@@ -96,6 +96,6 @@ Flyway/数据库审计。
 
 ## baseline 冻结点
 
-核心 V001/V002/V003 与 0.6 的 1024 knowledge V001 都在发布后永久冻结。公开 Maven 制品可能已被第三方执行；
-把后续 DDL 合并回既有 V001 会制造 checksum 漂移；任何已发布 checksum
-变化都属于发布阻断，不得用 `repair` 掩盖。
+`0.9.0` 尚未公开发布时，仓库只接受核心与知识各一份最新 V001，旧候选 migration 已删除并由机器门禁阻止重新出现。
+一旦 `0.9.0` 公开发布，这两份 V001 就永久冻结；后续已发布线上的 DDL 必须使用新的追加 migration，不能再合并回 V001，
+也不得用 `repair` 掩盖 checksum 漂移。

@@ -156,7 +156,8 @@ private[openai] object OpenAIResponsesWire:
     "max_output_tokens",
     "parallel_tool_calls",
     "store",
-    "stream"
+    "stream",
+    "reasoning"
   )
 
   /** 把框架请求编码成 Responses 创建请求。
@@ -202,12 +203,21 @@ private[openai] object OpenAIResponsesWire:
           val temperature = request.settings.temperature.map(value => "temperature" -> Json.Num(value))
           val maxTokens   =
             request.settings.maxOutputTokens.map(value => "max_output_tokens" -> Json.Num(value))
+          val reasoning = request.settings.reasoningEffort
+            .map(effort => "reasoning" -> obj("effort" -> Json.Str(reasoningEffort(effort))))
           obj(
-            required ++ List(tools, toolChoice, temperature, maxTokens).flatten ++ options.toList
+            required ++ List(tools, toolChoice, temperature, maxTokens, reasoning).flatten ++ options.toList
               .sortBy(_._1)*
           )
         }
     }
+
+  private def reasoningEffort(effort: ReasoningEffort): String = effort match
+    case ReasoningEffort.None   => "none"
+    case ReasoningEffort.Low    => "low"
+    case ReasoningEffort.Medium => "medium"
+    case ReasoningEffort.High   => "high"
+    case ReasoningEffort.Max    => "xhigh"
 
   /** 解码非流式 Response JSON。
     *

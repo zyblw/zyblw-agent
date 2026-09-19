@@ -167,7 +167,7 @@ final private[agent] class ModelCallCoordinator(
         fingerprint = fingerprint,
         messageCount = request.messages.length,
         toolCount = request.tools.length,
-        lineage = lineageOf(state, prepared, request),
+        lineage = lineageOf(state, prepared, request, routing.capabilities),
         instructionFingerprint = instructionFp,
         canonicalRequest =
           Option.when(policy == CapturePolicy.Replayable)(CanonicalModelRequest.from(request)),
@@ -274,7 +274,8 @@ final private[agent] class ModelCallCoordinator(
   private def lineageOf(
       state: AgentState,
       prepared: PreparedContext,
-      request: ChatRequest
+      request: ChatRequest,
+      capabilities: ModelCapabilities
   ): ModelCallContextLineage =
     ModelCallContextLineage(
       estimatedTokens = prepared.usage.estimatedTokens,
@@ -296,7 +297,8 @@ final private[agent] class ModelCallCoordinator(
       stablePrefixFingerprint = Some(
         CanonicalModelRequest.stablePrefixFingerprint(request, prepared.promptLineage.stablePrefixMessages)
       ),
-      promptPlanFingerprint = Some(prepared.promptLineage.planFingerprint)
+      promptPlanFingerprint = Some(prepared.promptLineage.planFingerprint),
+      modelCapabilitiesFingerprint = Some(capabilities.fingerprint)
     )
 
   private def pendingFrom(record: ModelCallExecutionRecord): PendingModelCall =
