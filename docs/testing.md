@@ -63,7 +63,7 @@ Space/Profile knowledge 两条唯一 V001 绿场基线验证该约束。
 
 2026-09-19 当前基线复核：
 
-- Scala 3.9.0 LTS、ZIO 2.1.26、ZIO HTTP 3.11.6、zio-schema 1.8.7、zio-json 1.1.0、Tika 4.0.0、Flyway 13.7.0 与 OpenTelemetry 1.66.0 组合编译通过；`zio-schema` 固定为 ZIO HTTP 3.11.6 官方依赖线，而不是越过兼容边界追逐 1.9.0；
+- Scala 3.9.0 LTS、ZIO 2.1.26、ZIO HTTP 3.11.6、zio-schema 1.8.7、zio-json 1.0.0、Tika 4.0.0、Flyway 13.7.0 与 OpenTelemetry 1.66.0 组合编译通过；`zio-schema` 固定为 ZIO HTTP 3.11.6 官方依赖线，而不是越过兼容边界追逐 1.9.0；zio-json 必须与 schema-json 的编译版本一致；
 - `documentLoaders/testFull; rag/testFull; evals/testFull; postgres/compile; opentelemetry/testFull` 全部通过、0 失败；公开 PDF 用例在普通测试中按设计忽略，不用易漂移的测试数量代替命令结果；
 - `./scripts/test-public-pdf-rag.sh` 对三个固定 SHA-256 的真实 PDF 运行两项端到端契约：Docling 技术报告样本经 Tika/PDFBox（非 Docling Serve）完成解析、分页/结构、切分、索引、检索与 citation；Open RAG Benchmark 固定 qrel 的正例在固定负例之前返回；
 - `RUN_POSTGRES_INTEGRATION=1 postgres/testFull` 使用 PostgreSQL 18.6 和 pgvector 0.8.6 镜像执行唯一 V001、事务、并发、lease/fencing、ACL、向量与治理契约；

@@ -50,7 +50,7 @@ Global / concurrentRestrictions += Tags.limit(Tags.Test, 1)
 // ---------------------------------------------------------------------------
 
 lazy val zioVersion            = "2.1.26"
-lazy val zioJsonVersion        = "1.1.0"
+lazy val zioJsonVersion        = "1.0.0"
 lazy val zioSchemaVersion      = "1.8.7"
 lazy val zioHttpVersion        = "3.11.6"
 lazy val postgresVersion       = "42.7.13"

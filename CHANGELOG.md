@@ -5,6 +5,7 @@ All notable user-visible changes will be recorded here. The project follows
 
 ## 0.9.0 - Unreleased
 
+- 将 `zio-json` 固定为 `1.0.0`，与 `zio-schema-json` 1.8.7 / ZIO HTTP 3.11.6 的编译线一致；单独覆盖到 1.1.0 会在 Endpoint JSON 解码时触发 `Lexer.firstField` 的 `NoSuchMethodError`。
 - 中转站现在可以通过 `ZYBLW_SMOKE_PROVIDER=relay` 直接复用 Provider、MemoryExtractor 与 Context 压缩 live smoke；端点根 URL 改为严格 URI 校验，并补充同一网关多 wire 方言的生产配置与准入规则。`ProductionSupportHost` 与 `KnowledgeQaHost` 已接入同一配置驱动装配：存在非空 `ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON` 时优先构造多端点路由，缺失或空白时才使用单一 `OPENAI_*`；非法 JSON、端点约束或缺失密钥均类型化失败，不静默降级。Docker Compose、preflight 与环境示例同步支持这两条生产入口。
 
 ### 破坏性变更：耐久形状归位（无原地升级路径，需重建数据库）

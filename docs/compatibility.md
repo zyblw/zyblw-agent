@@ -12,7 +12,7 @@
 | sbt | 2.0.1 | 仓库 wrapper/构建基线 |
 | ZIO | 2.1.26 | 当前稳定线 |
 | ZIO HTTP | 3.11.6 | 当前稳定线，与 ZIO 2.1.26 对齐 |
-| zio-schema / zio-json | 1.8.7 / 1.1.0 | schema 采用 ZIO HTTP 3.11.6 的已验证依赖线；避免二进制矩阵漂移 |
+| zio-schema / zio-json | 1.8.7 / 1.0.0 | schema-json 1.8.7 按 zio-json 1.0.0 编译；不可覆盖到 1.1.0，否则 Endpoint 解码会 NoSuchMethodError |
 | PostgreSQL / pgvector | 18.6 / 0.8.6 | 真实 Testcontainers 与本地 Compose 基线 |
 | JDBC / Flyway | 42.7.13 / 13.7.0 | 当前数据库门禁组合 |
 | Apache Tika | 4.0.0 | 文档 Loader 已迁移到 Tika 4 API |
