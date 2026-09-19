@@ -91,7 +91,8 @@ object AgentHttpContractSpec extends ZIOSpecDefault:
         requiredPaths.forall(path => json.contains(s"\"$path\"")),
         requiredWireFields.forall(field => json.contains(s"\"$field\"")),
         json.contains("\"202\""),
-        json.contains("text/event-stream")
+        json.contains("text/event-stream"),
+        !json.contains(""""$ref" : "#/components/schemas/ServerSentEvent"""")
       )
     },
     test("OpenAPI 不包含内部状态、工具参数、结果或认证上下文") {
