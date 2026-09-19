@@ -721,5 +721,13 @@ object AgentHttpContract:
   lazy val openApi: OpenAPI =
     OpenAPIGen.fromEndpoints("zyblw-agent API", AgentHttpProtocol.ContractVersion, endpoints)
 
-  /** 用于 HTTP 响应、发布快照和契约测试的确定性 pretty JSON。 */
-  lazy val openApiJson: String = openApi.toJsonPretty
+  /** 用于 HTTP 响应、发布快照和契约测试的确定性 pretty JSON。
+    *
+    * ZIO HTTP 3.11.6 为 SSE stream 生成 `ServerSentEvent` 引用但没有把该内部传输类型加入 components。OpenAPI 描述的是 SSE data
+    * 载荷而不是运行时 envelope，因此在公开规范中收窄为 string，避免悬空引用使兼容性工具无法加载文档。
+    */
+  lazy val openApiJson: String =
+    openApi.toJsonPretty.replace(
+      """"$ref" : "#/components/schemas/ServerSentEvent"""",
+      """"type" : "string""""
+    )
