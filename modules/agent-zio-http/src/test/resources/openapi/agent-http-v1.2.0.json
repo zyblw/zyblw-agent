@@ -1985,10 +1985,6 @@
             "type" : "integer",
             "format" : "int64"
           },
-          "outputTokens" : {
-            "type" : "integer",
-            "format" : "int64"
-          },
           "modelCalls" : {
             "type" : "integer",
             "format" : "int32"
@@ -2008,6 +2004,16 @@
             "format" : "int64",
             "description" : "If not set, this field defaults to the value of the default annotation.",
             "default" : 0
+          },
+          "cacheWriteInputTokens" : {
+            "type" : "integer",
+            "format" : "int64",
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : 0
+          },
+          "outputTokens" : {
+            "type" : "integer",
+            "format" : "int64"
           },
           "toolCalls" : {
             "type" : "integer",

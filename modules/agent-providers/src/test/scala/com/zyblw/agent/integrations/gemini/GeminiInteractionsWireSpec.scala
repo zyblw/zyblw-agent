@@ -79,7 +79,10 @@ object GeminiInteractionsWireSpec extends ZIOSpecDefault:
             AgentMessage.tool("call-1", "lookup", ToolResult(Json.Obj("answer" -> Json.Str("ok"))))
           ),
           tools = Chunk(ToolDefinition("lookup", "查询", Json.Obj("type" -> Json.Str("object")))),
-          settings = ModelSettings(toolChoice = ToolChoice.Required)
+          settings = ModelSettings(
+            toolChoice = ToolChoice.Required,
+            reasoningEffort = Some(ReasoningEffort.Medium)
+          )
         )
         encoded <- ZIO.fromEither(GeminiInteractionsWire.encodeRequest(request, config, streaming = false))
         body = encoded.toJson
@@ -93,6 +96,7 @@ object GeminiInteractionsWireSpec extends ZIOSpecDefault:
         body.contains("\"system_instruction\":\"系统规则\\n\\n[developer]\\n开发规则\""),
         body.contains("\"type\":\"function_result\""),
         body.contains("\"call_id\":\"call-1\""),
+        body.contains("\"thinking_level\":\"medium\""),
         body.contains("signed-call"),
         !body.contains("previous_interaction_id")
       )
@@ -149,8 +153,23 @@ object GeminiInteractionsWireSpec extends ZIOSpecDefault:
           )
         )
         .exit
-      truncated.zipWith(invalidUsage)((a, b) => (a, b)).zipWith(invalidOption) { case ((a, b), c) =>
-        assertTrue(a.isFailure, b.isFailure, c.isFailure)
-      }
+      val invalidEffort = ZIO
+        .fromEither(
+          GeminiInteractionsWire.encodeRequest(
+            ChatRequest(
+              Chunk(AgentMessage.user("hi")),
+              settings = ModelSettings(reasoningEffort = Some(ReasoningEffort.Max))
+            ),
+            config,
+            streaming = false
+          )
+        )
+        .exit
+      truncated
+        .zipWith(invalidUsage)((a, b) => (a, b))
+        .zipWith(invalidOption)((ab, c) => (ab, c))
+        .zipWith(invalidEffort) { case (((a, b), c), d) =>
+          assertTrue(a.isFailure, b.isFailure, c.isFailure, d.isFailure)
+        }
     }
   )

@@ -104,7 +104,7 @@ report = {
     "mode": mode.removeprefix("--"),
     "generatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "topology": {
-        "postgres": "postgres:16-alpine",
+        "postgres": "postgres:18-alpine",
         "pgbouncer": "edoburu/pgbouncer:v1.25.1-p0",
         "poolMode": "transaction",
         "defaultPoolSize": 4,

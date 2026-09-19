@@ -2,11 +2,9 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-05
+> 最后核验：2026-09-17
 >
 > 事实来源：对应模块源码、测试与构建定义
-
-更新时间：2026-07-17。
 
 ## 1. 为什么 stub contract 之外还需要真实 smoke
 
@@ -43,10 +41,14 @@ HTTP body、endpoint、request ID 或 API Key。
 | `deepseek` | OpenAI-compatible + DeepSeek profile | `DEEPSEEK_API_KEY`；模型可选 |
 | `glm` | OpenAI-compatible + GLM profile | `GLM_API_KEY`；模型可选 |
 | `qwen` | OpenAI-compatible + Qwen profile | `QWEN_API_KEY`、`QWEN_BASE_URL`、`QWEN_MODEL` |
+| `kimi` | OpenAI-compatible + Kimi profile | `MOONSHOT_API_KEY`、`KIMI_MODEL`；`KIMI_BASE_URL` 可选 |
 | `openai-chat` | OpenAI Chat Completions | `OPENAI_API_KEY`、`OPENAI_MODEL` |
 | `openai-responses` | OpenAI Responses 原生 | `OPENAI_API_KEY`、`OPENAI_MODEL` |
 | `anthropic` | Anthropic Messages 原生 | `ANTHROPIC_API_KEY`、`ANTHROPIC_MODEL` |
 | `gemini` | Gemini Interactions 原生 | `GEMINI_API_KEY`、`GEMINI_MODEL` |
+| `relay` | 配置驱动 OpenAI-compatible 中转站 | `ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON`；`ZYBLW_SMOKE_PROVIDER_ID` 可选 |
+
+`ZYBLW_SMOKE_PROVIDER=endpoints` 是 `relay` 的等价别名。
 
 密钥只能放 Secret Manager、CI secret 或本机未提交环境文件，不要写进命令历史、文档或测试报告。
 
@@ -58,6 +60,19 @@ HTTP body、endpoint、request ID 或 API Key。
 ZYBLW_SMOKE_PROVIDER=deepseek \
   mise exec -- sbt "examples/runMain com.zyblw.agent.examples.ProviderSmokeExample"
 ```
+
+没有使用 mise 时可省略 `mise exec --`，直接调用同一 sbt 任务。
+
+中转站使用同一命令，只替换选择器；留空 `ZYBLW_SMOKE_PROVIDER_ID` 时验证配置中的 `defaultProvider`：
+
+```bash
+ZYBLW_SMOKE_PROVIDER=relay \
+ZYBLW_SMOKE_PROVIDER_ID=relay-deepseek \
+  mise exec -- sbt "examples/runMain com.zyblw.agent.examples.ProviderSmokeExample"
+```
+
+该入口复用生产的多端点装配、凭据解析、兼容 profile、HTTP/SSE 和响应解码路径。一个中转 URL 承载多种 wire 方言时，应为
+每种方言声明独立 `providerId` 并分别运行 smoke；一次通过不能替其他模型或 profile 提供证据。
 
 可选预算：
 
@@ -93,7 +108,8 @@ ZYBLW_SMOKE_PROVIDER=deepseek \
   mise exec -- sbt "examples/runMain com.zyblw.agent.examples.ContextCompressionLiveSmokeExample"
 ```
 
-同一个入口支持 `deepseek`、`glm`、`qwen`、`openai-chat`、`openai-responses`、`anthropic` 和 `gemini`。Runner 会：
+同一个入口支持 `deepseek`、`glm`、`qwen`、`kimi`、`openai-chat`、`openai-responses`、`anthropic`、`gemini` 和
+配置驱动的 `relay`。Runner 会：
 
 1. 在任何计费调用前查询模型能力，要求声明 tool calling；
 2. 要求传入的压缩器明确声明 `supportsModelAssisted=true`；
@@ -140,16 +156,16 @@ repetitions × maxModelCallsPerAttempt
 ## 5. CI 门禁建议
 
 1. PR 必跑 `testFull` 和 stub contract，不需要真实密钥；
-2. 预发布分支对实际启用的 Provider 运行通用 smoke；
+2. 预发布分支对每个实际启用的 Provider/模型运行通用 smoke，中转站不能只测默认模型；
 3. 启用模型辅助 Context 压缩前，对每个实际模型运行 Context smoke，并配置价格门禁；
 4. Memory 功能发布前额外运行 MemoryExtractor smoke；
 5. JSON 报告作为受控 CI artifact，不公开模型部署信息；
 6. smoke 失败禁止自动切换到能力未知的 Provider；
-7. 模型、endpoint、代理、Prompt/schema、价格或凭据变化后重新运行；
+7. 模型、endpoint、中转路由/映射、compatibility profile、代理、Prompt/schema、价格或凭据变化后重新运行；
 8. 用户流量上线仍需业务 eval、金丝雀、成本告警和 kill switch。
 
 ## 6. 当前诚实边界
 
-框架已提供统一 Runner、六个 Provider 选择目标、低敏报告、确定性测试、MemoryExtractor 和 Context 压缩专项入口。
+框架已提供统一 Runner、九个 Provider/中转选择目标、低敏报告、确定性测试、MemoryExtractor 和 Context 压缩专项入口。
 本地没有真实厂商密钥，本轮没有实际产生公网请求，也没有声称任何具体账号/模型已经通过 smoke。部署团队在对应网络、
 账号、模型和价格版本上执行后的报告，才是该环境的证据。

@@ -194,7 +194,7 @@ val configured: URLayer[DataSource, EvalTrendStore] =
   )
 ```
 
-0.3 fresh baseline 创建 `agent_eval_snapshots`，V007 增加独立的 `AgentReliability` suite kind，V009 增加独立的 `HarnessComparison` suite kind。每行同时保存：
+0.9 fresh-install V001 直接创建 `agent_eval_snapshots`，并包含独立的 `AgentReliability` 与 `HarnessComparison` suite kind。每行同时保存：
 
 - `snapshot_payload TEXT`：保留应用生成的确定性 UTF-8 字节，供 SHA-256 校验；
 - `snapshot_json JSONB`：供 SQL 分析和 dashboard 查询；
@@ -453,7 +453,7 @@ yield (latest, history)
 - 已完成带 checksum、文件锁、fsync、并发幂等和崩溃尾恢复的本地 Store；
 - 已完成 PostgreSQL Adapter、完整身份复合索引、成功基线部分索引、不可变并发幂等和读取完整性校验；
 - 已完成正式 `agent-eval-cli`、ZIO Config/Secret、严格 artifact 读取、文件/PostgreSQL 切换和稳定退出码；
-- 已用 PostgreSQL 16 Testcontainers 覆盖正式 Flyway、跨 Store 并发、kind 隔离、JSONB 规范化、篡改和 ID 冲突；
+- 已用 PostgreSQL 18 Testcontainers 覆盖正式 Flyway、跨 Store 并发、kind 隔离、JSONB 规范化、篡改和 ID 冲突；
 - 尚未提供对象存储 Adapter、Web dashboard 和跨数据集版本统计；
 - 尚未替业务建立真实中医黄金数据集，也没有部署账号的长期 Provider 基线；
 - Langfuse Scores 可展示维度趋势，但当前框架不会从 Langfuse 反向读取并把第三方状态作为唯一发布事实源。

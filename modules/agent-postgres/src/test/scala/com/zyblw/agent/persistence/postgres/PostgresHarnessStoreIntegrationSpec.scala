@@ -13,7 +13,7 @@ import zio.*
 import zio.json.*
 import zio.test.*
 
-/** 真实 PostgreSQL 16 验证 Harness CAS、外键、预算账本与恢复对账。
+/** 真实 PostgreSQL 18 验证 Harness CAS、外键、预算账本与恢复对账。
   *
   * 覆盖 `harness_goals`、`harness_plans`、`harness_skills`、`harness_interactions` 与
   * `harness_budget_reservations`。
@@ -56,7 +56,7 @@ object PostgresHarnessStoreIntegrationSpec extends ZIOSpecDefault:
         container <- ZIO.acquireRelease(
           ZIO.attemptBlocking {
             val value =
-              PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:16-alpine"))
+              PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:18-alpine"))
             value.start()
             value
           }

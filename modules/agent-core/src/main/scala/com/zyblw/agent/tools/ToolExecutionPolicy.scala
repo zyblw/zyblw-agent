@@ -121,7 +121,7 @@ final class ToolExecutor private (
     result match
       case _: ToolResult.Externalized => ZIO.succeed(result)
       case inline: ToolResult.Inline  =>
-        val bytes = inline.utf8ByteSize
+        val bytes      = inline.utf8ByteSize
         val characters = inline.value.toJson.length
         if bytes <= policy.externalizeAboveBytes && characters <= maxInlineCharacters then ZIO.succeed(inline)
         else

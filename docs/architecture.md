@@ -204,6 +204,7 @@ sequenceDiagram
 - [0027 RAG Retrieval Runtime 绿场基线](architecture/0027-rag-retrieval-runtime.md)
 - [0028 Functional Kernel 与 ZIO Runtime Driver](architecture/0028-functional-kernel-runtime-driver.md)
 - [0029 Context Authority、Prompt Lineage 与 Cache 非权威化](architecture/0029-context-authority-prompt-lineage.md)
+- [0030 强模型时代的 Capability-aware Control Runtime](architecture/0030-model-capability-control-runtime.md)
 - [Prompt Runtime、Context Authority 与 Cache 接入](prompt-runtime.md)
 - [Runtime、Context 与 Prompt Cache 一体化演进方案](architecture/runtime-context-evolution-plan.md)
 - [Model Runtime 现状审计（Phase 0）](architecture/model-runtime-current-state.md)

@@ -43,7 +43,7 @@ claim、heartbeat 与 Cancel 抢占不能穿过这一短事务，因此旧 gener
 
 - TestClock：租约过期、generation 递增、旧完成被拒绝。
 - 内存 command queue：幂等冲突、同 Run 串行、Cancel 抢占、DeadLetter 与人工 retry。
-- PostgreSQL 16 Testcontainers：24 worker `SKIP LOCKED`、过期抢占、Cancel 抢占和状态 fencing。
+- PostgreSQL 18 Testcontainers：24 worker `SKIP LOCKED`、过期抢占、Cancel 抢占和状态 fencing。
 - heartbeat 故障注入：业务 Fiber 被中断且 finalizer 执行。
 - Provider stub：断流、慢流、负 usage、429、5xx、取消传播。
 - `pg_dump`/`pg_restore`：Run 快照、命令正文与 dispatcher generation/token 恢复。

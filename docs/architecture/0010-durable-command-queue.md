@@ -2,7 +2,7 @@
 
 ## 状态
 
-已采纳并实现。HTTP、WorkerHost、Runtime、PostgreSQL migration、内存 Adapter 和真实 PostgreSQL 16 契约测试均已接入。
+已采纳并实现。HTTP、WorkerHost、Runtime、PostgreSQL migration、内存 Adapter 和真实 PostgreSQL 18 契约测试均已接入。
 
 ## 问题
 
@@ -122,7 +122,7 @@ Cancel 完成后，其他 Queued command 变为 Superseded，防止已取消 Run
 - 内存：幂等冲突、同 Run 串行、Cancel 抢占、Fiber finalizer、DeadLetter 与人工 retry。
 - Runtime：approvalId 绑定与决定重放窗口。
 - HTTP：202 回执、命令查询与 payload 隔离。
-- PostgreSQL 16：Start 四事实原子提交/并发幂等、24 worker claim、租约过期 generation 抢占、AgentState fencing、Cancel
+- PostgreSQL 18：Start 四事实原子提交/并发幂等、24 worker claim、租约过期 generation 抢占、AgentState fencing、Cancel
   抢占、备份恢复。
 
 ## 未解决边界

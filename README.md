@@ -29,11 +29,12 @@ Harness 不是第二套模型循环；Workflow 也不替代普通函数。多 Ag
 开发与运行基线：
 
 - JDK 21
-- Scala 3.8.4
+- Scala 3.9.0 LTS
 - sbt 2.0.1
 - ZIO 2.1.26
-- PostgreSQL 16+
-- 可配置的 OpenAI-compatible Provider
+- PostgreSQL 18（当前验证版本 18.6）+ pgvector 0.8.6
+- OpenAI Responses、Anthropic Messages、Gemini Interactions，以及可配置的 OpenAI-compatible Provider/中转站
+  （含 DeepSeek、Qwen、GLM、Kimi 一级档案）
 
 `0.9.0` 的书籍问答入口是 `KnowledgeQaHost`；客户支持与审批写工具仍走 `ProductionSupportHost`。二者都需要 PostgreSQL、可信身份头和 ZIO HTTP。`AgentQuickstart` 已删除。
 
@@ -43,13 +44,18 @@ export ZYBLW_AGENT_DB_USER=zyblw_migrate
 export ZYBLW_AGENT_DB_PASSWORD=...
 export OPENAI_BASE_URL=https://api.openai.com/v1
 export OPENAI_API_KEY=...
-export OPENAI_MODEL=gpt-4.1-mini
+export OPENAI_MODEL="your-deployment-model-id"
 
 sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost migrate"
 sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost ingest data/books"
 export ZYBLW_AGENT_DB_USER=zyblw_runtime
 sbt "examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost serve"
 ```
+
+生产参考宿主的模型装配顺序是显式的：配置 `ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON` 时装配多端点
+`RoutedChatModel`；未配置时使用单一 `OPENAI_BASE_URL/OPENAI_API_KEY/OPENAI_MODEL`。多端点 JSON 只保存
+`apiKeyEnv` 变量名，不保存 Key 值；同一中转 URL/Key 下的不同 wire 方言应拆成不同 `providerId`。完整 JSON、能力字段和
+smoke 命令见 [Provider 与能力协商](docs/providers.md#中转站与多端点)。
 
 创建 Run 返回 `202`：HTTP 只提交耐久命令，Worker 随后推进。调用方用 `Idempotency-Key`、`X-Tenant-Id`、`X-User-Id` 和 runId 查询 `/api/v1/runs/{runId}`。退款工具会停在 `WaitingForApproval`，必须由可信身份调用审批接口。
 
@@ -64,7 +70,22 @@ libraryDependencies ++= Seq(
 )
 ```
 
-第一支持面是 Docker 直连自管 PostgreSQL，见 [Docker 接入手册](docs/operations-docker-vm.md)。长时 soak、主备、PgBouncer 和滚动发布等宿主证据已延期，不阻止当前业务接入。CI 可用 `ZYBLW_AGENT_RUNTIME_MODE=contract` 跑脚本化模型，那不是生产配置。完整接入见 [总体使用手册](docs/usage-guide.md) 和 [快速开始](docs/getting-started.md)。
+第一支持面是 Docker 直连自管 PostgreSQL；可复制的参数、启动和回滚命令见
+[Docker 可执行配置](deploy/docker/README.md)，部署判断见 [Docker 接入手册](docs/operations-docker-vm.md)。这条路径可以进入业务开发和
+受限生产验收；长时 soak、主备、PgBouncer、滚动发布和备份恢复仍需在实际宿主环境补证，因此不能据此宣称通用生产 GA。
+CI 可用 `ZYBLW_AGENT_RUNTIME_MODE=contract` 跑脚本化模型，那不是生产配置。完整接入见
+[总体使用手册](docs/usage-guide.md) 和 [快速开始](docs/getting-started.md)。
+
+真实公开 PDF/RAG 回归不把大文件提交到仓库；脚本从原始发布地址下载、校验 SHA-256，并执行解析→结构切分→Embedding→
+发布→检索→citation 闭环：
+
+```bash
+./scripts/test-public-pdf-rag.sh
+```
+
+该门禁使用 Docling 技术报告与 Open RAG Benchmark 固定 qrel 样本；技术报告 PDF 由 Tika/PDFBox 提取，不调用远程
+Docling/OCR。它证明协议与检索链路，不替代真实模型答案质量、OCR、
+领域语料和许可证验收。详见 [文档 Loader 与知识摄取](docs/document-loaders.md#公开-pdfrag-端到端门禁)。
 
 ## 最小业务代码
 
@@ -142,7 +163,7 @@ flowchart TB
 | Workflow | 静态图校验、循环预算、fan-out、checkpoint、execution ledger、低敏 timeline/wake queue、durable wait/signal、受监督 wake worker | Experimental；独立 JVM `SIGKILL` + PostgreSQL restart 后双 generation 接管及 3 Worker/126 Run 有界 wake soak 已验证；仍需数据库 failover、节点丢失、长时 soak、人工任务与子图 |
 | Context / Memory | 分区预算、压缩、可信来源、长期记忆治理 | Beta；需要真实长会话质量趋势 |
 | RAG | 目录/PDF 摄取、Markdown+JSON、page/bbox lineage、结构切分、hybrid、rerank、相邻/同父级扩展、citation、eval | Beta；真实 OCR/恶意 PDF/大规模容量待验收 |
-| Provider | OpenAI-compatible、Responses、Anthropic、Gemini 与 capability contract | Beta；需要持续真实流量证据 |
+| Provider | OpenAI-compatible/中转站（DeepSeek/Qwen/GLM/Kimi）、Responses、Anthropic、Gemini、逐模型 capability 与 live smoke | Beta；每个实际 endpoint/model/profile 需要真实证据 |
 | 管理面 / 运维控制台 | scope fail-closed、能力探测、keyset 目录、CAS 配置覆盖与审计、Run SSE 调试器、七个面板 | Beta；跨 Run 成本聚合与嵌入式部署待完成 |
 | 模型治理 | 目录 fail-closed 校验、运行时 Provider/模型切换、探活、脱敏 HTTP 失败分类、价目表成本估算 | Beta；按 Agent 粒度覆盖与自动降级链待完成 |
 | HTTP / Ops | 异步 v1 API、耐久 SSE、OpenAPI、健康检查、Inspector、OTLP/Langfuse | Foundation/Beta；CLI、告警与事故演练待完成 |
@@ -158,7 +179,7 @@ modules/agent-rag               知识索引、Embedding 治理、混合检索
 modules/agent-document-loaders  Tika / Docling 文档加载与结构切分（重依赖隔离）
 modules/agent-rerank            外部 Rerank HTTP 协议
 modules/agent-evals             固定数据集评测、趋势与发布门禁
-modules/agent-providers         OpenAI-compatible / Responses / Anthropic / Gemini 适配与模型目录
+modules/agent-providers         OpenAI-compatible（DeepSeek/Qwen/GLM/Kimi）/ Responses / Anthropic / Gemini 适配与模型目录
 modules/agent-postgres          Flyway migration、耐久控制面、pgvector 知识索引、管理面 Store
 modules/agent-zio-http          HTTP v1 契约、Routes、OpenAPI、Host、管理面 API
 modules/agent-mcp               MCP client 与受控 Workspace
@@ -178,7 +199,7 @@ integration-tests/maven-consumer  只依赖已发布制品的独立消费者
 | 需要的能力 | 引入 artifact | 说明 |
 |---|---|---|
 | Agent Runtime、Tool、Context、Memory、Workflow SPI | `zyblw-agent-core` | 所有业务的最小起点 |
-| OpenAI-compatible、Responses、Anthropic、Gemini | `zyblw-agent-providers` | 只在接真实模型时加入 |
+| OpenAI-compatible（DeepSeek/Qwen/GLM/Kimi）、Responses、Anthropic、Gemini | `zyblw-agent-providers` | 只在接真实模型时加入 |
 | Knowledge Index、Embedding、Retrieval | `zyblw-agent-rag` | 不包含 PDF 解析器 |
 | Tika、Docling、PDF/Markdown Loader | `zyblw-agent-document-loaders` | 重型解析依赖保持可选 |
 | 外部模型 Rerank | `zyblw-agent-rerank` | 与基础检索分离 |
@@ -244,11 +265,12 @@ npm run dev          # 打开 http://localhost:3000，在右上角填写后端�
 分阶段扩流；不要把 `testFull` 绿色直接解释为某个业务已经生产就绪。
 
 1. 按生产参考宿主接入 PostgreSQL、真实 Provider、可信身份和 ZIO HTTP，先跑通 `migrate` 再 `serve`。
-2. 用 `ScriptedChatModel` 与 `AgentApplication.inMemory` 写确定性业务测试；不要把内存装配当成部署入口。
-3. 写工具保持固定 SQL、稳定业务幂等键、审批和 outbox；模型参数不能变成语句。
-4. 运行账号只有 DML。Flyway 与结构探针属于部署任务。
-5. 需要运维界面时再装配管理面，并单独确定入口、身份来源与限流。
-6. 当前单库 Docker 路径通过业务接入门禁即可引进；7 项宿主证据保持 `deferred`，在约定窗口的生产流量上测量后再补，不宣称通用 production-supported。
+2. 对每个实际 `(providerId, model, compatibilityProfile)` 运行 complete/stream smoke；使用工具或模型压缩时再跑专项 smoke。
+3. 用 `ScriptedChatModel` 与 `AgentApplication.inMemory` 写确定性业务测试；不要把内存装配当成部署入口。
+4. 写工具保持固定 SQL、稳定业务幂等键、审批和 outbox；模型参数不能变成语句。
+5. 运行账号只有 DML。Flyway 与结构探针属于部署任务。
+6. 需要运维界面时再装配管理面，并单独确定入口、身份来源与限流。
+7. 当前单库 Docker 路径通过业务接入门禁后进入金丝雀；宿主证据在真实流量窗口补齐前，不宣称通用 production-supported。
 
 ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`/ZIO Schema 维护 `/api/v1` 与 OpenAPI；Server 和
 关键 worker 由同一 Scope 管生命周期。它不会创建 DataSource、匿名认证或 Provider Secret。详见
@@ -309,6 +331,7 @@ ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`
 ## 构建、测试与发布
 
 ```bash
+./scripts/verify-business-ready.sh
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
 ./integration-tests/command-worker-kill-recovery.sh --restart-postgres

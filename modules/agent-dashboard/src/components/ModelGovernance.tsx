@@ -217,12 +217,19 @@ export function ModelGovernance({ capabilities }: { capabilities: AdminCapabilit
 
 /** 能力位徽章；只展示与"这个模型能不能承担 Agent 循环"直接相关的几项。 */
 function CapabilityBadges({ option }: { option: ModelOptionView }) {
+  // 管理面可能在滚动发布期间先连到尚未返回加法字段的旧副本；缺失只表示未声明，不能让整个目录崩溃。
+  const supportedReasoningEfforts = option.capabilities.supportedReasoningEfforts ?? [];
   const flags: { label: string; on: boolean; critical?: boolean }[] = [
     { label: '工具调用', on: option.capabilities.toolCalls, critical: true },
     { label: '并行工具', on: option.capabilities.parallelToolCalls },
     { label: '严格 Schema', on: option.capabilities.strictToolSchema },
     { label: '视觉', on: option.capabilities.vision },
-    { label: '思考', on: option.capabilities.thinking },
+    {
+      label: supportedReasoningEfforts.length
+        ? `推理 ${supportedReasoningEfforts.join('/')}`
+        : '推理默认',
+      on: option.capabilities.thinking,
+    },
     { label: '流式', on: option.capabilities.streaming },
     { label: `缓存 ${option.capabilities.promptCacheKind}`, on: option.capabilities.promptCacheKind !== 'Unsupported' },
   ];

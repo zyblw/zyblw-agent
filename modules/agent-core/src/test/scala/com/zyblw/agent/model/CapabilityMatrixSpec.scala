@@ -13,7 +13,11 @@ object CapabilityMatrixSpec extends ZIOSpecDefault:
         matrix.requireConsistent("openai", "gpt-4.1", declared).isRight,
         matrix.requireConsistent("openai", "gpt-4.1", declared.copy(vision = true)).isLeft,
         matrix
-          .requireConsistent("openai", "gpt-4.1", declared.copy(promptCache = PromptCacheCapability.implicitRead))
+          .requireConsistent(
+            "openai",
+            "gpt-4.1",
+            declared.copy(promptCache = PromptCacheCapability.implicitRead)
+          )
           .isLeft,
         matrix.requireConsistent("openai", "missing", declared).isLeft
       )
@@ -31,5 +35,21 @@ object CapabilityMatrixSpec extends ZIOSpecDefault:
         matrix.requireConsistent("relay", "deepseek-v4", declared).isRight,
         matrix.requireConsistent("relay", "*", declared).isLeft
       )
+    },
+    test("能力指纹不受 Set 构造顺序影响且能识别推理档位变化") {
+      val left = declared.copy(reasoningEfforts =
+        Set(
+          com.zyblw.agent.core.ReasoningEffort.High,
+          com.zyblw.agent.core.ReasoningEffort.Low
+        )
+      )
+      val reordered = declared.copy(reasoningEfforts =
+        Set(
+          com.zyblw.agent.core.ReasoningEffort.Low,
+          com.zyblw.agent.core.ReasoningEffort.High
+        )
+      )
+      val changed = declared.copy(reasoningEfforts = Set(com.zyblw.agent.core.ReasoningEffort.Low))
+      assertTrue(left.fingerprint == reordered.fingerprint, left.fingerprint != changed.fingerprint)
     }
   )

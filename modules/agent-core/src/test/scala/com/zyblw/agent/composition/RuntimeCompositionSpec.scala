@@ -88,12 +88,15 @@ object RuntimeCompositionSpec extends ZIOSpecDefault:
         providerOptions = List("tier" -> Json.Str("prod"), "region" -> Json.Str("cn")).toMap,
         metadata = List("purpose" -> "primary", "owner" -> "runtime").toMap
       )
-      val changed = left.copy(maxOutputTokens = Some(2048))
+      val changed       = left.copy(maxOutputTokens = Some(2048))
+      val changedEffort = left.copy(reasoningEffort = Some(ReasoningEffort.High))
       assertTrue(
         RuntimeComposition.modelSettingsFingerprint(left) ==
           RuntimeComposition.modelSettingsFingerprint(reordered),
         RuntimeComposition.modelSettingsFingerprint(left) !=
           RuntimeComposition.modelSettingsFingerprint(changed),
+        RuntimeComposition.modelSettingsFingerprint(left) !=
+          RuntimeComposition.modelSettingsFingerprint(changedEffort),
         RuntimeComposition
           .compare(
             RuntimeComposition.fingerprint(profile, agent, left),

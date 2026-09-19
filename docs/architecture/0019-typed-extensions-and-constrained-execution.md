@@ -5,6 +5,8 @@
 > 影响：审批模型、扩展接口、工具执行边界、Context 装配、公共协议；继承并扩展 [ADR-0018](0018-next-generation-runtime-kernel.md)
 >
 > 配套工作手册：[next-generation-runtime.md](next-generation-runtime.md)
+>
+> 版本说明：本文出现的 AgentState v6 与 V001–V010 是候选期历史编号；当前 0.9 fresh-install 的 State/SQL 基线均归位为 v1/V001。
 
 ## 背景
 

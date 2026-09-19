@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-11
+> 最后核验：2026-09-17
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -123,6 +123,19 @@ ZYBLW_AGENT_RUNTIME_CAPTURE_POLICY=metadata-only
 模型 API Key、数据库密码、OTLP/Langfuse 认证头不属于 `AgentApplicationConfig`。这些值必须留在各 Adapter 的 Secret
 配置与部署平台 Secret Manager 中，避免整个应用配置被调试打印时泄漏凭据。ZIO Core 配置前端和可替换
 `ConfigProvider` 的官方说明见 [https://zio.dev/reference/configuration/](https://zio.dev/reference/configuration/)。
+
+### 4.1 配置驱动的多 Provider 装配
+
+业务 composition root 可以直接把多端点配置装配成统一路由和管理目录：
+
+```scala
+val providerLayer: ZLayer[Client, AgentError, ChatModel & ProviderRegistry] =
+  ZLayer.unwrap(ProviderEndpointsConfig.fromEnvironment.map(ProviderEndpoints.layer))
+```
+
+`ProviderEndpoints.layer` 共享宿主 `Client`，启动期解析 `apiKeyEnv`、验证 URL/模型清单/profile，并同时产出
+`RoutedChatModel` 与 `ProviderRegistry`。生产参考宿主还提供兼容过渡：存在多端点 JSON 时使用该路由，缺失时才读取单一
+`OPENAI_*`。配置存在但为空或非法时必须启动失败，不能静默退回另一个 Provider。
 
 模型辅助 Context 压缩有独立的 `LlmContextCompressorConfigLoader`，默认路径是
 `zyblw.agent.context.compression`。它只加载 Provider/模型路由、输入上限、超时、有限修复和降级策略，不读取 API Key：

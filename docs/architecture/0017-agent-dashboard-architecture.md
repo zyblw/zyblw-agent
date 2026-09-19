@@ -172,7 +172,7 @@ Run 目录需要按租户、Agent、状态、审批等待与非审批挂起过�
 
 ```text
 agent-dashboard
-├── Next.js 16 (App Router, React 19, TypeScript 5)
+├── Next.js 16 (App Router, React 19, TypeScript 6)
 ├── Tailwind CSS v4 + Lucide Icons
 ├── TanStack Query v5
 └── standalone 输出 / Docker 容器

@@ -4,6 +4,7 @@ import com.zyblw.agent.app.*
 import com.zyblw.agent.core.*
 import com.zyblw.agent.http.*
 import com.zyblw.agent.memory.RunCommandStatus
+import com.zyblw.agent.model.{ChatModel, RoutedChatModel}
 import zio.json.*
 import com.zyblw.agent.scheduler.WorkerHostConfig
 import com.zyblw.agent.tools.*
@@ -63,6 +64,48 @@ object ProductionSupportHostContractSpec extends ZIOSpecDefault:
       live.requireDurableDatabase.either.map { result =>
         assertTrue(result.left.exists(_.message.contains("live 模式必须提供")))
       }
+    },
+    test("live 生产装配优先使用配置驱动的多端点路由") {
+      val endpoints =
+        """{"defaultProvider":"relay-deepseek","endpoints":[{"providerId":"relay-deepseek","baseUrl":"https://gateway.example/v1","apiKeyEnv":"RELAY_API_KEY","defaultModel":"deepseek-test","protocol":"relay","compatibilityProfile":"deepseek","models":[{"name":"deepseek-test","capabilities":{"toolCalls":true,"streaming":true,"thinking":true}}]}]}"""
+      (for model <- ZIO.service[ChatModel]
+      yield assertTrue(
+        model.isInstanceOf[RoutedChatModel],
+        model.asInstanceOf[RoutedChatModel].defaultProvider == "relay-deepseek"
+      )).provide(
+        Client.default,
+        ProductionSupportLayers.liveModel
+      ).provide(
+        Runtime.setConfigProvider(
+          ConfigProvider.fromMap(
+            Map(
+              "ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON" -> endpoints,
+              "RELAY_API_KEY"                       -> "test-secret"
+            )
+          )
+        )
+      )
+    },
+    test("空白多端点变量使用显式单端点配置") {
+      (for model <- ZIO.service[ChatModel]
+      yield assertTrue(
+        !model.isInstanceOf[RoutedChatModel],
+        model.provider == "openai"
+      )).provide(
+        Client.default,
+        ProductionSupportLayers.liveModel
+      ).provide(
+        Runtime.setConfigProvider(
+          ConfigProvider.fromMap(
+            Map(
+              "ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON" -> "",
+              "OPENAI_BASE_URL"                     -> "https://api.example.com/v1",
+              "OPENAI_API_KEY"                      -> "test-secret",
+              "OPENAI_MODEL"                        -> "test-model"
+            )
+          )
+        )
+      )
     },
     test("可信身份解析拒绝缺少租户或用户头的请求") {
       val trusted = contractConfig.copy(authMode = ProductionAuthMode.TrustedHeaders)

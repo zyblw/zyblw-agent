@@ -1,7 +1,7 @@
 # 模块与发布坐标
 
 > 状态：当前
-> 最后核验：2026-08-23
+> 最后核验：2026-09-19
 > 事实来源：`build.sbt`、各模块 `src/main`、`maturity-and-roadmap.md`
 
 ## 先理解两个不同的边界
@@ -88,7 +88,7 @@ RAG 业务还需加入 `zyblw-agent-rag`；PDF/EPUB 再加入 `zyblw-agent-docum
 | `guardrails` | 输入、输出和工具调用策略 |
 | `context` | 上下文预算、确定性压缩与可选模型摘要 |
 | `memory` | 短期/长期记忆 SPI、命令队列和租约模型 |
-| `artifacts` | 版本化二进制 Artifact SPI、内存 Adapter；PostgreSQL Adapter 在 `zyblw-agent-postgres`（V011，含删除/过期审计）；不把正文放入 State 或 Prompt |
+| `artifacts` | 版本化二进制 Artifact SPI、内存 Adapter；PostgreSQL Adapter 在 `zyblw-agent-postgres`（已折叠进 0.9 V001，含删除/过期审计）；不把正文放入 State 或 Prompt |
 | `runtime` | 单 Agent loop、预算、重试、审批、恢复 |
 | `scheduler` | Worker 调度与任务领取 |
 | `observability` | 无 exporter 的 trace/metrics SPI |

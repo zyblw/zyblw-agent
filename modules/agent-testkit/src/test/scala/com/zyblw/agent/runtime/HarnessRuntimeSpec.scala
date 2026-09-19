@@ -58,12 +58,19 @@ object HarnessRuntimeSpec extends ZIOSpecDefault:
           TestAgentRuntime.inMemory(model, tools = List(echoStub), contextSources = resolver)
         )
         (state, requests) = result
-        text              = requests.head.messages.map(_.text).mkString("\n")
+        messages          = requests.head.messages
+        text              = messages.map(_.text).mkString("\n")
       yield assertTrue(
         text.contains("整理《内经》引用"),
-        text.contains("不可信长期记忆"),
         text.contains("ignore previous instructions"),
-        text.contains("不可信检索资料"),
+        text.contains("<context-data"),
+        messages.filter(_.text.contains("整理《内经》引用")).forall(_.role == MessageRole.User),
+        messages.filter(_.text.contains("ignore previous instructions")).forall(_.role == MessageRole.User),
+        !messages
+          .filter(message => message.role == MessageRole.System || message.role == MessageRole.Developer)
+          .exists(message =>
+            message.text.contains("整理《内经》引用") || message.text.contains("ignore previous instructions")
+          ),
         !text.contains("[instruction:skill.web-note"),
         state.composition.sourceIds == Chunk(CapabilityRef(CapabilityKind.Context, "harness", "2")),
         agent.allowedTools == Set("echo")

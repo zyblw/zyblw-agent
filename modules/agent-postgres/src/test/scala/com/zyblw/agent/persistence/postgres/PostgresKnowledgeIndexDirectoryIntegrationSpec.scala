@@ -22,7 +22,9 @@ object PostgresKnowledgeIndexDirectoryIntegrationSpec extends ZIOSpecDefault:
     for
       container <- ZIO.acquireRelease(
         ZIO.attemptBlocking {
-          val image = DockerImageName.parse("pgvector/pgvector:pg16").asCompatibleSubstituteFor("postgres")
+          val image = DockerImageName
+            .parse("pgvector/pgvector:0.8.6-pg18-bookworm")
+            .asCompatibleSubstituteFor("postgres")
           val value = PostgreSQLContainer(dockerImageNameOverride = image)
           value.start()
           value

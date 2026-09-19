@@ -2,7 +2,7 @@ name: zyblw-agent-local-staging
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     command:
       - postgres
       - -c
@@ -21,7 +21,7 @@ services:
       timeout: 3s
       retries: 30
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql
 
   pgbouncer:
     image: edoburu/pgbouncer:v1.25.1-p0

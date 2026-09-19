@@ -5,6 +5,8 @@ All notable user-visible changes will be recorded here. The project follows
 
 ## 0.9.0 - Unreleased
 
+- 中转站现在可以通过 `ZYBLW_SMOKE_PROVIDER=relay` 直接复用 Provider、MemoryExtractor 与 Context 压缩 live smoke；端点根 URL 改为严格 URI 校验，并补充同一网关多 wire 方言的生产配置与准入规则。`ProductionSupportHost` 与 `KnowledgeQaHost` 已接入同一配置驱动装配：存在非空 `ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON` 时优先构造多端点路由，缺失或空白时才使用单一 `OPENAI_*`；非法 JSON、端点约束或缺失密钥均类型化失败，不静默降级。Docker Compose、preflight 与环境示例同步支持这两条生产入口。
+
 ### 破坏性变更：耐久形状归位（无原地升级路径，需重建数据库）
 
 本版本删除全部历史 schema 的读取分支。0.9.x 之前的数据库**无法原地升级**：`agent_runs.schema_version` 的 CHECK 已从
@@ -54,6 +56,7 @@ All notable user-visible changes will be recorded here. The project follows
 - PostgreSQL conformance 覆盖 `agent_suspensions` 到期索引、Run 域 artifact 读回，以及 `CompositionDriftDetected` 事件耐久。
 - `verify-local-evidence.sh` 要求 `AgentSchemaInventory.Authoritative` 中每一张表都出现在 postgres `*ConformanceSpec` 或 `*IntegrationSpec` 正文中，不再用 8 张表白名单冒充全集覆盖。
 - `failover-drill.sh` 在备库提升后跑 `FailoverDurablePathProbe`：挂起到期 Worker 与 artifact blob 读回。7 项宿主证据仍为 `deferred`。
+- `scripts/test-public-pdf-rag.sh` 会在复用中的 sbt 服务内显式注入开关与固定 SHA-256 样本路径，避免命令表面成功但真实 PDF 用例仍被标成 ignored。
 
 ### 管理面与控制台对齐最新契约
 
@@ -81,6 +84,7 @@ All notable user-visible changes will be recorded here. The project follows
 - ToolResult 在 Guardrail 看过全文后只物化一次；部署字节阈值或 Agent 字符阈值任一超限即外置。Context 只验证已冻结表示，不再二次压缩 Tool 消息。
 - `PromptCacheCapability` 取代 Boolean。`inputTokens` 是逻辑总输入，cache read/write 都是其中子集；预算按逻辑总量，价格按 fresh/read/write/output 分别计算。缓存未命中、过期或清空不改变授权、恢复或预算结果。
 - Anthropic 在完成 `cache_control` wire contract 前保持 Unsupported；OpenAI Responses 与 Gemini Interactions 只声明已验证的 implicit-read。模型辅助摘要的 Provider 调用与 checkpoint 提交之间仍有不确定窗口，生产默认仍是确定性压缩。
+- 新增 Provider-neutral `ReasoningEffort`，并在 OpenAI Responses/OpenAI 官方兼容协议/Gemini Interactions 中做 typed wire 映射。显式档位只能由模型能力目录授予；能力快照只读一次并把指纹写入 ModelCall lineage。
 
 ### Durable Worker reliability
 
@@ -118,6 +122,11 @@ All notable user-visible changes will be recorded here. The project follows
 - 默认装配保持旧行为；公共 Scala case class 加字段仅面向当前开发 minor。未改 SQL migration、稳定 HTTP 或平台装配。
 - Goal 对账遇到未结算模型调用时保留预留；内存/PostgreSQL 账本禁止在状态转换中改写路由决定。
 - Qwen 升级为一级 OpenAI-compatible 档案：区域端点、模型和密钥均由部署显式配置，并纳入低成本真实 smoke 入口。
+- Kimi 升级为一级 OpenAI-compatible 档案；DeepSeek/Qwen/GLM/Kimi 的 typed 推理方言、工具续接状态和模型级 wire
+  能力校验已贯通。多端点声明可用 `compatibilityProfile` 让业务别名复用已验证方言，并可声明并行工具、推理 token 与
+  输入/输出上限。
+- 业务接入门禁默认执行 PostgreSQL 16 全量契约，并扫描 migration 目录确保未发布的 0.9 核心/知识各只有唯一 V001；
+  管理台在滚动发布遇到缺失的加法能力字段时安全回退，不再让模型目录整页崩溃。
 - Retry/Fallback、动态评分/限流、持久费用预留与 Planner 尚未启用。
 
 0.9.0 is the current fresh-install baseline. There is no in-place upgrade from the frozen
@@ -125,7 +134,7 @@ published `0.8.0` artifact, or from 0.6.x / 0.7.0-candidate databases: hosts mus
 PostgreSQL database and rebuild knowledge indexes. Core Flyway history is
 `V001__zyblw_agent_0_9_baseline.sql`; the 1024 knowledge history is
 `optional/pgvector_1024/V001__agent_knowledge_0_9_baseline.sql`. Citations remain in
-`AgentState` JSON (schema v7); they are not SQL columns. `RunCitation` / `CitationView` add
+`AgentState` JSON (fresh-install schema v1); they are not SQL columns. `RunCitation` / `CitationView` add
 optional allowlist `sourceKind`. `knowledge_search` returns preview excerpts; `knowledge_fetch`
 returns the authorized chunk text. Read-only knowledge/web tools may declare conflict-aware
 parallelism. HTTP OpenAPI stays `1.2.0`. The

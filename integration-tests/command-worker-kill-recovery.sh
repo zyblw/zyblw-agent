@@ -65,7 +65,7 @@ docker run --detach --name "$container_name" \
   --env POSTGRES_USER=zyblw \
   --env POSTGRES_PASSWORD=zyblw-process-kill-test \
   --env POSTGRES_DB=zyblw \
-  postgres:16-alpine >/dev/null
+  postgres:18-alpine >/dev/null
 
 wait_for_postgres
 

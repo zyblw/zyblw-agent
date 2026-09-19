@@ -28,13 +28,13 @@ object PostgresRunCommandStoreIntegrationSpec extends ZIOSpecDefault:
       harnessStore: HarnessStore
   )
 
-  /** 启动 PostgreSQL 16 并执行正式 Flyway 迁移。 */
+  /** 启动 PostgreSQL 18 并执行正式 Flyway 迁移。 */
   private val storesLayer: ZLayer[Any, Throwable, Stores] = ZLayer.scoped {
     for
       container <- ZIO.acquireRelease(
         ZIO.attemptBlocking {
           val value =
-            PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:16-alpine"))
+            PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:18-alpine"))
           value.start()
           value
         }

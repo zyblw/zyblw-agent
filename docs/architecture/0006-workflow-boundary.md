@@ -21,7 +21,7 @@
 - `WorkflowDefinition` 必须声明稳定 `WorkflowId/WorkflowVersion`；`WorkflowCheckpoint` 同时保存该 identity、Session、
   游标、不可变状态、step 和访问次数；
 - 第一阶段 fan-in 只提供 `AllSucceeded`，任一失败由 ZIO 结构化并发中断兄弟 Fiber，且不提交 join checkpoint。
-- 内存与 PostgreSQL checkpoint Store 都只允许相同 identity 内按 step 单调推进；PostgreSQL Adapter 提供经过 PostgreSQL 16
+- 内存与 PostgreSQL checkpoint Store 都只允许相同 identity 内按 step 单调推进；PostgreSQL Adapter 提供经过 PostgreSQL 18
   Testcontainers 验证的完整快照、checksum 和损坏拒绝。
 - 生产耐久模式使用 `WorkflowExecutionStore`：claim 比较 owner/token/generation/expiry，节点结果先进入 `Prepared`，
   再把一个节点或整个 fan-out 的 execution 与 checkpoint 在同一原子临界区/数据库事务提交；

@@ -54,7 +54,7 @@ object HarnessBudgetStoreConformanceSpec extends ZIOSpecDefault:
         container <- ZIO.acquireRelease(
           ZIO.attemptBlocking {
             val value =
-              PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:16-alpine"))
+              PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:18-alpine"))
             value.start()
             value
           }

@@ -129,8 +129,8 @@ object TelemetryRunObserver:
                 "langfuse.observation.type" -> "generation"
               ),
               Map(
-                "gen_ai.usage.input_tokens"  -> usage.inputTokens.toDouble,
-                "gen_ai.usage.output_tokens" -> usage.outputTokens.toDouble,
+                "gen_ai.usage.input_tokens"            -> usage.inputTokens.toDouble,
+                "gen_ai.usage.output_tokens"           -> usage.outputTokens.toDouble,
                 "agent.usage.cache_read_input_tokens"  -> usage.cacheReadInputTokens.toDouble,
                 "agent.usage.cache_write_input_tokens" -> usage.cacheWriteInputTokens.toDouble
               )
@@ -616,14 +616,14 @@ object TelemetryRunObserver:
   /** 将 Run 级资源消耗转换为数值 attributes，便于 dashboard 做聚合和预算告警。 */
   private def usageMeasurements(usage: UsageSummary): Map[String, Double] =
     Map(
-      "agent.usage.model_calls"             -> usage.modelCalls.toDouble,
-      "agent.usage.tool_calls"              -> usage.toolCalls.toDouble,
-      "gen_ai.usage.input_tokens"           -> usage.inputTokens.toDouble,
-      "gen_ai.usage.output_tokens"          -> usage.outputTokens.toDouble,
-      "agent.usage.cached_input_tokens"     -> usage.cachedInputTokens.toDouble,
+      "agent.usage.model_calls"              -> usage.modelCalls.toDouble,
+      "agent.usage.tool_calls"               -> usage.toolCalls.toDouble,
+      "gen_ai.usage.input_tokens"            -> usage.inputTokens.toDouble,
+      "gen_ai.usage.output_tokens"           -> usage.outputTokens.toDouble,
+      "agent.usage.cached_input_tokens"      -> usage.cachedInputTokens.toDouble,
       "agent.usage.cache_write_input_tokens" -> usage.cacheWriteInputTokens.toDouble,
-      "agent.usage.reasoning_output_tokens" -> usage.reasoningOutputTokens.toDouble,
-      "agent.usage.estimated_cost"          -> usage.estimatedCost.toDouble
+      "agent.usage.reasoning_output_tokens"  -> usage.reasoningOutputTokens.toDouble,
+      "agent.usage.estimated_cost"           -> usage.estimatedCost.toDouble
     )
 
 /** 把 Runtime 事件配对为低基数、可聚合的生产指标。

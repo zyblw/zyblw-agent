@@ -14,7 +14,7 @@
 | Workflow 唤醒 | `WorkflowExecutionStore.wakeQueueSnapshot(workflowId, definitionVersion)` | Pending/Due wait、可领取/在租约/过期 wakeup、最长等待 | Run/Session、signal payload、owner、fencing token |
 | 进程死亡 | `integration-tests/command-worker-kill-recovery.sh`、`workflow-wake-worker-kill-recovery.sh` | generation 提升、同一 PostgreSQL restart 后接管 | 云厂商主备切换、AZ 故障 |
 | 有界 soak | `durable-worker-soak.sh`、`workflow-wake-worker-soak.sh` | 多 Worker 归零、无异常重领 | 数小时业务 soak、容量曲线 |
-| 本地类 staging | `integration-tests/local-staging-evidence.sh` | PostgreSQL 16 + transaction-mode PgBouncer 小池压力、两类 soak、备份恢复和机器可读报告 | 主备/AZ/Kubernetes 故障、业务 SLO |
+| 本地类 staging | `integration-tests/local-staging-evidence.sh` | PostgreSQL 18 + transaction-mode PgBouncer 小池压力、两类 soak、备份恢复和机器可读报告 | 主备/AZ/Kubernetes 故障、业务 SLO |
 | 本地主备提升 | `integration-tests/failover-drill.sh` | 流复制、`pg_promote`、提升后继续 soak、丢失已提交行数与提升等待毫秒 | 托管 HA、自动切换、对客 RPO/RTO |
 
 快照是**采样**，不是审计。审计走 `RunStore.events` / 命令记录；指标走 OTLP。不要为了看 backlog 去查任意 SQL。

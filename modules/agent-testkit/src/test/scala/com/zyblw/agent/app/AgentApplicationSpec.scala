@@ -335,13 +335,14 @@ object AgentApplicationSpec extends ZIOSpecDefault:
             total = 1_000L,
             system = 100L,
             tools = 100L,
-            recentMessages = 120L,
+            recentMessages = 400L,
             memory = 100L,
             retrieval = 100L,
             outputReserve = 100L,
             safetyMargin = 100L
           ),
-          maxToolResultCharacters = 1_000,
+          // 单次物化语义下，工具执行边界必须先把大结果外置；Context 不再临时压缩 Tool message。
+          maxToolResultCharacters = 64,
           historyCompression = CompressionMode.ModelAssisted,
           toolOutputCompression = CompressionMode.Deterministic
         )
@@ -362,7 +363,8 @@ object AgentApplicationSpec extends ZIOSpecDefault:
             definition,
             RunRequest(
               ThreadId("app-context-thread"),
-              AgentMessage.user("需要保留的初始问题" + "上下文" * 36)
+              // 当前 tool-call/result 原子组可完整保留，而较旧的大消息会被摘要。
+              AgentMessage.user("需要保留的初始问题" + "上下文" * 300)
             ),
             "app-context-request"
           )

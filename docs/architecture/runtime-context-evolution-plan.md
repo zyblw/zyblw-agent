@@ -4,7 +4,7 @@
 >
 > 当前源码核验：2026-09-16
 >
-> 输入：[0915 架构说明](../文档说明/0915架构说明.md)、[0915 上下文架构说明](../文档说明/0915上下文架构说明.md)、[0915 KV Cache 缓存架构](../文档说明/0915kv-cache缓存架构.md)
+> 输入：[0915 架构说明](../文档说明/0915架构说明.md)、[0915 上下文架构说明](../文档说明/0915上下文架构说明.md)、[0915 KV Cache 缓存架构](../文档说明/0915kv-cache缓存架构.md)。强模型、推理档位与 native capability 的后续裁决见 [ADR-0030](0030-model-capability-control-runtime.md)。
 >
 > 已实现架构基线：[ADR-0018](0018-next-generation-runtime-kernel.md)、[ADR-0019](0019-typed-extensions-and-constrained-execution.md)、[ADR-0028](0028-functional-kernel-runtime-driver.md)、[ADR-0029](0029-context-authority-prompt-lineage.md)
 >

@@ -62,7 +62,8 @@ final class OpenAICompatibleChatModel(client: Client, config: OpenAICompatibleCo
     * 的任意边界。
     */
   override def stream(request: ChatRequest): ZStream[Any, AgentError, ModelStreamEvent] =
-    if !descriptor.capabilities.streaming then super.stream(request)
+    val model = request.settings.model.getOrElse(config.defaultModel)
+    if !descriptor.capabilitiesFor(Some(model)).streaming then super.stream(request)
     else
       ZStream.unwrap {
         for
@@ -143,7 +144,10 @@ private[openai] object OpenAIWire:
     "temperature",
     "max_tokens",
     "max_completion_tokens",
-    "stream"
+    "stream",
+    "reasoning_effort",
+    "thinking",
+    "enable_thinking"
   )
 
   /** 把内部请求编码成 Provider JSON，并阻止请求级参数覆盖保留协议字段。 */
@@ -154,6 +158,8 @@ private[openai] object OpenAIWire:
       defaultOptions: Map[String, Json] = Map.empty
   ): Either[AgentError, Json] =
     val provider          = compatibility.descriptor.id
+    val model             = request.settings.model.getOrElse(defaultModel)
+    val capabilities      = compatibility.descriptor.capabilitiesFor(Some(model))
     val unsupportedChoice = compatibility.toolChoiceMode match
       case ToolChoiceMode.Full     => None
       case ToolChoiceMode.AutoOnly =>
@@ -161,16 +167,37 @@ private[openai] object OpenAIWire:
       case ToolChoiceMode.Omit =>
         Option.unless(request.settings.toolChoice == ToolChoice.Auto)("tool_choice is omitted")
     val options  = defaultOptions ++ request.settings.providerOptions
-    val reserved = options.keySet.intersect(reservedOptions)
+    val reserved = request.settings.providerOptions.keySet.intersect(reservedOptions)
     val media    = ProviderImagePolicy.requireBound(request)
 
     media.flatMap { _ =>
-      if request.tools.nonEmpty && !compatibility.descriptor.capabilities.toolCalls then
+      if request.tools.nonEmpty && !capabilities.toolCalls then
         Left(AgentError.UnsupportedModelCapability(provider, "tool calls", "tools were supplied"))
       else if request.tools.nonEmpty && unsupportedChoice.nonEmpty then
         Left(AgentError.UnsupportedModelCapability(provider, "tool_choice", unsupportedChoice.get))
-      else if hasImageUrl(request) && !compatibility.descriptor.capabilities.vision then
+      else if hasImageUrl(request) && !capabilities.vision then
         Left(AgentError.UnsupportedModelCapability(provider, "vision", "请求包含图片"))
+      else if request.settings.reasoningEffort.exists(
+          !capabilities.reasoningEfforts.contains(_)
+        )
+      then
+        Left(
+          AgentError.UnsupportedModelCapability(
+            provider,
+            "reasoning effort",
+            s"请求档位=${request.settings.reasoningEffort.get}"
+          )
+        )
+      else if request.settings.reasoningEffort.nonEmpty &&
+        compatibility.reasoningWireMode == ReasoningWireMode.Unsupported
+      then
+        Left(
+          AgentError.UnsupportedModelCapability(
+            provider,
+            "reasoning effort",
+            "compatibility profile has no verified reasoning wire mapping"
+          )
+        )
       else if reserved.nonEmpty then
         Left(
           AgentError.InvalidConfiguration(
@@ -180,7 +207,7 @@ private[openai] object OpenAIWire:
       else Right(encodeValidated(request, defaultModel, compatibility, options))
     }
 
-  /** 执行字段兼容校验并按“基础字段→默认选项→请求选项”合并。 */
+  /** 执行字段兼容校验并按“基础字段→默认/请求选项→typed 推理控制”合并。 */
   private def encodeValidated(
       request: ChatRequest,
       defaultModel: String,
@@ -197,10 +224,64 @@ private[openai] object OpenAIWire:
     val temperature = request.settings.temperature.map(value => "temperature" -> Json.Num(value))
     val maxTokens   =
       request.settings.maxOutputTokens.map(value => compatibility.outputTokenField -> Json.Num(value))
+    val reasoning = request.settings.reasoningEffort.toList.flatMap(reasoningFields(_, compatibility))
+    val controlledReasoningKeys = reasoning.map(_._1).toSet
+    val safeOptions             = options.toList
+      .filterNot(option => controlledReasoningKeys.contains(option._1))
+      .sortBy(_._1)
     val toolChoice = Option.when(
       request.tools.nonEmpty && compatibility.toolChoiceMode != ToolChoiceMode.Omit
     )("tool_choice" -> encodeToolChoice(request.settings.toolChoice))
-    obj(required ++ List(tools, temperature, maxTokens, toolChoice).flatten ++ options.toList.sortBy(_._1)*)
+    obj(
+      required ++ List(tools, temperature, maxTokens, toolChoice).flatten ++ safeOptions ++ reasoning*
+    )
+
+  /** 把稳定档位投影到当前兼容档案的最小 wire 字段集。 */
+  private def reasoningFields(
+      effort: ReasoningEffort,
+      compatibility: OpenAICompatibility
+  ): List[(String, Json)] = compatibility.reasoningWireMode match
+    case ReasoningWireMode.Unsupported  => Nil
+    case ReasoningWireMode.OpenAIEffort =>
+      List("reasoning_effort" -> Json.Str(openAIReasoningEffort(effort)))
+    case ReasoningWireMode.StandardEffort =>
+      List("reasoning_effort" -> Json.Str(standardReasoningEffort(effort)))
+    case ReasoningWireMode.ThinkingObjectEffort =>
+      effort match
+        case ReasoningEffort.None => List("thinking" -> thinking(enabled = false))
+        case value                =>
+          List(
+            "thinking"         -> thinking(enabled = true),
+            "reasoning_effort" -> Json.Str(deepSeekReasoningEffort(value))
+          )
+    case ReasoningWireMode.EnableThinking =>
+      List("enable_thinking" -> Json.Bool(effort != ReasoningEffort.None))
+    case ReasoningWireMode.ThinkingObjectToggle =>
+      List("thinking" -> thinking(enabled = effort != ReasoningEffort.None))
+
+  private def thinking(enabled: Boolean): Json.Obj =
+    obj("type" -> Json.Str(if enabled then "enabled" else "disabled"))
+
+  private def openAIReasoningEffort(effort: ReasoningEffort): String = effort match
+    case ReasoningEffort.None   => "none"
+    case ReasoningEffort.Low    => "low"
+    case ReasoningEffort.Medium => "medium"
+    case ReasoningEffort.High   => "high"
+    case ReasoningEffort.Max    => "xhigh"
+
+  private def standardReasoningEffort(effort: ReasoningEffort): String = effort match
+    case ReasoningEffort.None   => "none"
+    case ReasoningEffort.Low    => "low"
+    case ReasoningEffort.Medium => "medium"
+    case ReasoningEffort.High   => "high"
+    case ReasoningEffort.Max    => "max"
+
+  private def deepSeekReasoningEffort(effort: ReasoningEffort): String = effort match
+    case ReasoningEffort.None   => "none"
+    case ReasoningEffort.Low    => "low"
+    case ReasoningEffort.Medium => "high"
+    case ReasoningEffort.High   => "high"
+    case ReasoningEffort.Max    => "max"
 
   /** 解码完整 JSON 响应，重建文本、reasoning、工具调用、usage 和结束原因。 */
   def decodeResponse(body: String, compatibility: OpenAICompatibility): IO[AgentError, ChatResponse] =
@@ -322,9 +403,10 @@ private[openai] object OpenAIWire:
 
   /** 编码 function tool；不支持 strict 时明确省略对应字段。 */
   private def encodeTool(tool: ToolDefinition, compatibility: OpenAICompatibility): Json =
-    val strict = Option.when(compatibility.strictToolSchemaMode == StrictToolSchemaMode.Include)(
-      "strict" -> Json.Bool(tool.strict)
-    )
+    val strict = compatibility.strictToolSchemaMode match
+      case StrictToolSchemaMode.Include => Some("strict" -> Json.Bool(tool.strict))
+      case StrictToolSchemaMode.Disable => Some("strict" -> Json.Bool(false))
+      case StrictToolSchemaMode.Omit    => None
     obj(
       "type"     -> Json.Str("function"),
       "function" -> obj(

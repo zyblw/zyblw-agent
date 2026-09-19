@@ -106,6 +106,13 @@ private[openai] object OpenAIResponsesDescriptor:
       streaming = true,
       parallelToolCalls = true,
       usageReporting = true,
-      promptCache = PromptCacheCapability.implicitRead
+      promptCache = PromptCacheCapability.implicitRead,
+      reasoningEfforts = Set(
+        ReasoningEffort.None,
+        ReasoningEffort.Low,
+        ReasoningEffort.Medium,
+        ReasoningEffort.High,
+        ReasoningEffort.Max
+      )
     )
   )

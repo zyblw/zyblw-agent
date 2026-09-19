@@ -32,7 +32,9 @@ object TokenUsageSpec extends ZIOSpecDefault:
     },
     test("cache read/write 不能超出输入 token") {
       assertTrue(
-        scala.util.Try(TokenUsage(inputTokens = 3, cachedInputTokens = 2, cacheWriteInputTokens = 2)).isFailure
+        scala.util
+          .Try(TokenUsage(inputTokens = 3, cachedInputTokens = 2, cacheWriteInputTokens = 2))
+          .isFailure
       )
     }
   )

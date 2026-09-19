@@ -32,7 +32,7 @@ object CanonicalModelRequestSpec extends ZIOSpecDefault:
     },
     test("稳定前缀指纹包含冻结工具与设置，不包含动态尾部") {
       val stable = AgentMessage.system("policy")
-      val base = ChatRequest(
+      val base   = ChatRequest(
         Chunk(stable, AgentMessage.user("dynamic-a")),
         Chunk(ToolDefinition("lookup", "query", zio.json.ast.Json.Obj())),
         ModelSettings(model = Some("m"))

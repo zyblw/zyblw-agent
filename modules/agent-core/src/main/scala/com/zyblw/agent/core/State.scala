@@ -85,8 +85,8 @@ object BudgetState:
   * `[0, coveredMessages)`；Runtime 只会把其后的新淘汰消息追加进下一次 压缩，避免每个回合重复调用付费模型。
   *
   * @param summary
-  *   未附加 Provider envelope 的摘要正文；仍可能包含业务事实，HTTP/Telemetry 不得直接投影。每次组装时由
-  *   PromptCompiler 统一包装，避免 checkpoint 复用时重复转义
+  *   未附加 Provider envelope 的摘要正文；仍可能包含业务事实，HTTP/Telemetry 不得直接投影。每次组装时由 PromptCompiler 统一包装，避免 checkpoint
+  *   复用时重复转义
   * @param coveredMessages
   *   已被摘要覆盖的消息前缀长度
   * @param sourceDigest

@@ -1,7 +1,7 @@
 # 0.9.0 全新安装
 
 > 状态：当前唯一安装基线
-> 最后核验：2026-09-13
+> 最后核验：2026-09-17
 
 `0.9.0` 只支持全新数据库。不要导入旧 Flyway history、旧 Run、旧 embedding cache 或旧知识索引；业务资料应按当前 tokenizer、Embedding、切分和 ACL 规则重新摄入。
 
@@ -18,7 +18,7 @@
 - `RetrievalMode` 支持 `Hybrid`、`VectorOnly`、`LexicalOnly`、`Phrase`。
 - `RetrievalFilter` 在 ACL 之后、打分之前约束 document、chunk、page、heading 和 metadata。
 - `knowledge_search` 与 `knowledge_fetch` 是正式只读工具；tenant 和 permissions 只能来自可信宿主上下文。
-- `AgentState` schemaVersion 7 保存有界 citations 与 retrievalEvidence。
+- `AgentState` fresh-install schemaVersion 1 保存有界 citations 与 retrievalEvidence；0.9 之前的候选编号不是可读历史版本。
 - 文档提取、chunk、embedding、rerank、回答与 citation 必须记录同一条 retrieval lineage。
 
 ## 生产宿主

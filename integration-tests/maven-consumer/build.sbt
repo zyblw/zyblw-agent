@@ -1,7 +1,7 @@
 import sbt.*
 import sbt.Keys.*
 
-ThisBuild / scalaVersion := "3.8.4"
+ThisBuild / scalaVersion := "3.9.0"
 
 lazy val agentVersion = sys.env
   .get("ZYBLW_AGENT_VERSION")

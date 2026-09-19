@@ -127,7 +127,7 @@ safety / cache 低敏信息
 | Qwen | 已有一级 Chat Completions preset、显式区域配置和 smoke 入口 | 以逐模型能力清单与真实 Eval 决定默认候选 |
 | GLM | 已有 preset | 不阻塞核心；Phase 8 按 Eval 纳入默认候选 |
 | OpenAI | Chat + Responses 已有 | 同上 |
-| Kimi | 无 | 同上 |
+| Kimi | 已有一级 Chat Completions preset、显式模型配置和 smoke 入口 | 以逐模型能力清单与真实 Eval 决定默认候选 |
 | Anthropic | 已有 | 保持可用，不作为第一阶段路由叙事中心 |
 
 新 Provider 准入：不同协议实现 Adapter；兼容协议至少实现命名档案；两者都要有 Catalog 条目、配置、`verifySuite`/wire

@@ -2,14 +2,14 @@
 
 > 状态：Phase 0 审计（不是现行实现合同）
 >
-> 最后核验：2026-09-05
+> 最后核验：2026-09-17
 >
 > 事实来源：`agent-core` / `agent-providers` / `agent-testkit` / `agent-postgres` / `agent-evals` / `agent-opentelemetry` 源码与测试；平台宿主 `zyblw-platform/zyblw-server` 装配；[成熟度与路线](../maturity-and-roadmap.md)、[ADR-0004](0004-provider-abstraction.md)、[ADR-0018](0018-next-generation-runtime-kernel.md)
 >
 > 配套： [目标架构](model-runtime-target.md) · [路由](model-routing.md) · [Provider 契约](model-provider-contract.md) · [预算与成本](model-budget-and-cost.md) · [多模型执行](multi-model-execution.md)
 
 本文以下审计表保留 **Phase 0 编码前快照**，其中“缺失/尚未接线”是该快照的结论。
-Phase 1 已新增的主调用路由、最小账本、准入检查，以及 Qwen 一级兼容档案/配置/smoke 入口，以 [目标架构的当前落地边界](model-runtime-target.md) 和
+Phase 1 已新增的主调用路由、最小账本、准入检查，以及 Qwen/Kimi 一级兼容档案、配置驱动多端点/中转站和 smoke 入口，以 [目标架构的当前落地边界](model-runtime-target.md) 和
 [预算状态表](model-budget-and-cost.md) 为准；不能把历史缺口表当成当前实现清单。
 
 本文件回答：现有 zyblw-agent **已经是什么**，以及提示词中的 Model Runtime / Routing Plane **缺在哪里**。它不授权重写 Runtime，也不把示例接口名当成必须落地的类型。
@@ -18,7 +18,7 @@ Phase 1 已新增的主调用路由、最小账本、准入检查，以及 Qwen 
 
 1. **Agent ≠ Model**。没有 `QwenAgent` / `DeepSeekAgent`。
 2. **ToolCall = Proposal**。模型只提出调用；Runtime 校验、授权、记账、执行。
-3. **Router ≠ LLM**。今天甚至还没有策略路由器；只有按名字转发。
+3. **Router ≠ LLM**。当前主路径已有 `ModelRouterGateway` 的 Experimental 档位路由和 `RoutedChatModel` 的按 Provider 点名转发；路由仍是可验证策略，不由另一个 LLM 自由决定。
 4. **Multi-model ≠ Multi-agent**。多模型应发生在步骤级，而不是再造一套 Agent 社会。
 
 ---
@@ -33,14 +33,14 @@ Phase 1 已新增的主调用路由、最小账本、准入检查，以及 Qwen 
 | `agent-core` / `context`、`memory.llm` | `ContextManager`、`LlmContextCompressor`、`LlmMemoryExtractor`（旁路 `ChatModel` 调用） | Beta |
 | `agent-core` / `admin` | `ModelCatalog` 视图、运行时稀疏覆盖、探活入口 | Beta |
 | `agent-core` / `workflow`、`harness` | 显式图与 Goal 预算；**没有** `ModelProfile` 节点 | Experimental |
-| `agent-providers` | OpenAI-compatible、Responses、Anthropic、Gemini；`ProviderRouter`、`ModelCatalogLive` | Beta |
+| `agent-providers` | OpenAI-compatible、Responses、Anthropic、Gemini；`ProviderEndpoints`、`ProviderRegistry`、`ModelCatalogLive` | Beta |
 | `agent-testkit` | `ProviderContract` 2.0、`ScriptedChatModel` | Foundation |
 | `agent-rag` | 独立 `EmbeddingModel`，不走 Chat SPI | Beta |
 | `agent-document-loaders` | `VisionPageDocumentLoader` 再走一遍 `ChatModel` | Beta |
 | `agent-postgres` | `model_call_executions` 与 Run / Event / Tool 同事务 | Beta |
 | `agent-opentelemetry` | GenAI semconv、禁 Prompt；无 `model.route` span | Beta |
 | `agent-evals` | 轨迹回放、资源预算；无 RouterEval | Experimental |
-| `zyblw-platform` | `QaProviderConfigLoader` + `tcm-learning-assistant`；双 Provider 注册，不接 `FallbackChatModel` | 业务宿主 |
+| `zyblw-platform` | `QaProviderConfigLoader` + `tcm-learning-assistant`；命名档案或 `ProviderEndpoints` 多端点装配，不接 `FallbackChatModel` | 业务宿主 |
 
 依赖方向未变：providers / postgres / http / otel → core。Model Runtime 必须落在这条边上，不能平行长出第二套执行内核。
 
@@ -133,7 +133,7 @@ flowchart LR
 | OpenAI Responses | `OpenAIResponsesChatModel` | `ModelProvider` |
 | Anthropic Messages | `AnthropicMessagesChatModel` | `ModelProvider` |
 | Gemini Interactions | `GeminiInteractionsChatModel` | `ModelProvider` |
-| Qwen / Kimi / Moonshot | **无独立 Adapter** | 只能 `OpenAICompatibility.relay` 或 endpoints JSON |
+| Qwen / Kimi | 无单独类 Adapter | 复用 `OpenAICompatibleChatModel` 与 `OpenAICompatibility.qwen/kimi`；可通过命名环境档案或 endpoints JSON / relay 装配 |
 
 core **不 import** 厂商 SDK。泄漏面是字符串 metadata（`reasoning_content`、`gemini.interactions.steps`、`anthropic.messages.content_blocks`）和 `providerOptions`。这些只允许作 Provider continuation 优化，不得成为跨 Provider 正确性依赖。
 
@@ -235,7 +235,7 @@ Created → Running
 |---|---|---|
 | `RoutedChatModel` vs `ProviderRouter` vs `MultiProviderChatModel` | 三种装配“按名字选 Provider” | 收敛到 ModelRuntime 装配，不并排加第四个 |
 | `ChatModel` vs `ModelProvider` | 命名层，行为几乎相同 | 保留两者；新 Adapter 优先 `ModelProvider` |
-| 平台双 Provider 注册 vs `FallbackChatModel` | 意图重叠、语义不同 | 故障切换走 Fallback/Router；点名路由走 Catalog |
+| 平台 additional/multi-endpoint 注册 vs `FallbackChatModel` | 意图重叠、语义不同 | 额外注册仅用于点名路由；故障切换必须显式接 Fallback/Router 并持久化决策 |
 | 新 `ModelRequest`/`ModelResponse` vs 现有 Chat ADT | 提示词示例与现码冲突 | **不新建替换类型**；演进 `ChatRequest`/`ChatResponse` |
 | Chat vs Embedding | 故意分离 | 保持独立；Router 不得假设同厂商绑定 |
 
@@ -315,7 +315,7 @@ Created → Running
 | ReliabilityPolicy 接线 | 部分完成 | 类型在 `Policy.scala`，Chat 路径未用 |
 | Pricing version / 历史重算 | **缺失** | `ModelPriceBook` 无 version |
 | Provider Health / 统一限流 | **缺失** | 仅 429 分类 |
-| Qwen 一等 Adapter | **缺失** | relay only |
+| Qwen 单独类 Adapter | **不计划** | 已有 Qwen 一级兼容档案与命名环境装配，复用 OpenAI-compatible 传输 |
 | DeepSeek / Gemini / GLM | 已完成 / 部分 | preset 或原生 Adapter |
 | `model.route` / `model.call` 分层 span | **缺失** | 现有 generation span |
 | RouterEval / Shadow / Canary | **缺失** | — |

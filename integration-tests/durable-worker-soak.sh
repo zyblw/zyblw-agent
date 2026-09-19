@@ -22,7 +22,7 @@ docker run --detach --name "$container_name" \
   --env POSTGRES_USER=zyblw \
   --env POSTGRES_PASSWORD=zyblw-worker-soak-test \
   --env POSTGRES_DB=zyblw \
-  postgres:16-alpine >/dev/null
+  postgres:18-alpine >/dev/null
 
 ready=false
 for _ in $(seq 1 120); do

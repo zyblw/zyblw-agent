@@ -36,14 +36,14 @@ System/Developer policy
 -> session-stable Memory
 -> durable history summary
 -> dynamic world-state/RAG
--> recent conversation/tool evidence
 -> Runtime Status（有剩余预算时）
+-> recent conversation/tool evidence（保持原始因果顺序；初始模型回合中当前用户输入仍在最后）
 ```
 
 - Agent 和 Host 配置是唯一高权限指令来源。
 - Memory、RAG、world-state 和 summary 使用 `User` role 的 `<context-data>` envelope，并对 XML 边界字符转义。
 - Tool evidence 保持原生 Tool role 和 call/result 对应，绝不转成 System 摘要。
-- Runtime Status 只包含状态、步数、剩余硬预算、pending tool 名称与 suspension kind；不含 Run/Session/Tenant/User ID、参数正文、时间戳或 lease。
+- Runtime Status 只包含状态、步数、剩余硬预算、pending tool 名称与 suspension kind；不含 Run/Session/Tenant/User ID、参数正文、时间戳或 lease。它放在 recent conversation 之前，不能把本轮用户输入挤出“最后一条任务消息”的位置。
 - System/Developer 不是连续前缀、Secret 出站、RuntimeControl 来源不可证明时都 fail closed。
 
 ## 预算与单次物化
@@ -68,8 +68,15 @@ tool.invoke -> hard byte limit -> output guardrail
 - `stablePrefixMessages`；
 - 带冻结 tools/settings 的 `stablePrefixFingerprint`；
 - 整个消息计划的 `promptPlanFingerprint`。
+- 路由时只读一次的 `modelCapabilitiesFingerprint`，防止校验与 dispatch 之间能力目录漂移。
 
 动态尾部变化不改变稳定前缀指纹；Policy、会话稳定资料、tools 或 settings 变化必须改变对应指纹。`CapturePolicy.Replayable` 仍以 `CanonicalModelRequest` 作为完整请求权威；lineage 不保存正文，不能用于重放。
+
+## 推理档位与能力快照
+
+`ModelSettings.reasoningEffort` 只表达 `None/Low/Medium/High/Max` 这组 Provider-neutral 语义，不携带推理正文。Adapter 负责映射到厂商字段：OpenAI Responses 使用 `reasoning.effort`，OpenAI 官方兼容协议使用 `reasoning_effort`，Gemini Interactions 使用 `generation_config.thinking_level`。
+
+显式档位必须出现在选中模型的 `reasoningEfforts` 中；否则路由或 Adapter 在发网络请求前 fail closed。路由、校验、账本与 dispatch 共用同一份能力快照，其指纹进入 lineage；不把 chain-of-thought 写入 `AgentState`。
 
 ## Cache usage 与成本
 

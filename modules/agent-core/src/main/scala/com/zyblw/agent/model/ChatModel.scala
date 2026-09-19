@@ -1,6 +1,7 @@
 package com.zyblw.agent.model
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.composition.CanonicalDigest
 import zio.*
 import zio.stream.*
 
@@ -56,7 +57,9 @@ final case class ModelCapabilities(
     reasoningTokens: Boolean = false,
     serverContinuation: Boolean = false,
     maxInputTokens: Option[Long] = None,
-    maxOutputTokens: Option[Long] = None
+    maxOutputTokens: Option[Long] = None,
+    /** 当前 Adapter + 具体模型已验证的可配置推理档位；空集合表示只能使用模型默认值。 */
+    reasoningEfforts: Set[ReasoningEffort] = Set.empty
 ):
   /** 把布尔能力归纳为“不支持/单调用/并行调用”三级，供 Runtime 做模式选择。 */
   def toolCalling: ToolCallingCapability =
@@ -68,6 +71,32 @@ final case class ModelCapabilities(
   def structuredOutput: StructuredOutputCapability =
     if strictToolSchema then StructuredOutputCapability.JsonSchemaStrict
     else StructuredOutputCapability.JsonObject
+
+  /** 低敏稳定指纹；Run 账本只需证明调用时依据了哪份能力合同，无需复制整份可变目录。 */
+  def fingerprint: String =
+    CanonicalDigest.sha256(
+      List(
+        toolCalls,
+        strictToolSchema,
+        specificToolChoice,
+        developerRole,
+        thinking,
+        vision,
+        streaming,
+        audio,
+        parallelToolCalls,
+        usageReporting,
+        promptCache.kind,
+        promptCache.reportsReadTokens,
+        promptCache.reportsWriteTokens,
+        promptCache.supportedRetention.toList.map(_.toString).sorted.mkString(","),
+        reasoningTokens,
+        serverContinuation,
+        maxInputTokens.getOrElse(""),
+        maxOutputTokens.getOrElse(""),
+        reasoningEfforts.toList.map(_.toString).sorted.mkString(",")
+      ).mkString("\n")
+    )
 
 final case class ProviderDescriptor(
     id: String,
@@ -157,6 +186,14 @@ object CapabilityValidator:
     then ZIO.fail(AgentError.UnsupportedModelCapability(provider, "specific tool choice", "请求指定了工具"))
     else if hasImage(request) && !capabilities.vision then
       ZIO.fail(AgentError.UnsupportedModelCapability(provider, "vision", "请求包含图片"))
+    else if request.settings.reasoningEffort.exists(!capabilities.reasoningEfforts.contains(_)) then
+      ZIO.fail(
+        AgentError.UnsupportedModelCapability(
+          provider,
+          "reasoning effort",
+          s"请求档位=${request.settings.reasoningEffort.get}"
+        )
+      )
     else ZIO.unit
 
   private def hasImage(request: ChatRequest): Boolean =

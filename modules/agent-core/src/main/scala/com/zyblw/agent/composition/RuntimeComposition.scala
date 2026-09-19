@@ -449,6 +449,7 @@ object RuntimeComposition:
       "model"           -> Json.Str(settings.model.getOrElse("")),
       "temperature"     -> Json.Str(settings.temperature.fold("")(_.toString)),
       "maxOutputTokens" -> Json.Str(settings.maxOutputTokens.fold("")(_.toString)),
+      "reasoningEffort" -> Json.Str(settings.reasoningEffort.fold("")(_.toString)),
       "toolChoice"      -> Json.Str(settings.toolChoice.toJson),
       "providerOptions" -> Json.Obj(
         Chunk.fromIterable(

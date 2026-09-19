@@ -129,7 +129,10 @@ object ModelCatalogLive:
       promptCacheKind = capabilities.promptCache.kind.toString,
       reportsCacheReadTokens = capabilities.promptCache.reportsReadTokens,
       reportsCacheWriteTokens = capabilities.promptCache.reportsWriteTokens,
-      promptCacheRetention = Chunk.fromIterable(capabilities.promptCache.supportedRetention.toList.map(_.toString).sorted)
+      promptCacheRetention =
+        Chunk.fromIterable(capabilities.promptCache.supportedRetention.toList.map(_.toString).sorted),
+      supportedReasoningEfforts =
+        Chunk.fromIterable(capabilities.reasoningEfforts.toList.map(_.toString).sorted)
     )
 
   /** 投影单价。

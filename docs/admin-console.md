@@ -246,9 +246,9 @@ Provider 的「模型不存在」掩盖，看不出其实是本地目录里就�
 时间、合同与区域变化，把一份猜测的价目表编译进框架只会让成本看板显示一个看起来精确但其实错误的数字，而运维
 没有任何线索知道它错了。缺失条目估算为零，与 `addModel` 既有的「未知费用保持零，不伪造账单事实」一致。
 
-价格表有两个容易踩错的计费口径，框架已经处理：`cachedInputTokens` 是 `inputTokens` 的**子集**，两个字段各自
-乘单价会把缓存命中部分收两次费；`reasoningOutputTokens` 同样是 `outputTokens` 的子集，主流厂商按普通输出
-token 计费，为它单独计价就是重复计费。
+缓存计价按 fresh/read/write 三段分开：`cachedInputTokens` 与 `cacheWriteInputTokens` 都是 `inputTokens` 的子集，
+不会与全部 input 重复累加。`reasoningOutputTokens` 同样是 `outputTokens` 的子集，只用于观测。模型能力徽章会展示
+已验证的 reasoning effort 集合；空集合意味着只能使用模型默认值，不代表模型没有内部推理。
 
 价格表不允许混用货币：`estimatedCost` 是单一标量，混币会把不可比的金额直接相加，因此这一点在构造时就被拒绝。
 

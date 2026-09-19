@@ -1,7 +1,7 @@
 # zyblw-agent 文档地图
 
 > 状态：当前
-> 最后核验：2026-09-16
+> 最后核验：2026-09-17
 > 事实来源：`build.sbt`、发布工作流、模块源码、测试与数据库迁移
 
 ## 按目标选择阅读路径
@@ -10,10 +10,11 @@
 
 1. [总体使用手册](usage-guide.md)
 2. [快速开始](getting-started.md)
-3. [PostgreSQL 生产接入](postgres-quickstart.md)、[Docker + 自管 PostgreSQL](operations-docker-vm.md) 与 [升级到 0.9.0](fresh-install-0.9.0.md)
+3. [Docker 可执行配置与命令](../deploy/docker/README.md)、[PostgreSQL 生产接入](postgres-quickstart.md)、[Docker + 自管 PostgreSQL](operations-docker-vm.md) 与 [升级到 0.9.0](fresh-install-0.9.0.md)
 4. [AgentApplication 与 Builder](application-builder.md)
 5. [Provider 与能力协商](providers.md)
-6. [ZIO HTTP 生产宿主](http-host.md)
+6. [真实 Provider / 中转站 smoke](provider-live-smoke.md)
+7. [ZIO HTTP 生产宿主](http-host.md)
 
 ### 我要运行维护
 
@@ -51,7 +52,8 @@
 9. [下一代 Runtime 开发手册](architecture/next-generation-runtime.md)（含 Wave 0–3 路线、Adoption Matrix 与 Phase 0 审计证据表）
 10. [0914 架构说明审查与演进裁决](0914-architecture-review.md)（逐项对照当前实现，区分采纳、深化、暂缓与拒绝）
 11. [Runtime、Context 与 Prompt Cache 一体化演进方案](architecture/runtime-context-evolution-plan.md)（0915 输入的裁剪基线；Phase 0–1 与 Phase 2/3 核心切片已落地，显式 Provider cache dialect 仍待）
-12. [0914/0915 日期式输入稿](文档说明/README.md)（咨询与演进输入，不是当前契约）
+12. [0914–0916 日期式输入稿](文档说明/README.md)（咨询与演进输入，不是当前契约）
+13. [强模型时代的 Capability-aware Control Runtime](architecture/0030-model-capability-control-runtime.md)（0916 输入的实施裁决；ReasoningEffort 与 capability snapshot 已落地，native capability 按评测门禁演进）
 
 ### 我要接入知识库
 
@@ -75,6 +77,7 @@
 - [宿主数据库迁移](database-migrations.md)
 - [PostgreSQL 生产接入与运维](postgres-quickstart.md)
 - [Docker/VM 安装、升级与恢复](operations-docker-vm.md)
+- [Docker 环境变量、Compose 与启动命令](../deploy/docker/README.md)
 - [业务仓库消费与跨仓联调](consuming-from-server.md)
 - [独立公开仓库 ADR](architecture/0015-independent-public-repository.md)
 - [已被取代的原开源边界 ADR](architecture/0013-open-source-release-boundary.md)

@@ -1,7 +1,7 @@
 package com.zyblw.agent.integrations.openai
 
 import com.zyblw.agent.core.*
-import com.zyblw.agent.model.CapabilityMatrix
+import com.zyblw.agent.model.{CapabilityMatrix, ModelStreamEvent}
 import com.zyblw.agent.testkit.*
 import zio.*
 import zio.http.*
@@ -218,6 +218,42 @@ object OpenAIHttpContractSpec extends ZIOSpecDefault:
           closed <- streamClosed.await.timeout(10.seconds)
         yield closed).provide(Client.default, TestServer.default)
       yield assertTrue(closed.isDefined)
+    } @@ TestAspect.withLiveClock @@ TestAspect.sequential,
+    test("模型级 streaming=false 使用非流式降级而不是只读取 Provider 默认能力") {
+      for
+        bodies        <- Ref.make(Chunk.empty[String])
+        streamStarted <- Promise.make[Nothing, Unit]
+        streamClosed  <- Promise.make[Nothing, Unit]
+        result        <- (for
+          _      <- TestServer.addRoutes(routes(bodies, streamStarted, streamClosed))
+          port   <- ZIO.serviceWithZIO[Server](_.port)
+          client <- ZIO.service[Client]
+          baseCapabilities = OpenAICompatibility.openAI.descriptor.capabilities
+          compatibility    = OpenAICompatibility.openAI.copy(
+            descriptor = OpenAICompatibility.openAI.descriptor.copy(
+              models = Map("non-streaming" -> baseCapabilities.copy(streaming = false))
+            )
+          )
+          config = OpenAICompatibleConfig(
+            s"http://127.0.0.1:$port/v1",
+            "stub-secret",
+            "non-streaming",
+            compatibility = compatibility
+          )
+          events <- OpenAICompatibleChatModel(client, config)
+            .stream(ChatRequest(Chunk(AgentMessage.user("hello"))))
+            .runCollect
+          sent <- bodies.get
+        yield events -> sent).provide(Client.default, TestServer.default)
+      yield assertTrue(
+        result._1.length == 1,
+        result._1.headOption.exists {
+          case ModelStreamEvent.Completed(_) => true
+          case _                             => false
+        },
+        result._2.length == 1,
+        result._2.headOption.exists(!_.contains("\"stream\":true"))
+      )
     } @@ TestAspect.withLiveClock @@ TestAspect.sequential,
     test("ProviderContract.verifySuite 覆盖成功、429/5xx、负 usage、断流和取消") {
       for

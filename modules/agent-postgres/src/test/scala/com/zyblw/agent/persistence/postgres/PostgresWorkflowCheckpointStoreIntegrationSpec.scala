@@ -12,7 +12,7 @@ import zio.*
 import zio.json.*
 import zio.test.*
 
-/** 真实 PostgreSQL 16 下的 Workflow checkpoint 契约。
+/** 真实 PostgreSQL 18 下的 Workflow checkpoint 契约。
   *
   * 覆盖 `agent_workflow_checkpoints`、`agent_workflow_node_executions`、`agent_workflow_waits` 与
   * `agent_workflow_signals`：跨 Store 幂等/单调仲裁、identity 隔离、checksum fail-closed、execution timeline、durable
@@ -40,7 +40,7 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
       container <- ZIO.acquireRelease(
         ZIO.attemptBlocking {
           val value =
-            PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:16-alpine"))
+            PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:18-alpine"))
           value.start()
           value
         }

@@ -72,6 +72,35 @@ missing_ddl = [table for table in tables if f"CREATE TABLE {table}" not in v001]
 if missing_ddl:
     raise SystemExit("authoritative tables missing V001 DDL: " + ", ".join(missing_ddl))
 
+# 0.9.0 尚未发布，当前仓库采用可破坏重建的 fresh-install 基线。这里检查目录全集，而不是只探测几个已知旧文件，
+# 防止误加 V002 或遗留历史 migration 后让“空库唯一 V001”退化成只存在于文档里的约定。
+core_migration_dir = pathlib.Path(
+    "modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/migration"
+)
+knowledge_migration_dir = pathlib.Path(
+    "modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/optional/pgvector_1024"
+)
+expected_core = {
+    "V001__zyblw_agent_0_9_baseline.sql",
+    "R__zyblw_agent_schema_comments.sql",
+}
+expected_knowledge = {
+    "V001__agent_knowledge_0_9_baseline.sql",
+    "R__agent_knowledge_1024_comments.sql",
+}
+actual_core = {path.name for path in core_migration_dir.glob("*.sql")}
+actual_knowledge = {path.name for path in knowledge_migration_dir.glob("*.sql")}
+if actual_core != expected_core:
+    raise SystemExit(
+        "core migration directory must contain exactly the 0.9 V001 and repeatable comments: "
+        + ", ".join(sorted(actual_core))
+    )
+if actual_knowledge != expected_knowledge:
+    raise SystemExit(
+        "knowledge migration directory must contain exactly the 0.9 V001 and repeatable comments: "
+        + ", ".join(sorted(actual_knowledge))
+    )
+
 test_root = pathlib.Path("modules/agent-postgres/src/test/scala")
 spec_files = list(test_root.rglob("*ConformanceSpec.scala")) + list(
     test_root.rglob("*IntegrationSpec.scala")
@@ -91,7 +120,8 @@ print(json.dumps({
     "items": len(items),
     "pendingExternal": pending,
     "pendingEvalHost": eval_pending,
-    "authoritativeTables": len(tables)
+    "authoritativeTables": len(tables),
+    "freshInstallBaselines": 2
 }, separators=(",", ":")))
 PY
 

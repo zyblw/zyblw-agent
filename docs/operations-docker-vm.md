@@ -1,27 +1,38 @@
 # Docker / 自管 PostgreSQL 接入
 
 > 状态：0.9.0 业务接入手册
-> 最后核验：2026-08-28
+> 最后核验：2026-09-18
 > 事实来源：`deploy/docker/compose.business.yml`、`ProductionSupportHost`、`KnowledgeQaHost`、`AgentPostgresMigrations`
 
 当前可靠拓扑是 **Docker 启动应用 + 你自己部署的 PostgreSQL**。这足够支撑业务智能体接入。
 长时 soak、节点丢失、主备切换、PgBouncer 饱和、滚动发布、备份 RPO/RTO 和 SLO owner 已延期，在约定窗口的生产流量上测量后再补。
+环境变量逐项说明、三种 Compose 的选择、完整启动/检查/停止命令以
+[Docker 可执行配置](../deploy/docker/README.md)为唯一入口；本文只维护安装、升级和恢复策略。
 
 ## 安装
 
-1. 准备 PostgreSQL 16+ 和一个空库。单用户账号可以同时执行 migrate 与 serve。
+1. 准备 PostgreSQL 18 和一个空库。单用户账号可以同时执行 migrate 与 serve。
 2. 复制 [`deploy/docker/env.example`](../deploy/docker/env.example)。容器访问宿主机库时用
    `jdbc:postgresql://host.docker.internal:5432/<db>`，并让 PostgreSQL 监听该地址。
-3. 准备 OpenAI-compatible Provider 环境变量。书籍问答 live 路径还需要 `EMBEDDING_API_KEY`、
+3. 准备单一 `OPENAI_*`，或者使用非空 `ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON` + 对应 `apiKeyEnv` Secret 装配多个官方端点/
+   中转站。非空 JSON 非法时启动失败，不回落到单一 OpenAI。书籍问答 live 路径还需要 `EMBEDDING_API_KEY`、
    `EMBEDDING_MODEL` 与 `EMBEDDING_DIMENSION=1024`，不会回退到哈希向量。
 4. 由业务反代写入 `X-Tenant-Id`、`X-User-Id`。
 5. 启动：
 
 ```bash
 cd deploy/docker
-./preflight.sh
-docker compose -f compose.business.yml --env-file .env up --build
+./preflight.sh .env
+docker compose -f compose.business.yml --env-file .env up -d --build --wait
 ```
+
+示例默认只绑定 `127.0.0.1`。`trusted-headers` 入口不能直接暴露公网；跨机反代必须显式设置受控私网
+`ZYBLW_AGENT_BIND_ADDRESS`，并让网络 ACL 拒绝其他来源。
+
+`preflight.sh .env` 只接受运维人员维护的受信环境文件（内部使用 shell `source`），不能用于下载内容或用户上传内容。配置
+示例 Compose 会显式注入 `RELAY_API_KEY`、DeepSeek、GLM、Qwen、Moonshot/Kimi、OpenAI、Anthropic、Gemini 的标准
+Secret 变量；使用自定义变量名时，必须同步加入 `support.environment` 与 `preflight.sh` 允许列表，避免 Secret 只存在于
+宿主机却未进入容器。
 
 源码方式：
 

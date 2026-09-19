@@ -87,7 +87,7 @@ final case class ContextSummaryCheckpoint(
 - `coveredMessages` 表示摘要覆盖 `messages[0, coveredMessages)`；
 - `sourceDigest` 对原始消息前缀做稳定 SHA-256；
 - `compressorVersion` 标识 Prompt/schema/渲染协议版本；
-- `summary` 是已经标为“不可信事实数据”的摘要正文，不会进入 HTTP 或 Telemetry。
+- `summary` 是尚未附加 Provider envelope 的原始摘要正文；每次组装时由 `PromptCompiler` 包装为 User data，避免 checkpoint 复用时重复转义。正文不进入 HTTP 或 Telemetry。
 
 下一回合只压缩：
 
@@ -99,7 +99,7 @@ final case class ContextSummaryCheckpoint(
 或消息数量回退，ContextManager 会 fail-closed。
 
 摘要、辅助模型 usage、`lastEventSequence` 和状态版本通过同一个 `RunStore.commit/commitFenced` 事务提交。Worker 在摘要完成后
-崩溃，新的 Worker 会从 checkpoint 继续，而不是再次付费压缩相同历史。
+在 checkpoint 已提交后崩溃，新 Worker 会从该边界继续。可选模型辅助压缩在 Provider 返回与 checkpoint/usage 提交之间仍有不确定窗口；在它复用 ModelCall intent/settlement 账本前，生产默认应使用确定性压缩。
 
 ## 5. 模型调用预算
 
@@ -275,7 +275,7 @@ Trace 事件为 `agent.context.compacted`；Langfuse 会把它作为 span，而�
 `DefaultContextManagerSpec` 另外覆盖：
 
 - checkpoint 生成；
-- 相同历史恢复后不重复压缩或计费；
+- 已提交 checkpoint 的相同历史恢复后不重复压缩；模型辅助调用在完成 ledger 复用前不宣称 exactly-once 计费；
 - 消息前缀改写时 source digest fail-closed。
 
 `AgentRuntimeSpec` 验证 checkpoint、usage 和 `ContextCompacted` 在主模型之前进入同一耐久状态链路。
@@ -293,7 +293,7 @@ Trace 事件为 `agent.context.compacted`；Langfuse 会把它作为 span，而�
 
 - 正式评测 Harness、中文 starter dataset 与离线示例已经完成，但还需要用真实中医长会话失败样本扩充约束、引用、
   审批和待办数据集并形成 CI 趋势；
-- DeepSeek、GLM、OpenAI Chat/Responses、Anthropic 和 Gemini 的统一 compressor smoke 入口已经完成；当前环境没有
+- DeepSeek、GLM、Qwen、Kimi、OpenAI Chat/Responses、Anthropic 和 Gemini 的统一 compressor smoke 入口已经完成；当前环境没有
   厂商密钥，仍需部署团队生成各账号/模型/价格版本的真实通过报告；
 - Provider 在网络失败前已经计费、但没有返回 usage 时，框架无法凭空恢复厂商账单数据；
 - 当前摘要是抽取式，不追求文学化或高度抽象；只有事实保真 eval 证明安全后，才考虑受约束的生成式二级摘要；

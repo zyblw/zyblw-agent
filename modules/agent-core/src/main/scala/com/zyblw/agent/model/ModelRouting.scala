@@ -139,6 +139,9 @@ object ModelRouter:
         Option.when(
           request.settings.toolChoice.isInstanceOf[ToolChoice.Specific] && !capabilities.specificToolChoice
         )("specific-tool-choice"),
+        Option.when(
+          request.settings.reasoningEffort.exists(!capabilities.reasoningEfforts.contains(_))
+        )("reasoning-effort"),
         Option.when(capabilities.maxInputTokens.exists(_ < estimatedInputTokens))("context-input"),
         Option.when(capabilities.maxOutputTokens.exists(_ < output.toLong))("context-output"),
         Option.when(estimatedInputTokens < 0 || output <= 0)("invalid-token-estimate"),

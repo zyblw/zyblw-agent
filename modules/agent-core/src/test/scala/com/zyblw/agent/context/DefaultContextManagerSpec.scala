@@ -116,6 +116,8 @@ object DefaultContextManagerSpec extends ZIOSpecDefault:
             prepared.messages.exists(_.text.contains("黄帝内经学习资料")),
             prepared.messages.filter(_.text.contains("只使用中文")).forall(_.role == MessageRole.User),
             prepared.messages.filter(_.text.contains("黄帝内经学习资料")).forall(_.role == MessageRole.User),
+            prepared.messages.lastOption
+              .exists(message => message.role == MessageRole.User && message.text == "question"),
             !prepared.messages
               .filter(message => message.role == MessageRole.System || message.role == MessageRole.Developer)
               .exists(_.text.contains("黄帝内经学习资料")),

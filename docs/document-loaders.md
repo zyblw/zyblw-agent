@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-08-23
+> 最后核验：2026-09-19
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -69,7 +69,7 @@ HTTP Adapter。不需要文件摄取的业务不会被迫携带解析器或 HTTP
 
 ## 4. Apache Tika 实现
 
-`TikaDocumentLoader` 当前使用 Apache Tika 3.3.1，支持：
+`TikaDocumentLoader` 当前使用 Apache Tika 4.0.0，支持：
 
 - `text/plain`
 - `text/markdown`
@@ -107,6 +107,9 @@ TikaDocumentLoaderConfig(
 ```
 
 注册表仍会拒绝多个 loader 竞争同一 MIME；调用方不能借该配置扩大解析攻击面。
+
+Tika 4 的嵌入式 Parser 仍与业务 JVM 同进程；升级版本不会自动获得进程隔离。受信任的数字 PDF 可使用该轻量路径；公开上传、
+复杂格式和高风险文件应在恶意文件扫描后交给隔离的 Docling/Tika 服务，并用 CPU、内存、PID、超时和默认断网限制解析器。
 
 ## 5. Docling Serve：PDF→Markdown + 无损结构
 
@@ -185,7 +188,9 @@ val chunker = DocumentStructureChunker(
 )
 ```
 
-默认装箱预算仍是 Unicode code point，以保持已发布 `strategyId`。可选 `maxTokens` + `TokenCounter.CjkApproximate` 只改变合并/切分预算，不是 Embedding tokenizer 对齐；启用后必须出现在 `strategyId` 中并新建索引版本。
+`DocumentStructureChunker` 默认使用 `maxTokens=512` 与 `TokenCounter.Cl100k` 装箱，`maxCharacters` 是 Unicode
+硬上限；counter 与预算都会进入 `strategyId`。显式改用 `TokenCounter.CjkApproximate` 或其他 counter 属于新的索引策略，
+必须新建索引版本。没有结构时降级的 `MarkdownStructureChunker` 仍按 Unicode code point 字符预算。
 
 它直接基于 `DocumentBlock` 工作：合并相邻、同父节点、同标题路径的小 block，只在单个 block 超限时使用
 Unicode-safe overlap 切分。产出的 `ChunkLineage` 保留 `parentId/previousChunkId/nextChunkId/ordinal`、页码、bbox 和
@@ -261,7 +266,7 @@ import zio.*
 import zio.stream.*
 
 val ragLayer = ZLayer.make[RagApplication](
-  DocumentLoaderRegistry.layer(Chunk(docling)),
+  DocumentLoaderRegistry.layer(Chunk(pdf)),
   ZLayer.succeed[EmbeddingModel](embeddingService),
   InMemoryKnowledgeIndexStore.knowledge,
   DocumentStructureChunker.layer,
@@ -319,8 +324,32 @@ PostgresAgentPersistence.knowledge(
 )
 ```
 
+这里的 `pdf` 是第 5.1 节的 `CascadingDocumentLoader`，作为 `application/pdf` 的唯一 owner；只注册 `docling`
+适合强制 OCR 的诊断部署，不是生产 `auto` 模式的默认装配。
+
 该组合层让 `KnowledgeIndexStore` 与 `VectorStore` 使用同一 DataSource、固定维度和正式表；业务无需把已经发布的向量再
 手工 upsert 到另一套查询 Store。
+
+## 公开 PDF/RAG 端到端门禁
+
+`scripts/test-public-pdf-rag.sh` 按原始发布 URL 下载并校验三个固定 SHA-256 文件，二进制只进入 `target/` 缓存，不提交
+仓库、Maven 制品或运行镜像：
+
+| 样本 | 用途 | 固定身份 |
+|---|---|---|
+| Docling Technical Report 2408.09869 | 真实 PDF 经 Tika/PDFBox 文字层提取与 page/line 结构化（不调用 Docling Serve），再完成切分、索引、检索、citation | `82dd4707…4d22` |
+| Open RAG Benchmark 2404.08757v2 | qrel gold 文档 | `82252bbf…5888` |
+| Open RAG Benchmark 2407.01528v3 | 固定非相关对照文档 | `68eca45e…fd33` |
+
+```bash
+./scripts/test-public-pdf-rag.sh
+```
+
+测试固定使用自然语言查询 `In what ways do large financial institutions influence market equilibrium prices?`
+（对应 Open RAG Benchmark qrel；实现不绑定 query UUID），要求 gold 文档在对照文档之前返回，
+并验证 citation 的文档身份。Embedding 使用确定性测试实现，因此该门禁验证的是框架数据流、身份、排序和引用，不是远程
+Embedding 或生成模型的质量结论。Open RAG Benchmark 许可证是 CC-BY-NC-4.0，只能按项目许可证用于测试；商业发布前仍需
+由业务确认语料、论文原文与派生缓存的使用范围。
 
 ## 9. 生产部署边界
 

@@ -3,7 +3,7 @@ package com.zyblw.agent.integrations.openai
 import zio.*
 import zio.test.*
 
-/** 验证 OpenAI、DeepSeek、GLM、Qwen 配置都经过可替换 ConfigProvider，并确保失败文本不会泄漏 Secret。 */
+/** 验证 OpenAI、DeepSeek、GLM、Qwen、Kimi 配置都经过可替换 ConfigProvider，并确保失败文本不会泄漏 Secret。 */
 object ProviderConfigLoaderSpec extends ZIOSpecDefault:
   def spec: Spec[TestEnvironment & Scope, Any] = suite("OpenAI provider config loader")(
     test("OpenAI-compatible 与 Responses 共享部署键但保持独立协议配置") {
@@ -59,6 +59,20 @@ object ProviderConfigLoaderSpec extends ZIOSpecDefault:
         )
       }
     },
+    test("Kimi 显式加载模型、使用官方默认端点且不泄漏密钥") {
+      val values = Map(
+        "MOONSHOT_API_KEY" -> "kimi-secret",
+        "KIMI_MODEL"       -> "kimi-test"
+      )
+      ProviderPresets.kimiFromEnvironment.provide(provider(values)).map { kimi =>
+        assertTrue(
+          kimi.defaultModel == "kimi-test",
+          kimi.chatCompletionsUrl == "https://api.moonshot.ai/v1/chat/completions",
+          kimi.compatibility.descriptor.id == "kimi",
+          !kimi.toString.contains("kimi-secret")
+        )
+      }
+    },
     test("构造失败信息不包含 API Key") {
       val secret = "must-not-appear-in-error"
       val values = Map("OPENAI_API_KEY" -> secret, "OPENAI_MODEL" -> "")
@@ -66,6 +80,18 @@ object ProviderConfigLoaderSpec extends ZIOSpecDefault:
         val rendered = exit.toString
         assertTrue(exit.isFailure, !rendered.contains(secret))
       }
+    },
+    test("OpenAI-compatible 直接配置与多端点使用同一严格 URL 边界") {
+      val remoteHttp = scala.util.Try(
+        OpenAICompatibleConfig("http://gateway.example/v1", "secret", "model")
+      )
+      val querySecret = scala.util.Try(
+        OpenAICompatibleConfig("https://gateway.example/v1?key=secret", "secret", "model")
+      )
+      val local = scala.util.Try(
+        OpenAICompatibleConfig("http://127.0.0.1:8080/v1", "secret", "model")
+      )
+      assertTrue(remoteHttp.isFailure, querySecret.isFailure, local.isSuccess)
     }
   )
 

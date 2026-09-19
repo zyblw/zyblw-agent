@@ -3,7 +3,7 @@ package com.zyblw.agent.integrations.openai
 // Provider 配置与预设：API Key 必须来自环境变量或 Secret Manager，禁止写入仓库和日志。
 
 import com.zyblw.agent.core.*
-import com.zyblw.agent.integrations.CredentialReference
+import com.zyblw.agent.integrations.{CredentialReference, ProviderEndpointUrl}
 import zio.*
 
 final case class OpenAICompatibleConfig(
@@ -16,7 +16,10 @@ final case class OpenAICompatibleConfig(
     defaultOptions: Map[String, zio.json.ast.Json] = Map.empty
 ):
   // 构造阶段快速失败，避免带着空 URL、模型或密钥启动服务。
-  require(baseUrl.nonEmpty, "baseUrl must not be empty")
+  require(
+    ProviderEndpointUrl.isAllowed(baseUrl),
+    "baseUrl must be an HTTPS root URL without user-info/query/fragment, or local 127.0.0.1 HTTP"
+  )
   require(apiKey.nonEmpty, "apiKey must not be empty")
   require(defaultModel.nonEmpty, "defaultModel must not be empty")
 
@@ -30,7 +33,7 @@ final case class OpenAICompatibleConfig(
 object OpenAICompatibleConfig:
   /** 本 loader 读取 API Key 的环境变量名。
     *
-    * 单独声明而不是让管理面按 Provider ID 猜测：同一个 `OpenAICompatibleConfig` 类型被 OpenAI、DeepSeek 和 GLM 复用， 猜测会在"运维明明配了
+    * 单独声明而不是让管理面按 Provider ID 猜测：同一个 `OpenAICompatibleConfig` 类型被多个兼容 Provider 复用， 猜测会在"运维明明配了
     * Key、界面却说来源是另一个变量"时把排障引向错误的方向。
     */
   val ApiKeyVariable: String = "OPENAI_API_KEY"
@@ -62,16 +65,19 @@ object OpenAICompatibleConfig:
 object ProviderPresets:
   val DeepSeekDefaultModel = "deepseek-v4-flash"
   val GlmDefaultModel      = "glm-4.7-flash"
+  val KimiBaseUrl          = "https://api.moonshot.ai/v1"
 
   /** 各 OpenAI-compatible Provider 的 API Key 变量名；共用配置类型但不共用凭据。 */
   val DeepSeekApiKeyVariable: String = "DEEPSEEK_API_KEY"
   val GlmApiKeyVariable: String      = "GLM_API_KEY"
   val QwenApiKeyVariable: String     = "QWEN_API_KEY"
+  val KimiApiKeyVariable: String     = "MOONSHOT_API_KEY"
 
   /** 可展示的凭据引用；只含变量名，不含值。 */
   val deepSeekCredentialReference: String = CredentialReference.environment(DeepSeekApiKeyVariable)
   val glmCredentialReference: String      = CredentialReference.environment(GlmApiKeyVariable)
   val qwenCredentialReference: String     = CredentialReference.environment(QwenApiKeyVariable)
+  val kimiCredentialReference: String     = CredentialReference.environment(KimiApiKeyVariable)
 
   /** 构造 OpenAI 官方端点配置。 */
   def openAI(apiKey: String, model: String): OpenAICompatibleConfig =
@@ -118,6 +124,19 @@ object ProviderPresets:
       compatibility = OpenAICompatibility.qwen
     )
 
+  /** 构造 Moonshot Kimi 配置。模型必须显式给出，避免框架把会演进的营销别名固化为长期默认。 */
+  def kimi(
+      apiKey: String,
+      model: String,
+      baseUrl: String = KimiBaseUrl
+  ): OpenAICompatibleConfig =
+    OpenAICompatibleConfig(
+      baseUrl = baseUrl,
+      apiKey = apiKey,
+      defaultModel = model,
+      compatibility = OpenAICompatibility.kimi
+    )
+
   /** DeepSeek 的 ZIO Config 描述；密钥保持为 `Config.Secret` 直到构造 Adapter。 */
   val deepSeekEnvironmentConfig: Config[OpenAICompatibleConfig] =
     (
@@ -140,6 +159,14 @@ object ProviderPresets:
         Config.string("QWEN_MODEL")
     ).mapAttempt { case (key, baseUrl, model) => qwen(key.stringValue, baseUrl, model) }
 
+  /** Kimi 的 ZIO Config 描述。模型显式配置；官方根端点可按部署需要覆盖。 */
+  val kimiEnvironmentConfig: Config[OpenAICompatibleConfig] =
+    (
+      Config.secret(KimiApiKeyVariable) ++
+        Config.string("KIMI_MODEL") ++
+        Config.string("KIMI_BASE_URL").withDefault(KimiBaseUrl)
+    ).mapAttempt { case (key, model, baseUrl) => kimi(key.stringValue, model, baseUrl) }
+
   /** 从当前 ZIO ConfigProvider 读取 DeepSeek 密钥和模型。 */
   def deepSeekFromEnvironment: IO[AgentError, OpenAICompatibleConfig] =
     load("DeepSeek", deepSeekEnvironmentConfig)
@@ -151,6 +178,10 @@ object ProviderPresets:
   /** 从当前 ZIO ConfigProvider 读取 Qwen 密钥、区域端点和模型。 */
   def qwenFromEnvironment: IO[AgentError, OpenAICompatibleConfig] =
     load("Qwen", qwenEnvironmentConfig)
+
+  /** 从当前 ZIO ConfigProvider 读取 Kimi 密钥、模型和可选端点。 */
+  def kimiFromEnvironment: IO[AgentError, OpenAICompatibleConfig] =
+    load("Kimi", kimiEnvironmentConfig)
 
   /** 从当前 ZIO ConfigProvider 读取 OpenAI 密钥和模型。 */
   def openAIFromEnvironment: IO[AgentError, OpenAICompatibleConfig] =

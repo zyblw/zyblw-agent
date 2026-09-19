@@ -31,13 +31,24 @@ services:
       ZYBLW_AGENT_DB_USER: ${ZYBLW_AGENT_DB_USER:?set ZYBLW_AGENT_DB_USER}
       ZYBLW_AGENT_DB_PASSWORD_ENV: ZYBLW_AGENT_DB_PASSWORD
       ZYBLW_AGENT_DB_PASSWORD: ${ZYBLW_AGENT_DB_PASSWORD:?set ZYBLW_AGENT_DB_PASSWORD}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:?set OPENAI_BASE_URL}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      # 二选一：配置驱动的多端点/中转站，或单一 OPENAI_* 兼容端点。
+      ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON: ${ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON:-}
+      RELAY_API_KEY: ${RELAY_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      GLM_API_KEY: ${GLM_API_KEY:-}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      MOONSHOT_API_KEY: ${MOONSHOT_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:
-      - "${ZYBLW_AGENT_HTTP_PORT:-8080}:8080"
+      # 跨机反代时显式绑定受控私网 IP；禁止用 0.0.0.0 暴露 trusted headers 入口。
+      - "${ZYBLW_AGENT_BIND_ADDRESS:-127.0.0.1}:${ZYBLW_AGENT_HTTP_PORT:-8080}:8080"
     command: ["serve"]
+    restart: unless-stopped
     stop_grace_period: 25s
     read_only: true
     tmpfs:
@@ -52,3 +63,8 @@ services:
       timeout: 3s
       retries: 12
       start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

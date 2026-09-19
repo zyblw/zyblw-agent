@@ -40,6 +40,17 @@ jobs:
       - name: Validate production evidence manifest
         run: .github/scripts/verify-local-evidence.sh --manifest
 
+      - name: Validate Docker deployment contracts
+        run: |
+          ./deploy/docker/test-preflight.sh
+          docker compose --env-file deploy/docker/env.example -f deploy/docker/compose.business.yml config --quiet
+          ZYBLW_AGENT_IMAGE=ghcr.io/example/zyblw-agent:test \
+            ZYBLW_AGENT_MIGRATION_USER=zyblw_migrate \
+            ZYBLW_AGENT_MIGRATION_PASSWORD=test-only-migration-password \
+            docker compose --env-file deploy/docker/env.example -f deploy/docker/compose.external-db.yml config --quiet
+          ZYBLW_AGENT_MIGRATION_PASSWORD=test-only-migration-password \
+            docker compose --env-file deploy/docker/env.example -f deploy/docker/compose.staging.yml config --quiet
+
       - name: RAG runtime security and eval gates
         run: >-
           sbt -batch

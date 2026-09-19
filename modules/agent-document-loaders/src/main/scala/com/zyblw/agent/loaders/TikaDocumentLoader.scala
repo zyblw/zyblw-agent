@@ -2,13 +2,13 @@ package com.zyblw.agent.loaders
 
 import com.zyblw.agent.core.*
 import com.zyblw.agent.rag.*
-import java.io.ByteArrayInputStream
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.text.PDFTextStripper
+import org.apache.tika.io.TikaInputStream
 import org.apache.tika.metadata.Metadata
 import org.apache.tika.parser.{AutoDetectParser, ParseContext}
 import org.apache.tika.parser.ocr.TesseractOCRConfig
-import org.apache.tika.parser.pdf.PDFParserConfig
+import org.apache.tika.parser.pdf.{OcrConfig, PDFParserConfig}
 import org.apache.tika.sax.BodyContentHandler
 import zio.*
 
@@ -44,7 +44,7 @@ final case class TikaDocumentLoaderConfig(
     "Tika enabledMediaTypes 包含未审核的 MIME type"
   )
 
-/** 使用 Apache Tika 3.x 解析文本、Markdown、HTML、PDF 和 EPUB 的可选 Loader。
+/** 使用 Apache Tika 4.x 解析文本、Markdown、HTML、PDF 和 EPUB 的可选 Loader。
   *
   * 这个实现把输入总量、输出总量、MIME 检测、超时和 OCR 开关都放在框架控制面，而不是相信文件扩展名或文档内部 metadata。解析在 blocking executor 上执行；InputStream 在
   * finally 中关闭。Tika/PDFBox/压缩格式解析器仍属于复杂 攻击面，因此公开上传的任意文件应在独立 OCI 解析服务中运行；本实现适合受控知识库与可信运营导入，并为未来远程 Sandbox
@@ -58,7 +58,7 @@ final case class TikaDocumentLoaderConfig(
   */
 final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLoaderConfig())
     extends DocumentLoader:
-  override val id: String = "apache-tika-3.3.1"
+  override val id: String = "apache-tika-4.0.0"
 
   override val supportedMediaTypes: Set[String] = config.enabledMediaTypes
 
@@ -129,10 +129,10 @@ final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLo
     context.set(classOf[TesseractOCRConfig], ocr)
     if !config.allowOcr then
       val pdf = PDFParserConfig()
-      pdf.setOcrStrategy(PDFParserConfig.OCR_STRATEGY.NO_OCR)
+      pdf.getOcr.setStrategy(OcrConfig.Strategy.NO_OCR)
       context.set(classOf[PDFParserConfig], pdf)
     val handler = BodyContentHandler(config.maxExtractedCodePoints + 1)
-    val stream  = ByteArrayInputStream(bytes)
+    val stream  = TikaInputStream.get(bytes)
     try
       parser.parse(stream, handler, metadata, context)
       ParsedDocument(

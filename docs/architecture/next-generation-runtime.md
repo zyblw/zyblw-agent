@@ -4,6 +4,8 @@
 > 最后核验：2026-08-22
 > 决策来源：[ADR-0018](0018-next-generation-runtime-kernel.md)（Kernel 铁律）+ [ADR-0019](0019-typed-extensions-and-constrained-execution.md)（Typed Extensions / Precise Approvals / Constrained Execution 与 Wave 路线）
 > 事实来源：`modules/agent-core` 现行代码与测试；外部框架仅作对照，不作为本仓库合同
+>
+> 迁移编号说明：本文保留的 V004–V010 是候选期实现谱系，相关表和约束已全部折叠进当前 0.9 fresh-install V001，不能作为现行升级或安装步骤。
 
 本文指导后续**逐步开发**。P0 Kernel、P1 Composition 与 P2 Harness（ADT/CAS、PostgreSQL Adapter、Steering/FollowUp、typed ArtifactReference、成对 Eval、跨 Run 任务预算）已落地。后续路线按 ADR-0019 的 **Wave 0–3** 推进（见 §5.5 与 §16）；P3–P4 仍为 Proposed。现行行为以 [architecture.md](../architecture.md)、[runtime.md](../runtime.md)、[persistence.md](../persistence.md) 与源码为准。
 
@@ -36,7 +38,7 @@
 | P0 随后：Tool retry vs crash replay 语义拆分 | **已落地**（`ToolRetryPolicy` 在线；`ToolRecoveryPolicy` 崩溃重放；账本表未改） |
 | P0 crash matrix：Disabled / settlement 失败 / Complete 窗口 / lease lost / 预算保留 | **已落地**（in-memory 确定性注入；Postgres stale fenced ModelCall 测试需 `RUN_POSTGRES_INTEGRATION=1`） |
 | P0 Store 原子性：状态 + 事件 + ModelCall ledger | **已落地修复**（in-memory 单一 `Ref.Synchronized`；冲突后状态、事件与账本均不变化） |
-| P0 持久化信封：关系列 + JSON typed payload | **已落地**（State/Event/Tool/ModelCall 读取交叉校验；PostgreSQL 16 篡改测试 fail-closed） |
+| P0 持久化信封：关系列 + JSON typed payload | **已落地**（State/Event/Tool/ModelCall 读取交叉校验；PostgreSQL 18 篡改测试 fail-closed） |
 | P1 Composition / DX 第一刀：Profile + fingerprint + drift + CapturePolicy 配置 | **已落地**（创建冻结；恢复 Incompatible/RequiresRevalidation fail-closed；v5 工具计划另冻结 Schema/安全契约与单调审批要求；旧 Run 按版本兼容） |
 | P1 ContextContributor + Eval Replayable 轨迹门禁 | **已落地**（Contributor 组成 Resolver；sourceIds 进入指纹；`TrajectoryReplay` 评分 Replayable 重建） |
 | P1 其余：更小 Public API、testkit 便利层 | **已落地第一刀**（`TestAgentRuntime.inMemory`；`AgentEvalGrader` 可选轨迹维度） |
@@ -735,7 +737,7 @@ Deterministic `CrashInjector` 优于只靠随机 kill。已有 tool crash 测试
 - MetadataOnly：`toChatRequest` 失败或明确不可用；fingerprint 一致 — **已有测试**
 - Disabled：不写正文、旧单测仍绿 — **已有测试**
 - Telemetry / 公共 inspection JSON 不含 prompt、tool schema 正文、RAG/Memory 原文 — **Inspector 已覆盖 prompt；schema/RAG 原文沿用既有投影测试**
-- Store conformance：atomic rollback、idempotent Prepared、bounded pagination、cascade delete、EventId 身份漂移拒绝、跨批 sequence 连续性、无事件 `save` 不得漂移游标及非法 sequence/cursor 拒绝 — 已由同一套测试在 in-memory 与 PostgreSQL 16 Adapter 上通过
+- Store conformance：atomic rollback、idempotent Prepared、bounded pagination、cascade delete、EventId 身份漂移拒绝、跨批 sequence 连续性、无事件 `save` 不得漂移游标及非法 sequence/cursor 拒绝 — 已由同一套测试在 in-memory 与 PostgreSQL 18 Adapter 上通过
 - Budget 恢复后不被清零 — **已有测试**
 - Eval 使用 Replayable 轨迹 — **已落地**（`TrajectoryReplay` 评分器 + testkit 运行夹具；生产 soak 仍待）
 

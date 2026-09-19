@@ -339,12 +339,6 @@ final class AgentRuntimeDriver(
           (if definitions.nonEmpty then agent.contextPolicy.budget.tools else 0L),
         prices
       )
-      // 路由已经逐候选做过能力校验；直连调用必须在这里补上，否则不支持工具的模型会收到工具定义。
-      _ <- ZIO.unless(routing.routed)(
-        routing.adapter
-          .capabilities(routing.request.settings.model)
-          .flatMap(CapabilityValidator.validate(routing.request, _))
-      )
       startedAt <- RunClock.millis
       // 用实际路由到的 provider/model 查价，而不是 ChatModel.provider——后者在多 Provider 部署里是 "router"。
       resolvedProvider = routing.request.settings.provider.getOrElse(model.provider)
@@ -674,8 +668,8 @@ final class AgentRuntimeDriver(
                 full,
                 state.definition.contextPolicy.maxToolResultCharacters
               )
-              at           <- RunClock.millis
-              _            <- toolLedger.succeed(active, externalized, at)
+              at <- RunClock.millis
+              _  <- toolLedger.succeed(active, externalized, at)
             yield externalized
         )
     yield result

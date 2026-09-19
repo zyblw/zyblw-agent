@@ -13,6 +13,12 @@ final case class ToolDefinition(
     strict: Boolean = true
 ) derives JsonCodec
 
+/** Provider-neutral reasoning depth. Adapters translate this semantic level to their wire protocol; callers
+  * must not put provider field names such as `thinking_level` or `reasoning.effort` in core code.
+  */
+enum ReasoningEffort derives JsonCodec:
+  case None, Low, Medium, High, Max
+
 /** 厂商无关的生成参数；Provider 不支持的字段必须显式拒绝或按配置降级。 */
 final case class ModelSettings(
     provider: Option[String] = None,
@@ -25,7 +31,9 @@ final case class ModelSettings(
     /** 部署角色；由 `ModelRoleCatalog` 在 Run 创建时解析为 provider/model。 */
     role: Option[com.zyblw.agent.model.ModelRole] = None,
     /** 步骤需求；仅启用 RuntimeProfile.modelRouting 时生效，否则显式失败。 */
-    requirement: Option[com.zyblw.agent.model.ModelRequirement] = None
+    requirement: Option[com.zyblw.agent.model.ModelRequirement] = None,
+    /** 推理深度而非推理正文；实际可用档位由选中模型的 `ModelCapabilities` 决定。 */
+    reasoningEffort: Option[ReasoningEffort] = None
 ) derives JsonCodec
 
 enum ToolChoice derives JsonCodec:

@@ -1,7 +1,7 @@
 # 源码阅读路线
 
 > 状态：当前
-> 最后核验：2026-09-16
+> 最后核验：2026-09-17
 > 事实来源：`build.sbt`、`modules/*/src/main`、`modules/*/src/test`
 
 本页解决“从哪个文件开始、读到什么程度、如何证明自己理解了”的问题。概念解释仍以
@@ -160,9 +160,4 @@ sbt 'testkit/testOnly com.zyblw.agent.runtime.AgentRuntimeSpec -- -t "关键词"
 4. 一个只读工具和对应 policy/eval；
 5. 一个使用 Maven Central 最新正式版或唯一 `0.9.0-local` 候选的独立最小消费者。
 
-最后在 `zyblw-platform` 中用两条路径验证同一业务：
-
-- 源码模式：`ZYBLW_AGENT_SOURCE_DIR=../zyblw-agent`
-- 制品模式：精确 `ZYBLW_AGENT_VERSION`（正式版本或唯一 Maven-local 候选）
-
-两者都通过，才能证明“理解并改好了框架”，而不是只让同一工作树偶然编译。
+最后在 `zyblw-platform` 中通过唯一 sibling 源码路径验证业务：本地可以用 `ZYBLW_AGENT_SOURCE_DIR=../zyblw-agent` 指定 checkout，CI 与镜像则 checkout `.github/zyblw-agent.sha` 的精确 commit。需要同时通过 Agent 全量门禁、平台单测、平台真实 PostgreSQL 契约和 `VERIFY_AGENT_CLEAN=1 ./scripts/verify-agent-version.sh`，才能证明候选是可复现的，而不是只让开发机工作树偶然编译。独立 Maven consumer 只负责验证框架公开制品，不是平台的第二条运行路径。

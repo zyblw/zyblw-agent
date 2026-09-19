@@ -2,7 +2,7 @@
 
 > 状态：0.9.0 使用契约
 >
-> 最后核验：2026-08-28
+> 最后核验：2026-09-17
 >
 > 事实来源：公开源码、可运行示例、独立 Maven consumer、数据库 migration 与测试
 
@@ -24,7 +24,7 @@ Agent 的核心边界始终是：模型提出文本、结构化结果或工具�
 
 ## 2. 环境与依赖
 
-框架 0.9.0 的开发基线是 JDK 21、Scala 3.8.4、sbt 2.0.1、ZIO 2.1.26。业务只引入实际需要的模块：
+框架 0.9.0 的开发基线是 JDK 21、Scala 3.9.0 LTS、sbt 2.0.1、ZIO 2.1.26。业务只引入实际需要的模块：
 
 ```scala
 val zyblwAgentVersion = "0.9.0"
@@ -85,6 +85,11 @@ Hikari DataSource
 
 `ZYBLW_AGENT_RUNTIME_MODE=contract` 只供自动化验证。内存 `inMemory` 装配留给测试，不再作为用户入口。
 `AgentQuickstart` 已删除；未注册但被白名单引用的工具仍会在模型调用前被正式路径拒绝。
+
+两个生产参考宿主共用同一模型选择规则：存在 `ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON` 时使用配置驱动的多端点路由；否则
+读取单一 `OPENAI_*`。多端点配置可以让同一中转 URL/Key 注册多个逻辑 Provider，但每个 Provider 只能选择一个明确的
+wire profile。完整配置和逐模型 smoke 见 [Provider 与能力协商](providers.md)与
+[真实 Provider smoke](provider-live-smoke.md)。
 
 ## 4. 定义 Agent 与工具
 
@@ -335,6 +340,7 @@ artifact。Provider 类型不能进入 core，数据库 DTO 不能成为 HTTP wi
 框架仓库的候选门禁：
 
 ```bash
+./scripts/verify-business-ready.sh
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
 sbt -batch 'set ThisBuild / version := "0.9.0-local"; publishM2'

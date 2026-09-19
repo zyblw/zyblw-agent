@@ -1,7 +1,7 @@
 # zyblw-agent 能力审计、框架对照与演进判断
 
 > 状态：当前审计
-> 最后核验：2026-09-15
+> 最后核验：2026-09-19
 > 事实来源：当前源码、测试、构建、迁移、发布工作流，以及文末列出的官方框架资料
 > 演进排序的权威来源：[ADR-0019](architecture/0019-typed-extensions-and-constrained-execution.md) 的 Wave 0–3；本文用于能力现状与竞品对照，不另立路线
 
@@ -43,10 +43,11 @@ lease/fencing、PostgreSQL、RAG 引用和低敏观测已经形成可信地基�
 
 | 证据 | 结果 | 能证明什么 | 不能证明什么 |
 |---|---|---|---|
-| `sbt -batch 'scalafmtCheckAll;scalafmtSbtCheck;testFull'` | pass | 全模块格式、确定性单元和契约基线可编译、可执行 | 真实 Provider、数据库主备、长时负载 |
-| `RUN_POSTGRES_INTEGRATION=1 sbt -DRUN_POSTGRES_INTEGRATION=1 -batch postgres/testFull` | pass，105/105 | PostgreSQL 16/Testcontainers 的迁移、并发、事务、RAG ACL、embedding 身份 fail-closed、恢复契约 | 生产数据量、跨可用区故障、RPO/RTO |
-| 259 个主 Scala 源码文件、186 个测试 Scala 源码文件 | 事实 | 不是示例级代码库，测试投入较高 | 文件数量和测试数量本身不等于成熟度 |
-| `AgentRuntimeDriver.scala` 2,053 行、`PostgresWorkflowCheckpointStore.scala` 1,879 行 | 风险信号 | Driver 已与纯 Kernel 分离，但效果编排仍集中、需要按变化原因继续收口 | 不能仅凭行数判定设计错误 |
+| `sbt -batch 'scalafmtCheckAll;scalafmtSbtCheck;testFull'` | pass（当前工作树全量通过） | 全模块格式、确定性单元和契约基线可编译、可执行 | 真实 Provider、数据库主备、长时负载 |
+| `RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull` | pass | PostgreSQL 18.6 / pgvector 0.8.6 Testcontainers 的唯一 V001、并发、事务、RAG ACL、embedding 身份 fail-closed、恢复契约 | 生产数据量、跨可用区故障、RPO/RTO |
+| Dashboard `typecheck` / `lint` / production `build` | pass（Node.js 26、React 19.3、TypeScript 6） | 当前管理 DTO 与 UI 可类型检查并产出生产静态构建 | 浏览器、真实宿主授权和线上负载 |
+| 280 个主 Scala 源码文件、195 个测试 Scala 源码文件 | 事实 | 不是示例级代码库，测试投入较高 | 文件数量和测试数量本身不等于成熟度 |
+| `AgentRuntimeDriver.scala` 814 行、`PostgresWorkflowCheckpointStore.scala` 1,896 行 | 风险信号 | Driver 已与纯 Kernel 分离；Workflow SQL 效果编排仍集中，需要按变化原因继续收口 | 不能仅凭行数判定设计错误 |
 
 发布候选仍必须补充精确 Central 制品的独立 consumer、真实 Provider 小额度 smoke、业务固定数据集、部署环境恢复和
 生产观测证据。测试通过只说明当前已编码契约成立，不授予未测试能力更高成熟度。
@@ -102,7 +103,8 @@ lease/fencing、PostgreSQL、RAG 引用和低敏观测已经形成可信地基�
 
 ### 2. 可用但仍需生产证据
 
-- OpenAI-compatible、OpenAI Responses、Anthropic、Gemini 都有真实协议 Adapter 和 stub contract test，但真实流量历史仍短。
+- OpenAI-compatible 的 DeepSeek/Qwen/GLM/Kimi 一级档案、OpenAI Responses、Anthropic、Gemini 都有真实协议 Adapter
+  和 stub contract test；模型级能力已经贯穿 wire 校验，但各部署 endpoint/model 的真实流量历史仍短。
 - RAG 已有 Tika/Docling PDF 摄取、结构感知 Markdown chunk、版本化原子发布、hybrid retrieval、rerank、citation 和 eval；
   已有 block/page/bbox lineage、结构切分和 ACL 后相邻/同父级扩展；仍缺恶意 PDF/真实 OCR、tokenizer-aligned
   chunking、大规模容量与线上领域质量证据。
@@ -311,7 +313,7 @@ execution；Graph Studio、复杂 GraphRAG 和 Provider 全特性矩阵不能替
 
 - Plan/Goal/Todo 是可恢复任务状态，不只是 Prompt；
 - 跨 Run 任务预算已采用 DeepSeek/Pi Harness 值得吸收的“显式任务边界 + 可重建事实”思想，但实现保持 ZIO/Scala 原生：`RunLimits` 是唯一 Run 额度，Goal 账本只做幂等 reserve/settle/release；PostgreSQL 行锁防并发透支，Start 五事实同事务，终态 Reconciler 修复崩溃窗口；没有第二套模型循环；
-- Artifact 已完成 core SPI 与 PostgreSQL durable Adapter（V011）：独立二进制、session/user 隔离、不可变版本、名称/容量/metadata 边界，以及保存/读取/删除/过期审计。Goal/Plan/Todo 已通过有界 typed reference 关联且不加载正文。下一步由真实需求决定 Tool 接入、多模态正文和线上保留期演练；
+- Artifact 已完成 core SPI 与 PostgreSQL durable Adapter（已折叠进 0.9 V001）：独立二进制、session/user 隔离、不可变版本、名称/容量/metadata 边界，以及保存/读取/删除/过期审计。Goal/Plan/Todo 已通过有界 typed reference 关联且不加载正文。下一步由真实需求决定 Tool 接入、多模态正文和线上保留期演练；
 - Skill 是版本化说明与能力清单，按需加载，不在每轮塞入完整正文；
 - approval 和外部副作用继续由现有 Runtime/Store 承担。
 

@@ -12,7 +12,7 @@ import org.testcontainers.utility.DockerImageName
 import zio.*
 import zio.test.*
 
-/** 使用真实 PostgreSQL 16 验证 Embedding 缓存与配额的跨实例生产语义。
+/** 使用真实 PostgreSQL 18 验证 Embedding 缓存与配额的跨实例生产语义。
   *
   * 覆盖 `agent_embedding_cache`、`agent_embedding_quota_windows` 与 `agent_embedding_quota_reservations`。测试通过
   * `RUN_POSTGRES_INTEGRATION=1` 显式开启，避免普通单元测试隐式依赖 Docker。它关注内存实现无法证明的行为：多 Store 实例共享缓存、tenant
@@ -34,7 +34,7 @@ object PostgresEmbeddingGovernanceIntegrationSpec extends ZIOSpecDefault:
       container <- ZIO.acquireRelease(
         ZIO.attemptBlocking {
           val value =
-            PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:16-alpine"))
+            PostgreSQLContainer(dockerImageNameOverride = DockerImageName.parse("postgres:18-alpine"))
           value.start()
           value
         }
