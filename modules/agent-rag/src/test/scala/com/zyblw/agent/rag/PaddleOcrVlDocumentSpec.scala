@@ -1,0 +1,98 @@
+package com.zyblw.agent.rag
+
+import zio.test.*
+
+object PaddleOcrVlDocumentSpec extends ZIOSpecDefault:
+
+  private val layoutJson =
+    """[
+      |  {
+      |    "prunedResult": {
+      |      "parsing_res_list": [
+      |        {"block_label":"header","block_content":"脏腑经络学说","block_bbox":[1,2,30,12],"block_id":1,"block_order":1},
+      |        {"block_label":"number","block_content":"12","block_bbox":[80,90,100,100],"block_id":2,"block_order":2},
+      |        {"block_label":"doc_title","block_content":"# 脏腑经络学说","block_bbox":[10,20,80,40],"block_id":3,"block_order":3},
+      |        {"block_label":"content","block_content":"目录 …… 1","block_bbox":[10,50,80,70],"block_id":4,"block_order":4},
+      |        {"block_label":"paragraph_title","block_content":"#### 疟与经络","block_bbox":[10,80,90,100],"block_id":5,"block_order":5},
+      |        {"block_label":"text","block_content":"疟邪客于少阳。","block_bbox":[10,110,120,140],"block_id":6,"block_order":6},
+      |        {"block_label":"image","block_content":"<img src=\"https://example.bcebos.com/a.png\" />","block_bbox":[1,1,2,2],"block_id":7,"block_order":7},
+      |        {"block_label":"figure_title","block_content":"图 1 经络示意","block_bbox":[10,150,80,160],"block_id":8,"block_order":8}
+      |      ]
+      |    }
+      |  },
+      |  {
+      |    "prunedResult": {
+      |      "parsing_res_list": [
+      |        {"block_label":"table","block_content":"| 穴 | 归经 |\n| --- | --- |\n| 大椎 | 督脉 |","block_bbox":[4,8,90,40],"block_id":1,"block_order":1}
+      |      ]
+      |    }
+      |  }
+      |]""".stripMargin
+
+  private val markdown =
+    """# 脏腑经络学说
+      |
+      |## 疟与经络
+      |
+      |疟邪客于少阳。
+      |""".stripMargin
+
+  private val baiduJson =
+    """{
+      |  "file_name": "示例.pdf",
+      |  "pages": [
+      |    {
+      |      "page_num": 0,
+      |      "meta": {"page_width": 600, "page_height": 800},
+      |      "layouts": [
+      |        {"layout_id": "L1", "text": "买卖合同", "position": [10, 20, 30, 12], "type": "title"},
+      |        {"layout_id": "L2", "text": "", "position": [8, 40, 100, 60], "type": "table"},
+      |        {"layout_id": "L3", "text": "1", "position": [1, 1, 8, 8], "type": "number"}
+      |      ],
+      |      "tables": [
+      |        {"layout_id": "L2", "markdown": "| 商品 | 数量 |\n| --- | --- |\n| 服务器 | 1 |"}
+      |      ]
+      |    }
+      |  ]
+      |}""".stripMargin
+
+  def spec = suite("PaddleOCR-VL 文档解码")(
+    test("官网页数组保留页码坐标，并用 Markdown 纠正标题层级") {
+      val parsed = PaddleOcrVlDocument.decode(layoutJson, Some(markdown)).toOption.get
+      val titles = parsed.sections.map(section => section.level -> section.title)
+      val body   = parsed.blocks.find(_.text.contains("疟邪")).get
+      val table  = parsed.blocks.find(_.kind == DocumentBlockKind.Table).get
+      assertTrue(
+        parsed.pageCount == 2,
+        titles == zio.Chunk(1 -> "脏腑经络学说", 2 -> "目录", 2 -> "疟与经络"),
+        parsed.sections.find(_.title == "疟与经络").get.parentId.contains(
+          parsed.sections.find(_.title == "脏腑经络学说").get.id
+        ),
+        body.origins.head.pageNumber == 1,
+        body.origins.head.boundingBox.exists(box => box.left == 10 && box.right == 120 && box.origin == DocumentCoordinateOrigin.TopLeft),
+        table.origins.head.pageNumber == 2,
+        !parsed.blocks.exists(_.text == "12"),
+        !parsed.blocks.exists(_.text.contains("bcebos.com")),
+        parsed.blocks.exists(block => block.kind == DocumentBlockKind.Picture && block.text == "图 1 经络示意"),
+        parsed.figures.map(_.sourceUrl) == zio.Chunk("https://example.bcebos.com/a.png"),
+        parsed.sections.find(_.title == "疟与经络").get.pageEnd.contains(2)
+      )
+    },
+    test("百度 parse_result 使用 0 基页码和宽高坐标，表格取 markdown") {
+      val parsed = PaddleOcrVlDocument.decode(baiduJson, None).toOption.get
+      val box    = parsed.blocks.head.origins.head.boundingBox.get
+      assertTrue(
+        parsed.sections.head.title == "买卖合同",
+        parsed.sections.head.pageStart.contains(1),
+        parsed.blocks.exists(_.text.contains("服务器")),
+        box.left == 8,
+        box.top == 40,
+        box.right == 108,
+        box.bottom == 100,
+        box.pageWidth.contains(600)
+      )
+    },
+    test("无法识别的 JSON 不会被当成正文") {
+      assertTrue(PaddleOcrVlDocument.decode("{\"error_code\":0}", None).isLeft)
+    }
+  )

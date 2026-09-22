@@ -11,6 +11,7 @@ final case class CascadingDocumentLoaderConfig(
     mediaTypes: Set[String] = Set("application/pdf"),
     maxInputBytes: Int = 32 * 1024 * 1024,
     quality: ExtractionQualityPolicy = ExtractionQualityPolicy(),
+    structure: StructureQualityPolicy = StructureQualityPolicy(),
     failIfInsufficient: Boolean = true
 ):
   require(mediaTypes.nonEmpty, "CascadingDocumentLoader mediaTypes 不能为空")
@@ -106,17 +107,40 @@ final class CascadingDocumentLoader(
           .foldZIO(
             error => attempt(input, remaining.drop(1), mode, attemptIndex + 1, Some(error), lastInsufficient),
             document =>
-              val quality = ExtractionQuality.assess(document.text)
-              if quality.sufficient(config.quality) then
+              val normalized = normalizeStructure(document)
+              val quality = ExtractionQuality.assess(normalized.text)
+              val structure = StructureQuality.assess(
+                normalized.structure.map(_.blocks).getOrElse(Chunk.empty),
+                normalized.metadata.get("pageCount").flatMap(_.toIntOption)
+              )
+              val textOk = quality.sufficient(config.quality)
+              val structureOk = structure.sufficient(config.structure)
+              val mixedPages = normalized.metadata.get("lowTextPageCount").flatMap(_.toIntOption).exists(_ > 0)
+              val canUpgrade = remaining.drop(1).nonEmpty && (stage.kind == ExtractionStageKind.TextLayer)
+              if textOk && structureOk && !mixedPages then
                 ZIO.succeed(
                   annotate(
-                    document,
+                    normalized,
                     mode,
                     attemptIndex + 1,
                     fallbackUsed = attemptIndex > 0,
                     sufficient = true,
                     Some(quality),
-                    Some(stage.id)
+                    Some(stage.id),
+                    Some(structure)
+                  )
+                )
+              else if textOk && !canUpgrade then
+                ZIO.succeed(
+                  annotate(
+                    normalized,
+                    mode,
+                    attemptIndex + 1,
+                    fallbackUsed = attemptIndex > 0,
+                    sufficient = textOk,
+                    Some(quality),
+                    Some(stage.id),
+                    Some(structure)
                   )
                 )
               else
@@ -128,13 +152,14 @@ final class CascadingDocumentLoader(
                   lastError,
                   Some(
                     annotate(
-                      document,
+                      normalized,
                       mode,
                       attemptIndex + 1,
                       fallbackUsed = true,
                       sufficient = false,
                       Some(quality),
-                      Some(stage.id)
+                      Some(stage.id),
+                      Some(structure)
                     )
                   )
                 )
@@ -147,12 +172,29 @@ final class CascadingDocumentLoader(
       fallbackUsed: Boolean,
       sufficient: Boolean,
       quality: Option[ExtractionQuality] = None,
-      method: Option[String] = None
+      method: Option[String] = None,
+      structure: Option[StructureQuality] = None
   ): SourceDocument =
     val extras = Map(
       ExtractionMode.MetadataKey -> mode.wireValue,
       "extractionFallbackUsed"   -> fallbackUsed.toString,
       "extractionAttemptCount"   -> attemptCount.toString,
       "extractionSufficient"     -> sufficient.toString
-    ) ++ method.map("extractionMethod" -> _) ++ quality.map("extractionQuality" -> _.compact)
+    ) ++ method.map("extractionMethod" -> _) ++ quality.map("extractionQuality" -> _.compact) ++
+      structure.map("structureQuality" -> _.compact)
     document.copy(metadata = document.metadata ++ extras)
+
+  private def normalizeStructure(document: SourceDocument): SourceDocument =
+    document.structure match
+      case None            => document
+      case Some(structure) =>
+        val blocks = PdfTextStructure.normalize(structure.blocks)
+        if blocks.isEmpty then document
+        else
+          document.copy(
+            structure = Some(structure.copy(blocks = blocks)),
+            text = blocks
+              .filter(_.kind != DocumentBlockKind.Other)
+              .map(_.text)
+              .mkString("\n\n")
+          )
