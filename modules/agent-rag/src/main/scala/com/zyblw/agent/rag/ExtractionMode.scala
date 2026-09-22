@@ -67,7 +67,8 @@ object ExtractedHeading:
   private val MarkdownHeading = """^(#{1,6})\s+(.+?)\s*$""".r
 
   def from(document: SourceDocument): Chunk[ExtractedHeading] =
-    val structured = document.structure.toList.flatMap(structure => PdfTextStructure.sectionPlan(structure.blocks).toList)
+    val structured =
+      document.structure.toList.flatMap(structure => PdfTextStructure.sectionPlan(structure.blocks).toList)
     if structured.nonEmpty then Chunk.fromIterable(structured)
     else
       Chunk.fromIterable(

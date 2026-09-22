@@ -65,11 +65,17 @@ object PaddleOcrVlDocumentSpec extends ZIOSpecDefault:
       assertTrue(
         parsed.pageCount == 2,
         titles == zio.Chunk(1 -> "脏腑经络学说", 2 -> "目录", 2 -> "疟与经络"),
-        parsed.sections.find(_.title == "疟与经络").get.parentId.contains(
-          parsed.sections.find(_.title == "脏腑经络学说").get.id
-        ),
+        parsed.sections
+          .find(_.title == "疟与经络")
+          .get
+          .parentId
+          .contains(
+            parsed.sections.find(_.title == "脏腑经络学说").get.id
+          ),
         body.origins.head.pageNumber == 1,
-        body.origins.head.boundingBox.exists(box => box.left == 10 && box.right == 120 && box.origin == DocumentCoordinateOrigin.TopLeft),
+        body.origins.head.boundingBox.exists(box =>
+          box.left == 10 && box.right == 120 && box.origin == DocumentCoordinateOrigin.TopLeft
+        ),
         table.origins.head.pageNumber == 2,
         !parsed.blocks.exists(_.text == "12"),
         !parsed.blocks.exists(_.text.contains("bcebos.com")),

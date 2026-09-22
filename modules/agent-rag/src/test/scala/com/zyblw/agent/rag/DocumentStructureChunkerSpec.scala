@@ -145,8 +145,8 @@ object DocumentStructureChunkerSpec extends ZIOSpecDefault:
       yield assertTrue(chunks.length >= 2)
     },
     test("超长表格按行切开，每段都重复表头") {
-      val row = "| 大椎 | " + "督脉".repeat(28) + " |"
-      val table = "| 穴 | 归经 |\n| --- | --- |\n" + row + "\n" + row
+      val row       = "| 大椎 | " + "督脉".repeat(28) + " |"
+      val table     = "| 穴 | 归经 |\n| --- | --- |\n" + row + "\n" + row
       val structure = DocumentStructure(
         "paddleocr-vl-1.6",
         None,

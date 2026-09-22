@@ -140,7 +140,7 @@ final class DocumentStructureChunker(
 
   /** 表格按行组切开，每段重复表头，不从单元格中间断开。 */
   private def splitTable(block: DocumentBlock): Vector[Draft] =
-    val lines = block.text.split("\n", -1).toVector
+    val lines  = block.text.split("\n", -1).toVector
     val header =
       if lines.length >= 2 && lines(1).trim.startsWith("|") && lines(1).contains("---") then
         Some(lines(0) + "\n" + lines(1))
@@ -148,8 +148,8 @@ final class DocumentStructureChunker(
     val rows = header.fold(lines)(_ => lines.drop(2)).filter(_.trim.nonEmpty)
     if header.isEmpty || rows.isEmpty then splitCharacters(block)
     else
-      val built = Vector.newBuilder[Draft]
-      val pending = mutable.ArrayBuffer.empty[String]
+      val built         = Vector.newBuilder[Draft]
+      val pending       = mutable.ArrayBuffer.empty[String]
       def flush(): Unit =
         if pending.nonEmpty then
           val text = header.get + "\n" + pending.mkString("\n")

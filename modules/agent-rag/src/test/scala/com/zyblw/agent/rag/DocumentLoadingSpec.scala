@@ -92,7 +92,7 @@ object DocumentLoadingSpec extends ZIOSpecDefault:
         outcomes <- service.ingest(ZStream.fromChunk(requests)).runCollect
       yield assertTrue(
         outcomes.map {
-          case DocumentIngestionOutcome.Indexed(id, _)   => id
+          case DocumentIngestionOutcome.Indexed(id, _)         => id
           case DocumentIngestionOutcome.Failed(id, _, _, _, _) => id
         } == Chunk("slow", "fast", "broken"),
         outcomes(2).isInstanceOf[DocumentIngestionOutcome.Failed]

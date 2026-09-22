@@ -14,7 +14,10 @@ final case class StructureQualityPolicy(
   require(maxTocHeadingRatio >= 0.0 && maxTocHeadingRatio <= 1.0, "maxTocHeadingRatio 必须位于 0..1")
   require(minMedianParagraphChars >= 0, "minMedianParagraphChars 不能为负")
   require(minHeadingDepth >= 1, "minHeadingDepth 必须 >= 1")
-  require(maxDuplicateHeadingRatio >= 0.0 && maxDuplicateHeadingRatio <= 1.0, "maxDuplicateHeadingRatio 必须位于 0..1")
+  require(
+    maxDuplicateHeadingRatio >= 0.0 && maxDuplicateHeadingRatio <= 1.0,
+    "maxDuplicateHeadingRatio 必须位于 0..1"
+  )
   require(maxHeadingShare >= 0.0 && maxHeadingShare <= 1.0, "maxHeadingShare 必须位于 0..1")
   require(minPageCoverage >= 0.0 && minPageCoverage <= 1.0, "minPageCoverage 必须位于 0..1")
 
@@ -56,13 +59,13 @@ object StructureQuality:
     val headings = blocks.filter(block =>
       block.kind == DocumentBlockKind.Title || block.kind == DocumentBlockKind.SectionHeading
     )
-    val paragraphs = blocks.filter(_.kind == DocumentBlockKind.Paragraph)
-    val titles = headings.map(_.text.trim).filter(_.nonEmpty)
-    val unique = titles.distinct
-    val pages = blocks.flatMap(_.origins.map(_.pageNumber)).distinct
+    val paragraphs    = blocks.filter(_.kind == DocumentBlockKind.Paragraph)
+    val titles        = headings.map(_.text.trim).filter(_.nonEmpty)
+    val unique        = titles.distinct
+    val pages         = blocks.flatMap(_.origins.map(_.pageNumber)).distinct
     val declaredPages = pageCount.filter(_ > 0).getOrElse(pages.length.max(1))
-    val lengths = paragraphs.map(_.text.trim.length).sorted
-    val median =
+    val lengths       = paragraphs.map(_.text.trim.length).sorted
+    val median        =
       if lengths.isEmpty then 0
       else lengths(lengths.length / 2)
     StructureQuality(

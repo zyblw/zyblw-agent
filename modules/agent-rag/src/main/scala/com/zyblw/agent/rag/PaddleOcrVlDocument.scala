@@ -8,19 +8,19 @@ import scala.util.Try
 
 /** PaddleOCR-VL 的版面结果解码。
   *
-  * 同时接受两种已经验证过的 JSON：官网/自建 `/layout-parsing` 的页数组（`prunedResult.parsing_res_list`，
-  * bbox 为 `[left, top, right, bottom]`），以及百度智能云 `parse_result_url` 对象（`pages[].layouts`，
-  * `position` 为 `[x, y, width, height]`，`page_num` 从 0 起）。页码、阅读顺序和坐标以 JSON 为准；
-  * 可选 Markdown 只按标题文本纠正层级。页眉、页脚和页码不进入正文。不调用 `PdfTextStructure.normalize`。
+  * 同时接受两种已经验证过的 JSON：官网/自建 `/layout-parsing` 的页数组（`prunedResult.parsing_res_list`， bbox 为
+  * `[left, top, right, bottom]`），以及百度智能云 `parse_result_url` 对象（`pages[].layouts`， `position` 为
+  * `[x, y, width, height]`，`page_num` 从 0 起）。页码、阅读顺序和坐标以 JSON 为准； 可选 Markdown 只按标题文本纠正层级。页眉、页脚和页码不进入正文。不调用
+  * `PdfTextStructure.normalize`。
   */
 object PaddleOcrVlDocument:
-  val Method             = "paddleocr-vl-1.6"
-  val MaxJsonChars       = 12_000_000
-  val MaxMarkdownChars   = 4_000_000
-  private val MaxBlocks  = 20_000
-  private val MaxText    = 100_000
+  val Method              = "paddleocr-vl-1.6"
+  val MaxJsonChars        = 12_000_000
+  val MaxMarkdownChars    = 4_000_000
+  private val MaxBlocks   = 20_000
+  private val MaxText     = 100_000
   private val HeadingLine = """^(#{1,6})[ \t]+(.+?)\s*$""".r
-  private val ImageOnly =
+  private val ImageOnly   =
     """(?s)^\s*(?:<img\b[^>]*>|!\[[^\]]*\]\([^)]+\)|<div[^>]*>\s*<img\b[^>]*>\s*</div>)\s*$""".r
 
   private val NoiseLabels = Set(
@@ -52,23 +52,33 @@ object PaddleOcrVlDocument:
   )
 
   def decode(jsonText: String, markdown: Option[String] = None): Either[String, Parsed] =
-    val json = Option(jsonText).map(_.stripPrefix("\uFEFF").trim).getOrElse("")
+    val json    = Option(jsonText).map(_.stripPrefix("\uFEFF").trim).getOrElse("")
     val outline = markdown.map(_.stripPrefix("\uFEFF")).filter(_.trim.nonEmpty)
     if json.isEmpty then Left("需要 PaddleOCR 的 JSON 结果")
     else if json.length > MaxJsonChars then Left("JSON 超过可导入大小")
     else if outline.exists(_.length > MaxMarkdownChars) then Left("Markdown 超过可导入大小")
     else
-      json.fromJson[Json].left.map(_ => "JSON 无法解析").flatMap { root =>
-        val pages = extractPages(root)
-        if pages.isEmpty then Left("JSON 里没有可识别的 PaddleOCR 页面")
-        else Right(assemble(pages, outline))
-      }.flatMap { parsed =>
-        if parsed.sections.isEmpty && parsed.blocks.isEmpty then Left("没有可导入的正文")
-        else Right(parsed)
-      }
+      json
+        .fromJson[Json]
+        .left
+        .map(_ => "JSON 无法解析")
+        .flatMap { root =>
+          val pages = extractPages(root)
+          if pages.isEmpty then Left("JSON 里没有可识别的 PaddleOCR 页面")
+          else Right(assemble(pages, outline))
+        }
+        .flatMap { parsed =>
+          if parsed.sections.isEmpty && parsed.blocks.isEmpty then Left("没有可导入的正文")
+          else Right(parsed)
+        }
 
-  private final case class RawPage(number: Int, width: Option[Double], height: Option[Double], blocks: Vector[RawBlock])
-  private final case class RawBlock(
+  final private case class RawPage(
+      number: Int,
+      width: Option[Double],
+      height: Option[Double],
+      blocks: Vector[RawBlock]
+  )
+  final private case class RawBlock(
       order: Int,
       label: String,
       text: String,
@@ -79,7 +89,7 @@ object PaddleOcrVlDocument:
   )
 
   private def assemble(pages: Vector[RawPage], markdown: Option[String]): Parsed =
-    val headings = markdown.fold(Vector.empty[(Int, String)])(markdownHeadings)
+    val headings      = markdown.fold(Vector.empty[(Int, String)])(markdownHeadings)
     var headingCursor = 0
     var stack         = List.empty[(Int, String, String)]
     var sections      = Vector.empty[Section]
@@ -93,7 +103,15 @@ object PaddleOcrVlDocument:
       val id     = s"p${pageNumber}-h$ordinal"
       stack = (level, id, title) :: stack.dropWhile(_._1 >= level)
       current = Some(id)
-      sections = sections :+ Section(id, parent.map(_._2), sections.length, level, title, Some(pageNumber), Some(pageNumber))
+      sections = sections :+ Section(
+        id,
+        parent.map(_._2),
+        sections.length,
+        level,
+        title,
+        Some(pageNumber),
+        Some(pageNumber)
+      )
       ordinal += 1
       id
 
@@ -129,7 +147,7 @@ object PaddleOcrVlDocument:
             appendBlock(page, raw, DocumentBlockKind.Paragraph, clampText(title))
           else
             classify(raw.label, title) match
-              case None => ()
+              case None                     => ()
               case Some(Left(defaultLevel)) =>
                 val cleaned = clampTitle(title)
                 if cleaned.nonEmpty then
@@ -191,13 +209,17 @@ object PaddleOcrVlDocument:
   /** 图片块吃掉紧随的图注，正文只留说明文字，下载地址留在 sourceUrl。 */
   private def pairFigures(blocks: Vector[RawBlock]): Vector[RawBlock] =
     val result = Vector.newBuilder[RawBlock]
-    var index = 0
+    var index  = 0
     while index < blocks.length do
       val block = blocks(index)
       if block.label == "image" || block.label == "chart" then
         val caption = blocks.lift(index + 1).filter(_.label == "figure_title")
-        val text = caption.map(item => plainText(item.text)).filter(_.nonEmpty).getOrElse("插图")
-        result += block.copy(label = "image", text = text, sourceUrl = block.sourceUrl.orElse(httpsUrl(Some(imageSrc(block.text)))))
+        val text    = caption.map(item => plainText(item.text)).filter(_.nonEmpty).getOrElse("插图")
+        result += block.copy(
+          label = "image",
+          text = text,
+          sourceUrl = block.sourceUrl.orElse(httpsUrl(Some(imageSrc(block.text))))
+        )
         index += (if caption.isDefined then 2 else 1)
       else if looksHtml(block.text) then
         result += block.copy(text = plainText(block.text))
@@ -239,13 +261,14 @@ object PaddleOcrVlDocument:
   /** 标题返回层级，正文返回块类型；噪声和空图片返回 None。 */
   private def classify(label: String, text: String): Option[Either[Int, DocumentBlockKind]] =
     label match
-      case "doc_title" | "title"          => Some(Left(1))
-      case "paragraph_title"              => Some(Left(2))
-      case "table"                        => Some(Right(DocumentBlockKind.Table))
-      case "formula"                      => Some(Right(DocumentBlockKind.Formula))
-      case "list"                         => Some(Right(DocumentBlockKind.ListItem))
-      case "image" | "chart" | "seal"     =>
-        if text.nonEmpty && !ImageOnly.matches(text) then Some(Right(if label == "seal" then DocumentBlockKind.Other else DocumentBlockKind.Picture))
+      case "doc_title" | "title"      => Some(Left(1))
+      case "paragraph_title"          => Some(Left(2))
+      case "table"                    => Some(Right(DocumentBlockKind.Table))
+      case "formula"                  => Some(Right(DocumentBlockKind.Formula))
+      case "list"                     => Some(Right(DocumentBlockKind.ListItem))
+      case "image" | "chart" | "seal" =>
+        if text.nonEmpty && !ImageOnly.matches(text) then
+          Some(Right(if label == "seal" then DocumentBlockKind.Other else DocumentBlockKind.Picture))
         else None
       case "figure_title" | "text" | "vertical_text" | "footnote" | "vision_footnote" | "aside_text" =>
         Some(Right(DocumentBlockKind.Paragraph))
@@ -253,8 +276,8 @@ object PaddleOcrVlDocument:
         if text.nonEmpty then Some(Right(DocumentBlockKind.Paragraph)) else None
 
   private def fillRanges(sections: Vector[Section], blocks: Vector[DocumentBlock]): Vector[Section] =
-    val own = blocks.groupBy(_.parentId)
-    val children = sections.groupBy(_.parentId)
+    val own                                               = blocks.groupBy(_.parentId)
+    val children                                          = sections.groupBy(_.parentId)
     def pagesOf(id: String, seen: Set[String]): List[Int] =
       if seen.contains(id) then Nil
       else
@@ -273,13 +296,15 @@ object PaddleOcrVlDocument:
       case Json.Arr(values) =>
         values.zipWithIndex.flatMap { case (page, index) => layoutPage(page, index) }.toVector
       case obj: Json.Obj if arrayField(obj, "pages").exists(looksLikeBaiduPages) =>
-        val pages = arrayField(obj, "pages").getOrElse(Chunk.empty)
+        val pages     = arrayField(obj, "pages").getOrElse(Chunk.empty)
         val zeroBased = pages.flatMap(page => intField(page, "page_num")).minOption.contains(0)
         pages.zipWithIndex.flatMap { case (page, index) => baiduPage(page, index, zeroBased) }.toVector
       case obj: Json.Obj =>
         arrayField(obj, "layoutParsingResults")
           .orElse(arrayField(obj, "layout_parsing_results"))
-          .map(values => values.zipWithIndex.flatMap { case (page, index) => layoutPage(page, index) }.toVector)
+          .map(values =>
+            values.zipWithIndex.flatMap { case (page, index) => layoutPage(page, index) }.toVector
+          )
           .orElse(layoutPage(obj, 0).map(page => Vector(page)))
           .getOrElse(Vector.empty)
       case _ => Vector.empty
@@ -291,15 +316,23 @@ object PaddleOcrVlDocument:
       case other => other
 
   private def looksLikeBaiduPages(pages: Chunk[Json]): Boolean =
-    pages.headOption.exists(page => arrayField(page, "layouts").isDefined || intField(page, "page_num").isDefined)
+    pages.headOption.exists(page =>
+      arrayField(page, "layouts").isDefined || intField(page, "page_num").isDefined
+    )
 
   private def layoutPage(json: Json, index: Int): Option[RawPage] =
     val pruned = field(json, "prunedResult").orElse(field(json, "pruned_result")).getOrElse(json)
     val blocks = arrayField(pruned, "parsing_res_list").getOrElse(Chunk.empty)
-    if blocks.isEmpty && field(json, "prunedResult").isEmpty && field(json, "pruned_result").isEmpty && arrayField(json, "parsing_res_list").isEmpty then
-      None
+    if blocks.isEmpty && field(json, "prunedResult").isEmpty && field(
+        json,
+        "pruned_result"
+      ).isEmpty && arrayField(json, "parsing_res_list").isEmpty
+    then None
     else
-      val number = intField(json, "page_index").orElse(intField(pruned, "page_index")).map(normalizePageNumber(_, index)).getOrElse(index + 1)
+      val number = intField(json, "page_index")
+        .orElse(intField(pruned, "page_index"))
+        .map(normalizePageNumber(_, index))
+        .getOrElse(index + 1)
       val width  = doubleField(json, "width").orElse(doubleField(pruned, "width")).filter(_ > 0)
       val height = doubleField(json, "height").orElse(doubleField(pruned, "height")).filter(_ > 0)
       val images = imageMap(field(json, "markdown").getOrElse(json))
@@ -308,19 +341,22 @@ object PaddleOcrVlDocument:
           number,
           width,
           height,
-          blocks.zipWithIndex.map { case (block, order) =>
-            val content = stringField(block, "block_content").getOrElse("").trim
-            val src = imageSrc(content)
-            RawBlock(
-              intField(block, "block_order").getOrElse(order),
-              stringField(block, "block_label").getOrElse("text"),
-              content,
-              box4(field(block, "block_bbox")),
-              stringField(block, "block_id").map(id => s"p$number-$id"),
-              None,
-              httpsUrl(images.get(src).orElse(Option.when(src.startsWith("https://"))(src)))
-            )
-          }.sortBy(_.order).toVector
+          blocks.zipWithIndex
+            .map { case (block, order) =>
+              val content = stringField(block, "block_content").getOrElse("").trim
+              val src     = imageSrc(content)
+              RawBlock(
+                intField(block, "block_order").getOrElse(order),
+                stringField(block, "block_label").getOrElse("text"),
+                content,
+                box4(field(block, "block_bbox")),
+                stringField(block, "block_id").map(id => s"p$number-$id"),
+                None,
+                httpsUrl(images.get(src).orElse(Option.when(src.startsWith("https://"))(src)))
+              )
+            }
+            .sortBy(_.order)
+            .toVector
         )
       )
 
@@ -331,7 +367,9 @@ object PaddleOcrVlDocument:
     val meta    = field(json, "meta")
     val width   = meta.flatMap(value => doubleField(value, "page_width")).filter(_ > 0)
     val height  = meta.flatMap(value => doubleField(value, "page_height")).filter(_ > 0)
-    val number  = intField(json, "page_num").map(value => if zeroBased then value + 1 else normalizePageNumber(value, index)).getOrElse(index + 1)
+    val number  = intField(json, "page_num")
+      .map(value => if zeroBased then value + 1 else normalizePageNumber(value, index))
+      .getOrElse(index + 1)
     if layouts.isEmpty && stringField(json, "text").isEmpty then None
     else
       val blocks =
@@ -339,18 +377,22 @@ object PaddleOcrVlDocument:
           Vector(RawBlock(0, "text", stringField(json, "text").getOrElse("").trim, None, None, None))
         else
           layouts.zipWithIndex.map { case (layout, order) =>
-            val id = stringField(layout, "layout_id")
+            val id        = stringField(layout, "layout_id")
             val tableText = id.flatMap(layoutId =>
-              tables.collectFirst {
-                case table if stringField(table, "layout_id").contains(layoutId) =>
-                  stringField(table, "markdown").getOrElse("").trim
-              }.filter(_.nonEmpty)
+              tables
+                .collectFirst {
+                  case table if stringField(table, "layout_id").contains(layoutId) =>
+                    stringField(table, "markdown").getOrElse("").trim
+                }
+                .filter(_.nonEmpty)
             )
             val description = id.flatMap(layoutId =>
-              images.collectFirst {
-                case image if stringField(image, "layout_id").contains(layoutId) =>
-                  stringField(image, "image_description").getOrElse("").trim
-              }.filter(_.nonEmpty)
+              images
+                .collectFirst {
+                  case image if stringField(image, "layout_id").contains(layoutId) =>
+                    stringField(image, "image_description").getOrElse("").trim
+                }
+                .filter(_.nonEmpty)
             )
             val text = tableText.orElse(description).getOrElse(stringField(layout, "text").getOrElse("")).trim
             val remote = id.flatMap(layoutId =>
@@ -405,9 +447,12 @@ object PaddleOcrVlDocument:
       case _ => None
 
   private def markdownHeadings(markdown: String): Vector[(Int, String)] =
-    markdown.linesIterator.collect { case HeadingLine(marks, title) =>
-      marks.length -> title.trim
-    }.filter(_._2.nonEmpty).toVector
+    markdown.linesIterator
+      .collect { case HeadingLine(marks, title) =>
+        marks.length -> title.trim
+      }
+      .filter(_._2.nonEmpty)
+      .toVector
 
   private def splitHeading(text: String): (Option[Int], String) =
     text.linesIterator.map(_.trim).find(_.nonEmpty) match

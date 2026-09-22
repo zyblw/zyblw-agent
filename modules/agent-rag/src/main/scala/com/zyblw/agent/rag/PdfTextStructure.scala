@@ -32,7 +32,13 @@ object PdfTextStructure:
     val line = normalizeTitle(text)
     if line.isEmpty || line.length > 80 || looksLikeHeaderFooter(line) then None
     else if Chapter.matches(line) || EnglishChapter.matches(line) then
-      Some(HeadingHint(if line.contains("节") || line.toLowerCase.contains("section") then 2 else 1, line, isTocStyle(text)))
+      Some(
+        HeadingHint(
+          if line.contains("节") || line.toLowerCase.contains("section") then 2 else 1,
+          line,
+          isTocStyle(text)
+        )
+      )
     else if NumberedSection.matches(line) then Some(HeadingHint(2, line, isTocStyle(text)))
     else if ParenSection.matches(line) || DecimalSection.matches(line) then
       Some(HeadingHint(3, line, isTocStyle(text)))
@@ -53,7 +59,7 @@ object PdfTextStructure:
       else if looksLikeHeaderFooter(text) then
         Some(block.copy(kind = DocumentBlockKind.Other, headingPath = Chunk.empty, ordinal = index))
       else
-        val hint = headingHint(text)
+        val hint      = headingHint(text)
         val onTocPage = block.origins.headOption.exists(origin => tocPages.contains(origin.pageNumber))
         if hint.exists(_.tocStyle) || (onTocPage && hint.isDefined) then None
         else if hint.exists(!_.tocStyle) then
@@ -73,18 +79,20 @@ object PdfTextStructure:
 
   def sectionPlan(blocks: Chunk[DocumentBlock]): Chunk[ExtractedHeading] =
     Chunk.fromIterable(
-      blocks.collect {
-        case block
-            if block.kind == DocumentBlockKind.Title || block.kind == DocumentBlockKind.SectionHeading =>
-          ExtractedHeading(
-            level =
-              if block.kind == DocumentBlockKind.Title then 1
-              else math.max(1, block.headingPath.length).min(6),
-            title = block.text.trim.take(300),
-            pageNumber = block.origins.headOption.map(_.pageNumber),
-            blockId = Some(block.id)
-          )
-      }.filter(heading => heading.title.nonEmpty && !isTocStyle(heading.title))
+      blocks
+        .collect {
+          case block
+              if block.kind == DocumentBlockKind.Title || block.kind == DocumentBlockKind.SectionHeading =>
+            ExtractedHeading(
+              level =
+                if block.kind == DocumentBlockKind.Title then 1
+                else math.max(1, block.headingPath.length).min(6),
+              title = block.text.trim.take(300),
+              pageNumber = block.origins.headOption.map(_.pageNumber),
+              blockId = Some(block.id)
+            )
+        }
+        .filter(heading => heading.title.nonEmpty && !isTocStyle(heading.title))
     )
 
   private def detectTocPages(blocks: Chunk[DocumentBlock]): Set[Int] =
@@ -94,7 +102,8 @@ object PdfTextStructure:
       }
       .groupBy(_._1)
       .collect {
-        case (page, rows) if rows.count(_._2) >= 4 && rows.count(_._2).toDouble / rows.length.toDouble >= 0.4 =>
+        case (page, rows)
+            if rows.count(_._2) >= 4 && rows.count(_._2).toDouble / rows.length.toDouble >= 0.4 =>
           page
       }
       .toSet
@@ -127,8 +136,8 @@ object PdfTextStructure:
     val left  = previous.trim
     val right = next.trim
     left.nonEmpty && right.nonEmpty &&
-      !headingHint(right).exists(!_.tocStyle) &&
-      (SentenceEnd.findFirstIn(left).isEmpty || startsLikeContinuation(right))
+    !headingHint(right).exists(!_.tocStyle) &&
+    (SentenceEnd.findFirstIn(left).isEmpty || startsLikeContinuation(right))
 
   private def startsLikeContinuation(text: String): Boolean =
     text.nonEmpty && text.head.isLower && headingHint(text).isEmpty
@@ -148,7 +157,7 @@ object PdfTextStructure:
       case _                  => true
 
   private def numberAndPath(blocks: Chunk[DocumentBlock]): Chunk[DocumentBlock] =
-    var path = Chunk.empty[String]
+    var path       = Chunk.empty[String]
     var headingIds = Chunk.empty[String]
     Chunk.fromIterable(blocks.zipWithIndex.map { case (block, index) =>
       if block.kind == DocumentBlockKind.Title || block.kind == DocumentBlockKind.SectionHeading then

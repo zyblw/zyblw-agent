@@ -108,14 +108,15 @@ final class CascadingDocumentLoader(
             error => attempt(input, remaining.drop(1), mode, attemptIndex + 1, Some(error), lastInsufficient),
             document =>
               val normalized = normalizeStructure(document)
-              val quality = ExtractionQuality.assess(normalized.text)
-              val structure = StructureQuality.assess(
+              val quality    = ExtractionQuality.assess(normalized.text)
+              val structure  = StructureQuality.assess(
                 normalized.structure.map(_.blocks).getOrElse(Chunk.empty),
                 normalized.metadata.get("pageCount").flatMap(_.toIntOption)
               )
-              val textOk = quality.sufficient(config.quality)
+              val textOk      = quality.sufficient(config.quality)
               val structureOk = structure.sufficient(config.structure)
-              val mixedPages = normalized.metadata.get("lowTextPageCount").flatMap(_.toIntOption).exists(_ > 0)
+              val mixedPages  =
+                normalized.metadata.get("lowTextPageCount").flatMap(_.toIntOption).exists(_ > 0)
               val canUpgrade = remaining.drop(1).nonEmpty && (stage.kind == ExtractionStageKind.TextLayer)
               if textOk && structureOk && !mixedPages then
                 ZIO.succeed(
