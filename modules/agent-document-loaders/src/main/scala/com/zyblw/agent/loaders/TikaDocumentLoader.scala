@@ -153,43 +153,41 @@ final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLo
         val stripper = PDFTextStripper()
         stripper.setStartPage(pageNumber)
         stripper.setEndPage(pageNumber)
+        stripper.setSortByPosition(true)
         pageNumber -> normalize(stripper.getText(document))
       }
-      val text = pageTexts.map(_._2).filter(_.nonEmpty).mkString("\n\n")
+      val lowTextPages = pageTexts.count { case (_, pageText) =>
+        ExtractionQuality.assess(pageText).scriptCodePoints < 24
+      }
+      val rawBlocks = Chunk.fromIterable(
+        pageTexts.flatMap { case (pageNumber, pageText) =>
+          pageText.linesIterator
+            .map(normalize)
+            .filter(_.nonEmpty)
+            .zipWithIndex
+            .map { case (line, lineIndex) =>
+              val blockId = s"#/pdf/page/$pageNumber/line/${lineIndex + 1}"
+              DocumentBlock(
+                id = blockId,
+                parentId = None,
+                ordinal = 0,
+                kind = DocumentBlockKind.Paragraph,
+                text = line,
+                origins = Chunk(DocumentOrigin(pageNumber, blockId = Some(blockId)))
+              )
+            }
+        }
+      )
+      val blocks = PdfTextStructure.normalize(rawBlocks)
+      val text   = blocks.filter(_.kind != DocumentBlockKind.Other).map(_.text).mkString("\n\n")
       if text.codePointCount(0, text.length) > config.maxExtractedCodePoints then
         throw ExtractedTextLimitReached()
-      var currentHeading: Option[String] = None
-      val blocks                         = Chunk.fromIterable(
-        pageTexts
-          .flatMap { case (pageNumber, pageText) =>
-            pageText.linesIterator
-              .map(normalize)
-              .filter(_.nonEmpty)
-              .zipWithIndex
-              .map { case (line, lineIndex) =>
-                val blockId = s"#/pdf/page/$pageNumber/line/${lineIndex + 1}"
-                val heading = looksLikePdfHeading(line)
-                if heading then currentHeading = Some(line)
-                DocumentBlock(
-                  id = blockId,
-                  parentId = None,
-                  ordinal = 0,
-                  kind =
-                    if heading then DocumentBlockKind.SectionHeading
-                    else DocumentBlockKind.Paragraph,
-                  text = line,
-                  headingPath = currentHeading.fold(Chunk.empty)(Chunk(_)),
-                  origins = Chunk(DocumentOrigin(pageNumber, blockId = Some(blockId)))
-                )
-              }
-          }
-          .zipWithIndex
-          .map { case (block, ordinal) => block.copy(ordinal = ordinal) }
-      )
       val info     = document.getDocumentInformation
       val metadata = Map(
         "detectedMediaType" -> "application/pdf",
-        "pageCount"         -> document.getNumberOfPages.toString
+        "pageCount"         -> document.getNumberOfPages.toString,
+        "lowTextPageCount"  -> lowTextPages.toString,
+        "structureQuality"  -> StructureQuality.assess(blocks, Some(document.getNumberOfPages)).compact
       ) ++ Option(info.getTitle)
         .map(normalize)
         .filter(_.nonEmpty)
@@ -199,16 +197,9 @@ final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLo
         text,
         "application/pdf",
         metadata,
-        Some(DocumentStructure("pdf-text-pages", Some("1"), blocks))
+        Some(DocumentStructure("pdf-text-pages", Some("2"), blocks))
       )
     finally document.close()
-
-  private def looksLikePdfHeading(line: String): Boolean =
-    val normalized = line.trim
-    normalized.length <= 120 && (
-      normalized.matches("^第[一二三四五六七八九十百千万0-9]+[章节篇卷部].*") ||
-        normalized.matches("(?i)^chapter\\s+[0-9ivxlcdm]+(?:\\b|[.:：]).*")
-    )
 
   /** 检查类型兼容、非空正文和 code point 上限后建立 SourceDocument。 */
   private def validateParsed(

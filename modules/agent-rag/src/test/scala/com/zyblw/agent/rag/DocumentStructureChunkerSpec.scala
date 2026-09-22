@@ -143,5 +143,41 @@ object DocumentStructureChunkerSpec extends ZIOSpecDefault:
       )
       for chunks <- chunker.split(document, tenant, scope)
       yield assertTrue(chunks.length >= 2)
+    },
+    test("超长表格按行切开，每段都重复表头") {
+      val row       = "| 大椎 | " + "督脉".repeat(28) + " |"
+      val table     = "| 穴 | 归经 |\n| --- | --- |\n" + row + "\n" + row
+      val structure = DocumentStructure(
+        "paddleocr-vl-1.6",
+        None,
+        Chunk(
+          DocumentBlock(
+            "p2-b1",
+            Some("sec"),
+            0,
+            DocumentBlockKind.Table,
+            table,
+            Chunk("经络", "穴位"),
+            Chunk(DocumentOrigin(2), DocumentOrigin(3))
+          )
+        )
+      )
+      val document = SourceDocument(
+        "table-doc",
+        table,
+        "knowledge://table-doc",
+        representation = DocumentRepresentation.Markdown,
+        structure = Some(structure)
+      )
+      val chunker = DocumentStructureChunker(
+        DocumentStructureChunkerConfig(maxCharacters = 128, overlapCharacters = 0, maxTokens = None)
+      )
+      for chunks <- chunker.split(document, tenant, scope)
+      yield assertTrue(
+        chunks.length >= 2,
+        chunks.forall(_.text.contains("| 穴 | 归经 |")),
+        chunks.forall(_.text.contains("| --- | --- |")),
+        chunks.forall(_.lineage.exists(_.origins.map(_.pageNumber) == Chunk(2, 3)))
+      )
     }
   )

@@ -213,10 +213,38 @@ enum DocumentIngestionFailureMode:
   /** 把每份失败转成低敏结果并继续处理其他文档，适合后台导入队列。 */
   case Continue
 
-/** 每份文档的稳定摄取结果；失败不保存解析器异常消息或文档正文。 */
+/** 每份文档的稳定摄取结果；失败只保留低敏分类码，不保存解析器异常或文档正文。 */
 enum DocumentIngestionOutcome:
   case Indexed(documentId: String, result: KnowledgeIndexResult)
-  case Failed(documentId: String, category: ErrorCategory, retryable: Boolean)
+  case Failed(
+      documentId: String,
+      category: ErrorCategory,
+      retryable: Boolean,
+      code: String = "retrieval.failed",
+      safeMessage: String = ""
+  )
+
+object IngestionFailureDiagnostics:
+  def code(error: RetrievalError): String =
+    val raw = error match
+      case AgentError.EmbeddingQuotaExceeded(metric, _) => s"embedding.quota.$metric"
+      case AgentError.RetrievalFailed(message, _)       => message
+    compact(raw)
+
+  def safeMessage(error: RetrievalError): String =
+    compact(error.message)
+
+  def outcome(documentId: String, error: RetrievalError): DocumentIngestionOutcome.Failed =
+    DocumentIngestionOutcome.Failed(
+      documentId,
+      error.category,
+      error.retryable,
+      code(error),
+      safeMessage(error)
+    )
+
+  private def compact(value: String): String =
+    value.replaceAll("\\s+", " ").trim.take(80)
 
 /** 把 DocumentLoaderRegistry 与 KnowledgeIndexer 组合成有背压的多文档摄取入口。
   *
@@ -270,9 +298,7 @@ final class DocumentIngestionService(
       failureMode match
         case DocumentIngestionFailureMode.FailFast => process
         case DocumentIngestionFailureMode.Continue =>
-          process.catchAll(error =>
-            ZIO.succeed(DocumentIngestionOutcome.Failed(request.input.id, error.category, error.retryable))
-          )
+          process.catchAll(error => ZIO.succeed(IngestionFailureDiagnostics.outcome(request.input.id, error)))
     }
 
   /** 单文档便捷入口；仍复用与批量流完全相同的失败模式、取消和治理语义。 */

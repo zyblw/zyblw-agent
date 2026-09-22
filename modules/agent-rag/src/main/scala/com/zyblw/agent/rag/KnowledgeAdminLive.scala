@@ -228,7 +228,7 @@ final class KnowledgeAdminLive private (
           indexVersion = Some(result.manifest.build.version),
           chunkCount = Some(result.manifest.chunkCount)
         )
-      case Exit.Success(DocumentIngestionOutcome.Failed(documentId, category, _)) =>
+      case Exit.Success(DocumentIngestionOutcome.Failed(documentId, category, _, _, _)) =>
         jobs.transition(
           jobId,
           IngestionJobStatus.Failed,

@@ -879,10 +879,12 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
             .map(index => ModelStreamEvent.TextDelta(index.toString)) ++ ZStream.never
       (for
         runtime <- ZIO.service[AgentRuntime]
-        first   <- runtime
-          .runEvents(agent, RunRequest(ThreadId("early-disconnect"), AgentMessage.user("立即断开")))
-          .runHead
-          .timeoutFail(AgentError.Unexpected("关闭 SSE Scope 超时"))(2.seconds)
+        first   <- Live.live(
+          runtime
+            .runEvents(agent, RunRequest(ThreadId("early-disconnect"), AgentMessage.user("立即断开")))
+            .runHead
+            .timeoutFail(AgentError.Unexpected("关闭 SSE Scope 超时"))(2.seconds)
+        )
         runId <- first match
           case Some(AgentEvent.RunCreated(id, _, _)) => ZIO.succeed(id)
           case other => ZIO.fail(AgentError.Unexpected(s"首事件不是 RunCreated: $other"))

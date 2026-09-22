@@ -56,33 +56,28 @@ final case class ExtractionReport(
 )
 
 /** 从结构或 Markdown 标题恢复的目录项。不含正文。 */
-final case class ExtractedHeading(level: Int, title: String, pageNumber: Option[Int])
+final case class ExtractedHeading(
+    level: Int,
+    title: String,
+    pageNumber: Option[Int],
+    blockId: Option[String] = None
+)
 
 object ExtractedHeading:
   private val MarkdownHeading = """^(#{1,6})\s+(.+?)\s*$""".r
 
   def from(document: SourceDocument): Chunk[ExtractedHeading] =
-    val structured = document.structure.toList
-      .flatMap(_.blocks)
-      .collect {
-        case block
-            if block.kind == DocumentBlockKind.Title || block.kind == DocumentBlockKind.SectionHeading =>
-          ExtractedHeading(
-            level =
-              if block.kind == DocumentBlockKind.Title then 1 else math.max(1, block.headingPath.length),
-            title = block.text.trim.take(300),
-            pageNumber = block.origins.headOption.map(_.pageNumber)
-          )
-      }
-      .filter(_.title.nonEmpty)
+    val structured =
+      document.structure.toList.flatMap(structure => PdfTextStructure.sectionPlan(structure.blocks).toList)
     if structured.nonEmpty then Chunk.fromIterable(structured)
     else
       Chunk.fromIterable(
         document.text.linesIterator
           .collect { case MarkdownHeading(marks, title) =>
-            ExtractedHeading(marks.length, title.trim.take(300), None)
+            val cleaned = PdfTextStructure.normalizeTitle(title)
+            ExtractedHeading(marks.length, cleaned.take(300), None)
           }
-          .filter(_.title.nonEmpty)
+          .filter(heading => heading.title.nonEmpty && !PdfTextStructure.isTocStyle(heading.title))
           .toList
       )
 

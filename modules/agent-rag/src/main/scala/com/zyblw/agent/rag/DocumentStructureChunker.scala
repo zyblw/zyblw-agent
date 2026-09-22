@@ -135,6 +135,37 @@ final class DocumentStructureChunker(
     )
 
   private def splitOversized(block: DocumentBlock): Vector[Draft] =
+    if block.kind == DocumentBlockKind.Table then splitTable(block)
+    else splitCharacters(block)
+
+  /** 表格按行组切开，每段重复表头，不从单元格中间断开。 */
+  private def splitTable(block: DocumentBlock): Vector[Draft] =
+    val lines  = block.text.split("\n", -1).toVector
+    val header =
+      if lines.length >= 2 && lines(1).trim.startsWith("|") && lines(1).contains("---") then
+        Some(lines(0) + "\n" + lines(1))
+      else None
+    val rows = header.fold(lines)(_ => lines.drop(2)).filter(_.trim.nonEmpty)
+    if header.isEmpty || rows.isEmpty then splitCharacters(block)
+    else
+      val built         = Vector.newBuilder[Draft]
+      val pending       = mutable.ArrayBuffer.empty[String]
+      def flush(): Unit =
+        if pending.nonEmpty then
+          val text = header.get + "\n" + pending.mkString("\n")
+          built += Draft(block.parentId, block.headingPath, text, block.origins, Chunk(block.id))
+          pending.clear()
+      rows.foreach { row =>
+        val candidate = header.get + "\n" + (pending.toVector :+ row).mkString("\n")
+        if pending.nonEmpty && !fits(block.headingPath, candidate) then flush()
+        if fits(block.headingPath, header.get + "\n" + row) then pending += row
+        else built ++= splitCharacters(block.copy(text = header.get + "\n" + row))
+      }
+      flush()
+      val result = built.result()
+      if result.nonEmpty then result else splitCharacters(block)
+
+  private def splitCharacters(block: DocumentBlock): Vector[Draft] =
     val size = availableBody(block.headingPath).max(1)
     val step = (size - config.overlapCharacters.min(size - 1)).max(1)
     Iterator

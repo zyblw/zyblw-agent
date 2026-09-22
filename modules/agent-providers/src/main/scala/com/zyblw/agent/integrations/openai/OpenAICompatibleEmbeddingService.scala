@@ -259,7 +259,27 @@ final class OpenAICompatibleEmbeddingService(
       body   <- response.body.asString.mapError(mapTransportError)
       result <-
         if response.status.isSuccess then decodeResponse(body, texts.length)
-        else ZIO.fail(httpError(response.status.code, body))
+        else
+          val error = httpError(response.status.code, body)
+          if response.status.code == 400 && texts.length > 1 then
+            val mid = (texts.length + 1) / 2
+            callBatch(texts.take(mid)).zipWith(callBatch(texts.drop(mid))) { (left, right) =>
+              EmbeddingBatchResult(
+                left.embeddings ++ right.embeddings,
+                (left.usage, right.usage) match
+                  case (Some(a), Some(b)) =>
+                    Some(
+                      EmbeddingUsage(
+                        a.inputTokens + b.inputTokens,
+                        a.totalTokens + b.totalTokens
+                      )
+                    )
+                  case _ => None
+                ,
+                left.providerRequestIds ++ right.providerRequestIds
+              )
+            }
+          else ZIO.fail(error)
     yield result
 
   /** 构造请求并拒绝 defaultOptions 覆盖 model/input/encoding_format/dimensions。 */
