@@ -107,17 +107,7 @@ object KnowledgeQaLayers:
   def requireDeclaredTokenizer(
       config: OpenAICompatibleEmbeddingConfig
   ): IO[AgentError, OpenAICompatibleEmbeddingConfig] =
-    config.tokenizerId match
-      case Some(id) if TokenCounter.get(id).isDefined =>
-        ZIO.succeed(config)
-      case Some(id) =>
-        ZIO.fail(AgentError.InvalidConfiguration(s"不支持的 EMBEDDING_TOKENIZER: $id"))
-      case None =>
-        ZIO.fail(
-          AgentError.InvalidConfiguration(
-            "live 知识摄入必须设置 EMBEDDING_TOKENIZER（cl100k-base、o200k-base 或 cjk-approx-v1）"
-          )
-        )
+    OpenAICompatibleEmbeddingConfig.requireDeclaredTokenizer(config)
 
   val liveEmbedding: ZLayer[Client, AgentError, EmbeddingModel] =
     ZLayer.fromZIO {

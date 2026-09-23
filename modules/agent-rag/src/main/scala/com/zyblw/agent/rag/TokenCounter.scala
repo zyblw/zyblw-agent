@@ -48,6 +48,10 @@ object TokenCounter:
       case "codepoints"    => Some(CodePoints)
       case _               => None
 
+  /** 可以写入生产索引 Profile 的 tokenizer。`codepoints` 与 `test-hash` 只留给测试。 */
+  def isProduction(id: String): Boolean =
+    id == Cl100k.id || id == O200k.id || id == "cjk-approx-v1"
+
   /** 汉字/假名/谚文约 1 token，拉丁字母约 4 字符 1 token。只用于装箱预算，不是模型 tokenizer。 */
   val CjkApproximate: TokenCounter = new TokenCounter:
     val id: String = "cjk-approx-v1"

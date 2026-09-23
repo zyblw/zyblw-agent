@@ -4,6 +4,7 @@ import com.zyblw.agent.composition.{CapabilityKind, CapabilityRef}
 import com.zyblw.agent.context.*
 import com.zyblw.agent.core.*
 import com.zyblw.agent.guardrails.*
+import com.zyblw.agent.inspection.RunInspection
 import com.zyblw.agent.memory.*
 import com.zyblw.agent.model.*
 import com.zyblw.agent.scheduler.*
@@ -772,6 +773,42 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
         text.contains("偏好引用经典原文"),
         text.contains("[cite-1] 阴阳者，天地之道也。"),
         text.contains("来源: book://huangdi")
+      )
+    },
+    test("证据拒绝完成时记下 InsufficientEvidence，普通回答保持未设置") {
+      val refusing = new ContextSourceResolver:
+        def resolve(state: AgentState, definition: AgentDefinition): UIO[ContextSources] =
+          val _ = (state, definition)
+          ZIO.succeed(ContextSources(grounding = GroundingDecision.Refuse("证据不足，不能回答")))
+      for
+        refusedModel <- ScriptedChatModel.make(Chunk.empty)
+        refused      <- (for
+          outcome <- AgentRuntime.run(
+            agent,
+            RunRequest(ThreadId("refusal-disposition"), AgentMessage.user("没有资料"))
+          )
+          store <- ZIO.service[RunStore]
+          state <- store.load(runIdOf(outcome))
+        yield state).provideLayer(layersWithContextSources(refusedModel, refusing))
+        refusedRequests <- refusedModel.recordedRequests
+        answeredModel   <- ScriptedChatModel.make(Chunk(finalResponse("普通回答")))
+        answered        <- (for
+          outcome <- AgentRuntime.run(
+            agent,
+            RunRequest(ThreadId("ordinary-disposition"), AgentMessage.user("你好"))
+          )
+          store <- ZIO.service[RunStore]
+          state <- store.load(runIdOf(outcome))
+        yield state).provideLayer(layersWithContextSources(answeredModel, ContextSourceResolver.emptyValue))
+        inspection = RunInspection.build(refused, Chunk.empty)
+      yield assertTrue(
+        refused.status == RunStatus.Completed,
+        refused.messages.last.text == "证据不足，不能回答",
+        refused.completionDisposition.contains(CompletionDisposition.InsufficientEvidence),
+        inspection.completionDisposition.contains(CompletionDisposition.InsufficientEvidence),
+        refusedRequests.isEmpty,
+        answered.status == RunStatus.Completed,
+        answered.completionDisposition.isEmpty
       )
     },
     test("ContextContributor 不改 Kernel 即可注入来源，并冻结 sourceIds") {

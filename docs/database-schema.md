@@ -73,7 +73,7 @@ migration 下进行。
 | `agent_knowledge_profile_chunk_staging` | Building 文档的可重放暂存块 | Retriever 永远不查询该表 |
 | `agent_knowledge_profile_chunks` | 不可变 Profile 块：display/lexical、dense 1024、可选 sparse、ACL、谱系 | 查询排除 withdrawn；只读 active Profile |
 | `agent_knowledge_profile_activation_audit` | Space 指针 CAS 审计 | 回滚也追加一行 |
-| `agent_knowledge_withdrawn` | Space 级 tombstone | 回滚不得复活已撤回修订 |
+| `agent_knowledge_withdrawn` | `(tenant, space, document, revision)` tombstone | 只隐藏该空间的该修订；其他空间和更新修订仍可见。没有隐式全局禁令 |
 
 知识 manifest 状态为 Building/Ready/Superseded/Failed/Retired。三张知识表的中文说明由
 `R__agent_knowledge_1024_comments.sql` 覆盖写入。`retire` 在文档 advisory lock 和 active-version 乐观条件下
@@ -280,6 +280,7 @@ claim 在短事务中按 `priority DESC, available_at ASC, created_at ASC, comma
 永久错误直接 DeadLetter。人工 retry 会重置本轮 `attempt`，同时单调递增 `manual_retry_count`，不会删除故障历史。
 
 每次 claim 生成随机 `lease_token` 并递增 dispatcher `generation`。heartbeat、complete、abandon、deadLetter 和
+`agent_run_dispatch.current_command_id` 通过 `(run_id, command_id)` 复合外键指向同一 Run 的命令。
 AgentState 提交必须匹配 `run_id + current_command_id + owner + token + generation`，并确认未过期。Cancel 入队会在同一
 事务撤销活动租约并重新排队被抢占命令；Cancel 完成后其余 Queued 命令进入 Superseded。
 

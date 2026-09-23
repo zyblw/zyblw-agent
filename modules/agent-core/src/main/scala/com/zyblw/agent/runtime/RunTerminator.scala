@@ -20,12 +20,16 @@ final private[agent] class RunTerminator(
     *
     * TX2 已写入最终助手消息但尚未把 Run 标为 Completed 时，恢复会走到这里收口，而不是再调一次 Provider。
     */
-  def complete(state: AgentState, answer: AgentMessage): IO[AgentError, RunOutcome] =
+  def complete(
+      state: AgentState,
+      answer: AgentMessage,
+      disposition: Option[CompletionDisposition] = None
+  ): IO[AgentError, RunOutcome] =
     for
       decisions  <- guardrails.checkOutput(answer, guardrailContext(state))
       _          <- publisher.emitGuardrails(state.runId, "output", decisions)
       now        <- RunClock.instant
-      transition <- ZIO.fromEither(AgentKernel.complete(state, answer, now))
+      transition <- ZIO.fromEither(AgentKernel.complete(state, answer, now, disposition))
       saved      <- committer.commitTransition(state, transition)
       outcome    <- ZIO.fromEither(AgentKernel.completedOutcome(saved))
     yield outcome

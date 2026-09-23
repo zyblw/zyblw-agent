@@ -106,5 +106,74 @@ object RetrievalContractSpec extends ZIOSpecDefault:
         ).retrieve("桂枝", scope, 3)
       yield assertTrue(result.diagnostics.degradedStages.contains("rewrite-fallback")))
         .provide(InMemoryVectorStore.layer)
+    },
+    test("扩展块不占用来源名额，挂上种子后仍进入上下文") {
+      val neighbor = RetrievalHit(
+        chunk.copy(
+          id = "neighbor",
+          representations = ChunkRepresentations.uniform("相邻条文"),
+          lineage = Some(ChunkLineage(Some("section"), 1, seedChunkId = Some("seed")))
+        ),
+        0.7
+      )
+      val second = RetrievalHit(
+        chunk.copy(id = "second", representations = ChunkRepresentations.uniform("同书另一段")),
+        0.8
+      )
+      val bundle = ContextAssembler.assemble(
+        Chunk(hit, second),
+        Chunk(neighbor),
+        RetrievalEvidence(RetrievalEvidenceStatus.Supported, 2, 2, Some(0.9)),
+        CandidateBudgets(maxChunksPerSource = 2)
+      )
+      assertTrue(
+        bundle.items.exists(item => item.chunk.id == "neighbor" && item.decision == EvidenceDecision.KeptExpanded),
+        bundle.toRetrievalResult.hits.map(_.chunk.id).toSet == Set("seed", "second", "neighbor")
+      )
+    },
+    test("同一来源先按标题路径分散，再留下一块") {
+      def headed(id: String, heading: String, score: Double) =
+        RetrievalHit(
+          chunk.copy(
+            id = id,
+            lineage = Some(ChunkLineage(Some("parent"), 0, headingPath = Chunk(heading)))
+          ),
+          score
+        )
+      val bundle = ContextAssembler.assemble(
+        Chunk(headed("same-a", "病因", 0.9), headed("same-b", "病因", 0.85), headed("other", "表现", 0.8)),
+        Chunk.empty,
+        RetrievalEvidence(RetrievalEvidenceStatus.Supported, 3, 3, Some(0.9)),
+        CandidateBudgets(maxChunksPerSource = 2)
+      )
+      assertTrue(
+        bundle.toRetrievalResult.hits.map(_.chunk.id).toSet == Set("same-a", "other"),
+        bundle.items.exists(item => item.chunk.id == "same-b" && item.decision == EvidenceDecision.DroppedDiversity)
+      )
+    },
+    test("单书检索放宽来源上限，邻居经完整检索进入结果") {
+      val query   = "桂枝"
+      val matched = Embedding(Chunk(query.length.toFloat, 1.0f))
+      val seed    = chunk.copy(
+        lineage = Some(ChunkLineage(Some("section"), 0, nextChunkId = Some("neighbor")))
+      )
+      val neighbor = chunk.copy(
+        id = "neighbor",
+        representations = ChunkRepresentations.uniform("相邻条文"),
+        lineage = Some(ChunkLineage(Some("section"), 1, previousChunkId = Some("seed")))
+      )
+      (for
+        store <- ZIO.service[VectorStore]
+        _ <- store.upsert(
+          Chunk(
+            IndexedChunk(seed, matched),
+            IndexedChunk(neighbor, Embedding(Chunk(0.01f, 0.0f)))
+          )
+        )
+        result <- DefaultRetriever(EmbeddingModel.stub(), store, identity).retrieve(
+          RetrievalRequest(query, scope, 1, filter = RetrievalFilter(documentIds = Set("doc")))
+        )
+      yield assertTrue(result.hits.map(_.chunk.id).toSet == Set("seed", "neighbor")))
+        .provide(InMemoryVectorStore.layer)
     }
   )

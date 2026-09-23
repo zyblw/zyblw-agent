@@ -117,6 +117,14 @@ final case class ToolExecutionContext(
 enum RunStatus derives JsonCodec:
   case Created, Running, WaitingForApproval, Suspended, Completed, Failed, Cancelled, TimedOut, BudgetExceeded
 
+/** 完成态的业务结论。不新增 RunStatus：政策拒绝与有依据的回答都是 Completed。 */
+enum CompletionDisposition derives JsonCodec:
+  /** 正常完成的助手回答。未设置时检查器不把它当成证据不足。 */
+  case Answered
+
+  /** 证据策略拒绝。Run 已完成，但不是有依据的回答。 */
+  case InsufficientEvidence
+
 object RunStatus:
   /** 终态不会再由 Recover/Resume 推进；Harness 预算对账只能在这些状态结算。 */
   def isTerminal(status: RunStatus): Boolean = status match

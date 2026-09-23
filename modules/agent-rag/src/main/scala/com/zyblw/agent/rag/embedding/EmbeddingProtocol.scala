@@ -140,7 +140,9 @@ object EmbeddingModel:
       onEmbed: Chunk[String] => UIO[Chunk[Embedding]] = texts =>
         ZIO.succeed(texts.map(text => Embedding(Chunk(text.length.toFloat, 1.0f))))
   ): EmbeddingModel =
-    val caps = EmbeddingDefaults.denseCapabilities(dimension)
+    val caps = EmbeddingDefaults
+      .denseCapabilities(dimension)
+      .copy(tokenizerId = Some(ChunkEmbeddingAlignment.TestTokenizerId))
     new EmbeddingModel:
       override val capabilities: EmbeddingCapabilities       = caps
       override val descriptor: EmbeddingProviderDescriptorV2 =

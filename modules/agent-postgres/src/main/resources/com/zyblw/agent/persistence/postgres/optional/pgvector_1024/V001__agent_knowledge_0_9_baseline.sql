@@ -93,6 +93,9 @@ CREATE INDEX agent_knowledge_profile_documents_recovery_idx
 CREATE INDEX agent_knowledge_profile_documents_retention_idx
   ON agent_knowledge_profile_documents(updated_at, tenant_id, document_id, index_version)
   WHERE active = FALSE AND status IN ('superseded', 'failed', 'retired');
+ALTER TABLE agent_knowledge_profile_documents
+  ADD CONSTRAINT agent_knowledge_profile_documents_identity_key
+  UNIQUE (tenant_id, knowledge_space_id, profile_id, document_id, index_version);
 
 CREATE TABLE agent_knowledge_profile_chunk_staging (
   tenant_id TEXT NOT NULL,
@@ -117,8 +120,9 @@ CREATE TABLE agent_knowledge_profile_chunk_staging (
   origins JSONB NOT NULL DEFAULT '[]'::JSONB CHECK (jsonb_typeof(origins) = 'array'), block_ids TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (tenant_id, document_id, index_version, chunk_id),
-  FOREIGN KEY (tenant_id, document_id, index_version)
-    REFERENCES agent_knowledge_profile_documents(tenant_id, document_id, index_version) ON DELETE CASCADE,
+  FOREIGN KEY (tenant_id, knowledge_space_id, profile_id, document_id, index_version)
+    REFERENCES agent_knowledge_profile_documents(tenant_id, knowledge_space_id, profile_id, document_id, index_version)
+    ON DELETE CASCADE,
   CHECK (updated_at >= created_at)
 );
 CREATE UNIQUE INDEX agent_knowledge_profile_chunk_staging_lineage_order_idx
@@ -150,6 +154,9 @@ CREATE TABLE agent_knowledge_profile_chunks (
   origins JSONB NOT NULL DEFAULT '[]'::JSONB CHECK (jsonb_typeof(origins) = 'array'), block_ids TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (tenant_id, knowledge_space_id, profile_id, document_id, chunk_id),
+  FOREIGN KEY (tenant_id, knowledge_space_id, profile_id, document_id, index_version)
+    REFERENCES agent_knowledge_profile_documents(tenant_id, knowledge_space_id, profile_id, document_id, index_version)
+    ON DELETE CASCADE,
   CHECK (updated_at >= created_at)
 );
 CREATE INDEX agent_knowledge_profile_chunks_document_version_idx
@@ -196,9 +203,9 @@ CREATE INDEX agent_knowledge_profile_activation_audit_idx
 
 CREATE TABLE agent_knowledge_withdrawn (
   tenant_id TEXT NOT NULL,
-  knowledge_space_id TEXT NOT NULL DEFAULT 'default',
+  knowledge_space_id TEXT NOT NULL,
   document_id TEXT NOT NULL,
-  document_revision_id TEXT NOT NULL,
+  document_revision_id TEXT NOT NULL CHECK (length(btrim(document_revision_id)) BETWEEN 1 AND 200),
   withdrawn_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (tenant_id, knowledge_space_id, document_id, document_revision_id)
 );

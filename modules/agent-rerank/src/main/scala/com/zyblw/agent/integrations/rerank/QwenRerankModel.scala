@@ -16,10 +16,12 @@ final case class QwenRerankConfig(
     model: String,
     baseUrl: String = "https://dashscope.aliyuncs.com/api/v1",
     maxCandidates: Int = 100,
-    requestTimeout: Duration = 10.seconds
+    requestTimeout: Duration = 10.seconds,
+    instruct: Option[String] = None
 ):
   require(apiKey.trim.nonEmpty && model.trim.nonEmpty, "Qwen rerank 配置无效")
   require(maxCandidates > 0 && maxCandidates <= 500, "Qwen rerank maxCandidates 必须位于 1..500")
+  require(instruct.forall(text => text.nonEmpty && text.length <= 4000), "Qwen rerank instruct 长度无效")
   val rerankUrl: String         = s"${baseUrl.stripSuffix("/")}/services/rerank/text-rerank/text-rerank"
   override def toString: String = s"QwenRerankConfig(model=$model, apiKey=<redacted>)"
 
@@ -44,7 +46,8 @@ final class QwenRerankModel(client: Client, config: QwenRerankConfig) extends Re
             )
           ),
           "parameters" -> Json.Obj(
-            Chunk("top_n" -> Json.Num(request.topN), "return_documents" -> Json.Bool(false))
+            Chunk("top_n" -> Json.Num(request.topN), "return_documents" -> Json.Bool(false)) ++
+              config.instruct.toList.map(text => "instruct" -> Json.Str(text))
           )
         )
       )

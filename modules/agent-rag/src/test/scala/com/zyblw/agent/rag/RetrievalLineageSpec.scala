@@ -62,10 +62,45 @@ object RetrievalLineageSpec extends ZIOSpecDefault:
         )
       yield assertTrue(
         expanded.map(_.chunk.id).toSet == Set("c-0", "c-3"),
+        expanded.find(_.chunk.id == "c-0").flatMap(_.chunk.lineage).flatMap(_.seedChunkId).contains("c-1"),
+        expanded.find(_.chunk.id == "c-3").flatMap(_.chunk.lineage).flatMap(_.seedChunkId).contains("c-2"),
         expanded.forall(_.chunk.documentId == "doc-1"),
         expanded.forall(_.signals.get("contextExpanded").contains(1.0)),
         !expanded.exists(_.chunk.id == "secret"),
         !expanded.exists(_.chunk.documentId == "doc-2")
+      )
+    }.provide(InMemoryVectorStore.layer),
+    test("单次命中再取同一标题下的相邻块") {
+      def headed(id: String, ordinal: Int, previous: Option[String], next: Option[String]) =
+        chunk(id, ordinal, previous, next).copy(
+          lineage = Some(
+            ChunkLineage(
+              parentId = Some("section-a"),
+              ordinal = ordinal,
+              previousChunkId = previous,
+              nextChunkId = next,
+              headingPath = Chunk("脏腑", "理论核心")
+            )
+          )
+        )
+      val chunks = Chunk(
+        headed("c-0", 0, None, Some("c-1")),
+        headed("c-1", 1, Some("c-0"), Some("c-2")),
+        headed("c-2", 2, Some("c-1"), Some("other")),
+        chunk("other", 3, Some("c-2"), None)
+      )
+      for
+        store <- ZIO.service[VectorStore]
+        _     <- store.upsert(chunks.map(value => IndexedChunk(value, Embedding(Chunk(1.0f, 0.0f)))))
+        expanded <- store.expandContext(
+          Chunk(RetrievalHit(chunks.head, 0.9)),
+          scope,
+          RetrievalExpansionConfig(parentHitThreshold = 2, maxAdditionalChunks = 4, headingRadius = 2)
+        )
+      yield assertTrue(
+        expanded.map(_.chunk.id).toSet == Set("c-1", "c-2"),
+        expanded.forall(_.chunk.lineage.flatMap(_.seedChunkId).contains("c-0")),
+        !expanded.exists(_.chunk.id == "other")
       )
     }.provide(InMemoryVectorStore.layer),
     test("引用保留页码和几何来源") {

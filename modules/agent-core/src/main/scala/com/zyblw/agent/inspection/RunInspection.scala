@@ -65,7 +65,9 @@ final case class RunInspection(
     diagnostics: Chunk[RunDiagnostic],
     nextCursor: Long,
     hasMore: Boolean,
-    completeHistory: Boolean
+    completeHistory: Boolean,
+    /** 完成态业务结论。未设置表示普通回答，不是证据不足拒绝。 */
+    completionDisposition: Option[CompletionDisposition] = None
 ) derives JsonCodec:
   /** 没有 Error 级诊断表示本页及可验证的状态不变量一致。 */
   def consistent: Boolean = !diagnostics.exists(_.severity == RunDiagnosticSeverity.Error)
@@ -119,7 +121,8 @@ object RunInspection:
       diagnostics = diagnostics,
       nextCursor = nextCursor,
       hasMore = hasMore,
-      completeHistory = completeHistory
+      completeHistory = completeHistory,
+      completionDisposition = state.completionDisposition
     )
 
   private def pageDiagnostics(

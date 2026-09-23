@@ -85,30 +85,86 @@ object RagRuntimeSpineSpec extends ZIOSpecDefault:
         after  <- store.search(vector, RetrievalScope(tenant, Set("read")), 5)
       yield assertTrue(before.nonEmpty, after.isEmpty)
     },
-    test("激活新版本不能复活已撤回文档") {
-      val tenant = TenantId("t")
-      val chunk  = DocumentChunk("c1", "doc-1", "可见条文", "book://x", tenant, Set("read"))
+    test("撤回只隐藏同一空间的同一修订，同一修订重新发布仍然不可见") {
+      val tenant                                             = TenantId("t")
+      val vector                                             = Embedding(Chunk(1.0f, 0.0f))
+      def chunk(id: String, revision: String, space: String) =
+        DocumentChunk(id, "doc-1", id, "book://x", tenant, Set("read")).copy(
+          documentRevisionId = Some(revision),
+          knowledgeSpaceId = Some(KnowledgeSpaceId(space))
+        )
+      val descriptor = EmbeddingProviderDescriptor("hash", "hash-2", 2, 8, false)
+      def begin(ingestionId: String, hash: String, space: String) = BeginKnowledgeIndex(
+        KnowledgeDocumentKey(tenant, "doc-1"),
+        ingestionId,
+        "book://x",
+        hash,
+        Set("read"),
+        Map.empty,
+        descriptor,
+        "structure-v1",
+        knowledgeSpaceId = KnowledgeSpaceId(space)
+      )
       for
         store <- InMemoryKnowledgeIndexStore.make
-        vector = Embedding(Chunk(1.0f, 0.0f))
-        _     <- store.upsert(Chunk(IndexedChunk(chunk, vector)))
-        _     <- store.withdraw(KnowledgeDocumentKey(tenant, "doc-1"), "1")
-        begin <- store.begin(
-          BeginKnowledgeIndex(
-            KnowledgeDocumentKey(tenant, "doc-1"),
-            "ingest-new",
-            "book://x",
-            "a" * 64,
-            Set("read"),
-            Map.empty,
-            EmbeddingProviderDescriptor("hash", "hash-2", 2, 8, false),
-            "structure-v1"
+        _     <- store.upsert(
+          Chunk(
+            IndexedChunk(chunk("old", "rev-1", "space-a"), vector),
+            IndexedChunk(chunk("newer", "rev-2", "space-a"), vector),
+            IndexedChunk(chunk("other-space", "rev-1", "space-b"), vector)
           )
         )
-        _     <- store.stage(begin, Chunk(IndexedChunk(chunk.copy(catalogVersion = begin.version), vector)))
-        _     <- store.activate(begin, 1)
-        after <- store.search(vector, RetrievalScope(tenant, Set("read")), 5)
-      yield assertTrue(after.isEmpty)
+        _      <- store.withdraw(KnowledgeDocumentKey(tenant, "doc-1"), "rev-1", KnowledgeSpaceId("space-a"))
+        spaceA <- store.search(
+          vector,
+          RetrievalScope(tenant, Set("read"), knowledgeSpaceId = Some(KnowledgeSpaceId("space-a"))),
+          5
+        )
+        spaceB <- store.search(
+          vector,
+          RetrievalScope(tenant, Set("read"), knowledgeSpaceId = Some(KnowledgeSpaceId("space-b"))),
+          5
+        )
+        replay <- store.begin(begin("ingest-same", "a" * 64, "space-a"))
+        _      <- store.stage(
+          replay,
+          Chunk(
+            IndexedChunk(
+              chunk("replay", "rev-1", "space-a").copy(catalogVersion = replay.version),
+              vector
+            )
+          )
+        )
+        _      <- store.activate(replay, 1)
+        hidden <- store.search(
+          vector,
+          RetrievalScope(tenant, Set("read"), knowledgeSpaceId = Some(KnowledgeSpaceId("space-a"))),
+          5
+        )
+        revived <- store.begin(begin("ingest-new", "b" * 64, "space-a"))
+        _       <- store.stage(
+          revived,
+          Chunk(
+            IndexedChunk(
+              chunk("visible-new", "rev-2", "space-a").copy(catalogVersion = revived.version),
+              vector
+            )
+          )
+        )
+        _     <- store.activate(revived, 1)
+        after <- store.search(
+          vector,
+          RetrievalScope(tenant, Set("read"), knowledgeSpaceId = Some(KnowledgeSpaceId("space-a"))),
+          5
+        )
+      yield assertTrue(
+        spaceA.map(_.chunk.id).toSet == Set("newer"),
+        spaceB.map(_.chunk.id).toSet == Set("other-space"),
+        !hidden.exists(_.chunk.id == "replay"),
+        hidden.exists(_.chunk.id == "newer"),
+        after.map(_.chunk.id).toSet == Set("newer", "visible-new"),
+        !after.exists(_.chunk.id == "replay")
+      )
     },
     test("sparse 第三路默认关闭，开启后参与 hybrid 融合") {
       val tenant     = TenantId("t")
@@ -287,7 +343,7 @@ object RagRuntimeSpineSpec extends ZIOSpecDefault:
           reason = "rollback",
           publication = Some(publication(first))
         )
-        _             <- store.withdraw(KnowledgeDocumentKey(tenant, "doc-a"), "1")
+        _             <- store.withdraw(KnowledgeDocumentKey(tenant, "doc-a"), "a" * 64)
         afterRollback <- store.search(
           vector,
           RetrievalScope(tenant, Set("read"), pinnedProfileId = Some(first.profileId)),

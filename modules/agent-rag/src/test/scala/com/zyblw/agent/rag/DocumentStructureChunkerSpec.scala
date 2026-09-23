@@ -64,10 +64,13 @@ object DocumentStructureChunkerSpec extends ZIOSpecDefault:
       for chunks <- DocumentStructureChunker().split(document, tenant, scope)
       yield assertTrue(
         chunks.length == 2,
-        chunks.head.text.contains("第一段\n\n第二段"),
-        chunks.head.text.startsWith("章\n\n"),
+        chunks.head.text == "第一段\n\n第二段",
+        !chunks.head.text.contains("章节："),
+        chunks.head.denseText.contains("章节：章"),
+        chunks.head.denseText.contains("类型：Paragraph"),
         !chunks.head.text.contains("# 章"),
-        chunks(1).text.startsWith("章 · 节\n\n"),
+        chunks(1).text == "另一节",
+        chunks(1).denseText.contains("章节：章 > 节"),
         !chunks(1).text.contains("# 章"),
         !chunks(1).text.contains("## 节"),
         chunks.head.lineage.exists(_.headingPath == Chunk("章")),
@@ -95,6 +98,7 @@ object DocumentStructureChunkerSpec extends ZIOSpecDefault:
         DocumentStructureChunkerConfig(maxTokens = Some(256), tokenCounter = TokenCounter.CjkApproximate)
       ).strategyId
       assertTrue(
+        defaultId.contains("document-structure-v3"),
         defaultId.contains("tokens=512"),
         defaultId.contains("counter=cl100k-base"),
         tokenId.contains("tokens=256"),
@@ -178,6 +182,68 @@ object DocumentStructureChunkerSpec extends ZIOSpecDefault:
         chunks.forall(_.text.contains("| 穴 | 归经 |")),
         chunks.forall(_.text.contains("| --- | --- |")),
         chunks.forall(_.lineage.exists(_.origins.map(_.pageNumber) == Chunk(2, 3)))
+      )
+    },
+    test("表格和方剂不与正文合并，方剂按行切开") {
+      val formula = "桂枝 9g\n白芍 9g\n甘草 6g\n" + ("生姜 9g\n" * 40)
+      val structure = DocumentStructure(
+        "paddleocr-vl-1.6",
+        None,
+        Chunk(
+          DocumentBlock("p", Some("sec"), 0, DocumentBlockKind.Paragraph, "先煎。", Chunk("桂枝汤")),
+          DocumentBlock("f", Some("sec"), 1, DocumentBlockKind.Formula, formula, Chunk("桂枝汤")),
+          DocumentBlock("k", Some("sec"), 2, DocumentBlockKind.KeyValue, "煎服：水煎温服", Chunk("桂枝汤"))
+        )
+      )
+      val document = SourceDocument(
+        "formula-doc",
+        formula,
+        "knowledge://formula-doc",
+        Map("title" -> "伤寒论"),
+        representation = DocumentRepresentation.Markdown,
+        structure = Some(structure)
+      )
+      val chunker = DocumentStructureChunker(
+        DocumentStructureChunkerConfig(maxCharacters = 180, overlapCharacters = 0, maxTokens = None)
+      )
+      for chunks <- chunker.split(document, tenant, scope)
+      yield assertTrue(
+        chunks.head.text == "先煎。",
+        chunks.exists(chunk => chunk.text.contains("桂枝 9g") && chunk.text.contains("白芍 9g")),
+        chunks.exists(_.text == "煎服：水煎温服"),
+        chunks.filter(_.text.contains("桂枝 9g")).forall { chunk =>
+          !chunk.text.contains("先煎") && !chunk.text.contains("煎服") && !chunk.displayText.contains("书名：")
+        },
+        chunks.filter(_.denseText.contains("类型：Formula")).forall(_.denseText.contains("书名：伤寒论")),
+        chunks.filter(_.text.contains("桂枝 9g")).forall(chunk => !chunk.text.contains("桂枝 9g白芍"))
+      )
+    },
+    test("方剂里只有超长的那一行按字切开") {
+      val longLine = "甘草" * 80
+      val formula  = s"桂枝 9g\n$longLine\n白芍 9g"
+      val structure = DocumentStructure(
+        "paddleocr-vl-1.6",
+        None,
+        Chunk(
+          DocumentBlock("f", Some("sec"), 0, DocumentBlockKind.Formula, formula, Chunk("桂枝汤"))
+        )
+      )
+      val document = SourceDocument(
+        "formula-split",
+        formula,
+        "knowledge://formula-split",
+        representation = DocumentRepresentation.Markdown,
+        structure = Some(structure)
+      )
+      val chunker = DocumentStructureChunker(
+        DocumentStructureChunkerConfig(maxCharacters = 160, overlapCharacters = 0, maxTokens = None)
+      )
+      for chunks <- chunker.split(document, tenant, scope)
+      yield assertTrue(
+        chunks.exists(_.text == "桂枝 9g"),
+        chunks.exists(_.text == "白芍 9g"),
+        chunks.filter(_.text.contains("桂枝")).forall(_.text.contains("桂枝 9g")),
+        chunks.filter(_.text.contains("白芍")).forall(_.text.contains("白芍 9g"))
       )
     }
   )

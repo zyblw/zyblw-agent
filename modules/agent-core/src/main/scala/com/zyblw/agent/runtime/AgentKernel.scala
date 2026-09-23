@@ -357,10 +357,24 @@ private[agent] object AgentKernel:
     )
 
   /** 输出 Guardrail 已通过后，把 Run 收口为 Completed。 */
-  def complete(state: AgentState, answer: AgentMessage, at: Instant): Either[AgentError, Transition] =
+  def complete(
+      state: AgentState,
+      answer: AgentMessage,
+      at: Instant,
+      disposition: Option[CompletionDisposition] = None
+  ): Either[AgentError, Transition] =
     requireStatus(state, "完成 Run", Set(RunStatus.Running)).map { _ =>
+      val alreadyRecorded = state.messages.lastOption.exists { message =>
+        message.role == MessageRole.Assistant && message.text == answer.text && message.toolCalls == answer.toolCalls
+      }
       Transition(
-        state.copy(status = RunStatus.Completed, suspension = None, updatedAt = at),
+        state.copy(
+          status = RunStatus.Completed,
+          messages = if alreadyRecorded then state.messages else state.messages :+ answer,
+          suspension = None,
+          updatedAt = at,
+          completionDisposition = disposition
+        ),
         NonEmptyChunk(AgentEvent.RunCompleted(state.runId, answer, state.usage, at.toEpochMilli))
       )
     }

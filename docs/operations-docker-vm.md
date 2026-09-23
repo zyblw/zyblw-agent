@@ -19,7 +19,7 @@
    `jdbc:postgresql://host.docker.internal:5432/<db>`，并让 PostgreSQL 监听该地址。
 3. 准备单一 `OPENAI_*`，或者使用非空 `ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON` + 对应 `apiKeyEnv` Secret 装配多个官方端点/
    中转站。非空 JSON 非法时启动失败，不回落到单一 OpenAI。书籍问答 live 路径还需要 `EMBEDDING_API_KEY`、
-   `EMBEDDING_MODEL` 与 `EMBEDDING_DIMENSION=1024`，不会回退到哈希向量。
+   `EMBEDDING_MODEL`、`EMBEDDING_DIMENSION=1024` 与 `EMBEDDING_TOKENIZER`，不会回退到哈希向量。
 4. 由业务反代写入 `X-Tenant-Id`、`X-User-Id`。
 5. 启动：
 

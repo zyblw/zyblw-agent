@@ -174,13 +174,14 @@ trait KnowledgeIndexStore:
     val _ = (tenantId, spaceId, profileId, expectedRevision, reason, publication)
     ZIO.fail(AgentError.RetrievalFailed("KnowledgeIndexStore 未实现 activateProfile"))
 
-  /** Space 级 tombstone；回滚不得复活该文档修订。 */
+  /** 撤回一个知识空间里的一个文档修订。其他空间和更新的修订保持可见；没有跨空间的隐式禁令。 */
   def withdraw(
       key: KnowledgeDocumentKey,
-      documentRevisionId: String
+      documentRevisionId: String,
+      knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId("default")
   ): IO[RetrievalError, Unit] =
-    val _ = documentRevisionId
-    retire(key, expectedActiveVersion = 1L).unit
+    val _ = (key, documentRevisionId, knowledgeSpaceId)
+    ZIO.fail(AgentError.RetrievalFailed("KnowledgeIndexStore 未实现 withdraw"))
 
 /** 一次索引发布的结果。
   *
@@ -346,7 +347,7 @@ final class KnowledgeIndexer(
       _ <- checkpoint(IngestCheckpoint.Enriched)
       lexicalized = chunks.map { chunk =>
         chunk
-          .withLexical(lexical.document(chunk.displayText))
+          .withLexical(lexical.document(chunk.denseText))
           .copy(
             metadata = chunk.metadata ++ enrichment.metadata,
             catalogVersion = build.version,

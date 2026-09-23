@@ -214,8 +214,8 @@ val chunker = MarkdownStructureChunker(
 ```
 
 每个 chunk 在 lineage / metadata 中保存完整 `headingPath`，并写入 `chunkStartLine/chunkEndLine/chunkContentSha/chunkerId`。
-写入 embedding 的正文不再把祖先路径渲染成 `# / ## / ###` 粘在每块前面；最多加一行末 1–2 级短前缀（例如 `苍术 · 金元时期`）。
-策略版本是 `document-structure-v2` / `markdown-structure-v2`。ID 使用
+`displayText` 只保留块正文。dense/lexical 在离线索引时加上确定性前缀：书名、完整章节路径和块类型。引用不带这行前缀。
+策略版本是 `document-structure-v3` / `markdown-structure-v3`。ID 使用
 `document + heading path + exact body` 的 SHA-256 内容寻址；在前面章节插入内容不会让后面未变化章节的 ID 全部漂移。
 超长单行使用 Unicode code point 安全滑窗，不会切断 emoji 或扩展汉字代理对。
 

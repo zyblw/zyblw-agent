@@ -15,7 +15,7 @@ COMMENT ON TABLE agent_knowledge_profile_chunks IS
 COMMENT ON TABLE agent_knowledge_profile_activation_audit IS
   'Space 指针 CAS 激活审计；回滚也写新行。';
 COMMENT ON TABLE agent_knowledge_withdrawn IS
-  'Space 级 tombstone；回滚不得复活已撤回文档修订。';
+  '按租户、空间、文档和修订撤回；不隐藏其他空间或更新修订。';
 
 DO $comments$
 DECLARE
