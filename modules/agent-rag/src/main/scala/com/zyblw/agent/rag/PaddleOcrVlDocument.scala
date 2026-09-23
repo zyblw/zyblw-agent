@@ -42,7 +42,16 @@ object PaddleOcrVlDocument:
       pageEnd: Option[Int]
   )
 
-  final case class PendingFigure(blockId: String, sourceUrl: String)
+  /** 插图待收存。临时地址过期时，用页码和左上角坐标从原件裁出。 */
+  final case class PendingFigure(
+      blockId: String,
+      sourceUrl: String,
+      pageNumber: Int,
+      left: Double,
+      top: Double,
+      right: Double,
+      bottom: Double
+  )
 
   final case class Parsed(
       pageCount: Int,
@@ -136,6 +145,14 @@ object PaddleOcrVlDocument:
       )
       ordinal += 1
 
+    def rememberFigure(pageNumber: Int, blockId: String, raw: RawBlock): Unit =
+      val url = httpsUrl(raw.sourceUrl).getOrElse("")
+      val box = raw.bbox.getOrElse((0.0, 0.0, 0.0, 0.0))
+      val (left, top, right, bottom) = box
+      val croppable = right - left >= 8 && bottom - top >= 8
+      if url.nonEmpty || croppable then
+        figures = figures :+ PendingFigure(blockId, url, pageNumber, left, top, right, bottom)
+
     pages.foreach { page =>
       pairFigures(page.blocks).foreach { raw =>
         if ordinal < MaxBlocks && !NoiseLabels.contains(raw.label) then
@@ -166,7 +183,7 @@ object PaddleOcrVlDocument:
                 if text.nonEmpty && !ImageOnly.matches(text) then
                   val blockId = s"p${page.number}-b$ordinal"
                   if kind == DocumentBlockKind.Picture then
-                    httpsUrl(raw.sourceUrl).foreach(url => figures = figures :+ PendingFigure(blockId, url))
+                    rememberFigure(page.number, blockId, raw)
                   appendBlock(page, raw, kind, text)
       }
     }
@@ -189,7 +206,13 @@ object PaddleOcrVlDocument:
       setCursor: Int => Unit
   ): Int =
     val matched = matchHeading(title, headings, cursor(), setCursor)
-    clampLevel(matched.orElse(hashLevel).orElse(hint).getOrElse(defaultLevel))
+    clampLevel(
+      matched
+        .orElse(hashLevel)
+        .orElse(hint)
+        .orElse(inferHeadingLevel(title))
+        .getOrElse(defaultLevel)
+    )
 
   private def matchHeading(
       title: String,
@@ -200,11 +223,34 @@ object PaddleOcrVlDocument:
     val key = normalizeTitle(title)
     if key.length < 2 then None
     else
-      val found = headings.indexWhere((level, heading) => level > 0 && normalizeTitle(heading) == key, cursor)
+      val exact = headings.indexWhere(
+        (level, heading) => level > 0 && normalizeTitle(heading) == key,
+        cursor
+      )
+      val relaxedKey = relaxedTitle(title)
+      val found      =
+        if exact >= 0 then exact
+        else
+          headings.indexWhere(
+            (level, heading) => level > 0 && relaxedKey.length >= 2 && relaxedTitle(heading) == relaxedKey,
+            cursor
+          )
       if found < 0 then None
       else
         setCursor(found + 1)
         Some(headings(found)._1)
+
+  /** Markdown 标题仍是层级事实源。遇到网页 JSON 与 Markdown 只差句号、括号或 OCR 空格时做宽松匹配； Markdown 确实缺失时，再按常见中文目录编号恢复最小可用层级，避免所有
+    * paragraph_title 都坍成二级。
+    */
+  private def inferHeadingLevel(title: String): Option[Int] =
+    val value = splitHeading(title)._2.trim
+    if value.matches("""^第[一二三四五六七八九十百零〇\d]+章(?:\s|[:：、.]|$).*""") then Some(2)
+    else if value.matches("""^第[一二三四五六七八九十百零〇\d]+节(?:\s|[:：、.]|$).*""") then Some(3)
+    else if value.matches("""^[一二三四五六七八九十百零〇]+[、.．]\s*.*""") then Some(4)
+    else if value.matches("""^[（(][一二三四五六七八九十百零〇\d]+[）)]\s*.*""") then Some(5)
+    else if value.matches("""^\d+[、.．]\s*.*""") then Some(5)
+    else None
 
   /** 图片块吃掉紧随的图注，正文只留说明文字，下载地址留在 sourceUrl。 */
   private def pairFigures(blocks: Vector[RawBlock]): Vector[RawBlock] =
@@ -462,6 +508,10 @@ object PaddleOcrVlDocument:
 
   private def normalizeTitle(value: String): String =
     splitHeading(value)._2.replace('\u3000', ' ').replaceAll("\\s+", "").toLowerCase
+
+  private def relaxedTitle(value: String): String =
+    normalizeTitle(value)
+      .replaceAll("""[\p{P}\p{S}]""", "")
 
   private def clampLevel(level: Int): Int = math.max(1, math.min(6, level))
 

@@ -56,6 +56,20 @@ object PaddleOcrVlDocumentSpec extends ZIOSpecDefault:
       |  ]
       |}""".stripMargin
 
+  private val numberedHeadingsJson =
+    """[{
+      |  "prunedResult": {
+      |    "parsing_res_list": [
+      |      {"block_label":"doc_title","block_content":"中医之逻辑方法论","block_order":1},
+      |      {"block_label":"paragraph_title","block_content":"第一章 人体逻辑的构建","block_order":2},
+      |      {"block_label":"paragraph_title","block_content":"第一节 孤立主义与系统的建立。","block_order":3},
+      |      {"block_label":"paragraph_title","block_content":"一、西医的孤立主义：","block_order":4},
+      |      {"block_label":"paragraph_title","block_content":"（一）器官切割","block_order":5},
+      |      {"block_label":"text","block_content":"正文","block_order":6}
+      |    ]
+      |  }
+      |}]""".stripMargin
+
   def spec = suite("PaddleOCR-VL 文档解码")(
     test("官网页数组保留页码坐标，并用 Markdown 纠正标题层级") {
       val parsed = PaddleOcrVlDocument.decode(layoutJson, Some(markdown)).toOption.get
@@ -96,6 +110,26 @@ object PaddleOcrVlDocumentSpec extends ZIOSpecDefault:
         box.right == 108,
         box.bottom == 100,
         box.pageWidth.contains(600)
+      )
+    },
+    test("Markdown 标题标点不一致时仍恢复层级，缺失时按中文编号兜底") {
+      val outline =
+        """# 中医之逻辑方法论
+          |## 第一章 人体逻辑的构建
+          |### 第一节 孤立主义与系统的建立
+          |""".stripMargin
+      val parsed = PaddleOcrVlDocument.decode(numberedHeadingsJson, Some(outline)).toOption.get
+      assertTrue(
+        parsed.sections.map(section => section.level -> section.title) == zio.Chunk(
+          1 -> "中医之逻辑方法论",
+          2 -> "第一章 人体逻辑的构建",
+          3 -> "第一节 孤立主义与系统的建立。",
+          4 -> "一、西医的孤立主义：",
+          5 -> "（一）器官切割"
+        ),
+        parsed.sections(2).parentId.contains(parsed.sections(1).id),
+        parsed.sections(3).parentId.contains(parsed.sections(2).id),
+        parsed.sections(4).parentId.contains(parsed.sections(3).id)
       )
     },
     test("无法识别的 JSON 不会被当成正文") {
