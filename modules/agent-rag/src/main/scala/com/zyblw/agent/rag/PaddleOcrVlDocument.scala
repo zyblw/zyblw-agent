@@ -98,7 +98,9 @@ object PaddleOcrVlDocument:
   )
 
   private def assemble(pages: Vector[RawPage], markdown: Option[String]): Parsed =
-    val headings      = markdown.fold(Vector.empty[(Int, String)])(markdownHeadings)
+    val headings      = markdown.fold(Vector.empty[(Int, String)])(text =>
+      markdownHeadings(text, jsonTitles(pages), continuationTexts(pages))
+    )
     var headingCursor = 0
     var stack         = List.empty[(Int, String, String)]
     var sections      = Vector.empty[Section]
@@ -154,16 +156,27 @@ object PaddleOcrVlDocument:
         figures = figures :+ PendingFigure(blockId, url, pageNumber, left, top, right, bottom)
 
     pages.foreach { page =>
-      pairFigures(page.blocks).foreach { raw =>
+      val prepared = pairFigures(page.blocks)
+      var index    = 0
+      while index < prepared.length do
+        val raw      = prepared(index)
+        var advance  = 1
         if ordinal < MaxBlocks && !NoiseLabels.contains(raw.label) then
-          val (hashLevel, title) = splitHeading(raw.text)
-          if raw.label == "content" && title.nonEmpty && !ImageOnly.matches(title) then
+          val absorbed = prepared.lift(index + 1).flatMap(next => titleContinuation(raw, next, headings))
+          val source   =
+            absorbed match
+              case Some(rest) =>
+                advance = 2
+                raw.copy(text = joinTitle(raw.text, rest))
+              case None => raw
+          val (hashLevel, title) = splitHeading(source.text)
+          if source.label == "content" && title.nonEmpty && !ImageOnly.matches(title) then
             if !stack.headOption.exists(_._3 == "目录") then
               val level = stack.headOption.fold(1)(parent => math.min(6, parent._1 + 1))
               openSection(level, "目录", page.number): Unit
-            appendBlock(page, raw, DocumentBlockKind.Paragraph, clampText(title))
+            appendBlock(page, source, DocumentBlockKind.Paragraph, clampText(title))
           else
-            classify(raw.label, title) match
+            classify(source.label, title) match
               case None                     => ()
               case Some(Left(defaultLevel)) =>
                 val cleaned = clampTitle(title)
@@ -171,7 +184,7 @@ object PaddleOcrVlDocument:
                   val level = resolveLevel(
                     defaultLevel,
                     hashLevel,
-                    raw.levelHint,
+                    source.levelHint,
                     cleaned,
                     headings,
                     () => headingCursor,
@@ -182,9 +195,9 @@ object PaddleOcrVlDocument:
                 val text = clampText(title)
                 if text.nonEmpty && !ImageOnly.matches(text) then
                   val blockId = s"p${page.number}-b$ordinal"
-                  if kind == DocumentBlockKind.Picture then rememberFigure(page.number, blockId, raw)
-                  appendBlock(page, raw, kind, text)
-      }
+                  if kind == DocumentBlockKind.Picture then rememberFigure(page.number, blockId, source)
+                  appendBlock(page, source, kind, text)
+        index += advance
     }
 
     val ranged = fillRanges(sections, blocks)
@@ -491,13 +504,107 @@ object PaddleOcrVlDocument:
         Option.when(!number.isNaN && !number.isInfinity)(number)
       case _ => None
 
-  private def markdownHeadings(markdown: String): Vector[(Int, String)] =
-    markdown.linesIterator
-      .collect { case HeadingLine(marks, title) =>
-        marks.length -> title.trim
+  private def jsonTitles(pages: Vector[RawPage]): Set[String] =
+    pages
+      .flatMap(_.blocks)
+      .iterator
+      .filter(block =>
+        block.label == "doc_title" || block.label == "paragraph_title" || block.label == "title"
+      )
+      .map(block => normalizeTitle(splitHeading(block.text)._2))
+      .filter(_.nonEmpty)
+      .toSet
+
+  /** 紧跟标题的短文本。编号小节和带句读的正文不并入标题。 */
+  private def continuationLine(text: String): Option[String] =
+    val lines = text.linesIterator.map(_.trim).filter(_.nonEmpty).toVector
+    if lines.length != 1 then None
+    else
+      val line   = lines.head
+      val points = line.codePointCount(0, line.length)
+      if points == 0 || points > 24 || line.startsWith("#") || line.startsWith("|") then None
+      else if line.exists(ch => "。！？；，、".contains(ch)) || inferHeadingLevel(line).nonEmpty then None
+      else Some(line)
+
+  private def continuationTexts(pages: Vector[RawPage]): Set[String] =
+    pages
+      .flatMap(_.blocks)
+      .iterator
+      .filter(_.label == "text")
+      .flatMap(block => continuationLine(splitHeading(block.text)._2))
+      .map(normalizeTitle)
+      .toSet
+
+  /** 标题块后面单独的短 text，且 Markdown 已经把这两行看成同一个标题时，才并进标题。 */
+  private def titleContinuation(
+      current: RawBlock,
+      next: RawBlock,
+      headings: Vector[(Int, String)]
+  ): Option[String] =
+    val (_, title) = splitHeading(current.text)
+    val heading    = classify(current.label, title).exists(_.isLeft)
+    if !heading || next.label != "text" then None
+    else
+      continuationLine(splitHeading(next.text)._2).filter { line =>
+        val joined = normalizeTitle(title.trim + line)
+        val spaced = normalizeTitle(title.trim + " " + line)
+        headings.exists { case (_, headingText) =>
+          val key = normalizeTitle(headingText)
+          key == joined || key == spaced
+        }
       }
-      .filter(_._2.nonEmpty)
-      .toVector
+
+  private def joinTitle(raw: String, rest: String): String =
+    val lines    = raw.split("\n", -1)
+    var replaced = false
+    lines
+      .map { line =>
+        if !replaced && line.trim.nonEmpty then
+          replaced = true
+          line.trim match
+            case HeadingLine(marks, title) => s"${"#".repeat(marks.length)} ${title.trim}$rest"
+            case other                     => other + rest
+        else line
+      }
+      .mkString("\n")
+
+  /** 折行标题合成一条。允许中间有空行。后半截要么被 JSON 标题盖住，要么就是下一块短文本。 */
+  private def markdownHeadings(
+      markdown: String,
+      titles: Set[String],
+      continuations: Set[String]
+  ): Vector[(Int, String)] =
+    val lines  = markdown.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1).toVector
+    val result = Vector.newBuilder[(Int, String)]
+    var index  = 0
+    while index < lines.length do
+      lines(index).trim match
+        case HeadingLine(marks, title) if title.trim.nonEmpty =>
+          val continuation = nextContent(lines, index + 1).filter { line =>
+            continuationLine(line).nonEmpty && headingContinuation(title, line, titles, continuations)
+          }
+          result += marks.length -> continuation.fold(title.trim)(rest => s"${title.trim}$rest")
+          index = continuation match
+            case Some(rest) =>
+              lines.indexWhere(line => line.trim == rest, index + 1) match
+                case found if found >= 0 => found + 1
+                case _                   => index + 1
+            case None => index + 1
+        case _ => index += 1
+    result.result()
+
+  private def nextContent(lines: Vector[String], from: Int): Option[String] =
+    lines.iterator.drop(from).map(_.trim).find(_.nonEmpty)
+
+  private def headingContinuation(
+      heading: String,
+      line: String,
+      titles: Set[String],
+      continuations: Set[String]
+  ): Boolean =
+    val joined = normalizeTitle(heading + line)
+    val spaced = normalizeTitle(heading + " " + line)
+    continuations.contains(normalizeTitle(line)) || titles.exists(title => title == joined || title == spaced)
 
   private def splitHeading(text: String): (Option[Int], String) =
     text.linesIterator.map(_.trim).find(_.nonEmpty) match

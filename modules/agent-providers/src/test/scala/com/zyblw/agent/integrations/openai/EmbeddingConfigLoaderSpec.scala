@@ -22,6 +22,7 @@ object EmbeddingConfigLoaderSpec extends ZIOSpecDefault:
           config.maxTextsPerRequest == 10_000,
           config.requestTimeout == 60.seconds,
           config.embeddingsUrl == "https://api.openai.com/v1/embeddings",
+          config.tokenizerId.isEmpty,
           !config.toString.contains("embedding-secret")
         )
       }
@@ -36,12 +37,14 @@ object EmbeddingConfigLoaderSpec extends ZIOSpecDefault:
         "EMBEDDING_SEND_DIMENSIONS"       -> "false",
         "EMBEDDING_MAX_BATCH_SIZE"        -> "16",
         "EMBEDDING_MAX_TEXTS_PER_REQUEST" -> "512",
-        "EMBEDDING_REQUEST_TIMEOUT"       -> "5s"
+        "EMBEDDING_REQUEST_TIMEOUT"       -> "5s",
+        "EMBEDDING_TOKENIZER"             -> "cjk-approx-v1"
       )
       OpenAICompatibleEmbeddingConfig.fromEnvironment.provide(provider(values)).map { config =>
         assertTrue(
           config.providerId == "glm-embeddings",
           config.dimension == 1024,
+          config.tokenizerId.contains("cjk-approx-v1"),
           !config.sendDimensions,
           config.maxBatchSize == 16,
           config.maxTextsPerRequest == 512,

@@ -998,7 +998,7 @@ Embedding/cache/retrieval cache 至少包含：
 - 对象存储或源系统的保留流程；
 - dashboard/search projection。
 
-撤回后的任何 profile 回滚都不能让已删除内容“复活”。因此 tombstone 是 space 级约束，检索查询除 profile 条件外还必须排除全局 withdrawn document revision。
+撤回后，同一 space 的同一 `document_revision_id` 不能因 profile 回滚复活。tombstone 只匹配租户、空间、文档和修订；它不会隐藏其他空间，也不会隐藏更新的修订。跨空间禁令必须是单独的显式操作。
 
 ### 12.3 Retention worker
 
@@ -1243,7 +1243,7 @@ zyblw-agent.rag.spaces.tcm-primary {
   }
 
   chunking {
-    strategy = "document-structure-v2"
+    strategy = "document-structure-v3"
     tokenizer = "<provider-compatible-tokenizer-id>"
     child-max-tokens = 512
     neighbor-radius = 1

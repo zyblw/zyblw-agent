@@ -29,7 +29,8 @@ final class PostgresPgVectorStore(
   private val chunkSelectColumns: String =
     """chunk_id, document_id, chunk_text, search_text, source_uri, permissions, metadata::text, index_version,
       |       parent_id, lineage_ordinal, previous_chunk_id, next_chunk_id, heading_path,
-      |       page_numbers, origins::text, block_ids, knowledge_space_id, profile_id""".stripMargin
+      |       page_numbers, origins::text, block_ids, knowledge_space_id, profile_id,
+      |       document_revision_id, dense_text""".stripMargin
 
   private def visibilitySql(relation: String = "agent_knowledge_profile_chunks"): String =
     s"""AND $relation.knowledge_space_id = ?
@@ -41,7 +42,9 @@ final class PostgresPgVectorStore(
        |AND NOT EXISTS (
        |  SELECT 1 FROM zyblw_agent_knowledge.agent_knowledge_withdrawn w
        |  WHERE w.tenant_id = $relation.tenant_id
+       |    AND w.knowledge_space_id = $relation.knowledge_space_id
        |    AND w.document_id = $relation.document_id
+       |    AND w.document_revision_id = $relation.document_revision_id
        |)""".stripMargin
 
   private def bindVisibility(
@@ -69,12 +72,16 @@ final class PostgresPgVectorStore(
           """INSERT INTO zyblw_agent_knowledge.agent_knowledge_profile_chunks
             |(tenant_id, knowledge_space_id, profile_id, chunk_id, document_id, index_version, chunk_text, search_text, source_uri, permissions, metadata,
             | embedding, parent_id, lineage_ordinal, previous_chunk_id, next_chunk_id, heading_path,
-            | page_numbers, origins, block_ids)
-            |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::public.vector, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+            | page_numbers, origins, block_ids, dense_text, display_sha256, dense_sha256, lexical_sha256)
+            |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::public.vector, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?)
             |ON CONFLICT (tenant_id, knowledge_space_id, profile_id, document_id, chunk_id) DO UPDATE SET
             |index_version = EXCLUDED.index_version,
             |chunk_text = EXCLUDED.chunk_text,
             |search_text = EXCLUDED.search_text,
+            |dense_text = EXCLUDED.dense_text,
+            |display_sha256 = EXCLUDED.display_sha256,
+            |dense_sha256 = EXCLUDED.dense_sha256,
+            |lexical_sha256 = EXCLUDED.lexical_sha256,
             |source_uri = EXCLUDED.source_uri,
             |permissions = EXCLUDED.permissions,
             |metadata = EXCLUDED.metadata,
@@ -105,6 +112,7 @@ final class PostgresPgVectorStore(
             statement.setString(11, chunk.metadata.toJson)
             statement.setString(12, vectorLiteral(indexed.embedding))
             bindLineage(statement, connection, 13, chunk.lineage)
+            bindRepresentations(statement, 21, chunk)
             statement.addBatch()
           }
           statement.executeBatch()
@@ -235,7 +243,7 @@ final class PostgresPgVectorStore(
               |       f.vector_score, f.text_score, f.vector_rank, f.text_rank, c.index_version,
               |       c.parent_id, c.lineage_ordinal, c.previous_chunk_id, c.next_chunk_id,
               |       c.heading_path, c.page_numbers, c.origins::text, c.block_ids,
-              |       c.knowledge_space_id, c.profile_id
+              |       c.knowledge_space_id, c.profile_id, c.document_revision_id, c.dense_text
               |FROM fused f
               |JOIN zyblw_agent_knowledge.agent_knowledge_profile_chunks c
               |  ON c.tenant_id = ? AND c.document_id = f.document_id AND c.chunk_id = f.chunk_id
@@ -360,7 +368,7 @@ final class PostgresPgVectorStore(
     if seeds.isEmpty || config.maxAdditionalChunks == 0 then ZIO.succeed(Chunk.empty)
     else
       val seedKeys = seeds.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
-      val neighborScores: Map[(String, String), Double] =
+      val neighborClaims: Map[(String, String), (Double, String)] =
         if config.neighborRadius == 0 then Map.empty
         else
           seeds
@@ -369,22 +377,24 @@ final class PostgresPgVectorStore(
                 .fold(Chunk.empty[String])(lineage =>
                   Chunk.fromIterable(lineage.previousChunkId) ++ Chunk.fromIterable(lineage.nextChunkId)
                 )
-                .map(id => (seed.chunk.documentId -> id) -> seed.score)
+                .map(id => (seed.chunk.documentId -> id) -> (seed.score -> seed.chunk.id))
             )
             .toList
-            .groupMapReduce(_._1)(_._2)(math.max)
-      val parentScores: Map[(String, String), Double] = seeds
+            .groupMapReduce(_._1)(_._2)(preferSeed)
+      val parentClaims: Map[(String, String), (Double, String)] = seeds
         .flatMap(hit =>
           hit.chunk.lineage
             .flatMap(_.parentId)
-            .map(parentId => (hit.chunk.documentId -> parentId) -> hit.score)
+            .map(parentId => (hit.chunk.documentId -> parentId) -> (hit.score -> hit.chunk.id))
         )
         .groupBy(_._1)
         .collect {
           case (parentKey, values) if values.length >= config.parentHitThreshold =>
-            parentKey -> values.map(_._2).max
+            parentKey -> values.map(_._2).reduce(preferSeed)
         }
-      if neighborScores.isEmpty && parentScores.isEmpty then ZIO.succeed(Chunk.empty)
+      val headingSeeds = seeds.filter(_.chunk.lineage.exists(_.headingPath.nonEmpty))
+      if neighborClaims.isEmpty && parentClaims.isEmpty && (config.headingRadius == 0 || headingSeeds.isEmpty) then
+        ZIO.succeed(Chunk.empty)
       else
         withConnection { connection =>
           ZIO.attemptBlocking {
@@ -395,6 +405,8 @@ final class PostgresPgVectorStore(
                 |  SELECT * FROM unnest(?::text[], ?::text[]) AS key(document_id, chunk_id)
                 |), parent_key AS (
                 |  SELECT * FROM unnest(?::text[], ?::text[]) AS key(document_id, parent_id)
+                |), heading_key AS (
+                |  SELECT * FROM unnest(?::text[], ?::text[], ?::int[]) AS key(document_id, heading, ordinal)
                 |)
                 |SELECT $chunkSelectColumns
                 |FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks chunk
@@ -415,6 +427,14 @@ final class PostgresPgVectorStore(
                 |      WHERE parent_key.document_id = chunk.document_id
                 |        AND parent_key.parent_id = chunk.parent_id
                 |    )
+                |    OR EXISTS (
+                |      SELECT 1 FROM heading_key hk
+                |      WHERE hk.document_id = chunk.document_id
+                |        AND hk.heading <> ''
+                |        AND array_to_string(chunk.heading_path, chr(31)) = hk.heading
+                |        AND chunk.lineage_ordinal BETWEEN hk.ordinal - ? AND hk.ordinal + ?
+                |        AND chunk.lineage_ordinal <> hk.ordinal
+                |    )
                 |  )
                 |ORDER BY CASE WHEN EXISTS (
                 |           SELECT 1 FROM neighbor_key
@@ -425,44 +445,78 @@ final class PostgresPgVectorStore(
                 |LIMIT ?""".stripMargin
             val statement = connection.prepareStatement(sql)
             try
-              val seeds     = seedKeys.toVector.sorted
-              val neighbors = neighborScores.keys.toVector.sorted
-              val parents   = parentScores.keys.toVector.sorted
-              statement.setArray(1, connection.createArrayOf("text", seeds.map(_._1).toArray))
-              statement.setArray(2, connection.createArrayOf("text", seeds.map(_._2).toArray))
+              val seedRows  = seedKeys.toVector.sorted
+              val neighbors = neighborClaims.keys.toVector.sorted
+              val parents   = parentClaims.keys.toVector.sorted
+              statement.setArray(1, connection.createArrayOf("text", seedRows.map(_._1).toArray))
+              statement.setArray(2, connection.createArrayOf("text", seedRows.map(_._2).toArray))
               statement.setArray(3, connection.createArrayOf("text", neighbors.map(_._1).toArray))
               statement.setArray(4, connection.createArrayOf("text", neighbors.map(_._2).toArray))
               statement.setArray(5, connection.createArrayOf("text", parents.map(_._1).toArray))
               statement.setArray(6, connection.createArrayOf("text", parents.map(_._2).toArray))
-              statement.setString(7, scope.tenantId.value)
-              statement.setArray(8, connection.createArrayOf("text", scope.permissions.toArray))
-              val vis = bindVisibility(statement, 9, scope)
-              statement.setInt(vis, (config.maxAdditionalChunks * 4).max(config.maxAdditionalChunks))
+              val headings = headingSeeds.toVector
+              statement.setArray(7, connection.createArrayOf("text", headings.map(_.chunk.documentId).toArray))
+              statement.setArray(
+                8,
+                connection.createArrayOf(
+                  "text",
+                  headings
+                    .map(seed => RetrievalExpansion.headingKey(seed.chunk.lineage.fold(Chunk.empty[String])(_.headingPath)))
+                    .toArray
+                )
+              )
+              statement.setArray(
+                9,
+                connection.createArrayOf(
+                  "integer",
+                  headings.map(seed => Int.box(seed.chunk.lineage.fold(0)(_.ordinal))).toArray
+                )
+              )
+              statement.setString(10, scope.tenantId.value)
+              statement.setArray(11, connection.createArrayOf("text", scope.permissions.toArray))
+              val vis = bindVisibility(statement, 12, scope)
+              statement.setInt(vis, config.headingRadius)
+              statement.setInt(vis + 1, config.headingRadius)
+              statement.setInt(vis + 2, (config.maxAdditionalChunks * 6).max(config.maxAdditionalChunks))
               val result = statement.executeQuery()
               val found  = Vector.newBuilder[DocumentChunk]
               while result.next() do found += readChunk(result, scope)
               val authorized   = found.result()
               val neighborHits = authorized
                 .flatMap(chunk =>
-                  neighborScores
+                  neighborClaims
                     .get(chunk.documentId -> chunk.id)
-                    .map(score => expandedHit(chunk, score, "neighbor", config))
+                    .map { case (score, seedId) =>
+                      expandedHit(RetrievalExpansion.stamp(chunk, seedId), score, "neighbor", config)
+                    }
                 )
               val neighborKeys = neighborHits.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
-              val siblingHits  = parentScores.toVector.sortBy(_._1).flatMap { case (parentKey, score) =>
+              val headingHits  = authorized
+                .filterNot(chunk => neighborKeys.contains(chunk.documentId -> chunk.id))
+                .flatMap(chunk =>
+                  RetrievalExpansion
+                    .bestSeed(seeds, chunk, config.headingRadius)
+                    .map(seed => expandedHit(RetrievalExpansion.stamp(chunk, seed.chunk.id), seed.score, "heading", config))
+                )
+              val headingKeys  = headingHits.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
+              val siblingHits  = parentClaims.toVector.sortBy(_._1).flatMap { case (parentKey, (score, seedId)) =>
                 authorized
                   .filter(chunk =>
                     chunk.documentId == parentKey._1 && chunk.lineage
                       .flatMap(_.parentId)
                       .contains(parentKey._2)
                   )
-                  .filterNot(chunk => neighborKeys.contains(chunk.documentId -> chunk.id))
+                  .filterNot(chunk =>
+                    neighborKeys.contains(chunk.documentId -> chunk.id) || headingKeys.contains(
+                      chunk.documentId -> chunk.id
+                    )
+                  )
                   .sortBy(chunk => (chunk.lineage.fold(Int.MaxValue)(_.ordinal), chunk.id))
                   .take(config.maxSiblingsPerParent)
-                  .map(chunk => expandedHit(chunk, score, "parentSibling", config))
+                  .map(chunk => expandedHit(RetrievalExpansion.stamp(chunk, seedId), score, "parentSibling", config))
               }
               Chunk.fromIterable(
-                (neighborHits ++ siblingHits)
+                (neighborHits ++ headingHits ++ siblingHits)
                   .distinctBy(hit => hit.chunk.documentId -> hit.chunk.id)
                   .take(config.maxAdditionalChunks)
               )
@@ -691,7 +745,7 @@ final class PostgresPgVectorStore(
              |       f.vector_score, f.text_score, f.vector_rank, f.text_rank, c.index_version,
              |       c.parent_id, c.lineage_ordinal, c.previous_chunk_id, c.next_chunk_id,
              |       c.heading_path, c.page_numbers, c.origins::text, c.block_ids,
-             |       c.knowledge_space_id, c.profile_id
+             |       c.knowledge_space_id, c.profile_id, c.document_revision_id, c.dense_text
              |FROM fused f
              |JOIN zyblw_agent_knowledge.agent_knowledge_profile_chunks c
              |  ON c.tenant_id = ? AND c.document_id = f.document_id AND c.chunk_id = f.chunk_id
@@ -926,23 +980,28 @@ final class PostgresPgVectorStore(
       .getString("metadata")
       .fromJson[Map[String, String]]
       .fold(error => throw IllegalStateException(s"知识块 metadata 解码失败: $error"), identity)
+    val display = result.getString("chunk_text")
+    val dense   = Option(result.getString("dense_text")).filter(_.nonEmpty).getOrElse(display)
+    val lexical = Option(result.getString("search_text")).filter(_.nonEmpty).getOrElse(dense)
     DocumentChunk
       .fromText(
         id = result.getString("chunk_id"),
         documentId = result.getString("document_id"),
-        text = result.getString("chunk_text"),
+        text = display,
         sourceUri = result.getString("source_uri"),
         tenantId = scope.tenantId,
         permissions = permissions,
         metadata = metadata,
-        searchText = Option(result.getString("search_text")),
+        searchText = Some(lexical),
+        denseText = Some(dense),
         indexVersion = result.getLong("index_version"),
         lineage = decodeLineage(result)
       )
       .copy(
         knowledgeSpaceId =
           Option(result.getString("knowledge_space_id")).filter(_.nonEmpty).map(KnowledgeSpaceId(_)),
-        profileId = Option(result.getString("profile_id")).filter(_.nonEmpty).map(IndexProfileId(_))
+        profileId = Option(result.getString("profile_id")).filter(_.nonEmpty).map(IndexProfileId(_)),
+        documentRevisionId = Option(result.getString("document_revision_id")).map(_.trim).filter(_.nonEmpty)
       )
 
   /** 谱系整体不存在时返回 None；损坏的 origins JSON 会终止查询，不静默丢失引用几何。 */
@@ -1007,6 +1066,21 @@ final class PostgresPgVectorStore(
       start + 7,
       connection.createArrayOf("text", lineage.fold(Chunk.empty[String])(_.blockIds).toArray)
     )
+
+  private def bindRepresentations(
+      statement: java.sql.PreparedStatement,
+      start: Int,
+      chunk: DocumentChunk
+  ): Unit =
+    val representations = chunk.representations
+    val distinct        = chunk.denseText != chunk.displayText || chunk.lexicalText != chunk.displayText
+    statement.setString(start, if distinct then chunk.denseText else null)
+    statement.setString(start + 1, representations.displaySha256)
+    statement.setString(start + 2, representations.denseSha256)
+    statement.setString(start + 3, representations.lexicalSha256)
+
+  private def preferSeed(left: (Double, String), right: (Double, String)): (Double, String) =
+    if left._1 >= right._1 then left else right
 
   private def expandedHit(
       chunk: DocumentChunk,

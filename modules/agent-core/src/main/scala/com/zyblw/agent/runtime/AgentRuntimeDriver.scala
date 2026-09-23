@@ -333,7 +333,11 @@ final class AgentRuntimeDriver(
   ): IO[AgentError, RunOutcome] =
     for
       cited <- contextAssembler.persistCitations(state, sources)
-      done  <- terminator.complete(cited, AgentMessage.assistant(message))
+      done  <- terminator.complete(
+        cited,
+        AgentMessage.assistant(message),
+        Some(CompletionDisposition.InsufficientEvidence)
+      )
     yield done
 
   private def continuePrepared(

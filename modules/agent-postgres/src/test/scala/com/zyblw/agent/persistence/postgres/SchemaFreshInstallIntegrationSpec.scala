@@ -122,5 +122,83 @@ object SchemaFreshInstallIntegrationSpec extends ZIOSpecDefault:
             )
           ).provide(ArtifactBlobStore.inMemory)
         yield result).provideLayer(dataSourceLayer)
+      },
+      test("dispatcher 只能指向同一 Run 的命令，事件序号不重复建 btree") {
+        (for
+          dataSource <- ZIO.service[DataSource]
+          _          <- AgentPostgresMigrations.migrate(dataSource)
+          outcome    <- ZIO.attemptBlocking {
+            val connection = dataSource.getConnection
+            try
+              val runA      = UUID.randomUUID()
+              val runB      = UUID.randomUUID()
+              val session   = UUID.randomUUID()
+              val commandA  = UUID.randomUUID()
+              val insertRun = connection.prepareStatement(
+                """INSERT INTO agent_runs
+                  |(run_id, session_id, agent_id, status, version, schema_version, state_json, created_at, updated_at)
+                  |VALUES (?::uuid, ?::uuid, 'schema', 'Created', 0, 1, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""".stripMargin
+              )
+              try
+                insertRun.setString(1, runA.toString)
+                insertRun.setString(2, session.toString)
+                insertRun.executeUpdate()
+                insertRun.setString(1, runB.toString)
+                insertRun.executeUpdate()
+              finally insertRun.close()
+              val insertCommand = connection.prepareStatement(
+                """INSERT INTO agent_run_commands
+                  |(command_id, run_id, command_type, payload, idempotency_key, status)
+                  |VALUES (?::uuid, ?::uuid, 'Cancel', '{}'::jsonb, 'same-run', 'Queued')""".stripMargin
+              )
+              try
+                insertCommand.setString(1, commandA.toString)
+                insertCommand.setString(2, runA.toString)
+                insertCommand.executeUpdate()
+              finally insertCommand.close()
+              val sameRun = connection.prepareStatement(
+                """INSERT INTO agent_run_dispatch
+                  |(run_id, status, current_command_id, lease_owner, lease_token, claimed_at, lease_expires_at)
+                  |VALUES (?::uuid, 'Leased', ?::uuid, 'owner', gen_random_uuid(), CURRENT_TIMESTAMP,
+                  |        CURRENT_TIMESTAMP + INTERVAL '30 seconds')""".stripMargin
+              )
+              try
+                sameRun.setString(1, runA.toString)
+                sameRun.setString(2, commandA.toString)
+                sameRun.executeUpdate()
+              finally sameRun.close()
+              val crossRun = connection.prepareStatement(
+                """INSERT INTO agent_run_dispatch
+                  |(run_id, status, current_command_id, lease_owner, lease_token, claimed_at, lease_expires_at)
+                  |VALUES (?::uuid, 'Leased', ?::uuid, 'owner', gen_random_uuid(), CURRENT_TIMESTAMP,
+                  |        CURRENT_TIMESTAMP + INTERVAL '30 seconds')""".stripMargin
+              )
+              val sqlState =
+                try
+                  crossRun.setString(1, runB.toString)
+                  crossRun.setString(2, commandA.toString)
+                  crossRun.executeUpdate()
+                  "ok"
+                catch case error: java.sql.SQLException => error.getSQLState
+                finally crossRun.close()
+              val indexes = connection.prepareStatement(
+                """SELECT indexname FROM pg_indexes
+                  |WHERE schemaname = current_schema() AND tablename = 'agent_events'""".stripMargin
+              )
+              val names =
+                try
+                  val rows  = indexes.executeQuery()
+                  val found = scala.collection.mutable.ListBuffer.empty[String]
+                  while rows.next() do found += rows.getString(1)
+                  found.toList
+                finally indexes.close()
+              (sqlState, names)
+            finally connection.close()
+          }
+        yield assertTrue(
+          outcome._1 == "23503",
+          !outcome._2.contains("agent_events_run_sequence_idx"),
+          outcome._2.exists(_.contains("run_id"))
+        )).provideLayer(dataSourceLayer)
       }
     ) @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(3.minutes) @@ TestAspect.sequential

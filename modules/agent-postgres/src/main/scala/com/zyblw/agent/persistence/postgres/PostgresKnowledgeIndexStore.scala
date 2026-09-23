@@ -486,11 +486,12 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
       _ <- jdbc("insert manifest") {
         val statement = connection.prepareStatement(
           """INSERT INTO zyblw_agent_knowledge.agent_knowledge_profile_documents
-                 |(tenant_id, knowledge_space_id, profile_id, document_id, index_version, ingestion_id, source_uri, content_hash,
+                 |(tenant_id, knowledge_space_id, profile_id, document_id, index_version, document_revision_id,
+                 | ingestion_id, source_uri, content_hash,
                  | permissions, metadata, embedding_provider, embedding_model, embedding_dimension,
                  | embedding_max_batch_size, embedding_supports_dimensions, indexing_strategy,
                  | status, active, chunk_count)
-                 |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, 'building', FALSE, 0)""".stripMargin
+                 |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, 'building', FALSE, 0)""".stripMargin
         )
         try
           statement.setString(1, request.key.tenantId.value)
@@ -498,20 +499,21 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
           statement.setString(3, assignment.profileId.value)
           statement.setString(4, request.key.documentId)
           statement.setLong(5, next)
-          statement.setString(6, request.ingestionId)
-          statement.setString(7, request.sourceUri)
-          statement.setString(8, request.contentHash)
-          statement.setArray(9, connection.createArrayOf("text", request.permissions.toArray))
+          statement.setString(6, request.contentHash)
+          statement.setString(7, request.ingestionId)
+          statement.setString(8, request.sourceUri)
+          statement.setString(9, request.contentHash)
+          statement.setArray(10, connection.createArrayOf("text", request.permissions.toArray))
           statement.setString(
-            10,
+            11,
             (request.metadata + ("ingest.casActiveProfile" -> assignment.cas.toString)).toJson
           )
-          statement.setString(11, request.embedding.provider)
-          statement.setString(12, request.embedding.model)
-          statement.setInt(13, request.embedding.dimension)
-          statement.setInt(14, request.embedding.maxBatchSize)
-          statement.setBoolean(15, request.embedding.supportsDimensions)
-          statement.setString(16, request.indexingStrategy)
+          statement.setString(12, request.embedding.provider)
+          statement.setString(13, request.embedding.model)
+          statement.setInt(14, request.embedding.dimension)
+          statement.setInt(15, request.embedding.maxBatchSize)
+          statement.setBoolean(16, request.embedding.supportsDimensions)
+          statement.setString(17, request.indexingStrategy)
           statement.executeUpdate()
           ()
         finally statement.close()
@@ -566,14 +568,23 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
       _ <- jdbc("publish staged chunks") {
         val statement = connection.prepareStatement(
           """INSERT INTO zyblw_agent_knowledge.agent_knowledge_profile_chunks
-                 |(tenant_id, knowledge_space_id, profile_id, chunk_id, document_id, index_version, chunk_text, search_text,
+                 |(tenant_id, knowledge_space_id, profile_id, chunk_id, document_id, index_version, document_revision_id,
+                 | chunk_text, search_text, dense_text, display_sha256, dense_sha256, lexical_sha256,
                  | source_uri, permissions, metadata, embedding, parent_id, lineage_ordinal,
                  | previous_chunk_id, next_chunk_id, heading_path, page_numbers, origins, block_ids)
-                 |SELECT tenant_id, knowledge_space_id, profile_id, chunk_id, document_id, index_version, chunk_text, search_text,
-                 |       source_uri, permissions, metadata, embedding, parent_id, lineage_ordinal,
-                 |       previous_chunk_id, next_chunk_id, heading_path, page_numbers, origins, block_ids
-                 |FROM zyblw_agent_knowledge.agent_knowledge_profile_chunk_staging
-                 |WHERE tenant_id = ? AND document_id = ? AND index_version = ?""".stripMargin
+                 |SELECT s.tenant_id, s.knowledge_space_id, s.profile_id, s.chunk_id, s.document_id, s.index_version,
+                 |       d.document_revision_id, s.chunk_text, s.search_text, s.dense_text,
+                 |       s.display_sha256, s.dense_sha256, s.lexical_sha256,
+                 |       s.source_uri, s.permissions, s.metadata, s.embedding, s.parent_id, s.lineage_ordinal,
+                 |       s.previous_chunk_id, s.next_chunk_id, s.heading_path, s.page_numbers, s.origins, s.block_ids
+                 |FROM zyblw_agent_knowledge.agent_knowledge_profile_chunk_staging s
+                 |JOIN zyblw_agent_knowledge.agent_knowledge_profile_documents d
+                 |  ON d.tenant_id = s.tenant_id
+                 | AND d.knowledge_space_id = s.knowledge_space_id
+                 | AND d.profile_id = s.profile_id
+                 | AND d.document_id = s.document_id
+                 | AND d.index_version = s.index_version
+                 |WHERE s.tenant_id = ? AND s.document_id = ? AND s.index_version = ?""".stripMargin
         )
         try
           statement.setString(1, build.key.tenantId.value)
@@ -606,13 +617,18 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
           """INSERT INTO zyblw_agent_knowledge.agent_knowledge_profile_chunk_staging
           |(tenant_id, knowledge_space_id, profile_id, document_id, index_version, chunk_id, chunk_text, search_text,
           | source_uri, permissions, metadata, embedding, parent_id, lineage_ordinal,
-          | previous_chunk_id, next_chunk_id, heading_path, page_numbers, origins, block_ids)
-          |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::public.vector, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+          | previous_chunk_id, next_chunk_id, heading_path, page_numbers, origins, block_ids,
+          | dense_text, display_sha256, dense_sha256, lexical_sha256)
+          |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::public.vector, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?)
           |ON CONFLICT (tenant_id, document_id, index_version, chunk_id) DO UPDATE SET
           |knowledge_space_id = EXCLUDED.knowledge_space_id,
           |profile_id = EXCLUDED.profile_id,
           |chunk_text = EXCLUDED.chunk_text,
           |search_text = EXCLUDED.search_text,
+          |dense_text = EXCLUDED.dense_text,
+          |display_sha256 = EXCLUDED.display_sha256,
+          |dense_sha256 = EXCLUDED.dense_sha256,
+          |lexical_sha256 = EXCLUDED.lexical_sha256,
           |source_uri = EXCLUDED.source_uri,
           |permissions = EXCLUDED.permissions,
           |metadata = EXCLUDED.metadata,
@@ -643,6 +659,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
             statement.setString(11, chunk.metadata.toJson)
             statement.setString(12, vectorLiteral(indexed.embedding))
             bindLineage(statement, connection, 13, chunk.lineage)
+            bindRepresentations(statement, 21, chunk)
             statement.addBatch()
           }
           statement.executeBatch()
@@ -694,6 +711,19 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
       start + 7,
       connection.createArrayOf("text", lineage.fold(Chunk.empty[String])(_.blockIds).toArray)
     )
+
+  /** 写入已有 dense 与 hash 列。三份文本相同时仍写入，查询端把空 dense 回读成 chunk_text。 */
+  private def bindRepresentations(
+      statement: java.sql.PreparedStatement,
+      start: Int,
+      chunk: DocumentChunk
+  ): Unit =
+    val representations = chunk.representations
+    val distinct        = chunk.denseText != chunk.displayText || chunk.lexicalText != chunk.displayText
+    statement.setString(start, if distinct then chunk.denseText else null)
+    statement.setString(start + 1, representations.displaySha256)
+    statement.setString(start + 2, representations.denseSha256)
+    statement.setString(start + 3, representations.lexicalSha256)
 
   /** 清理一个版本的全部暂存行；用于失败重试和成功发布。 */
   private def clearStaging(connection: Connection, build: KnowledgeIndexBuild): IO[RetrievalError, Unit] =
@@ -1135,33 +1165,45 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
 
   override def withdraw(
       key: KnowledgeDocumentKey,
-      documentRevisionId: String
+      documentRevisionId: String,
+      knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId("default")
   ): IO[RetrievalError, Unit] =
-    withTransaction { connection =>
-      jdbc("withdraw document") {
-        val tombstone = connection.prepareStatement(
-          """INSERT INTO zyblw_agent_knowledge.agent_knowledge_withdrawn
-            |(tenant_id, knowledge_space_id, document_id, document_revision_id)
-            |VALUES (?, 'default', ?, ?)
-            |ON CONFLICT DO NOTHING""".stripMargin
-        )
-        try
-          tombstone.setString(1, key.tenantId.value)
-          tombstone.setString(2, key.documentId)
-          tombstone.setString(3, Option(documentRevisionId).filter(_.nonEmpty).getOrElse("*"))
-          tombstone.executeUpdate()
-        finally tombstone.close()
-        val hide = connection.prepareStatement(
-          "UPDATE zyblw_agent_knowledge.agent_knowledge_profile_documents SET active = FALSE, status = 'retired', updated_at = now() WHERE tenant_id = ? AND document_id = ? AND active = TRUE AND (knowledge_space_id, profile_id) IN (SELECT knowledge_space_id, active_profile_id FROM zyblw_agent_knowledge.agent_knowledge_spaces WHERE tenant_id = zyblw_agent_knowledge.agent_knowledge_profile_documents.tenant_id)"
-        )
-        try
-          hide.setString(1, key.tenantId.value)
-          hide.setString(2, key.documentId)
-          hide.executeUpdate()
-          ()
-        finally hide.close()
-      }
-    }
+    val revision = Option(documentRevisionId).map(_.trim).filter(_.nonEmpty)
+    revision match
+      case None =>
+        ZIO.fail(AgentError.RetrievalFailed("documentRevisionId 不能为空"))
+      case Some(id) =>
+        withTransaction { connection =>
+          jdbc("withdraw document") {
+            val tombstone = connection.prepareStatement(
+              """INSERT INTO zyblw_agent_knowledge.agent_knowledge_withdrawn
+                |(tenant_id, knowledge_space_id, document_id, document_revision_id)
+                |VALUES (?, ?, ?, ?)
+                |ON CONFLICT DO NOTHING""".stripMargin
+            )
+            try
+              tombstone.setString(1, key.tenantId.value)
+              tombstone.setString(2, knowledgeSpaceId.value)
+              tombstone.setString(3, key.documentId)
+              tombstone.setString(4, id)
+              tombstone.executeUpdate()
+            finally tombstone.close()
+            val hide = connection.prepareStatement(
+              """UPDATE zyblw_agent_knowledge.agent_knowledge_profile_documents
+                |SET active = FALSE, status = 'retired', updated_at = now()
+                |WHERE tenant_id = ? AND knowledge_space_id = ? AND document_id = ?
+                |  AND document_revision_id = ? AND active = TRUE""".stripMargin
+            )
+            try
+              hide.setString(1, key.tenantId.value)
+              hide.setString(2, knowledgeSpaceId.value)
+              hide.setString(3, key.documentId)
+              hide.setString(4, id)
+              hide.executeUpdate()
+              ()
+            finally hide.close()
+          }
+        }
 
   /** 将 Float 向量编码为 pgvector 的受控文本输入格式。 */
   private def vectorLiteral(embedding: Embedding): String = embedding.values.mkString("[", ",", "]")

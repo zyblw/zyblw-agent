@@ -131,7 +131,8 @@ object ContextAssembler:
       withdrawnDocumentIds: Set[String] = Set.empty,
       tokenCounter: TokenCounter = DefaultTokenCounter
   ): EvidenceBundle =
-    val ranked = seeds.take(budgets.rerankSeeds).map(_ -> EvidenceDecision.KeptSeed) ++
+    val rankedSeeds = diversifySeeds(seeds.take(budgets.rerankSeeds))
+    val ranked      = rankedSeeds.map(_ -> EvidenceDecision.KeptSeed) ++
       expanded
         .filterNot(hit =>
           seeds.exists(seed => seed.chunk.documentId == hit.chunk.documentId && seed.chunk.id == hit.chunk.id)
@@ -156,7 +157,7 @@ object ContextAssembler:
       then state.drop(hit, keep, EvidenceDecision.DroppedBudget)
       else if withdrawnDocumentIds.contains(hit.chunk.documentId) then
         state.drop(hit, keep, EvidenceDecision.DroppedWithdrawn)
-      else if state.perSource.getOrElse(sourceKey, 0) >= budgets.maxChunksPerSource then
+      else if keep == EvidenceDecision.KeptSeed && state.perSource.getOrElse(sourceKey, 0) >= budgets.maxChunksPerSource then
         state.drop(hit, keep, EvidenceDecision.DroppedDiversity)
       else if state.tokens + tokens > budgets.maxEvidenceTokens then
         state.drop(hit, keep, EvidenceDecision.DroppedBudget)
@@ -171,7 +172,8 @@ object ContextAssembler:
         excerpt = item.displayText.take(500),
         score = item.score,
         pageNumbers = origins.map(_.pageNumber).distinct,
-        origins = origins
+        origins = origins,
+        chunkId = Some(item.chunk.id)
       )
     }
     val reasons = Chunk.fromIterable(
@@ -205,18 +207,39 @@ object ContextAssembler:
   private def kept(item: EvidenceItem): Boolean =
     item.decision == EvidenceDecision.KeptSeed || item.decision == EvidenceDecision.KeptExpanded
 
+  /** 同一来源里先留每个标题路径最相关的一块，再留下一块。跨来源仍按分数排序。 */
+  private def diversifySeeds(hits: Chunk[RetrievalHit]): Chunk[RetrievalHit] =
+    val counted = scala.collection.mutable.Map.empty[(String, String), Int]
+    val ranked  = hits.sortBy(hit => -hit.score).zipWithIndex.map { case (hit, index) =>
+      val key  = sourceKey(hit) -> headingKey(hit)
+      val wave = counted.getOrElse(key, 0)
+      counted.update(key, wave + 1)
+      (hit, wave, index)
+    }
+    Chunk.fromIterable(ranked.sortBy { case (hit, wave, index) => (wave, -hit.score, index) }.map(_._1))
+
+  private def sourceKey(hit: RetrievalHit): String =
+    Option(hit.chunk.sourceUri).filter(_.nonEmpty).getOrElse(hit.chunk.documentId)
+
+  private def headingKey(hit: RetrievalHit): String =
+    hit.chunk.lineage.fold("")(_.headingPath.mkString("\u001f"))
+
   final private case class AssembleState(
       items: Chunk[EvidenceItem] = Chunk.empty,
       tokens: Long = 0L,
       perSource: Map[String, Int] = Map.empty,
       dropped: Set[EvidenceDecision] = Set.empty
   ):
-    def keep(hit: RetrievalHit, keep: EvidenceDecision, sourceKey: String, added: Long): AssembleState =
+    def keep(hit: RetrievalHit, decision: EvidenceDecision, sourceKey: String, added: Long): AssembleState =
       val seed = hit.chunk.lineage.flatMap(_.seedChunkId).getOrElse(hit.chunk.id)
+      val counted =
+        if decision == EvidenceDecision.KeptSeed then
+          perSource.updated(sourceKey, perSource.getOrElse(sourceKey, 0) + 1)
+        else perSource
       copy(
-        items = items :+ EvidenceItem(hit.chunk, hit.score, seed, keep, hit.signals),
+        items = items :+ EvidenceItem(hit.chunk, hit.score, seed, decision, hit.signals),
         tokens = tokens + added,
-        perSource = perSource.updated(sourceKey, perSource.getOrElse(sourceKey, 0) + 1)
+        perSource = counted
       )
 
     def drop(hit: RetrievalHit, keep: EvidenceDecision, reason: EvidenceDecision): AssembleState =

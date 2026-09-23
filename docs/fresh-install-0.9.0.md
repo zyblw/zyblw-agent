@@ -34,6 +34,7 @@
 export EMBEDDING_API_KEY=...
 export EMBEDDING_MODEL=...
 export EMBEDDING_DIMENSION=1024
+export EMBEDDING_TOKENIZER=cl100k-base   # text-embedding-3；通义文本向量改为 cjk-approx-v1
 ```
 
 凭据只通过宿主 secret 注入，不写入配置样例、日志、trace 或 Git。

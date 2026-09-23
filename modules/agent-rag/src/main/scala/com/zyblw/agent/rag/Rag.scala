@@ -62,7 +62,7 @@ object DocumentChunk:
   ): DocumentChunk =
     fromText(id, documentId, text, sourceUri, tenantId, permissions)
 
-  /** 正文进入三份表示；lexical 可用 searchText 覆盖。 */
+  /** 展示正文、向量正文和词法正文分开。未提供 dense 时三份相同，兼容旧调用。 */
   def fromText(
       id: String,
       documentId: String,
@@ -73,15 +73,18 @@ object DocumentChunk:
       metadata: Map[String, String] = Map.empty,
       searchText: Option[String] = None,
       indexVersion: Long = 1L,
-      lineage: Option[ChunkLineage] = None
+      lineage: Option[ChunkLineage] = None,
+      denseText: Option[String] = None
   ): DocumentChunk =
+    val dense   = denseText.filter(_.nonEmpty).getOrElse(text)
+    val lexical = searchText.filter(_.nonEmpty).getOrElse(dense)
     new DocumentChunk(
       id,
       documentId,
       sourceUri,
       tenantId,
       permissions,
-      ChunkRepresentations.of(text, text, searchText.getOrElse(text)),
+      ChunkRepresentations.of(text, dense, lexical),
       metadata,
       catalogVersion = indexVersion,
       lineage = lineage
@@ -171,7 +174,9 @@ final case class Citation(
     /** 从 1 开始的原文页码；纯文本来源可为空。 */
     pageNumbers: Chunk[Int] = Chunk.empty,
     /** 用于 PDF 高亮的可选页内几何信息。 */
-    origins: Chunk[DocumentOrigin] = Chunk.empty
+    origins: Chunk[DocumentOrigin] = Chunk.empty,
+    /** 与命中块的稳定身份。过滤时按它配对，不能按过滤后的下标截取引用。 */
+    chunkId: Option[String] = None
 )
 
 /** 检索证据是否足以进入回答上下文。
@@ -217,7 +222,33 @@ final case class RetrievalResult(
     citations: Chunk[Citation],
     evidence: RetrievalEvidence = RetrievalEvidence(),
     diagnostics: RetrievalDiagnostics = RetrievalDiagnostics()
-)
+):
+  /** 按块身份保留仍匹配的命中与引用，并让证据计数等于过滤后的命中。 */
+  def filtered(filter: RetrievalFilter): RetrievalResult =
+    val paired =
+      if citations.nonEmpty && citations.forall(_.chunkId.exists(_.nonEmpty)) then
+        val byChunk = citations.flatMap(citation => citation.chunkId.map(_ -> citation)).toMap
+        hits.flatMap { hit =>
+          if filter.matches(hit.chunk) then byChunk.get(hit.chunk.id).map(hit -> _) else None
+        }
+      else
+        hits.zip(citations).collect { case (hit, citation) if filter.matches(hit.chunk) => hit -> citation }
+    val keptHits      = paired.map(_._1)
+    val keptCitations = paired.map(_._2)
+    val accepted      = keptHits.length
+    val candidates    = math.max(evidence.candidateCount, hits.length)
+    val status        =
+      if keptHits.isEmpty then RetrievalEvidenceStatus.NoAcceptedHits else RetrievalEvidenceStatus.Supported
+    copy(
+      hits = keptHits,
+      citations = keptCitations,
+      evidence = evidence.copy(
+        status = status,
+        candidateCount = math.max(candidates, accepted),
+        acceptedCount = accepted,
+        topAcceptedScore = keptHits.map(_.score).filter(java.lang.Double.isFinite).maxOption
+      )
+    )
 
 trait Chunker:
   /** 能完整区分算法及其影响输出参数的稳定标识；索引 manifest 默认使用它阻止错误重放。 */
@@ -433,28 +464,28 @@ final class InMemoryVectorStore private (
               chunk.permissions.subsetOf(scope.permissions)
           )
           .toVector
-        val neighborScores: Map[(String, String), Double] =
-          if config.neighborRadius == 0 then Map.empty[(String, String), Double]
+        val neighborClaims: Map[(String, String), (Double, String)] =
+          if config.neighborRadius == 0 then Map.empty
           else
             seeds
               .flatMap { seed =>
                 val ids = seed.chunk.lineage.fold(Chunk.empty[String])(lineage =>
                   Chunk.fromIterable(lineage.previousChunkId) ++ Chunk.fromIterable(lineage.nextChunkId)
                 )
-                ids.map(id => (seed.chunk.documentId -> id) -> seed.score)
+                ids.map(id => (seed.chunk.documentId -> id) -> (seed.score -> seed.chunk.id))
               }
               .toList
-              .groupMapReduce(_._1)(_._2)(math.max)
-        val parentScores = seeds
+              .groupMapReduce(_._1)(_._2)(preferSeed)
+        val parentClaims = seeds
           .flatMap(hit =>
             hit.chunk.lineage
               .flatMap(_.parentId)
-              .map(parentId => (hit.chunk.documentId -> parentId) -> hit.score)
+              .map(parentId => (hit.chunk.documentId -> parentId) -> (hit.score -> hit.chunk.id))
           )
           .groupBy(_._1)
           .collect {
             case (parentKey, values) if values.length >= config.parentHitThreshold =>
-              parentKey -> values.map(_._2).max
+              parentKey -> values.map(_._2).reduce(preferSeed)
           }
         val siblingsByParent = authorized
           .flatMap(chunk =>
@@ -466,25 +497,43 @@ final class InMemoryVectorStore private (
           .toMap
         val neighborHits = authorized
           .flatMap(chunk =>
-            neighborScores
+            neighborClaims
               .get(chunk.documentId -> chunk.id)
-              .map(score => expandedHit(chunk, score, "neighbor", config))
+              .map { case (score, seedId) =>
+                expandedHit(RetrievalExpansion.stamp(chunk, seedId), score, "neighbor", config)
+              }
           )
           .sortBy(hit => (-hit.score, hit.chunk.lineage.fold(Int.MaxValue)(_.ordinal), hit.chunk.id))
         val neighborKeys = neighborHits.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
-        val siblingHits  = parentScores.toVector.sortBy(_._1).flatMap { case (parentKey, score) =>
+        val headingHits  =
+          if config.headingRadius == 0 then Vector.empty
+          else
+            authorized
+              .filterNot(chunk => neighborKeys.contains(chunk.documentId -> chunk.id))
+              .flatMap(chunk =>
+                RetrievalExpansion
+                  .bestSeed(seeds, chunk, config.headingRadius)
+                  .map(seed => expandedHit(RetrievalExpansion.stamp(chunk, seed.chunk.id), seed.score, "heading", config))
+              )
+        val headingKeys = headingHits.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
+        val siblingHits = parentClaims.toVector.sortBy(_._1).flatMap { case (parentKey, (score, seedId)) =>
           siblingsByParent
             .getOrElse(parentKey, Vector.empty)
-            .filterNot(chunk => neighborKeys.contains(chunk.documentId -> chunk.id))
+            .filterNot(chunk =>
+              neighborKeys.contains(chunk.documentId -> chunk.id) || headingKeys.contains(chunk.documentId -> chunk.id)
+            )
             .take(config.maxSiblingsPerParent)
-            .map(chunk => expandedHit(chunk, score, "parentSibling", config))
+            .map(chunk => expandedHit(RetrievalExpansion.stamp(chunk, seedId), score, "parentSibling", config))
         }
         Chunk.fromIterable(
-          (neighborHits ++ siblingHits)
+          (neighborHits ++ headingHits ++ siblingHits)
             .distinctBy(hit => hit.chunk.documentId -> hit.chunk.id)
             .take(config.maxAdditionalChunks)
         )
       }
+
+  private def preferSeed(left: (Double, String), right: (Double, String)): (Double, String) =
+    if left._1 >= right._1 then left else right
 
   private def expandedHit(
       chunk: DocumentChunk,
@@ -541,10 +590,7 @@ trait Retriever:
       scope: RetrievalScope,
       filter: RetrievalFilter
   ): IO[RetrievalError, RetrievalResult] =
-    fetch(chunkIds, scope).map { result =>
-      val hits = result.hits.filter(hit => filter.matches(hit.chunk))
-      result.copy(hits = hits, citations = result.citations.take(hits.length))
-    }
+    fetch(chunkIds, scope).map(_.filtered(filter))
 
 final class DefaultRetriever(
     embeddings: EmbeddingModel,
@@ -682,6 +728,12 @@ final class DefaultRetriever(
         // 阈值只作用于 seed 命中。RRF fused score 只排序；余弦/词法决定是否接受。
         // 扩展块按 expandedScoreFactor 主动降分，不得再用同一阈值筛掉它们。
         hits     = validated.filter(hit => DefaultRetriever.acceptsSeed(hit, policy.minimumScore))
+        evidenceBudgets =
+          if request.filter.documentIds.size == 1 then
+            plan.budgets.copy(maxChunksPerSource =
+              math.max(plan.budgets.maxChunksPerSource, plan.budgets.rerankSeeds)
+            )
+          else plan.budgets
         evidence = RetrievalEvidence(
           status =
             if candidates.isEmpty then RetrievalEvidenceStatus.NoCandidates
@@ -707,7 +759,7 @@ final class DefaultRetriever(
                 )
               ),
               evidence,
-              plan.budgets,
+              evidenceBudgets,
               profileId = Some(pinned),
               knowledgeSpaceId = Some(pinnedScope.spaceId),
               degradedStages = Chunk.fromIterable(
@@ -767,7 +819,8 @@ final class DefaultRetriever(
               hit.chunk.displayText.take(500),
               hit.score,
               origins.map(_.pageNumber).distinct,
-              origins
+              origins,
+              Some(hit.chunk.id)
             )
           }
           RetrievalResult(
@@ -918,7 +971,10 @@ object DefaultRetriever:
 
 /** 确定性测试 embedding，不应用于真实语义检索。 */
 final class HashEmbedding(val dimension: Int = 64) extends EmbeddingModel:
-  override val capabilities: EmbeddingCapabilities       = EmbeddingDefaults.denseCapabilities(dimension)
+  override val capabilities: EmbeddingCapabilities =
+    EmbeddingDefaults
+      .denseCapabilities(dimension)
+      .copy(tokenizerId = Some(ChunkEmbeddingAlignment.TestTokenizerId))
   override val descriptor: EmbeddingProviderDescriptorV2 =
     EmbeddingProviderDescriptorV2("hash", s"hash-$dimension", capabilities)
 

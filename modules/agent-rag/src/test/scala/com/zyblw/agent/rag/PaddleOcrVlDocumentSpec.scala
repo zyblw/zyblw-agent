@@ -132,6 +132,64 @@ object PaddleOcrVlDocumentSpec extends ZIOSpecDefault:
         parsed.sections(4).parentId.contains(parsed.sections(3).id)
       )
     },
+    test("空行后的短文本并进标题，编号小节仍单独成块") {
+      val json =
+        """[{
+          |  "prunedResult": {
+          |    "parsing_res_list": [
+          |      {"block_label":"paragraph_title","block_content":"## 一、脏腑经络学说是中医学的","block_order":1},
+          |      {"block_label":"text","block_content":"理论核心","block_order":2},
+          |      {"block_label":"text","block_content":"脏腑与经络相互为用。","block_order":3},
+          |      {"block_label":"paragraph_title","block_content":"## （九）心包与手厥阴经（附：膻中）","block_order":4},
+          |      {"block_label":"text","block_content":"1. 心包的解剖及生理","block_order":5}
+          |    ]
+          |  }
+          |}]""".stripMargin
+      val markdown =
+        """## 一、脏腑经络学说是中医学的
+          |
+          |理论核心
+          |
+          |脏腑与经络相互为用。
+          |
+          |## （九）心包与手厥阴经（附：膻中）
+          |
+          |1. 心包的解剖及生理
+          |""".stripMargin
+      val parsed = PaddleOcrVlDocument.decode(json, Some(markdown)).toOption.get
+      assertTrue(
+        parsed.sections.map(section => section.level -> section.title) == zio.Chunk(
+          2 -> "一、脏腑经络学说是中医学的理论核心",
+          2 -> "（九）心包与手厥阴经（附：膻中）"
+        ),
+        !parsed.blocks.exists(_.text == "理论核心"),
+        parsed.blocks.exists(_.text == "脏腑与经络相互为用。"),
+        parsed.blocks.exists(_.text == "1. 心包的解剖及生理")
+      )
+    },
+    test("折行标题在 JSON 能盖住两行时合成一条") {
+      val json =
+        """[{
+          |  "prunedResult": {
+          |    "parsing_res_list": [
+          |      {"block_label":"paragraph_title","block_content":"一、脏腑经络学说是中医学的理论核心","block_order":1},
+          |      {"block_label":"text","block_content":"脏腑与经络相互为用。","block_order":2}
+          |    ]
+          |  }
+          |}]""".stripMargin
+      val markdown =
+        """## 一、脏腑经络学说是中医学的
+          |理论核心
+          |
+          |脏腑与经络相互为用。
+          |""".stripMargin
+      val parsed = PaddleOcrVlDocument.decode(json, Some(markdown)).toOption.get
+      assertTrue(
+        parsed.sections.map(section => section.level -> section.title) == zio.Chunk(
+          2 -> "一、脏腑经络学说是中医学的理论核心"
+        )
+      )
+    },
     test("无法识别的 JSON 不会被当成正文") {
       assertTrue(PaddleOcrVlDocument.decode("{\"error_code\":0}", None).isLeft)
     }

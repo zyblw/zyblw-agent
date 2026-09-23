@@ -100,6 +100,10 @@ final case class ChunkLineage(
   /** 去重且按原文顺序输出页码，用于引用和 SQL 索引。 */
   val pageNumbers: Chunk[Int] = origins.map(_.pageNumber).distinct
 
+  /** 检索扩展时标记触发它的种子。这是当次查询的字段，不入库。 */
+  def stampedBy(seedChunkId: String): ChunkLineage =
+    copy(seedChunkId = Some(seedChunkId))
+
 /** 在 rerank 之后执行的有界上下文扩展策略。
   *
   * @param neighborRadius
@@ -118,10 +122,34 @@ final case class RetrievalExpansionConfig(
     parentHitThreshold: Int = 2,
     maxSiblingsPerParent: Int = 4,
     maxAdditionalChunks: Int = 8,
-    expandedScoreFactor: Double = 0.85
+    expandedScoreFactor: Double = 0.85,
+    /** 同一标题路径上，种子两侧再取的相邻块数。空路径不扩展。 */
+    headingRadius: Int = 2
 ):
   require(neighborRadius >= 0 && neighborRadius <= 1, "neighborRadius 当前必须位于 0..1")
   require(parentHitThreshold >= 1, "parentHitThreshold 必须为正数")
   require(maxSiblingsPerParent >= 0 && maxSiblingsPerParent <= 50, "maxSiblingsPerParent 必须位于 0..50")
   require(maxAdditionalChunks >= 0 && maxAdditionalChunks <= 100, "maxAdditionalChunks 必须位于 0..100")
   require(expandedScoreFactor > 0.0 && expandedScoreFactor <= 1.0, "expandedScoreFactor 必须位于 (0, 1]")
+  require(headingRadius >= 0 && headingRadius <= 4, "headingRadius 必须位于 0..4")
+
+object RetrievalExpansion:
+  /** 给扩展块盖上触发它的种子。种子标记只存在于这次检索结果，不写回索引。 */
+  def stamp(chunk: DocumentChunk, seedChunkId: String): DocumentChunk =
+    val lineage = chunk.lineage.getOrElse(ChunkLineage(None, 0))
+    chunk.copy(lineage = Some(lineage.stampedBy(seedChunkId)))
+
+  def headingKey(path: Chunk[String]): String =
+    path.mkString("\u001f")
+
+  /** 同一非空标题路径上、序号距离不超过 radius 的块。阅读顺序上的前后邻居另算。 */
+  def sameHeading(seed: RetrievalHit, chunk: DocumentChunk, radius: Int): Boolean =
+    if radius <= 0 || seed.chunk.documentId != chunk.documentId || seed.chunk.id == chunk.id then false
+    else
+      (seed.chunk.lineage, chunk.lineage) match
+        case (Some(left), Some(right)) if left.headingPath.nonEmpty && left.headingPath == right.headingPath =>
+          left.ordinal != right.ordinal && math.abs(left.ordinal - right.ordinal) <= radius
+        case _ => false
+
+  def bestSeed(seeds: Chunk[RetrievalHit], chunk: DocumentChunk, radius: Int): Option[RetrievalHit] =
+    seeds.filter(seed => sameHeading(seed, chunk, radius)).maxByOption(_.score)

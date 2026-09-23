@@ -18,9 +18,13 @@ final class KnowledgeRetentionWorker(
     policy: KnowledgeRetentionPolicy = KnowledgeRetentionPolicy(),
     cache: Option[EmbeddingCacheStore] = None
 ):
-  /** Space 级 tombstone，并失效该租户 embedding cache。 */
-  def withdraw(key: KnowledgeDocumentKey, documentRevisionId: String): IO[RetrievalError, Unit] =
-    store.withdraw(key, documentRevisionId) *>
+  /** 撤回一个空间中的一个文档修订，并失效该租户 embedding cache。 */
+  def withdraw(
+      key: KnowledgeDocumentKey,
+      documentRevisionId: String,
+      knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId("default")
+  ): IO[RetrievalError, Unit] =
+    store.withdraw(key, documentRevisionId, knowledgeSpaceId) *>
       cache.fold(ZIO.unit)(_.invalidateTenant(key.tenantId))
 
   /** 清理到期且非 active 的终态；legal-hold 文档不得进入 purge。 */

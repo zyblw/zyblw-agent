@@ -184,7 +184,9 @@ final case class AgentState(
     worldSectionCursors: Chunk[ContextSectionCursor] = Chunk.empty,
     /** 最近一次被接受的有界引用；只保留 seed 命中，上限由 reducer 截断。 */
     citations: Chunk[RunCitation] = Chunk.empty,
-    retrievalEvidence: Option[RunRetrievalEvidence] = None
+    retrievalEvidence: Option[RunRetrievalEvidence] = None,
+    /** 完成时的业务结论。普通对话保持未设置；证据拒绝写入 InsufficientEvidence。 */
+    completionDisposition: Option[CompletionDisposition] = None
 ):
   /** 当前待人工决定的审批请求；非审批类挂起为 `None`。
     *

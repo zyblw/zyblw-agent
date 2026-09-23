@@ -19,7 +19,7 @@ final case class MarkdownStructureChunkerConfig(
     maxCharacters: Int = 1200,
     overlapCharacters: Int = 120,
     maxHeadingDepth: Int = 6,
-    strategyId: String = "markdown-structure-v2"
+    strategyId: String = "markdown-structure-v3"
 ):
   require(maxCharacters >= 128, "Markdown chunk maxCharacters 必须至少为 128")
   require(
@@ -35,7 +35,7 @@ final case class MarkdownStructureChunkerConfig(
   *
   *   - fenced code 内的 `#` 不会被误判为标题；
   *   - 正常大小的段落、列表、表格和代码块不会被字符窗口从中间切开；
-  *   - 完整标题路径留在 lineage / `headingPath`；写入 embedding 的正文只带末 1–2 级短前缀；
+  *   - 完整标题路径留在 lineage；`displayText` 只保留正文，dense/lexical 另带书名和章节前缀；
   *   - chunk ID 来自 `document + heading path + exact body` 的 SHA-256，而不是全局序号，因此前面章节插入内容不会让后面所有 ID 漂移；
   *   - metadata 保存标题路径、原始行号、正文 hash 与稳定策略版本，便于引用、评测和重建。
   *
@@ -60,7 +60,8 @@ final class MarkdownStructureChunker(
       val chunkingText    = removePageBreakMarkers(normalized, pageBreakMarker)
       if normalized.trim.isEmpty then Chunk.empty
       else
-        val drafts      = parseSections(chunkingText).flatMap(chunkSection)
+        val title       = document.metadata.get("title").map(_.trim).filter(_.nonEmpty)
+        val drafts      = parseSections(chunkingText).flatMap(section => chunkSection(title, section))
         val occurrences = mutable.HashMap.empty[String, Int]
         val prepared    = drafts.zipWithIndex.map { case (draft, ordinal) =>
           val identityHash = KnowledgeIndexer.sha256(
@@ -97,7 +98,16 @@ final class MarkdownStructureChunker(
           DocumentChunk.fromText(
             id = chunkId,
             documentId = document.id,
-            text = render(draft.headingPath, draft.body),
+            text = draft.body,
+            denseText = Some(
+              ChunkContext.dense(
+                draft.body,
+                title,
+                draft.headingPath,
+                draft.kind,
+                config.maxCharacters / 3
+              )
+            ),
             sourceUri = document.sourceUri,
             tenantId = tenantId,
             permissions = permissions,
@@ -180,12 +190,9 @@ final class MarkdownStructureChunker(
     flushSection()
     sections.toVector
 
-  /** 尽量以完整 block 装箱；只有单个 block 大于可用空间时才进入硬切分。 */
-  private def chunkSection(section: Section): Vector[DraftChunk] =
-    val prefix      = renderHeadingPrefix(section.headingPath)
-    val prefixSize  = codePointLength(prefix)
-    val separator   = if prefix.isEmpty then 0 else 2
-    val maxBodySize = (config.maxCharacters - prefixSize - separator).max(1)
+  /** 尽量以完整 block 装箱。表格单独成块；只有单个 block 大于可用空间时才进入硬切分。 */
+  private def chunkSection(title: Option[String], section: Section): Vector[DraftChunk] =
+    val proseBudget = bodyBudget(title, section.headingPath, None)
     val result      = mutable.ArrayBuffer.empty[DraftChunk]
     val pending     = mutable.ArrayBuffer.empty[Block]
 
@@ -196,6 +203,7 @@ final class MarkdownStructureChunker(
       if pending.nonEmpty then
         result += DraftChunk(
           section.headingPath,
+          None,
           pending.map(_.text).mkString("\n\n"),
           pending.head.startLine,
           pending.last.endLine
@@ -203,21 +211,34 @@ final class MarkdownStructureChunker(
         pending.clear()
 
     section.blocks.foreach { block =>
-      val blockSize = codePointLength(block.text)
-      if blockSize > maxBodySize then
+      if block.kind == BlockKind.Table then
         flushPending()
-        result ++= splitOversized(section.headingPath, block, maxBodySize)
-      else if pending.isEmpty || pendingSize + 2 + blockSize <= maxBodySize then pending += block
+        val budget = bodyBudget(title, section.headingPath, Some("Table"))
+        if codePointLength(block.text) <= budget then
+          result += DraftChunk(section.headingPath, Some("Table"), block.text, block.startLine, block.endLine)
+        else result ++= splitOversized(section.headingPath, Some("Table"), block, budget)
       else
-        flushPending()
-        pending += block
+        val blockSize = codePointLength(block.text)
+        if blockSize > proseBudget then
+          flushPending()
+          result ++= splitOversized(section.headingPath, None, block, proseBudget)
+        else if pending.isEmpty || pendingSize + 2 + blockSize <= proseBudget then pending += block
+        else
+          flushPending()
+          pending += block
     }
     flushPending()
     result.toVector
 
+  private def bodyBudget(title: Option[String], path: Vector[String], kind: Option[String]): Int =
+    val head      = ChunkContext.prefix(title, path, kind, config.maxCharacters / 3)
+    val separator = if head.isEmpty then 0 else 2
+    (config.maxCharacters - codePointLength(head) - separator).max(1)
+
   /** 超大结构块优先按完整行切；超长单行才使用 code-point-safe 滑窗。 */
   private def splitOversized(
       headingPath: Vector[String],
+      kind: Option[String],
       block: Block,
       maxBodySize: Int
   ): Vector[DraftChunk] =
@@ -230,7 +251,7 @@ final class MarkdownStructureChunker(
 
     def flushGroup(): Unit =
       if group.nonEmpty then
-        result += DraftChunk(headingPath, group.map(_._1).mkString("\n"), group.head._2, group.last._2)
+        result += DraftChunk(headingPath, kind, group.map(_._1).mkString("\n"), group.head._2, group.last._2)
         group.clear()
 
     lines.zipWithIndex.foreach { case (line, lineOffset) =>
@@ -238,7 +259,7 @@ final class MarkdownStructureChunker(
       if codePointLength(line) > maxBodySize then
         flushGroup()
         slidingSlices(line, maxBodySize).foreach(piece =>
-          result += DraftChunk(headingPath, piece, lineNumber, lineNumber)
+          result += DraftChunk(headingPath, kind, piece, lineNumber, lineNumber)
         )
       else if group.isEmpty || groupSize + 1 + codePointLength(line) <= maxBodySize then
         group += line -> lineNumber
@@ -258,20 +279,6 @@ final class MarkdownStructureChunker(
       .takeWhile(_ < total)
       .map(start => sliceCodePoints(value, start, (start + size).min(total)))
       .toVector
-
-  /** 末 1–2 级短前缀最多占块预算三分之一；完整祖先路径不写入正文。 */
-  private def renderHeadingPrefix(path: Vector[String]): String =
-    val raw = path
-      .take(config.maxHeadingDepth)
-      .takeRight(2)
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .mkString(" · ")
-    takeCodePoints(raw, config.maxCharacters / 3)
-
-  private def render(path: Vector[String], body: String): String =
-    val prefix = renderHeadingPrefix(path)
-    if prefix.isEmpty then body else s"$prefix\n\n$body"
 
   private def normalize(value: String): String =
     value.replace("\r\n", "\n").replace('\r', '\n').replace("\u0000", "")
@@ -318,6 +325,7 @@ final class MarkdownStructureChunker(
   final private case class Section(headingPath: Vector[String], blocks: Vector[Block])
   final private case class DraftChunk(
       headingPath: Vector[String],
+      kind: Option[String],
       body: String,
       startLine: Int,
       endLine: Int

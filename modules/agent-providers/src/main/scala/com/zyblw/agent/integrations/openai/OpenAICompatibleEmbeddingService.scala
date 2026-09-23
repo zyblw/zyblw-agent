@@ -162,6 +162,22 @@ object OpenAICompatibleEmbeddingConfig:
       .config(environmentConfig)
       .mapError(error => AgentError.InvalidConfiguration(s"Embedding 配置无效: $error"))
 
+  /** live 摄入必须显式声明生产 tokenizer。缺失时不能把 cl100k 当成所有模型的默认值。 */
+  def requireDeclaredTokenizer(
+      config: OpenAICompatibleEmbeddingConfig
+  ): IO[AgentError, OpenAICompatibleEmbeddingConfig] =
+    config.tokenizerId match
+      case Some(id) if TokenCounter.isProduction(id) =>
+        ZIO.succeed(config)
+      case Some(id) =>
+        ZIO.fail(AgentError.InvalidConfiguration(s"不支持的 EMBEDDING_TOKENIZER: $id"))
+      case None =>
+        ZIO.fail(
+          AgentError.InvalidConfiguration(
+            "live 知识摄入必须设置 EMBEDDING_TOKENIZER（cl100k-base、o200k-base 或 cjk-approx-v1）"
+          )
+        )
+
 /** OpenAI-compatible `/embeddings` 的 ZIO HTTP Adapter。
   *
   * 大批输入先按“数量 + 总字符”确定性切分，再使用 `foreachPar.withParallelism` 有界并发。ZIO 在一个 子批次失败时会中断同组其他 Fiber；HTTP Client 的

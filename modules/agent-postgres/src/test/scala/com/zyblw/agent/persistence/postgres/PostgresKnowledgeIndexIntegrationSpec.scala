@@ -379,38 +379,40 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         purged        <- harness.index.purgeInactive(retired.updatedAt.plusSeconds(1), 10)
         goneFirst     <- harness.index.find(KnowledgeDocumentKey(tenant, "doc-1"), "ingestion-1")
         goneSecond    <- harness.index.find(KnowledgeDocumentKey(tenant, "doc-1"), "ingestion-2")
-        sharedChunkA = DocumentChunk
-          .fromText(
-            "shared-chunk",
-            "doc-a",
-            "共享标识的第一份文档",
-            "doc://a",
-            tenant,
-            Set("read"),
-            searchText = Some("共享 标识 第一份")
-          )
-          .copy(
-            profileId = Some(firstReady.build.profileId),
-            knowledgeSpaceId = Some(firstReady.build.knowledgeSpaceId)
-          )
-        sharedChunkB = DocumentChunk
-          .fromText(
-            "shared-chunk",
-            "doc-b",
-            "共享标识的第二份文档",
-            "doc://b",
-            tenant,
-            Set("read"),
-            searchText = Some("共享 标识 第二份")
-          )
-          .copy(
-            profileId = Some(firstReady.build.profileId),
-            knowledgeSpaceId = Some(firstReady.build.knowledgeSpaceId)
-          )
-        _ <- harness.vectors.upsert(
-          Chunk(IndexedChunk(sharedChunkA, unitVector(3)), IndexedChunk(sharedChunkB, unitVector(3)))
+        sharedA       <- harness.index.begin(
+          request(tenant, "shared-a", "共享标识的第一份文档", ActiveVersionExpectation.AnyVersion)
+            .copy(key = KnowledgeDocumentKey(tenant, "doc-a"))
         )
+        _ <- harness.index.stage(
+          sharedA,
+          Chunk(indexed(sharedA, "shared-chunk", "共享标识的第一份文档", "共享 标识 第一份", unitVector(3)))
+        )
+        _       <- harness.index.activate(sharedA, 1)
+        sharedB <- harness.index.begin(
+          request(tenant, "shared-b", "共享标识的第二份文档", ActiveVersionExpectation.AnyVersion)
+            .copy(key = KnowledgeDocumentKey(tenant, "doc-b"))
+        )
+        _ <- harness.index.stage(
+          sharedB,
+          Chunk(indexed(sharedB, "shared-chunk", "共享标识的第二份文档", "共享 标识 第二份", unitVector(3)))
+        )
+        _          <- harness.index.activate(sharedB, 1)
         sharedHits <- harness.vectors.searchHybrid("共享标识", unitVector(3), scope, 10)
+        orphan     <- harness.vectors
+          .upsert(
+            Chunk(
+              IndexedChunk(
+                DocumentChunk
+                  .fromText("orphan-chunk", "missing-doc", "孤儿块", "doc://orphan", tenant, Set("read"))
+                  .copy(
+                    knowledgeSpaceId = Some(KnowledgeSpaceId("default")),
+                    profileId = Some(IndexProfileId("default"))
+                  ),
+                unitVector(4)
+              )
+            )
+          )
+          .exit
       yield assertTrue(
         before.isEmpty,
         harness.coreReplayMigrations == 0,
@@ -441,7 +443,12 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         purged == 2L,
         goneFirst.isEmpty,
         goneSecond.isEmpty,
-        sharedHits.filter(_.chunk.id == "shared-chunk").map(_.chunk.documentId).toSet == Set("doc-a", "doc-b")
+        sharedHits.filter(_.chunk.id == "shared-chunk").map(_.chunk.documentId).toSet == Set(
+          "doc-a",
+          "doc-b"
+        ),
+        orphan.isFailure,
+        orphan.causeOption.exists(_.prettyPrint.toLowerCase.contains("foreign key"))
       )).provideLayer(harnessLayer)
     } @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
       3.minutes
@@ -483,8 +490,11 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         _           <- harness.index.activate(other, 1)
         afterSwitch <- harness.vectors.search(unitVector(0), scope, 10)
         mixed       <- harness.vectors.search(unitVector(3), scope, 10)
-        _           <- harness.index.withdraw(KnowledgeDocumentKey(tenant, "doc-identity"), "1")
-        withdrawn   <- harness.vectors.search(unitVector(0), scope, 10)
+        _           <- harness.index.withdraw(
+          KnowledgeDocumentKey(tenant, "doc-identity"),
+          KnowledgeIndexer.sha256("identity-first")
+        )
+        withdrawn <- harness.vectors.search(unitVector(0), scope, 10)
       yield assertTrue(
         emptyOk.isSuccess,
         matchOk.isSuccess,
@@ -494,6 +504,68 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         afterSwitch.map(_.chunk.id) == Chunk("doc-identity-0"),
         !mixed.exists(_.chunk.documentId == "doc-identity-2"),
         withdrawn.isEmpty
+      )).provideLayer(harnessLayer)
+    } @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
+      3.minutes
+    ) @@ TestAspect.sequential,
+    test("撤回一个空间的一个修订不会隐藏其他空间或更新修订") {
+      val tenant                           = TenantId("tenant-withdraw-scope")
+      val spaceA                           = KnowledgeSpaceId("space-a")
+      val spaceB                           = KnowledgeSpaceId("space-b")
+      val textA                            = "桂枝汤空间甲修订一"
+      val textB                            = "桂枝汤空间乙修订一"
+      val textA2                           = "桂枝汤空间甲修订二"
+      def scopeOf(space: KnowledgeSpaceId) =
+        RetrievalScope(tenant, Set("read"), knowledgeSpaceId = Some(space))
+      (for
+        harness <- ZIO.service[Harness]
+        first   <- harness.index.begin(
+          request(tenant, "wd-a1", textA, ActiveVersionExpectation.AnyVersion).copy(
+            key = KnowledgeDocumentKey(tenant, "doc-wd"),
+            knowledgeSpaceId = spaceA
+          )
+        )
+        _ <- harness.index.stage(
+          first,
+          Chunk(indexed(first, "wd-a1", textA, "桂枝 汤 甲", unitVector(0)))
+        )
+        _      <- harness.index.activate(first, 1)
+        second <- harness.index.begin(
+          request(tenant, "wd-b1", textB, ActiveVersionExpectation.AnyVersion).copy(
+            key = KnowledgeDocumentKey(tenant, "doc-wd"),
+            knowledgeSpaceId = spaceB
+          )
+        )
+        _ <- harness.index.stage(
+          second,
+          Chunk(indexed(second, "wd-b1", textB, "桂枝 汤 乙", unitVector(1)))
+        )
+        _ <- harness.index.activate(second, 1)
+        _ <- harness.index.withdraw(
+          KnowledgeDocumentKey(tenant, "doc-wd"),
+          KnowledgeIndexer.sha256(textA),
+          spaceA
+        )
+        hiddenA <- harness.vectors.search(unitVector(0), scopeOf(spaceA), 10)
+        keptB   <- harness.vectors.search(unitVector(1), scopeOf(spaceB), 10)
+        newer   <- harness.index.begin(
+          request(tenant, "wd-a2", textA2, ActiveVersionExpectation.AnyVersion).copy(
+            key = KnowledgeDocumentKey(tenant, "doc-wd"),
+            knowledgeSpaceId = spaceA
+          )
+        )
+        _ <- harness.index.stage(
+          newer,
+          Chunk(indexed(newer, "wd-a2", textA2, "桂枝 汤 新", unitVector(2)))
+        )
+        _         <- harness.index.activate(newer, 1)
+        visibleA  <- harness.vectors.search(unitVector(2), scopeOf(spaceA), 10)
+        stillKept <- harness.vectors.search(unitVector(1), scopeOf(spaceB), 10)
+      yield assertTrue(
+        hiddenA.isEmpty,
+        keptB.map(_.chunk.id) == Chunk("wd-b1"),
+        visibleA.map(_.chunk.id) == Chunk("wd-a2"),
+        stillKept.map(_.chunk.id) == Chunk("wd-b1")
       )).provideLayer(harnessLayer)
     } @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
       3.minutes

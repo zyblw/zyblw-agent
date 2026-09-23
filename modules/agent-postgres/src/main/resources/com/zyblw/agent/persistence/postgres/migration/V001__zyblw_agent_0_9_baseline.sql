@@ -68,8 +68,6 @@ CREATE TABLE agent_events (
   UNIQUE(run_id, sequence)
 );
 
-CREATE INDEX agent_events_run_sequence_idx ON agent_events(run_id, sequence);
-
 CREATE TABLE tool_executions (
   run_id UUID NOT NULL REFERENCES agent_runs(run_id) ON DELETE CASCADE,
   batch_id TEXT NOT NULL CHECK (length(trim(batch_id)) > 0),
@@ -249,7 +247,8 @@ CREATE TABLE agent_run_commands (
   last_failure TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(run_id, idempotency_key)
+  UNIQUE(run_id, idempotency_key),
+  UNIQUE(run_id, command_id)
 );
 
 CREATE INDEX agent_run_commands_claimable_idx
@@ -264,7 +263,11 @@ CREATE INDEX agent_run_commands_run_created_idx
 CREATE TABLE agent_run_dispatch (
   run_id UUID PRIMARY KEY REFERENCES agent_runs(run_id) ON DELETE CASCADE,
   status TEXT NOT NULL CHECK (status IN ('Idle', 'Queued', 'Leased')),
-  current_command_id UUID REFERENCES agent_run_commands(command_id) ON DELETE SET NULL,
+  current_command_id UUID,
+  CONSTRAINT agent_run_dispatch_command_same_run_fk
+    FOREIGN KEY (run_id, current_command_id)
+    REFERENCES agent_run_commands (run_id, command_id)
+    ON DELETE SET NULL (current_command_id),
   generation BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0),
   lease_owner TEXT,
   lease_token UUID,

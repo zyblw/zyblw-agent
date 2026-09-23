@@ -65,7 +65,7 @@ final class InMemoryKnowledgeIndexStore private (
               item.chunk.permissions.subsetOf(scope.permissions) &&
               item.chunk.knowledgeSpaceId.forall(_ == scope.spaceId) &&
               matchesPinnedProfile(item.chunk, pin) &&
-              !current.withdrawn.contains(item.chunk.documentId -> item.chunk.tenantId) &&
+              !current.isWithdrawn(item.chunk) &&
               filter.matches(item.chunk)
           )
         Chunk.fromIterable(RetrievalScoring.rank(mode, queryText, query, authorized, sparseQuery).take(limit))
@@ -95,7 +95,7 @@ final class InMemoryKnowledgeIndexStore private (
                 chunk.permissions.subsetOf(scope.permissions) &&
                 chunk.knowledgeSpaceId.forall(_ == scope.spaceId) &&
                 matchesPinnedProfile(chunk, pinnedProfile(current, scope)) &&
-                !current.withdrawn.contains(chunk.documentId -> chunk.tenantId) &&
+                !current.isWithdrawn(chunk) &&
                 filter.matches(chunk)
             )
             .toVector
@@ -309,7 +309,11 @@ final class InMemoryKnowledgeIndexStore private (
                     indexed.copy(chunk =
                       indexed.chunk.copy(
                         knowledgeSpaceId = Some(build.knowledgeSpaceId),
-                        profileId = Some(build.profileId)
+                        profileId = Some(build.profileId),
+                        documentRevisionId = indexed.chunk.documentRevisionId
+                          .map(_.trim)
+                          .filter(_.nonEmpty)
+                          .orElse(Some(build.contentHash))
                       )
                     )
                   }
@@ -556,16 +560,25 @@ final class InMemoryKnowledgeIndexStore private (
 
   override def withdraw(
       key: KnowledgeDocumentKey,
-      documentRevisionId: String
+      documentRevisionId: String,
+      knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId("default")
   ): IO[RetrievalError, Unit] =
-    val _ = documentRevisionId
-    state.update { current =>
-      current.copy(
-        published = current.published - key,
-        withdrawn = current.withdrawn + (key.documentId -> key.tenantId),
-        cacheEpoch = current.cacheEpoch + 1L
-      )
-    }
+    val revision = Option(documentRevisionId).map(_.trim).filter(_.nonEmpty)
+    revision match
+      case None =>
+        ZIO.fail(AgentError.RetrievalFailed("documentRevisionId 不能为空"))
+      case Some(id) =>
+        state.update { current =>
+          current.copy(
+            withdrawn = current.withdrawn + InMemoryKnowledgeIndexStore.Withdrawal(
+              key.tenantId,
+              knowledgeSpaceId.value,
+              key.documentId,
+              id
+            ),
+            cacheEpoch = current.cacheEpoch + 1L
+          )
+        }
 
   /** 返回某文档最近一次发布的确定性块快照，仅供测试断言和本地调试。 */
   def published(key: KnowledgeDocumentKey): UIO[Chunk[IndexedChunk]] =
@@ -614,17 +627,29 @@ final class InMemoryKnowledgeIndexStore private (
 object InMemoryKnowledgeIndexStore:
   final private case class SpaceRecord(activeProfileId: Option[String] = None, revision: Long = 0L)
 
+  /** 与 `agent_knowledge_withdrawn` 同一粒度：租户、空间、文档、修订。 */
+  final private case class Withdrawal(
+      tenantId: TenantId,
+      spaceId: String,
+      documentId: String,
+      revisionId: String
+  )
+
   /** 内部状态把 manifest、暂存块和已发布快照分开，模拟 PostgreSQL 三类表的可见性边界。 */
   final private case class State(
       manifests: Map[(KnowledgeDocumentKey, Long), KnowledgeIndexManifest] = Map.empty,
       staged: Map[(KnowledgeDocumentKey, Long), Map[String, IndexedChunk]] = Map.empty,
       published: Map[KnowledgeDocumentKey, Chunk[IndexedChunk]] = Map.empty,
-      withdrawn: Set[(String, TenantId)] = Set.empty,
+      withdrawn: Set[Withdrawal] = Set.empty,
       cacheEpoch: Long = 0L,
       spaces: Map[(TenantId, String), SpaceRecord] = Map.empty,
       profiles: Map[(TenantId, String, String), (DenseIndexIdentity, String)] = Map.empty,
       sealedProfiles: Set[(TenantId, String, String)] = Set.empty
-  )
+  ):
+    def isWithdrawn(chunk: DocumentChunk): Boolean =
+      val space    = chunk.knowledgeSpaceId.map(_.value).getOrElse("default")
+      val revision = chunk.documentRevisionId.map(_.trim).filter(_.nonEmpty).getOrElse("1")
+      withdrawn.contains(Withdrawal(chunk.tenantId, space, chunk.documentId, revision))
 
   /** 创建可直接在测试中检查 `published` 的具体实现。 */
   def make: UIO[InMemoryKnowledgeIndexStore] =
