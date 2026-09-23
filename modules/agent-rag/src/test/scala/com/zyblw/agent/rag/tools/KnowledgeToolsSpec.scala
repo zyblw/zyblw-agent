@@ -142,7 +142,48 @@ object KnowledgeToolsSpec extends ZIOSpecDefault:
         output.citations.head.vectorScore.contains(0.52),
         output.excerpts.length == 2
       )
-    }
+    },
+    test("宿主限定资料时，模型不能改写 documentIds，未填写则锁在范围内") {
+      val host = context.copy(runContext =
+        context.runContext.copy(attributes = Map(KnowledgeTools.ScopeDocumentAttribute -> "book-a"))
+      )
+      for
+        widened <- KnowledgeTools
+          .constrainDocumentIds("knowledge_search", Set("book-b"), Set("book-a"))
+          .exit
+        narrowed <- KnowledgeTools.constrainDocumentIds("knowledge_search", Set("book-a"), Set("book-a"))
+        omitted  <- KnowledgeTools.constrainDocumentIds("knowledge_search", Set.empty, Set("book-a"))
+        rag      <- ZIO.service[RagApplication]
+        _        <- ingest(rag, "book-a", "甲书只讲营卫")
+        _        <- ingest(rag, "book-b", "乙书只讲营卫")
+        denied   <- KnowledgeTools
+          .searchTool(rag)
+          .execute(KnowledgeTools.SearchInput("营卫", documentIds = Some(List("book-b"))), host)
+          .exit
+        locked <- KnowledgeTools.searchTool(rag).execute(KnowledgeTools.SearchInput("营卫"), host)
+      yield assertTrue(
+        widened.isFailure,
+        narrowed == Set("book-a"),
+        omitted == Set("book-a"),
+        denied.isFailure,
+        locked.citations.nonEmpty,
+        locked.citations.map(_.documentId).toSet == Set("book-a")
+      )
+    }.provide(memoryRag),
+    test("宿主限定资料时，fetch 不能取回范围外的块") {
+      val host = context.copy(runContext =
+        context.runContext.copy(attributes = Map(KnowledgeTools.ScopeDocumentAttribute -> "book-a"))
+      )
+      for
+        rag   <- ZIO.service[RagApplication]
+        _     <- ingest(rag, "book-b", "乙书独有原文甲乙丙")
+        found <- KnowledgeTools
+          .searchTool(rag)
+          .execute(KnowledgeTools.SearchInput("乙书独有原文"), context)
+        chunkId = found.citations.head.chunkId
+        denied <- KnowledgeTools.fetchTool(rag).execute(KnowledgeTools.FetchInput(chunkId), host).exit
+      yield assertTrue(found.citations.nonEmpty, denied.isFailure)
+    }.provide(memoryRag)
   )
 
   private val context = ToolExecutionContext(
@@ -151,6 +192,22 @@ object KnowledgeToolsSpec extends ZIOSpecDefault:
     "call-1",
     RunContext(Some("user"), Some("acme"), Set("knowledge:read"))
   )
+
+  private def ingest(rag: RagApplication, id: String, body: String) =
+    rag.ingestOne(
+      DocumentIngestionRequest(
+        DocumentInput.fromBytes(
+          id,
+          s"book://$id",
+          s"$id.md",
+          "text/markdown",
+          Chunk.fromArray(s"# $id\n\n$body".getBytes("UTF-8"))
+        ),
+        TenantId("acme"),
+        Set("knowledge:read"),
+        s"tools-ingest-$id"
+      )
+    )
 
   private val markdownLoader = new DocumentLoader:
     override val id: String                       = "tools-md"

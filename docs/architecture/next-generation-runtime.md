@@ -1,11 +1,11 @@
 # 下一代 Runtime 开发手册
 
 > 状态：**历史工作手册**（当前事实以 `0.9.0` 源码与正式运行手册为准）
-> 最后核验：2026-08-22
+> 最后核验：2026-09-23
 > 决策来源：[ADR-0018](0018-next-generation-runtime-kernel.md)（Kernel 铁律）+ [ADR-0019](0019-typed-extensions-and-constrained-execution.md)（Typed Extensions / Precise Approvals / Constrained Execution 与 Wave 路线）
 > 事实来源：`modules/agent-core` 现行代码与测试；外部框架仅作对照，不作为本仓库合同
 >
-> 迁移编号说明：本文保留的 V004–V010 是候选期实现谱系，相关表和约束已全部折叠进当前 0.9 fresh-install V001，不能作为现行升级或安装步骤。
+> 迁移编号说明：本文保留的 V004–V010、AgentState v4–v6 是候选期实现谱系。相关表和约束已全部折叠进当前 0.9 fresh-install 的 State v1 与 SQL V001。`0.9` 不读取旧 Run、旧工具计划或缺字段 JSON。下文进度表里的旧编号只说明当时落地了什么，不能作为现行升级或安装步骤。
 
 本文指导后续**逐步开发**。P0 Kernel、P1 Composition 与 P2 Harness（ADT/CAS、PostgreSQL Adapter、Steering/FollowUp、typed ArtifactReference、成对 Eval、跨 Run 任务预算）已落地。后续路线按 ADR-0019 的 **Wave 0–3** 推进（见 §5.5 与 §16）；P3–P4 仍为 Proposed。现行行为以 [architecture.md](../architecture.md)、[runtime.md](../runtime.md)、[persistence.md](../persistence.md) 与源码为准。
 
@@ -39,21 +39,21 @@
 | P0 crash matrix：Disabled / settlement 失败 / Complete 窗口 / lease lost / 预算保留 | **已落地**（in-memory 确定性注入；Postgres stale fenced ModelCall 测试需 `RUN_POSTGRES_INTEGRATION=1`） |
 | P0 Store 原子性：状态 + 事件 + ModelCall ledger | **已落地修复**（in-memory 单一 `Ref.Synchronized`；冲突后状态、事件与账本均不变化） |
 | P0 持久化信封：关系列 + JSON typed payload | **已落地**（State/Event/Tool/ModelCall 读取交叉校验；PostgreSQL 18 篡改测试 fail-closed） |
-| P1 Composition / DX 第一刀：Profile + fingerprint + drift + CapturePolicy 配置 | **已落地**（创建冻结；恢复 Incompatible/RequiresRevalidation fail-closed；v5 工具计划另冻结 Schema/安全契约与单调审批要求；旧 Run 按版本兼容） |
+| P1 Composition / DX 第一刀：Profile + fingerprint + drift + CapturePolicy 配置 | **已落地**（创建冻结；恢复 Incompatible/RequiresRevalidation fail-closed；工具计划冻结 Schema/安全契约与单调审批要求。候选期曾按版本兼容旧 Run；0.9 绿场不再读取这些旧形状） |
 | P1 ContextContributor + Eval Replayable 轨迹门禁 | **已落地**（Contributor 组成 Resolver；sourceIds 进入指纹；`TrajectoryReplay` 评分 Replayable 重建） |
 | P1 其余：更小 Public API、testkit 便利层 | **已落地第一刀**（`TestAgentRuntime.inMemory`；`AgentEvalGrader` 可选轨迹维度） |
 | P2 Harness 第一刀：Goal/Plan/Todo/Skill ADT + CAS Store + Contributor | **已落地**（in-memory；Active ≠ 自动开跑；Plan ≠ 权限；Skill 不能授工具/升 System） |
-| P2 Harness H2：PostgreSQL Adapter | **已落地**（V005；CAS/外键/指纹冲突；集成测试需 `RUN_POSTGRES_INTEGRATION=1`） |
-| P2 Steering / FollowUp 第一刀 | **已落地**（追加式 Interaction；与 Cancel/Recover/Approval/Retry 分离；V006） |
-| P2 Harness H3-B：Goal/Plan/Todo typed ArtifactReference | **已落地**（有界引用；正文/metadata 留在 ArtifactStore；Context 只投影引用；V008） |
-| P2 Harness H3-C：有/无 Harness 成对 Eval | **已落地基础设施**（同 case/attempt；四轴、Wilson、人工介入与资源；独立趋势 kind；V009） |
-| P2 Harness H3-D：跨 Run 任务预算 | **已落地**（immutable policy；reserve/settle/release；Start 五事实同事务；终态 Reconciler；共享 Adapter conformance；V010） |
-| v5 DurableToolPlan 契约冻结 + 单调审批 | **已落地**（工具契约 SHA-256 指纹；恢复漂移 fail-closed；v5 不完整快照即损坏；v4 及更早按旧门禁读取） |
+| P2 Harness H2：PostgreSQL Adapter | **已落地**（候选期 V005 的 CAS/外键/指纹冲突已折叠进 0.9 V001；集成测试需 `RUN_POSTGRES_INTEGRATION=1`） |
+| P2 Steering / FollowUp 第一刀 | **已落地**（追加式 Interaction；与 Cancel/Recover/Approval/Retry 分离；候选期 V006 已折叠进 0.9 V001） |
+| P2 Harness H3-B：Goal/Plan/Todo typed ArtifactReference | **已落地**（有界引用；正文/metadata 留在 ArtifactStore；Context 只投影引用；候选期 V008 已折叠进 0.9 V001） |
+| P2 Harness H3-C：有/无 Harness 成对 Eval | **已落地基础设施**（同 case/attempt；四轴、Wilson、人工介入与资源；独立趋势 kind；候选期 V009 已折叠进 0.9 V001） |
+| P2 Harness H3-D：跨 Run 任务预算 | **已落地**（immutable policy；reserve/settle/release；Start 五事实同事务；终态 Reconciler；共享 Adapter conformance；候选期 V010 已折叠进 0.9 V001） |
+| DurableToolPlan 契约冻结 + 单调审批 | **已落地**（工具契约 SHA-256 指纹；恢复漂移 fail-closed。候选期的 v4/v5 兼容读取已删除；0.9 只接受当前必填形状） |
 | 多 Worker 有界 soak（command + Workflow wake） | **已落地**（3 Worker/6 lane/120 Run 与 3 Store/126 Run 均归零；无异常重领；`queueSnapshot` / `wakeQueueSnapshot` 低敏采样） |
-| **Wave 0 生产证据**（ADR-0019） | **进行中（仓库内已补）**：v6 Postgres 审批主体 JSONB 往返与信封门禁已落地；值班 runbook 已写。部署环境数小时 soak、节点丢失、主备切换与按实测校准的 SLO 仍待宿主 |
-| **Wave 1-A `ApprovalSubject`** | **已落地**（审批绑定 capability + callId + 工具契约 + 规范化输入 + 执行环境 + 授权上下文 + 策略指纹 + risk/sideEffect；规划冻结、门禁重算、漂移即重新审批且刷新 approvalId；AgentState v6，v5 及更早按旧门禁读取） |
+| **Wave 0 生产证据**（ADR-0019） | **进行中（仓库内已补）**：审批主体 JSONB 往返与信封门禁已折叠进 0.9 V001；值班 runbook 已写。部署环境数小时 soak、节点丢失、主备切换与按实测校准的 SLO 仍待宿主 |
+| **Wave 1-A `ApprovalSubject`** | **已落地**（审批绑定 capability + callId + 工具契约 + 规范化输入 + 执行环境 + 授权上下文 + 策略指纹 + risk/sideEffect；规划冻结、门禁重算、漂移即重新审批且刷新 approvalId。候选期 AgentState v6 已归位为 0.9 schema v1，不再读取更早 JSON） |
 | **Wave 1-B Typed Extension API** | **已落地**（`ToolProvider` / `SkillProvider` / `ApprovalReviewer` / `ToolLifecycleObserver`；扩展只拿 `ExtensionInput`；Deny 不能批准；观察缺陷不能取消副作用；`extensionIds` 进入组合指纹） |
-| **Wave 1-C ExecutionEnvironment** | **已落地**（`PermissionProfile` 只收窄；`Local` 显式化宿主执行；MCP `McpSandboxEnvironment` 映射 `mcp-sandbox`；环境与权限进入审批主体和组合指纹，缺字段兼容旧 JSON） |
+| **Wave 1-C ExecutionEnvironment** | **已落地**（`PermissionProfile` 只收窄；`Local` 显式化宿主执行；MCP `McpSandboxEnvironment` 映射 `mcp-sandbox`；环境与权限进入审批主体和组合指纹。0.9 不因缺字段回读旧 JSON） |
 | **Wave 2 上下文与协议**：ContextSection / SkillCatalog / stable AgentProtocol | **已落地第一刀**（section 快照/差量 + lineage；Skill 目录 Metadata section 不含正文；HTTP stable/experimental 分级声明） |
 | **Wave 3 分支与编排**：P3 Tree/Fork/Replay、人工任务、子图；P4 Subagent | 未开始（维持 DEFER） |
 

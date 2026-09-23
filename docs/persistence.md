@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-14
+> 最后核验：2026-09-23
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -116,7 +116,7 @@ RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.po
 快照幂等，相同 identity 只能推进到更大的 step；checksum、JSON、identity 或冗余列异常全部 fail-closed。
 
 同一 Adapter 同时实现 `WorkflowExecutionStore[S]`，推荐通过
-`PostgresAgentPersistence.workflowExecutions[S]` 装配生产 Workflow。0.3 基线为每次节点访问保存 Running/Prepared/Committed
+`PostgresAgentPersistence.workflowExecutions[S]` 装配生产 Workflow。0.9 V001 为每次节点访问保存 Running/Prepared/Committed
 台账；claim、heartbeat、prepare 与 commit 比较 owner/token/generation/未过期时间。`commit` 在一个短事务中锁定全部
 Prepared execution、推进 checkpoint、注册/消费 durable wait，并把台账改为 Committed；任何一步失败都整体回滚。过期
 Prepared 被新 owner 领取时保留 outcome，恢复不重新调用节点。`timeline` 复用 execution 主键按 `(step,nodeId)` 稳定分页

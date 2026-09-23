@@ -1,7 +1,10 @@
 # PostgreSQL 生产接入与运维
 
 > 状态：0.9.0 空库安装指南
-> 最后核验：2026-08-23
+> 最后核验：2026-09-23
+>
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+>
 > 事实来源：`ProductionSupportHost`、`KnowledgeQaHost`、`AgentPostgresMigrations`、`PostgresAgentPersistence`
 
 本页是独立宿主把 PostgreSQL 接成耐久控制面的权威路径。它不再提供“无密钥五分钟脚本”。客户支持参考是

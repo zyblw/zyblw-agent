@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-16
+> 最后核验：2026-09-23
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -124,8 +124,8 @@ flowchart LR
   WorkflowWake --> Workflow
 ```
 
-Inspector 从授权后的权威 State 与耐久 Event 生成只读 Timeline 和一致性诊断。它不承担恢复和重放，因此不会成为与
-Runtime 竞争的第二套状态；它也不复制 Prompt、消息、工具参数/结果或隐藏推理。边界见
+Inspector 从授权后的权威 State 与耐久 Event 生成只读 Timeline 和一致性诊断。`RunTrajectory` 把时间线、模型/工具账本、挂起、控制面命令和组合对照收成同一份只读投影。它不承担恢复和重放，因此不会成为与
+Runtime 竞争的第二套状态；它也不复制 Prompt、消息、工具参数/结果或隐藏推理。等待外部输入的权威字段是 `AgentState.suspension`。边界见
 [Run Inspector、Timeline 与安全调试](run-inspection.md)。
 
 Workflow execution timeline 遵守同一原则：它从节点账本投影 node/step/status/generation/owner/时间戳，不复制应用状态、

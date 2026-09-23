@@ -1,7 +1,7 @@
 # zyblw-agent 文档地图
 
 > 状态：当前
-> 最后核验：2026-09-17
+> 最后核验：2026-09-23
 > 事实来源：`build.sbt`、发布工作流、模块源码、测试与数据库迁移
 
 ## 按目标选择阅读路径
@@ -57,7 +57,7 @@
 
 ### 我要接入知识库
 
-1. [RAG / Knowledge Retrieval Runtime 目标架构与实施规范](architecture/rag-runtime-target.md)（Proposed，含现状审计、全流程架构、迁移、评测与 Cursor 分阶段上下文包）
+1. [RAG / Knowledge Retrieval Runtime 目标架构与实施规范](architecture/rag-runtime-target.md)（0.9 基线已实现 Space/Profile/Evidence；后续阶段仍按门禁，不是未编码提案）
 2. [Context、Memory 与 RAG](context-memory-rag.md)
 3. [PDF RAG 生产流水线](pdf-rag-pipeline.md)
 4. [文档 Loader、PDF→Markdown 与结构切分](document-loaders.md)
@@ -108,7 +108,7 @@
 
 ## 知识与上下文
 
-- [RAG / Knowledge Retrieval Runtime 目标架构与实施规范](architecture/rag-runtime-target.md)（Proposed）
+- [RAG / Knowledge Retrieval Runtime 目标架构与实施规范](architecture/rag-runtime-target.md)（0.9 基线已实现；后续阶段仍按门禁）
 - [指令、Context 与成本工程](instruction-context-cost.md)
 - [Prompt Runtime、Context Authority 与 Cache](prompt-runtime.md)
 - [Context、Memory 与 RAG](context-memory-rag.md)

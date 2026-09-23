@@ -2,7 +2,10 @@
 
 > 状态：0.9.0 使用契约
 >
-> 最后核验：2026-09-17
+> 最后核验：2026-09-23
+>
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+>
 >
 > 事实来源：公开源码、可运行示例、独立 Maven consumer、数据库 migration 与测试
 

@@ -1,7 +1,7 @@
 # zyblw-agent 成熟度、取舍与路线
 
 > 状态：路线图
-> 最后核验：2026-09-19
+> 最后核验：2026-09-23
 > 事实来源：`build.sbt`、模块源码、测试、发布工作流、迁移与当前文档
 
 ## 成熟度语义
@@ -24,7 +24,7 @@
 | 分层指令与指纹 | core / `core` | Foundation | System/Developer 顺序、版本、重复和稳定 fingerprint 测试 | 动态指令函数与 eval 身份自动关联 |
 | Provider-neutral 模型流 | core / `model` | Foundation | 统一事件和测试模型 | capability 矩阵持续演进 |
 | 类型化工具与策略 | core / `tools`,`guardrails` | Foundation | schema、allowlist、风险和结果测试；v5 durable plan 冻结工具契约摘要与单调审批要求，恢复漂移 fail-closed | policy 管理 UX 与历史计划人工重校验流程 |
-| 管理面与运维控制台 | core / `admin`；zio-http；agent-dashboard | Beta | scope fail-closed、CAS 覆盖写入与审计、keyset 游标（含亚毫秒回归）、能力探测、七个面板、无真实凭据的 Playwright 浏览器契约 | SSE 调试器、跨 Run 成本聚合、嵌入式部署 |
+| 管理面与运维控制台 | core / `admin`；zio-http；agent-dashboard | Beta | scope fail-closed、CAS 覆盖写入与审计、keyset 游标（含亚毫秒回归）、能力探测、七个面板、Run 低敏 SSE 调试器、无真实凭据的 Playwright 浏览器契约 | 跨 Run 成本聚合、筛选导出、嵌入式部署 |
 | 模型治理与运行时切换 | core / `admin`,`core`；providers | Beta | 覆盖到达真实请求、目录 fail-closed 校验、探活不泄漏凭据、HTTP 错误稳定分类、计费口径、模型页浏览器契约 | 按 Agent 粒度覆盖、Provider 自动降级链 |
 | 单 Agent loop | core / `runtime` | Foundation | `AgentKernel` 纯决定 + `AgentRuntimeDriver` 效果外壳；budget、工具、审批、恢复、遥测测试 | 长运行与大负载故障注入 |
 | durable command worker | core / `app`,`scheduler`,`runtime` | Foundation | 有界多 Run lane、同 Run 串行、claim/lease/heartbeat/fencing、三实例 drain、中断重领、独立 JVM `SIGKILL` + 同实例 PostgreSQL restart 后接管、正式 Runtime 3 Worker/6 lane/120 Run 有界 soak 与低敏 P95 报告 | 长时多节点 soak、节点/主备丢失、容量曲线、生产 SLO/dashboard |
@@ -131,7 +131,7 @@ Tika、OTLP SDK、数据库和 Provider 不进入 core，减少依赖、线程�
 6. **已转向生产参考**：无数据库五分钟 Quickstart 已删除；权威入口是 `ProductionSupportHost` 与
   `docs/postgres-quickstart.md`。PostgreSQL 18/pgvector 0.8.6 CI job 已定义；Docker/VM 包在 `deploy/docker/`。
   Wave 0 宿主实测仍待。
-7. **部分完成**：安全 timeline/inspection 读模型与故障诊断文档已落地；CLI、轻量 UI 和真实事故验证仍待完成。
+7. **部分完成**：安全 timeline/inspection 读模型、`RunTrajectory`、`IncidentPack` CLI 与控制台低敏 SSE 调试器已落地；筛选导出和真实事故验证仍待完成。
 
 退出标准：陌生用户只依据 README 能完成依赖解析、最小运行和清理；维护者能按 runbook 发布、升级和回滚。
 

@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-19
+> 最后核验：2026-09-23
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -286,7 +286,7 @@ Anthropic 与 Gemini 密钥均未配置，因此没有执行真实付费 Provide
 - ZIO Config 部署契约：AgentApplication、Context Compressor、HTTP Host 与 Eval CLI 使用点分 prefix +
   `snake_case` 叶子键，确保默认环境 Provider 真实命中 `.env.example` 中的 `ZYBLW_AGENT_*` 变量。
 - DataSource 连接池耗尽映射为 typed、retryable 持久化错误。
-- 本地类 staging：PostgreSQL 16 + transaction-mode PgBouncer 小 backend pool 下并发 command/workflow soak、
+- 本地类 staging：PostgreSQL 18 + transaction-mode PgBouncer 小 backend pool 下并发 command/workflow soak、
   备份恢复和 JSON 证据；仍明确排除主备/AZ/Kubernetes 与生产 SLO 结论。
 - OutboxPublisher 根据 typed error 执行 published/abandon/dead-letter，并与 heartbeat Fiber 结构化绑定。
 - CompensationRegistry 重名拒绝与 CompensationWorker 固定 handler 执行。
@@ -337,17 +337,17 @@ RUN_POSTGRES_INTEGRATION=1 sbt "postgres/testOnly com.zyblw.agent.persistence.po
 ./integration-tests/workflow-wake-worker-soak.sh
 ```
 
-该测试使用 PostgreSQL 16 而不是 H2，执行正式 Flyway migration，并验证事务、乐观锁、审批状态恢复、工具
+该测试使用 PostgreSQL 18.6 / pgvector 0.8.6 而不是 H2，执行 0.9 唯一 V001，并验证事务、乐观锁、挂起与审批恢复、工具
 账本、并发取消、24 worker command `SKIP LOCKED` claim、租约过期抢占、Cancel 原子抢占、旧 generation 状态 fencing，
 以及 Worker 消失与 PostgreSQL pause/unpause 组合故障后的代际接管和队列收敛，
 真实 `pg_dump`/`pg_restore` 后 Run、命令正文与 dispatcher generation 的恢复，以及业务 mutation/outbox/补偿同事务、
 错误回滚、发布确认崩溃窗口、旧 generation 拒绝、inbox/consumer mutation 同事务去重。独立 CI job 与发布门禁均设置
 该变量；本地默认
-关闭是为了不强迫纯单元测试环境安装 Docker。知识索引用例使用 `pgvector/pgvector:pg16`，验证 staging 不可见、
+关闭是为了不强迫纯单元测试环境安装 Docker。知识索引用例使用带 pgvector 0.8.6 的 PostgreSQL 18 镜像，验证 staging 不可见、
 块数失败回滚、active 原子切换、RRF ranking signals 和 tenant/permission 过滤。Memory 用例验证并发 CAS 仅一个胜出、
 tenant+user 隔离、中文检索、tombstone 真实清空正文、多 worker 过期领取，以及审计约束失败时纠正回滚和成功纠正/
 低敏审计同事务。
-Embedding 治理用例另外验证 0.3 基线中的三张治理表、REAL[] 批量编解码、跨 Store 实例缓存、tenant 隔离、窗口行锁、并发硬配额、
+Embedding 治理用例另外验证 0.9 V001 中的三张治理表、REAL[] 批量编解码、跨 Store 实例缓存、tenant 隔离、窗口行锁、并发硬配额、
 requestId/hash 幂等冲突与窗口清理级联释放。
 Eval 趋势用例验证低敏表、跨 Store 并发 `ON CONFLICT` 仲裁、同 ID 内容冲突、kind 隔离、精确时间排序、最近成功
 部分索引语义、TEXT/JSONB 双表示一致性、checksum 篡改拒绝和原始 grade details 不落库。
@@ -355,13 +355,13 @@ Eval 趋势用例验证低敏表、跨 Store 并发 `ON CONFLICT` 仲裁、同 I
 - Workflow 声明式边的启动校验、不可达/缺失目标诊断、循环访问上限、完成/暂停 checkpoint 恢复、
   definition/session identity、单调写冲突、未声明动态路由拒绝，以及 `AllSucceeded` fan-out 失败时的兄弟 Fiber 中断和
   join checkpoint 隔离；durable 模式另覆盖 lease generation/fencing 和 Prepared outcome 故障恢复。
-- PostgreSQL Workflow：0.3 fresh baseline、跨 Store 并发幂等与单调 step、identity 漂移拒绝、checksum 损坏 fail-closed、
+- PostgreSQL Workflow：0.9 V001、跨 Store 并发幂等与单调 step、identity 漂移拒绝、checksum 损坏 fail-closed、
   暂停后跨 Adapter 实例恢复、execution ledger/checkpoint/wait 原子提交、signal 去重、数据库时钟 deadline 竞态，以及 wake Worker 消失 + 数据库 pause/recover 组合故障后的 generation 接管。
 - RAG tenant/permission 前置过滤。
 
 Testkit 提供 Scripted/Recording Provider、Stub/Failing/Slow/NonInterruptible Tool、固定 TokenCounter、确定性 ID，以及 `TestAgentRuntime.inMemory` 共享内存 Runtime 装配。Replayable 轨迹门禁用 `TrajectoryReplay` 评分账本重建，`AgentEvalGrader` 可附加该维度，并用 `TrajectoryReplayEvalSpec` 跑通 Runtime 夹具。
 
-两个进程故障脚本各自使用临时 PostgreSQL 16 容器和三个短命 probe 进程，只杀死报告中精确的旧 Worker PID，并验证
+两个进程故障脚本各自使用临时 PostgreSQL 18 容器和三个短命 probe 进程，只杀死报告中精确的旧 Worker PID，并验证
 old/recovery PID 不同。command 脚本复用正式 Flyway、`PostgresRunCommandStore` 与 `WorkerHost`；Workflow 脚本只有在
 `WorkflowWakeWorker` 同时取得 wake 与 node execution lease 后才允许 kill，并验证 wait、execution ledger 与 checkpoint
 一起收敛。两条脚本的 `--restart-postgres` 都证明同一 PostgreSQL 实例进程重启后事实仍在；它们不证明

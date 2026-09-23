@@ -1,7 +1,10 @@
 # 从 ZIO 到可靠智能体：zyblw-agent 深入学习指南
 
 > 状态：学习指南
-> 最后核验：2026-09-14
+> 最后核验：2026-09-23
+>
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+>
 > 事实来源：当前模块源码、测试、ADR，以及 ZIO/ZIO HTTP、OpenAI、Anthropic、MCP 官方资料
 
 阅读本篇前，建议先看 [能力审计、框架对照与演进判断](framework-assessment.md)，避免把“代码里存在一个 SPI”

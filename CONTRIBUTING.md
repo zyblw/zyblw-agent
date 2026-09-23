@@ -1,7 +1,7 @@
 # Contributing to zyblw-agent
 
 > Status: contribution runbook
-> Last verified: 2026-07-29
+> Last verified: 2026-09-23
 > Sources of truth: `build.sbt`, `.github/workflows/ci.yml`, `docs/maturity-and-roadmap.md`
 
 Thank you for helping build a reliable Scala/ZIO agent framework. Contributions are accepted under
@@ -23,15 +23,16 @@ JDK 21 and sbt are required:
 ```bash
 sbt -batch compile
 sbt -batch testFull
-sbt -batch 'set ThisBuild / version := "0.1.0-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.9.0-local"; publishM2'
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.1.0-local sbt -batch compile
+ZYBLW_AGENT_VERSION=0.9.0-local sbt -batch compile
 ```
 
-PostgreSQL contracts require Docker:
+PostgreSQL contracts require Docker. The current fresh-install baseline is `0.9.0`: one core V001 and one
+1024-dimension knowledge V001. Do not document an in-place upgrade from `0.8.0` or earlier.
 
 ```bash
-RUN_POSTGRES_INTEGRATION=1 sbt -batch testFull
+RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
 ```
 
 Do not enable live provider tests in an ordinary pull request. They spend external quota and require
@@ -44,7 +45,8 @@ explicit, scoped secrets.
 - Preserve typed errors and structured tool results.
 - Keep blocking JDBC and file work on blocking effects.
 - Keep secrets, raw credentials and sensitive prompts out of source, fixtures and logs.
-- Add Flyway versions; never edit a migration that has been released.
+- Add Flyway versions; never edit a migration that has been released. Until `0.9.0` is published, the
+  repository keeps exactly one unreleased core V001 and one unreleased knowledge V001.
 - Update the canonical document instead of adding a dated duplicate.
 - Mark new modules Experimental until their failure and integration contracts have evidence.
 

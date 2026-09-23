@@ -5,6 +5,9 @@ All notable user-visible changes will be recorded here. The project follows
 
 ## 0.9.0 - Unreleased
 
+- `knowledge_search` / `knowledge_fetch` 遵守宿主写入的 `scopeDocumentId`。模型省略文档时锁在该范围；改到范围外或取回范围外的块会在正文返回前失败。
+- Langfuse Score 取消契约改为先确认无限响应流已经开始，再中断调用 Fiber。固定睡眠不再决定 Body 是否关闭。
+- 现行文档对齐到 0.9 空库基线：贡献命令使用 `0.9.0-local`，OpenAPI 统一为 `1.2.0`，核心概念、Inspector、Workflow 与持久化说明不再把候选期 v4/v5 兼容读取或 0.3 SQL 写成当前安装步骤。本条不改变 Scala、HTTP、SQL 或成熟度等级。宿主 soak、主备 SLO、领域金标和 Experimental 能力仍保持原边界。
 - 将 `zio-json` 固定为 `1.0.0`，与 `zio-schema-json` 1.8.7 / ZIO HTTP 3.11.6 的编译线一致；单独覆盖到 1.1.0 会在 Endpoint JSON 解码时触发 `Lexer.firstField` 的 `NoSuchMethodError`。
 - 中转站现在可以通过 `ZYBLW_SMOKE_PROVIDER=relay` 直接复用 Provider、MemoryExtractor 与 Context 压缩 live smoke；端点根 URL 改为严格 URI 校验，并补充同一网关多 wire 方言的生产配置与准入规则。`ProductionSupportHost` 与 `KnowledgeQaHost` 已接入同一配置驱动装配：存在非空 `ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON` 时优先构造多端点路由，缺失或空白时才使用单一 `OPENAI_*`；非法 JSON、端点约束或缺失密钥均类型化失败，不静默降级。Docker Compose、preflight 与环境示例同步支持这两条生产入口。
 

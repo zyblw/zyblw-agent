@@ -2,9 +2,9 @@
 
 > 状态：当前说明（低敏读模型已实现；可视化 Studio 尚未实现）
 >
-> 最后核验：2026-07-25
+> 最后核验：2026-09-23
 >
-> 事实来源：`inspection/RunInspection.scala`、HTTP contract/projection/routes 及其测试
+> 事实来源：`inspection/RunInspection.scala`、`inspection/RunTrajectory.scala`、`inspection/IncidentPack.scala`、HTTP contract/projection/routes 及其测试
 
 ## 1. 它解决什么问题
 
@@ -18,7 +18,7 @@ Agent 的失败通常不是一句“模型答错了”可以解释的。维护�
 
 直接把 `AgentState`、Event Store JSON、Prompt 和工具结果暴露给调试界面虽然方便，却会把恢复协议、高敏正文与客户端协议绑死。
 当前实现因此引入 `RunInspection`：它是从权威状态和耐久事件生成的**只读低敏投影**，不是第二套状态机，也不会重新执行
-模型或工具。
+模型或工具。`RunTrajectory` 把时间线、模型账本（含 section 决策）、工具账本（含 attempt / Unknown）、挂起、控制面命令（含 DeadLetter）和组合对照收成同一份只读投影。`IncidentPack` 与 Eval `TrajectoryReplay` 消费这份投影；Replayable 深比较仍使用账本里的 Canonical 正文，不把轨迹 JSON 当成第二份 Prompt。
 
 ## 2. 当前接口
 
@@ -76,13 +76,16 @@ Inspector 不返回：
 | `event_sequence_gap` | sequence 未从游标后连续递增 |
 | `event_cursor_ahead_of_state` | 事件超过权威状态的最后序号 |
 | `event_page_missing` | 状态表明有后续事件，但事件页为空 |
-| `waiting_without_approval` | 等待审批状态没有审批记录 |
-| `approval_outside_waiting_state` | 非等待状态仍残留审批记录 |
+| `inspection_page_truncated` | 当前页不是完整时间线，需用 nextCursor 继续 |
+| `waiting_without_suspension` | 等待状态没有挂起记录 |
+| `suspension_outside_waiting_state` | 非等待状态仍残留挂起记录 |
+| `suspension_status_mismatch` | 挂起类别要求的状态与实际 `RunStatus` 不一致 |
 | `budget_usage_mismatch` | Run usage 与预算累计不一致 |
-| `definition_snapshot_missing` | 旧数据缺少创建时定义快照 |
-| `instruction_fingerprint_missing` | 旧式指令无法关联趋势 |
+| `instruction_fingerprint_missing` | 单块指令无法关联 fingerprint 趋势（Warning，不是损坏） |
 | `run_created_event_missing` | 完整历史缺少创建事件 |
 | `terminal_event_missing` | 终态缺少对应终态事件 |
+
+`0.9` 删除了 `definition_snapshot_missing`，以及“缺组合指纹就跳过漂移检查”的降级。定义快照和工具契约指纹现在是必填事实；缺失按损坏拒绝，不再记成一条可忽略诊断。审批等待是 `Suspension.Approval`，诊断看挂起记录与 `RunStatus` 是否互推。
 
 `consistent=true` 只表示当前可验证范围没有 Error 级结构问题，不表示答案正确、引用可信、系统通过性能 SLO 或已经生产验证。
 这些仍需 eval、业务反馈、指标和故障演练。
@@ -97,12 +100,11 @@ Inspector 不返回：
 - 数据迁移后旧 checkpoint 能否继续解释；
 - fork 的费用、审计和责任属于谁。
 
-因此下一步应先做 Inspector CLI/轻量 UI、诊断筛选与受控导出。只有长任务 eval 证明 fork 带来明确收益，并完成副作用隔离
-设计后，才实现“从安全 checkpoint 派生新 Run”；不提供原 Run 上的任意历史覆写。
+`IncidentPackCliApp` 已经能从文件或标准输入再编码事故包并检查泄漏。运维控制台的 Run 调试器用 Bearer fetch 读取低敏耐久 SSE，不是可视化 Studio。筛选导出、真实事故回放和 checkpoint fork 仍未完成。只有长任务 eval 证明 fork 带来明确收益，并完成副作用隔离设计后，才实现“从安全 checkpoint 派生新 Run”；不提供原 Run 上的任意历史覆写。
 
 ## 7. 阅读代码的最短路径
 
-1. `inspection/RunInspection.scala`：理解读模型、诊断和脱敏；
+1. `inspection/RunInspection.scala` 与 `inspection/RunTrajectory.scala`：理解读模型、轨迹投影、诊断和脱敏；
 2. `http/AgentHttpProjection.scala`：理解 core 到 wire DTO 的 allow-list 投影；
 3. `http/contract/AgentHttpProtocol.scala`：理解 Endpoint/OpenAPI 契约；
 4. `http/AgentHttpApi.scala`：理解身份解析、授权、游标与读取顺序；
