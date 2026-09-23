@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "releaseLine": "0.7.0",
+  "releaseLine": "0.9.0",
   "policy": "Local and CI regressions prove mechanisms only. Current supported topology is Docker plus a self-hosted PostgreSQL. Multi-hour soak, node loss, primary/standby failover, PgBouncer saturation, rolling deploy, backup RPO/RTO and SLO owners stay deferred until a dedicated hosted environment exists.",
   "items": [
     {

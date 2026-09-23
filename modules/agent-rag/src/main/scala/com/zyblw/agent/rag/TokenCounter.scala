@@ -40,6 +40,14 @@ object TokenCounter:
   val Cl100k: TokenCounter = Bpe("cl100k_base")
   val O200k: TokenCounter  = Bpe("o200k_base")
 
+  def get(id: String): Option[TokenCounter] =
+    id match
+      case "cl100k-base"   => Some(Cl100k)
+      case "o200k-base"    => Some(O200k)
+      case "cjk-approx-v1" => Some(CjkApproximate)
+      case "codepoints"    => Some(CodePoints)
+      case _               => None
+
   /** 汉字/假名/谚文约 1 token，拉丁字母约 4 字符 1 token。只用于装箱预算，不是模型 tokenizer。 */
   val CjkApproximate: TokenCounter = new TokenCounter:
     val id: String = "cjk-approx-v1"

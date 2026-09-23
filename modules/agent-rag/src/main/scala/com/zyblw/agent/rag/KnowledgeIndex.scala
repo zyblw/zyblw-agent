@@ -289,6 +289,7 @@ final class KnowledgeIndexer(
       targetProfileId = targetProfileId
     )
     for
+      _        <- ZIO.fromEither(ChunkEmbeddingAlignment.require(chunker.strategyId, embeddings.capabilities))
       _        <- ApprovedSourceResolver.validate(document.sourceUri)
       build    <- store.begin(request)
       existing <- store.find(key, derivedKey)

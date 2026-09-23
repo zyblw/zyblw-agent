@@ -15,7 +15,7 @@ object KnowledgeToolsSpec extends ZIOSpecDefault:
         exit <- tool
           .execute(
             KnowledgeTools.SearchInput("阴阳", tenantId = Some("attacker")),
-            context
+            openLibrary
           )
           .exit
       yield assertTrue(exit.isFailure)
@@ -39,9 +39,9 @@ object KnowledgeToolsSpec extends ZIOSpecDefault:
           )
         )
         search = KnowledgeTools.searchTool(rag)
-        ok <- search.execute(KnowledgeTools.SearchInput("阴阳者"), context)
+        ok <- search.execute(KnowledgeTools.SearchInput("阴阳者"), openLibrary)
         fetch = KnowledgeTools.fetchTool(rag)
-        miss <- fetch.execute(KnowledgeTools.FetchInput("missing-chunk"), context)
+        miss <- fetch.execute(KnowledgeTools.FetchInput("missing-chunk"), openLibrary)
       yield assertTrue(
         ok.citations.nonEmpty,
         ok.status == "ok",
@@ -70,9 +70,9 @@ object KnowledgeToolsSpec extends ZIOSpecDefault:
           )
         )
         search = KnowledgeTools.searchTool(rag)
-        found <- search.execute(KnowledgeTools.SearchInput("后半段鉴别要点"), context)
+        found <- search.execute(KnowledgeTools.SearchInput("后半段鉴别要点"), openLibrary)
         chunkId = found.citations.head.chunkId
-        fetched <- KnowledgeTools.fetchTool(rag).execute(KnowledgeTools.FetchInput(chunkId), context)
+        fetched <- KnowledgeTools.fetchTool(rag).execute(KnowledgeTools.FetchInput(chunkId), openLibrary)
       yield assertTrue(
         found.excerpts.forall(_.length <= 500),
         found.citations.forall(_.excerpt.length <= 500),
@@ -149,14 +149,22 @@ object KnowledgeToolsSpec extends ZIOSpecDefault:
       )
       for
         widened <- KnowledgeTools
-          .constrainDocumentIds("knowledge_search", Set("book-b"), Set("book-a"))
+          .constrainDocumentIds("knowledge_search", Set("book-b"), DocumentScope.Restricted(Set("book-a")))
           .exit
-        narrowed <- KnowledgeTools.constrainDocumentIds("knowledge_search", Set("book-a"), Set("book-a"))
-        omitted  <- KnowledgeTools.constrainDocumentIds("knowledge_search", Set.empty, Set("book-a"))
-        rag      <- ZIO.service[RagApplication]
-        _        <- ingest(rag, "book-a", "甲书只讲营卫")
-        _        <- ingest(rag, "book-b", "乙书只讲营卫")
-        denied   <- KnowledgeTools
+        narrowed <- KnowledgeTools.constrainDocumentIds(
+          "knowledge_search",
+          Set("book-a"),
+          DocumentScope.Restricted(Set("book-a"))
+        )
+        omitted <- KnowledgeTools.constrainDocumentIds(
+          "knowledge_search",
+          Set.empty,
+          DocumentScope.Restricted(Set("book-a"))
+        )
+        rag    <- ZIO.service[RagApplication]
+        _      <- ingest(rag, "book-a", "甲书只讲营卫")
+        _      <- ingest(rag, "book-b", "乙书只讲营卫")
+        denied <- KnowledgeTools
           .searchTool(rag)
           .execute(KnowledgeTools.SearchInput("营卫", documentIds = Some(List("book-b"))), host)
           .exit
@@ -179,11 +187,36 @@ object KnowledgeToolsSpec extends ZIOSpecDefault:
         _     <- ingest(rag, "book-b", "乙书独有原文甲乙丙")
         found <- KnowledgeTools
           .searchTool(rag)
-          .execute(KnowledgeTools.SearchInput("乙书独有原文"), context)
+          .execute(KnowledgeTools.SearchInput("乙书独有原文"), openLibrary)
         chunkId = found.citations.head.chunkId
         denied <- KnowledgeTools.fetchTool(rag).execute(KnowledgeTools.FetchInput(chunkId), host).exit
       yield assertTrue(found.citations.nonEmpty, denied.isFailure)
+    }.provide(memoryRag),
+    test("空白或缺失的资料范围不能放宽成全库") {
+      val blank = context.copy(runContext =
+        context.runContext.copy(attributes = Map(KnowledgeTools.ScopeDocumentAttribute -> "  "))
+      )
+      val missing = DocumentScope.parse(Map.empty)
+      val empty   = DocumentScope.parse(Map(KnowledgeTools.ScopeDocumentAttribute -> ""))
+      for
+        rag    <- ZIO.service[RagApplication]
+        _      <- ingest(rag, "book-a", "甲书只讲营卫")
+        denied <- KnowledgeTools.searchTool(rag).execute(KnowledgeTools.SearchInput("营卫"), blank).exit
+        absent <- KnowledgeTools.searchTool(rag).execute(KnowledgeTools.SearchInput("营卫"), context).exit
+      yield assertTrue(missing.isLeft, empty.isLeft, denied.isFailure, absent.isFailure)
     }.provide(memoryRag)
+  )
+
+  private val openLibrary = ToolExecutionContext(
+    RunId(java.util.UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")),
+    ThreadId("thread-tools"),
+    "call-1",
+    RunContext(
+      Some("user"),
+      Some("acme"),
+      Set("knowledge:read"),
+      DocumentScope.unrestrictedAttributes
+    )
   )
 
   private val context = ToolExecutionContext(

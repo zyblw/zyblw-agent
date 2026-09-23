@@ -60,8 +60,20 @@ final case class ContextSources(
     citations: Chunk[RunCitation] = Chunk.empty,
     retrievalEvidence: Option[RunRetrievalEvidence] = None,
     /** 上一会话注入的 user/assistant 工作记忆；进入 recentMessages 分区，不是 RAG 或 System 策略。 */
-    priorTurns: Chunk[AgentMessage] = Chunk.empty
+    priorTurns: Chunk[AgentMessage] = Chunk.empty,
+    /** 证据不足以回答时，Runtime 直接完成拒绝，不再把决定交给模型。 */
+    grounding: GroundingDecision = GroundingDecision.Proceed
 )
+
+/** 这一回合是否允许模型在没有足够检索证据时继续作答。 */
+enum GroundingDecision:
+  case Proceed
+  case Refuse(message: String)
+
+object ContextSourceRequirement:
+  /** Agent 元数据键。值为 `required` 时，空的 ContextSourceResolver 不能启动该 Agent 的模型回合。 */
+  val Attribute: String = "contextSources"
+  val Required: String  = "required"
 
 /** 在每个模型回合之前解析动态上下文来源。 */
 trait ContextSourceResolver:
@@ -110,10 +122,16 @@ object ContextSourceResolver:
             sections = left.sections ++ right.sections,
             citations = left.citations ++ right.citations,
             retrievalEvidence = right.retrievalEvidence.orElse(left.retrievalEvidence),
-            priorTurns = left.priorTurns ++ right.priorTurns
+            priorTurns = left.priorTurns ++ right.priorTurns,
+            grounding = combineGrounding(left.grounding, right.grounding)
           )
         }
       }
+
+  private def combineGrounding(left: GroundingDecision, right: GroundingDecision): GroundingDecision =
+    (left, right) match
+      case (GroundingDecision.Refuse(message), _) => GroundingDecision.Refuse(message)
+      case (_, other)                             => other
 
 /** Context Debug View 中的稳定分区名称。 */
 enum ContextSection derives JsonCodec:

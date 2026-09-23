@@ -75,6 +75,13 @@ final class InMemoryKnowledgeIndexStore private (
       chunkIds: Set[String],
       scope: RetrievalScope
   ): UIO[Chunk[DocumentChunk]] =
+    fetchChunks(chunkIds, scope, RetrievalFilter.empty)
+
+  override def fetchChunks(
+      chunkIds: Set[String],
+      scope: RetrievalScope,
+      filter: RetrievalFilter
+  ): UIO[Chunk[DocumentChunk]] =
     if chunkIds.isEmpty then ZIO.succeed(Chunk.empty)
     else
       state.get.map { current =>
@@ -88,7 +95,8 @@ final class InMemoryKnowledgeIndexStore private (
                 chunk.permissions.subsetOf(scope.permissions) &&
                 chunk.knowledgeSpaceId.forall(_ == scope.spaceId) &&
                 matchesPinnedProfile(chunk, pinnedProfile(current, scope)) &&
-                !current.withdrawn.contains(chunk.documentId -> chunk.tenantId)
+                !current.withdrawn.contains(chunk.documentId -> chunk.tenantId) &&
+                filter.matches(chunk)
             )
             .toVector
             .sortBy(_.id)

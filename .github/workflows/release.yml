@@ -27,7 +27,7 @@ jobs:
       github.repository == 'zyblw/zyblw-agent' &&
       (github.event_name != 'workflow_dispatch' || startsWith(inputs.release_tag, 'v'))
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    timeout-minutes: 90
     environment: maven-central
 
     steps:
@@ -118,6 +118,23 @@ jobs:
           RUN_POSTGRES_INTEGRATION: "1"
         run: sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull; publishM2'
 
+      - name: Public PDF and RAG gate
+        run: ./scripts/test-public-pdf-rag.sh
+
+      - name: Generate stable OpenAPI revision
+        run: >-
+          sbt -batch
+          'http/Test/runMain com.zyblw.agent.http.contract.OpenApiSnapshotCli
+          ../../target/agent-http-openapi-current.json'
+
+      - name: Check stable OpenAPI compatibility
+        uses: oasdiff/oasdiff-action/breaking@v0.1.17
+        with:
+          base: modules/agent-zio-http/src/test/resources/openapi/agent-http-v1.2.0.json
+          revision: target/agent-http-openapi-current.json
+          fail-on: WARN
+          review: false
+
       - uses: actions/setup-node@v7
         with:
           node-version: "26.8.1"
@@ -127,19 +144,6 @@ jobs:
       - name: Verify dashboard standalone and host-session contracts
         working-directory: modules/agent-dashboard
         run: |
-          # The inspect copy says "不含 prompt"; a substring locator treated that as a leak.
-          # This step runs after publishM2 and does not change published Scala artifacts.
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path("tests/e2e/inspect-panel.spec.ts")
-          if path.exists():
-              text = path.read_text()
-              old = "await expect(page.getByText('prompt')).toHaveCount(0);"
-              new = "await expect(page.getByText('prompt', { exact: true })).toHaveCount(0);"
-              if old in text:
-                  path.write_text(text.replace(old, new, 1))
-          PY
-          trap 'git checkout -- tests/e2e/inspect-panel.spec.ts' EXIT
           npm ci
           npm run typecheck
           npm run lint
@@ -213,11 +217,8 @@ jobs:
           # foreground JVM; using the default sbtn client here may reconnect to
           # the credential-less verification server, and a preceding `shutdown`
           # races its socket teardown (observed as an immediate silent exit).
-          # Pin the release version: a dirty tree after dashboard recover would
-          # otherwise make sbt-dynver publish a dirty-tree SNAPSHOT to
-          # maven-snapshots (Forbidden).
+          # Pin the release version so a dirty worktree cannot publish a dynver SNAPSHOT.
           release_version="${RELEASE_TAG#v}"
-          git checkout -- modules/agent-dashboard/tests/e2e/inspect-panel.spec.ts || true
           sbt --server --batch --supershell=false \
             "set ThisBuild / version := \"$release_version\";" \
             "ci-release"

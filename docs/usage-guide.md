@@ -304,7 +304,7 @@ val result = rag.retrieve(
 ```
 
 `RetrievalMode` 还有 `VectorOnly`、`LexicalOnly`、`Phrase`。`RagQuery.filter`（document/page/heading/metadata/chunk）发生在 ACL
-之后、打分之前。默认切分按 cl100k `maxTokens=512`。模型侧使用 `knowledge_search` / `knowledge_fetch`，不得覆盖
+之后、打分之前。默认切分按 cl100k `maxTokens=512`，只适用于声明了同一 tokenizer 的 Embedding；live 摄入必须设置 `EMBEDDING_TOKENIZER`。模型侧使用 `knowledge_search` / `knowledge_fetch`，不得覆盖
 tenant/permissions。向量、FTS、rerank 和相邻块扩展都不能扩大已经授权的候选集合。完整路径见
 [PDF RAG 生产流水线](pdf-rag-pipeline.md) 与 [Context、Memory 与 RAG](context-memory-rag.md)。
 

@@ -13,10 +13,22 @@ object KnowledgeTools:
   val FetchName: ToolName    = ToolName("knowledge_fetch")
   val Allowed: Set[ToolName] = Set(SearchName, FetchName)
 
-  /** 宿主写入的资料范围。模型可以收窄，不能改写或省略后搜全集。 */
-  val ScopeDocumentAttribute: String = "scopeDocumentId"
+  /** 宿主写入的单文档范围。多文档使用 `scopeDocumentIds`，全库必须显式写 `documentScope=unrestricted`。 */
+  val ScopeDocumentAttribute: String = DocumentScope.SingleAttribute
 
   val policyFragment: ToolPolicyConfig = ToolPolicyConfig(allowedTools = Allowed)
+
+  /** 知识 Agent 的元数据。空 ContextSourceResolver 不能为这样的 Agent 调用模型。 */
+  val contextSourceMetadata: (String, String) =
+    com.zyblw.agent.context.ContextSourceRequirement.Attribute ->
+      com.zyblw.agent.context.ContextSourceRequirement.Required
+
+  /** 声明了知识工具却没有接入任何上下文来源时拒绝启动。 */
+  def requireWiredResolver(resolver: com.zyblw.agent.context.ContextSourceResolver): IO[AgentError, Unit] =
+    ZIO
+      .fail(AgentError.InvalidConfiguration("知识问答装配了 Retriever 或知识工具，但 ContextSourceResolver 为空"))
+      .when(resolver.sourceIds.isEmpty)
+      .unit
 
   final case class SearchInput(
       query: String,
@@ -86,17 +98,18 @@ object KnowledgeTools:
   def searchTool(rag: RagApplication): Tool[Any, SearchInput, AgentError, SearchOutput] =
     Tool.json[Any, SearchInput, AgentError, SearchOutput](
       SearchName,
-      "在已授权的知识库中检索可引用资料。返回短摘录与 chunkId，细讲时再 knowledge_fetch。不要填写 tenant 或 permissions。宿主已限定资料时，documentIds 只能收窄，不能改到范围外。",
+      "在宿主明确授权的知识库中检索可引用资料。返回短摘录与 chunkId，细讲时再 knowledge_fetch。不要填写 tenant 或 permissions。宿主限定资料时，documentIds 只能收窄，不能改到范围外。",
       searchSchema,
       None,
       knowledgeReadMetadata()
     ) { (input, context) =>
       for
-        _      <- rejectCallerOverride(input.tenantId, input.permissions)
-        scope  <- trustedScope(context)
-        mode   <- parseMode(input.mode)
-        filter <- parseFilter(input, context)
-        result <- rag
+        _         <- rejectCallerOverride(input.tenantId, input.permissions)
+        scope     <- trustedScope(context)
+        mode      <- parseMode(input.mode)
+        hostScope <- hostScope(context, SearchName.value)
+        filter    <- parseFilter(input, hostScope)
+        result    <- rag
           .retrieve(RagQuery(input.query, scope, input.limit, mode, filter))
           .mapError(error => AgentError.ToolExecutionFailed(SearchName.value, error.message, error.retryable))
       yield toOutput(result, includeFullChunkText = false)
@@ -111,16 +124,16 @@ object KnowledgeTools:
       knowledgeReadMetadata()
     ) { (input, context) =>
       for
-        _      <- rejectCallerOverride(input.tenantId, input.permissions)
-        scope  <- trustedScope(context)
+        _         <- rejectCallerOverride(input.tenantId, input.permissions)
+        scope     <- trustedScope(context)
+        hostScope <- hostScope(context, FetchName.value)
+        filter = hostScope match
+          case DocumentScope.Unrestricted    => RetrievalFilter.empty
+          case DocumentScope.Restricted(ids) => RetrievalFilter(documentIds = ids)
         result <- rag
-          .fetch(Set(input.chunkId), scope)
+          .fetch(Set(input.chunkId), scope, filter)
           .mapError(error => AgentError.ToolExecutionFailed(FetchName.value, error.message, error.retryable))
-        _ <- rejectOutsideDocumentScope(
-          FetchName.value,
-          result.hits.map(_.chunk.documentId).toSet,
-          hostDocumentIds(context)
-        )
+        _ <- rejectOutsideDocumentScope(FetchName.value, result, hostScope)
       yield toOutput(result, includeFullChunkText = true)
     }
 
@@ -155,43 +168,45 @@ object KnowledgeTools:
       case Some(other)                            =>
         ZIO.fail(AgentError.ToolInputInvalid(SearchName.value, s"不支持的检索模式: $other"))
 
-  /** 宿主通过 RunContext 限定的文档。空集表示这次 Run 没有资料范围。 */
-  def hostDocumentIds(context: ToolExecutionContext): Set[String] =
-    context.runContext.attributes
-      .get(ScopeDocumentAttribute)
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .toSet
+  /** 解析宿主资料范围。空白、缺失和非法值都拒绝，不会退回全库。 */
+  def hostScope(context: ToolExecutionContext, toolName: String): IO[AgentError, DocumentScope] =
+    ZIO.fromEither(DocumentScope.parse(context.runContext.attributes)).mapError { message =>
+      AgentError.ToolInputInvalid(toolName, message)
+    }
 
   /** 模型给出的 documentIds 只能是宿主范围的子集。未给出时使用宿主范围，不能退回全库。 */
   def constrainDocumentIds(
       toolName: String,
       requested: Set[String],
-      host: Set[String]
+      host: DocumentScope
   ): IO[AgentError, Set[String]] =
-    if host.isEmpty then ZIO.succeed(requested.filter(_.trim.nonEmpty))
-    else if requested.isEmpty || requested.subsetOf(host) then
-      ZIO.succeed(if requested.isEmpty then host else requested)
-    else ZIO.fail(AgentError.ToolInputInvalid(toolName, "documentIds 超出宿主限定的资料范围"))
+    val clean = requested.filter(_.trim.nonEmpty)
+    host match
+      case DocumentScope.Unrestricted =>
+        ZIO.succeed(clean)
+      case DocumentScope.Restricted(allowed) =>
+        if clean.isEmpty || clean.subsetOf(allowed) then ZIO.succeed(if clean.isEmpty then allowed else clean)
+        else ZIO.fail(AgentError.ToolInputInvalid(toolName, "documentIds 超出宿主限定的资料范围"))
 
-  /** 取回的块必须落在宿主范围内。范围外的正文不会进入工具结果。 */
+  /** 限定范围时，查询未命中或命中范围外文档都拒绝，且不把范围外正文交给模型。 */
   def rejectOutsideDocumentScope(
       toolName: String,
-      documentIds: Set[String],
-      host: Set[String]
+      result: RetrievalResult,
+      host: DocumentScope
   ): IO[AgentError, Unit] =
-    if host.isEmpty || documentIds.subsetOf(host) then ZIO.unit
-    else ZIO.fail(AgentError.ToolInputInvalid(toolName, "chunk 不在宿主限定的资料范围内"))
+    host match
+      case DocumentScope.Unrestricted        => ZIO.unit
+      case DocumentScope.Restricted(allowed) =>
+        val found = result.hits.map(_.chunk.documentId).toSet
+        if result.hits.nonEmpty && found.subsetOf(allowed) then ZIO.unit
+        else ZIO.fail(AgentError.ToolInputInvalid(toolName, "chunk 不在宿主限定的资料范围内"))
 
-  private def parseFilter(
-      input: SearchInput,
-      context: ToolExecutionContext
-  ): IO[AgentError, RetrievalFilter] =
+  private def parseFilter(input: SearchInput, host: DocumentScope): IO[AgentError, RetrievalFilter] =
     for
       documentIds <- constrainDocumentIds(
         SearchName.value,
         input.documentIds.fold(Set.empty[String])(_.iterator.map(_.trim).filter(_.nonEmpty).toSet),
-        hostDocumentIds(context)
+        host
       )
       filter <- ZIO
         .attempt {

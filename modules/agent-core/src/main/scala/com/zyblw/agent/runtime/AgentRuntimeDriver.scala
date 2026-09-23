@@ -1,7 +1,7 @@
 package com.zyblw.agent.runtime
 
 import com.zyblw.agent.composition.RuntimeProfile
-import com.zyblw.agent.context.ContextSourceResolver
+import com.zyblw.agent.context.{ContextSourceRequirement, ContextSourceResolver, GroundingDecision}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.guardrails.*
 import com.zyblw.agent.memory.*
@@ -304,7 +304,44 @@ final class AgentRuntimeDriver(
       cancelled    <- store.cancellationRequested(state.runId)
       _            <- ZIO.fail(AgentError.Cancelled(state.runId)).when(cancelled)
       agent = state.definition
-      sources            <- contextSources.resolve(state, agent)
+      _       <- requireDeclaredContextSources(agent)
+      sources <- contextSources.resolve(state, agent)
+      outcome <- sources.grounding match
+        case GroundingDecision.Refuse(message) => completeRefusal(state, sources, message)
+        case GroundingDecision.Proceed         => continuePrepared(state, sources)
+    yield outcome
+
+  /** 声明了上下文来源却装配了空 resolver 时，在调用模型前失败。 */
+  private def requireDeclaredContextSources(agent: AgentDefinition): IO[AgentError, Unit] =
+    ZIO
+      .fail(
+        AgentError.InvalidConfiguration(
+          "Agent 声明 contextSources=required，但 Runtime 装配的是空 ContextSourceResolver"
+        )
+      )
+      .when(
+        agent.metadata.get(ContextSourceRequirement.Attribute).contains(ContextSourceRequirement.Required) &&
+          contextSources.sourceIds.isEmpty
+      )
+      .unit
+
+  /** 证据不足时直接完成拒绝，不把记忆或检索正文交给模型。 */
+  private def completeRefusal(
+      state: AgentState,
+      sources: com.zyblw.agent.context.ContextSources,
+      message: String
+  ): IO[AgentError, RunOutcome] =
+    for
+      cited <- contextAssembler.persistCitations(state, sources)
+      done  <- terminator.complete(cited, AgentMessage.assistant(message))
+    yield done
+
+  private def continuePrepared(
+      state: AgentState,
+      sources: com.zyblw.agent.context.ContextSources
+  ): IO[AgentError, RunOutcome] =
+    val agent = state.definition
+    for
       retrievalDecisions <- guardrails.checkRetrieval(
         contextAssembler.untrustedSnippets(sources),
         guardrailContext(state)

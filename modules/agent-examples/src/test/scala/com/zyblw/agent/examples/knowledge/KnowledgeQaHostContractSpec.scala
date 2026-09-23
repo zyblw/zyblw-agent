@@ -47,7 +47,8 @@ object KnowledgeQaHostContractSpec extends ZIOSpecDefault:
   private val actor = RunContext(
     userId = Some("reader-1"),
     tenantId = Some(KnowledgeQaLayers.tenant.value),
-    scopes = Set(KnowledgeAuthorization.ReadScope)
+    scopes = Set(KnowledgeAuthorization.ReadScope),
+    attributes = com.zyblw.agent.rag.tools.DocumentScope.unrestrictedAttributes
   )
 
   private val resolver = new AgentRequestContextResolver:
@@ -67,6 +68,16 @@ object KnowledgeQaHostContractSpec extends ZIOSpecDefault:
         .either
         .map { result =>
           assertTrue(result.left.exists(_.message.contains("1024")))
+        }
+    },
+    test("live Embedding 缺少 tokenizer 声明时拒绝启动") {
+      KnowledgeQaLayers
+        .requireDeclaredTokenizer(
+          OpenAICompatibleEmbeddingConfig.openAI("test-key", dimension = 1024).copy(tokenizerId = None)
+        )
+        .either
+        .map { result =>
+          assertTrue(result.left.exists(_.message.contains("EMBEDDING_TOKENIZER")))
         }
     },
     test("live Embedding 接受 1024 维配置") {

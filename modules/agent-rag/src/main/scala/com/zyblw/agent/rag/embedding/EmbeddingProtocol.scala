@@ -28,9 +28,12 @@ final case class EmbeddingCapabilities(
     maxTextsPerRequest: Int,
     maxTokensPerRequest: Option[Long] = None,
     instructionPolicy: InstructionPolicy = InstructionPolicy.Unsupported,
-    reportsUsage: Boolean = false
+    reportsUsage: Boolean = false,
+    /** 与切分计数器 `TokenCounter.id` 对齐的 tokenizer。未声明时索引器不假装已经对齐。 */
+    tokenizerId: Option[String] = None
 ):
   require(inputRoles.nonEmpty && outputs.nonEmpty, "Embedding 能力不能为空")
+  require(tokenizerId.forall(id => id.trim.nonEmpty && id == id.trim), "tokenizerId 不能为空白")
   require(minDenseDimension > 0 && maxDenseDimension >= minDenseDimension, "Embedding 维度范围无效")
   require(
     defaultDenseDimension >= minDenseDimension && defaultDenseDimension <= maxDenseDimension,

@@ -30,7 +30,7 @@
 - `DangerousActionTool`：演示审批，不执行真实危险操作。
 - `knowledge_search` / `knowledge_fetch`：`agent-rag` 的 `KnowledgeTools`。tenant/permissions 由运行时注入，模型不得覆盖。
   `knowledge_search` 支持 `hybrid|vector|lexical|phrase` 与结构化过滤。需要 `knowledge:read`。
-  宿主若在 `RunContext.attributes` 写入 `scopeDocumentId`，检索被锁在该文档；模型把 `documentIds` 改到范围外，或 `knowledge_fetch` 取回范围外的块，都会在返回正文前失败。
+  宿主必须显式声明资料范围：`documentScope=unrestricted` 才允许在该 tenant 的授权库内检索；`scopeDocumentId` 或 JSON 数组 `scopeDocumentIds` 限定文档。属性缺失、空白或无法解析都会拒绝，不会退回全库。模型把 `documentIds` 改到范围外，或 `knowledge_fetch` 请求范围外的块，都会在查询前失败，范围外正文不会进入工具结果。
 
 生产工具应实现业务级幂等键；支付、删除、发布和外部消息不能仅靠 callId 或普通 Runtime 工具账本默认重试。
 PostgreSQL 业务写应使用 `PostgresReliableWriteTool.make`，它强制经同事务执行器运行，不能用普通 `Tool.json` 后只修改

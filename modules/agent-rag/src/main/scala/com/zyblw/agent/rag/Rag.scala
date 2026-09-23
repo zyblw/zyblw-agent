@@ -312,6 +312,14 @@ trait VectorStore:
     val _ = (chunkIds, scope)
     ZIO.succeed(Chunk.empty)
 
+  /** 在读取正文之前应用文档范围。未覆盖时先调用两参数版本再丢弃范围外的块；生产 Store 应覆盖并在查询中下推。 */
+  def fetchChunks(
+      chunkIds: Set[String],
+      scope: RetrievalScope,
+      filter: RetrievalFilter
+  ): IO[RetrievalError, Chunk[DocumentChunk]] =
+    fetchChunks(chunkIds, scope).map(_.filter(filter.matches))
+
   /** 在 rerank 之后根据受控谱系补充相邻块和同父级块。
     *
     * 默认实现不扩展，使纯向量的自定义 Store 仍可以最小实现。生产 Store 必须在读取扩展候选时再次应用 tenant/permission 条件，不得信任 seed metadata。
@@ -384,6 +392,13 @@ final class InMemoryVectorStore private (
       chunkIds: Set[String],
       scope: RetrievalScope
   ): UIO[Chunk[DocumentChunk]] =
+    fetchChunks(chunkIds, scope, RetrievalFilter.empty)
+
+  override def fetchChunks(
+      chunkIds: Set[String],
+      scope: RetrievalScope,
+      filter: RetrievalFilter
+  ): UIO[Chunk[DocumentChunk]] =
     if chunkIds.isEmpty then ZIO.succeed(Chunk.empty)
     else
       state.get.map { all =>
@@ -393,7 +408,8 @@ final class InMemoryVectorStore private (
             .filter(chunk =>
               chunkIds.contains(chunk.id) &&
                 chunk.tenantId == scope.tenantId &&
-                chunk.permissions.subsetOf(scope.permissions)
+                chunk.permissions.subsetOf(scope.permissions) &&
+                filter.matches(chunk)
             )
             .toVector
             .sortBy(_.id)
@@ -518,6 +534,17 @@ trait Retriever:
   def fetch(chunkIds: Set[String], scope: RetrievalScope): IO[RetrievalError, RetrievalResult] =
     val _ = (chunkIds, scope)
     ZIO.fail(AgentError.RetrievalFailed("Retriever 未实现 fetchChunks"))
+
+  /** 取回前施加文档范围。未覆盖时先调用两参数 `fetch`，再丢弃范围外的块。 */
+  def fetch(
+      chunkIds: Set[String],
+      scope: RetrievalScope,
+      filter: RetrievalFilter
+  ): IO[RetrievalError, RetrievalResult] =
+    fetch(chunkIds, scope).map { result =>
+      val hits = result.hits.filter(hit => filter.matches(hit.chunk))
+      result.copy(hits = hits, citations = result.citations.take(hits.length))
+    }
 
 final class DefaultRetriever(
     embeddings: EmbeddingModel,
@@ -706,6 +733,13 @@ final class DefaultRetriever(
     telemetry.fold(effect)(_.retrieval(runId, stage, scope.parentSpanId)(effect)(count))
 
   override def fetch(chunkIds: Set[String], scope: RetrievalScope): IO[RetrievalError, RetrievalResult] =
+    fetch(chunkIds, scope, RetrievalFilter.empty)
+
+  override def fetch(
+      chunkIds: Set[String],
+      scope: RetrievalScope,
+      filter: RetrievalFilter
+  ): IO[RetrievalError, RetrievalResult] =
     if chunkIds.isEmpty then
       ZIO.succeed(
         RetrievalResult(
@@ -721,7 +755,7 @@ final class DefaultRetriever(
       pin.flatMap { resolved =>
         val pinned      = resolved.getOrElse(IndexProfileId("default"))
         val pinnedScope = scope.withPinnedProfile(pinned)
-        vectors.fetchChunks(chunkIds, pinnedScope).map { chunks =>
+        vectors.fetchChunks(chunkIds, pinnedScope, filter).map { chunks =>
           val hits = chunks.zipWithIndex.map { case (chunk, index) =>
             RetrievalHit(chunk, 1.0d, Map("fetch" -> 1.0d, "ordinal" -> index.toDouble))
           }

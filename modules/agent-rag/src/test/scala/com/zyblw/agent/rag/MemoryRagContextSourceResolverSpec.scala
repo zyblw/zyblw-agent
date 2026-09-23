@@ -1,6 +1,7 @@
 package com.zyblw.agent.rag
 
 import com.zyblw.agent.composition.{CapabilityKind, CapabilityRef, RuntimeComposition, RuntimeProfile}
+import com.zyblw.agent.context.GroundingDecision
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
 import com.zyblw.agent.observability.*
@@ -103,7 +104,12 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
         resolver = MemoryRagContextSourceResolver(store, retriever, MemoryRagContextPolicy())
         sources <- resolver.resolve(state(runId, sessionId, None), AgentDefinition(AgentId("a"), "a", "i"))
         count   <- calls.get
-      yield assertTrue(count == 0, sources.retrieval.isEmpty)
+      yield assertTrue(
+        count == 0,
+        sources.retrieval.isEmpty,
+        sources.retrievalEvidence.exists(_.status == "MissingTenant"),
+        sources.grounding == GroundingDecision.Proceed
+      )
     }.provide(MemoryStore.inMemory),
     test("Retriever 明确报告证据不足时不把弱相关资料注入模型上下文") {
       for
@@ -135,9 +141,9 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
         )
       yield assertTrue(
         sources.retrieval.isEmpty,
-        sources.safetyInstructions.length == 1,
-        sources.safetyInstructions.head.contains("insufficient evidence"),
-        !sources.safetyInstructions.head.contains("阴阳是什么")
+        sources.memories.isEmpty,
+        sources.safetyInstructions.isEmpty,
+        sources.grounding == GroundingDecision.Refuse(MemoryRagContextSourceResolver.RefusalMessage)
       )
     }.provide(MemoryStore.inMemory),
     test("observed resolver 把真实 Memory/RAG 来源接入统一观测但不记录 query 和正文") {

@@ -99,7 +99,15 @@ final class RagApplication(
 
   /** 按 chunkId 精确再识别；授权仍由 Retriever / VectorStore 在读取时复核。 */
   def fetch(chunkIds: Set[String], scope: RetrievalScope): IO[RetrievalError, RetrievalResult] =
-    retriever.fetch(chunkIds, scope)
+    fetch(chunkIds, scope, RetrievalFilter.empty)
+
+  /** 在 Store 查询前施加文档范围，避免先读出范围外正文再丢弃。 */
+  def fetch(
+      chunkIds: Set[String],
+      scope: RetrievalScope,
+      filter: RetrievalFilter
+  ): IO[RetrievalError, RetrievalResult] =
+    retriever.fetch(chunkIds, scope, filter)
 
 object RagApplication:
   /** 默认业务装配；依赖缺失会在 ZLayer 图构建时暴露。 */

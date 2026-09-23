@@ -20,7 +20,7 @@ import com.zyblw.agent.loaders.{
 import com.zyblw.agent.memory.{MemoryStore, WorkerId}
 import com.zyblw.agent.persistence.postgres.PostgresAgentPersistence
 import com.zyblw.agent.rag.*
-import com.zyblw.agent.rag.tools.KnowledgeTools
+import com.zyblw.agent.rag.tools.{DocumentScope, KnowledgeTools}
 import com.zyblw.agent.testkit.ScriptedChatModel
 import com.zyblw.agent.tools.{RegisteredTool, RegisteredToolRegistry}
 import javax.sql.DataSource
@@ -61,7 +61,7 @@ object KnowledgeQaLayers:
       RagApplication & KnowledgeService & Retriever
     ](
       DocumentLoaderRegistry.layer(Chunk(TikaDocumentLoader())),
-      DocumentStructureChunker.layer,
+      DocumentStructureChunker.alignedLayer,
       KnowledgeIndexer.layer(),
       DocumentIngestionService.layer(failureMode = DocumentIngestionFailureMode.Continue),
       Reranker.identity,
@@ -103,10 +103,28 @@ object KnowledgeQaLayers:
       .when(config.dimension != 1024)
       .as(config)
 
+  /** live 摄入必须显式声明 tokenizer，不能把 cl100k 当成所有 Embedding 模型的默认值。 */
+  def requireDeclaredTokenizer(
+      config: OpenAICompatibleEmbeddingConfig
+  ): IO[AgentError, OpenAICompatibleEmbeddingConfig] =
+    config.tokenizerId match
+      case Some(id) if TokenCounter.get(id).isDefined =>
+        ZIO.succeed(config)
+      case Some(id) =>
+        ZIO.fail(AgentError.InvalidConfiguration(s"不支持的 EMBEDDING_TOKENIZER: $id"))
+      case None =>
+        ZIO.fail(
+          AgentError.InvalidConfiguration(
+            "live 知识摄入必须设置 EMBEDDING_TOKENIZER（cl100k-base、o200k-base 或 cjk-approx-v1）"
+          )
+        )
+
   val liveEmbedding: ZLayer[Client, AgentError, EmbeddingModel] =
     ZLayer.fromZIO {
       for
-        config <- OpenAICompatibleEmbeddingConfig.fromEnvironment.flatMap(require1024)
+        config <- OpenAICompatibleEmbeddingConfig.fromEnvironment
+          .flatMap(require1024)
+          .flatMap(requireDeclaredTokenizer)
         client <- ZIO.service[Client]
       yield OpenAICompatibleEmbeddingService(client, config)
     }
@@ -129,6 +147,23 @@ object KnowledgeQaLayers:
     ZLayer.fromFunction((memory: MemoryHttpApi, knowledge: KnowledgeHttpApi) =>
       AgentHttpAdditionalRoutes(memory.routes ++ knowledge.routes)
     )
+
+  /** 参考宿主显式允许已授权资料库。单书会话应在身份解析结果上改成非空文档范围。 */
+  def knowledgeIdentity(
+      config: ProductionSupportConfig
+  ): ULayer[com.zyblw.agent.http.AgentRequestContextResolver] =
+    ProductionSupportLayers.identity(config) >>> ZLayer.fromFunction {
+      (inner: com.zyblw.agent.http.AgentRequestContextResolver) =>
+        new com.zyblw.agent.http.AgentRequestContextResolver:
+          def resolve(request: zio.http.Request): IO[AgentError, RunContext] =
+            inner.resolve(request).map { context =>
+              val mentioned = context.attributes.contains(DocumentScope.ModeAttribute) ||
+                context.attributes.contains(DocumentScope.SingleAttribute) ||
+                context.attributes.contains(DocumentScope.ManyAttribute)
+              if mentioned then context
+              else context.copy(attributes = context.attributes ++ DocumentScope.unrestrictedAttributes)
+            }
+    }
 
   def applicationConfig(config: ProductionSupportConfig): AgentApplicationConfig =
     AgentApplicationConfig(toolPolicy = KnowledgeTools.policyFragment, worker = config.worker)
@@ -154,7 +189,9 @@ object KnowledgeQaLayers:
       AgentApplication.Services
     ](
       PostgresAgentPersistence.layer,
-      MemoryRagContextSourceResolver.configured(MemoryRagContextPolicy()),
+      MemoryRagContextSourceResolver.configured(
+        MemoryRagContextPolicy(lowEvidenceResponse = LowEvidenceResponse.RequireExplicitRefusal)
+      ),
       ProductionSupportLayers.guardrails,
       ProductionSupportLayers.observer(config),
       AgentApplication.durable(WorkerId(config.workerId), applicationConfig(config))

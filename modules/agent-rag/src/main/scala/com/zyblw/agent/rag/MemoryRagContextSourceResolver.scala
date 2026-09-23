@@ -5,6 +5,7 @@ import com.zyblw.agent.context.*
 import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
 import com.zyblw.agent.observability.AgentOperationTelemetry
+import com.zyblw.agent.rag.tools.DocumentScope
 import zio.*
 import zio.json.*
 import zio.json.ast.Json
@@ -73,15 +74,21 @@ final class MemoryRagContextSourceResolver(
       now      <- Clock.currentTime(java.util.concurrent.TimeUnit.MILLISECONDS)
       selected <- resolveMemories(state, query, now)
       result   <- resolveRetrieval(state, query)
+      refusing =
+        result.insufficient && policy.lowEvidenceResponse == LowEvidenceResponse.RequireExplicitRefusal
     yield ContextSources(
-      memories = selected,
-      retrieval = result.hits.map { case (hit, citation) =>
-        ContextDocument(citation.id, hit.chunk.displayText, citation.sourceUri, Some(hit.score))
-      },
-      safetyInstructions =
-        if result.insufficient && policy.lowEvidenceResponse == LowEvidenceResponse.RequireExplicitRefusal
-        then Chunk(MemoryRagContextSourceResolver.LowEvidenceInstruction)
-        else Chunk.empty,
+      memories = if refusing then Chunk.empty else selected,
+      retrieval =
+        if refusing then Chunk.empty
+        else
+          result.hits.map { case (hit, citation) =>
+            ContextDocument(citation.id, hit.chunk.displayText, citation.sourceUri, Some(hit.score))
+          }
+      ,
+      safetyInstructions = Chunk.empty,
+      grounding =
+        if refusing then GroundingDecision.Refuse(MemoryRagContextSourceResolver.RefusalMessage)
+        else GroundingDecision.Proceed,
       citations = result.hits.map { case (hit, citation) =>
         RunCitation(
           citation.id,
@@ -140,19 +147,26 @@ final class MemoryRagContextSourceResolver(
             .map(entry => ContextMemory(entry.key, renderMemory(entry.value), entry.importance))
         }
 
-  /** 有 tenant、非空 query 且 limit>0 时执行权限检索，否则安全地返回空来源。 */
+  /** 有 tenant、非空 query 且 limit>0 时执行权限检索。缺少 tenant 记为证据不足，不伪装成未评估。 */
   private def resolveRetrieval(
       state: AgentState,
       query: String
   ): IO[ContextError, ResolvedRetrieval] =
-    (state.runContext.tenantId, query.nonEmpty, policy.retrievalLimit > 0) match
-      case (Some(tenant), true, true) =>
-        val retrieval = retriever
-          .retrieve(
-            query,
-            RetrievalScope(TenantId(tenant), state.runContext.scopes, runId = Some(state.runId)),
-            policy.retrievalLimit
+    val tenant = state.runContext.tenantId.map(_.trim).filter(_.nonEmpty)
+    (tenant, query.nonEmpty, policy.retrievalLimit > 0) match
+      case (None, true, true) =>
+        ZIO.succeed(ResolvedRetrieval(Chunk.empty, insufficient = true, evidenceStatus = "MissingTenant"))
+      case (Some(tenantId), true, true) =>
+        val retrieval = documentFilter(state).flatMap { filter =>
+          retriever.retrieve(
+            RetrievalRequest(
+              query,
+              RetrievalScope(TenantId(tenantId), state.runContext.scopes, runId = Some(state.runId)),
+              policy.retrievalLimit,
+              filter = filter
+            )
           )
+        }
         operationTelemetry
           .fold(retrieval)(_.retrieval(state.runId, "retrieve")(retrieval)(_.hits.length.toLong))
           .mapError(retrievalError)
@@ -175,6 +189,22 @@ final class MemoryRagContextSourceResolver(
             )
           }
       case _ => ZIO.succeed(ResolvedRetrieval(Chunk.empty, insufficient = false))
+
+  /** 属性里出现资料范围时必须合法。未出现时保持租户授权库，避免把旧的非知识 Run 全部拒绝。 */
+  private def documentFilter(state: AgentState): IO[RetrievalError, RetrievalFilter] =
+    val attributes = state.runContext.attributes
+    val mentioned  = attributes.contains(DocumentScope.ModeAttribute) ||
+      attributes.contains(DocumentScope.SingleAttribute) ||
+      attributes.contains(DocumentScope.ManyAttribute)
+    if !mentioned then ZIO.succeed(RetrievalFilter.empty)
+    else
+      ZIO
+        .fromEither(DocumentScope.parse(attributes))
+        .mapError(message => AgentError.RetrievalFailed(message))
+        .map {
+          case DocumentScope.Unrestricted    => RetrievalFilter.empty
+          case DocumentScope.Restricted(ids) => RetrievalFilter(documentIds = ids)
+        }
 
   final private case class ResolvedRetrieval(
       hits: Chunk[(RetrievalHit, Citation)],
@@ -199,9 +229,8 @@ final class MemoryRagContextSourceResolver(
     AgentError.ContextBuildFailed(s"知识检索失败: ${error.message}")
 
 object MemoryRagContextSourceResolver:
-  private val LowEvidenceInstruction =
-    "Knowledge retrieval explicitly reported insufficient evidence. Do not infer a grounded answer from memory or " +
-      "general knowledge; state that the available evidence is insufficient and request a safer next step."
+  /** 证据不足时的用户可见终态，不进入模型上下文。 */
+  val RefusalMessage: String = "现有授权资料不足以回答这个问题。请换一种问法，或指定包含相关内容的文档。"
 
   /** 从 MemoryStore、Retriever 和策略装配生产 resolver。 */
   val layer: URLayer[MemoryStore & Retriever & MemoryRagContextPolicy, ContextSourceResolver] =

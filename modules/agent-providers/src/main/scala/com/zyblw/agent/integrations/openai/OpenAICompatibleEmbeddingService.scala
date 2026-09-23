@@ -52,8 +52,10 @@ final case class OpenAICompatibleEmbeddingConfig(
     maxCharactersPerText: Int = 100_000,
     maxCharactersPerBatch: Int = 500_000,
     requestTimeout: Duration = 60.seconds,
-    defaultOptions: Map[String, Json] = Map.empty
+    defaultOptions: Map[String, Json] = Map.empty,
+    tokenizerId: Option[String] = None
 ):
+  require(tokenizerId.forall(id => id.trim.nonEmpty && id == id.trim), "tokenizerId 不能为空白")
   require(providerId.trim.nonEmpty, "providerId 不能为空")
   require(baseUrl.trim.nonEmpty, "baseUrl 不能为空")
   require(apiKey.trim.nonEmpty, "apiKey 不能为空")
@@ -101,7 +103,8 @@ object OpenAICompatibleEmbeddingConfig:
       apiKey = apiKey,
       model = model,
       dimension = dimension,
-      sendDimensions = true
+      sendDimensions = true,
+      tokenizerId = Some(TokenCounter.Cl100k.id)
     )
 
   /** OpenAI-compatible Embedding 的 ZIO Config 描述。
@@ -121,9 +124,21 @@ object OpenAICompatibleEmbeddingConfig:
         Config.boolean("EMBEDDING_SEND_DIMENSIONS").withDefault(true) ++
         Config.int("EMBEDDING_MAX_BATCH_SIZE").withDefault(128) ++
         Config.int("EMBEDDING_MAX_TEXTS_PER_REQUEST").withDefault(10_000) ++
-        Config.duration("EMBEDDING_REQUEST_TIMEOUT").withDefault(60.seconds)
+        Config.duration("EMBEDDING_REQUEST_TIMEOUT").withDefault(60.seconds) ++
+        Config.string("EMBEDDING_TOKENIZER").optional
     ).mapAttempt {
-      case (providerId, baseUrl, apiKey, model, dimension, sendDimensions, maxBatchSize, maxTexts, timeout) =>
+      case (
+            providerId,
+            baseUrl,
+            apiKey,
+            model,
+            dimension,
+            sendDimensions,
+            maxBatchSize,
+            maxTexts,
+            timeout,
+            tokenizer
+          ) =>
         OpenAICompatibleEmbeddingConfig(
           providerId = providerId,
           baseUrl = baseUrl,
@@ -133,7 +148,8 @@ object OpenAICompatibleEmbeddingConfig:
           sendDimensions = sendDimensions,
           maxBatchSize = maxBatchSize,
           maxTextsPerRequest = maxTexts,
-          requestTimeout = timeout
+          requestTimeout = timeout,
+          tokenizerId = tokenizer.map(_.trim).filter(_.nonEmpty)
         )
     }
 
@@ -162,7 +178,9 @@ final class OpenAICompatibleEmbeddingService(
 ) extends EmbeddingModel:
   val dimension: Int                               = config.dimension
   override val capabilities: EmbeddingCapabilities =
-    EmbeddingDefaults.denseCapabilities(config.dimension, config.maxTextsPerRequest)
+    EmbeddingDefaults
+      .denseCapabilities(config.dimension, config.maxTextsPerRequest)
+      .copy(tokenizerId = config.tokenizerId)
   override val descriptor: EmbeddingProviderDescriptorV2 =
     EmbeddingProviderDescriptorV2(config.providerId, config.model, capabilities)
 

@@ -20,7 +20,7 @@
 
 - `RetrievalMode` 支持 `Hybrid`、`VectorOnly`、`LexicalOnly`、`Phrase`。
 - `RetrievalFilter` 在 ACL 之后、打分之前约束 document、chunk、page、heading 和 metadata。
-- `knowledge_search` 与 `knowledge_fetch` 是正式只读工具；tenant 和 permissions 只能来自可信宿主上下文。
+- `knowledge_search` 与 `knowledge_fetch` 是正式只读工具；tenant 和 permissions 只能来自可信宿主上下文。资料范围也必须由宿主显式声明：`documentScope=unrestricted` 或非空文档 ID。空白范围不会放宽成全库。
 - `AgentState` fresh-install schemaVersion 1 保存有界 citations 与 retrievalEvidence；0.9 之前的候选编号不是可读历史版本。
 - 文档提取、chunk、embedding、rerank、回答与 citation 必须记录同一条 retrieval lineage。
 

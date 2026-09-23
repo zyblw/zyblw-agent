@@ -5,7 +5,8 @@ All notable user-visible changes will be recorded here. The project follows
 
 ## 0.9.0 - Unreleased
 
-- `knowledge_search` / `knowledge_fetch` 遵守宿主写入的 `scopeDocumentId`。模型省略文档时锁在该范围；改到范围外或取回范围外的块会在正文返回前失败。
+- 知识资料范围改为显式状态：`documentScope=unrestricted` 才允许查授权库，非空 `scopeDocumentId` / `scopeDocumentIds` 限定文档；空白或缺失会拒绝，不再放宽成全库。`knowledge_fetch` 在查询时施加文档条件。证据不足且策略为 `RequireExplicitRefusal` 时，Runtime 直接拒绝，不再把记忆或检索正文交给模型。Qwen Embedding 只声明已启用的 `Dense`，并且不再声称返回 usage。live 知识摄入必须设置 `EMBEDDING_TOKENIZER`，切分计数器与该声明不一致时拒绝建索引。
+- `knowledge_search` / `knowledge_fetch` 遵守宿主写入的文档范围。模型省略文档时锁在该范围；改到范围外或取回范围外的块会在正文返回前失败。
 - Langfuse Score 取消契约改为先确认无限响应流已经开始，再中断调用 Fiber。固定睡眠不再决定 Body 是否关闭。
 - 现行文档对齐到 0.9 空库基线：贡献命令使用 `0.9.0-local`，OpenAPI 统一为 `1.2.0`，核心概念、Inspector、Workflow 与持久化说明不再把候选期 v4/v5 兼容读取或 0.3 SQL 写成当前安装步骤。本条不改变 Scala、HTTP、SQL 或成熟度等级。宿主 soak、主备 SLO、领域金标和 Experimental 能力仍保持原边界。
 - 将 `zio-json` 固定为 `1.0.0`，与 `zio-schema-json` 1.8.7 / ZIO HTTP 3.11.6 的编译线一致；单独覆盖到 1.1.0 会在 Endpoint JSON 解码时触发 `Lexer.firstField` 的 `NoSuchMethodError`。

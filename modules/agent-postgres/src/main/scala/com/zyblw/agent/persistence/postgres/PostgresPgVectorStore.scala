@@ -317,6 +317,13 @@ final class PostgresPgVectorStore(
       chunkIds: Set[String],
       scope: RetrievalScope
   ): IO[RetrievalError, Chunk[DocumentChunk]] =
+    fetchChunks(chunkIds, scope, RetrievalFilter.empty)
+
+  override def fetchChunks(
+      chunkIds: Set[String],
+      scope: RetrievalScope,
+      filter: RetrievalFilter
+  ): IO[RetrievalError, Chunk[DocumentChunk]] =
     if chunkIds.isEmpty then ZIO.succeed(Chunk.empty)
     else
       withConnection { connection =>
@@ -325,6 +332,7 @@ final class PostgresPgVectorStore(
             s"""SELECT $chunkSelectColumns
               |FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
               |WHERE tenant_id = ? AND permissions <@ ?::text[] AND chunk_id = ANY(?)
+              |AND (? = 0 OR document_id = ANY(?::text[]))
               |${visibilitySql()}
               |ORDER BY chunk_id""".stripMargin
           )
@@ -332,7 +340,9 @@ final class PostgresPgVectorStore(
             statement.setString(1, scope.tenantId.value)
             statement.setArray(2, connection.createArrayOf("text", scope.permissions.toArray))
             statement.setArray(3, connection.createArrayOf("text", chunkIds.toArray))
-            bindVisibility(statement, 4, scope)
+            statement.setInt(4, filter.documentIds.size)
+            statement.setArray(5, connection.createArrayOf("text", filter.documentIds.toArray))
+            bindVisibility(statement, 6, scope)
             val result  = statement.executeQuery()
             val builder = ChunkBuilder.make[DocumentChunk]()
             while result.next() do builder += readChunk(result, scope)

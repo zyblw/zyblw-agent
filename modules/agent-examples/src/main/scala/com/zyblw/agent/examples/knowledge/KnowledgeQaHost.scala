@@ -151,6 +151,7 @@ object KnowledgeQaHost extends ZIOAppDefault:
       .withInstructions("只根据已授权知识回答，并给出可核验引用。资料不足时明确拒绝编造。")
       .allowTools(KnowledgeTools.Allowed)
       .withMetadata("scenario", "knowledge-qa")
+      .withMetadata(KnowledgeTools.contextSourceMetadata._1, KnowledgeTools.contextSourceMetadata._2)
       .buildFor(KnowledgeQaLayers.applicationConfig(config).toolPolicy)
       .flatMap { agent =>
         if config.jdbcUrl.exists(_.nonEmpty) then config.requireDurableDatabase *> serveDurable(config, agent)
@@ -167,12 +168,14 @@ object KnowledgeQaHost extends ZIOAppDefault:
       KnowledgeQaLayers.inMemoryStack,
       KnowledgeQaLayers.tools,
       KnowledgeQaLayers.scriptedModel,
-      MemoryRagContextSourceResolver.configured(MemoryRagContextPolicy()),
+      MemoryRagContextSourceResolver.configured(
+        MemoryRagContextPolicy(lowEvidenceResponse = LowEvidenceResponse.RequireExplicitRefusal)
+      ),
       ProductionSupportLayers.guardrails,
       ProductionSupportLayers.observer(config),
       AgentApplication.inMemory(WorkerId(config.workerId), KnowledgeQaLayers.applicationConfig(config)),
       AgentRegistry.fromAgents(List(agent)),
-      ProductionSupportLayers.identity(config),
+      KnowledgeQaLayers.knowledgeIdentity(config),
       DurableRunEventStream.default,
       AgentHttpApi.layer,
       AgentHostReadiness.alwaysReady,
@@ -202,7 +205,7 @@ object KnowledgeQaHost extends ZIOAppDefault:
       ProductionSupportLayers.durableMemory,
       KnowledgeQaLayers.durableApplication(config),
       AgentRegistry.fromAgents(List(agent)),
-      ProductionSupportLayers.identity(config),
+      KnowledgeQaLayers.knowledgeIdentity(config),
       DurableRunEventStream.default,
       AgentHttpApi.layer,
       AgentHostReadiness.jdbc,

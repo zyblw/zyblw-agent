@@ -18,7 +18,7 @@ final case class DocumentStructureChunkerConfig(
     overlapCharacters: Int = 120,
     mergePeers: Boolean = true,
     strategyVersion: String = "document-structure-v2",
-    /** token 装箱预算。默认对齐 cl100k Embedding tokenizer；`maxCharacters` 只作硬性安全上限。 */
+    /** token 装箱预算。默认计数器是 cl100k，只适用于声明了同一 tokenizer 的 Embedding；`maxCharacters` 是硬性安全上限。 */
     maxTokens: Option[Int] = Some(512),
     tokenCounter: TokenCounter = TokenCounter.Cl100k
 ):
@@ -212,6 +212,23 @@ final class DocumentStructureChunker(
 
 object DocumentStructureChunker:
   val layer: ULayer[Chunker] = ZLayer.succeed(DocumentStructureChunker(): Chunker)
+
+  /** 按 Embedding 声明的 tokenizer 构造切分器。未声明时仍使用 cl100k，并依赖索引对齐检查拒绝假装对齐的 live 模型。 */
+  val alignedLayer: ZLayer[EmbeddingModel, RetrievalError, Chunker] =
+    ZLayer.fromZIO {
+      ZIO.serviceWithZIO[EmbeddingModel] { model =>
+        model.capabilities.tokenizerId match
+          case None =>
+            ZIO.succeed(DocumentStructureChunker(): Chunker)
+          case Some(id) =>
+            ZIO
+              .fromOption(TokenCounter.get(id))
+              .orElseFail(AgentError.RetrievalFailed(s"未知 Embedding tokenizer: $id"))
+              .map(counter =>
+                DocumentStructureChunker(DocumentStructureChunkerConfig(tokenCounter = counter))
+              )
+      }
+    }
 
   def configured(config: DocumentStructureChunkerConfig): ULayer[Chunker] =
     ZLayer.succeed(DocumentStructureChunker(config): Chunker)
