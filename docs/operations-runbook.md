@@ -1,7 +1,10 @@
 # 运维 Runbook
 
 > 状态：当前值班手册（Wave 0 证据合同）
-> 最后核验：2026-08-22
+> 最后核验：2026-09-23
+>
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+>
 > 事实来源：`queueSnapshot` / `wakeQueueSnapshot` 源码、管理控制台 `QueueOps`、`integration-tests/*soak*.sh`、`integration-tests/*kill-recovery*.sh`、[生产接入基线](production-readiness.md)
 
 本文告诉值班人员**看到什么数字、先查什么、不要做什么**。它不发明尚未测得的生产 SLO。仓库回归里的 P95 只是本机/CI 基线，不能直接当成对客承诺。Docker/VM 安装、升级和恢复见 [Docker/VM 手册](operations-docker-vm.md)。

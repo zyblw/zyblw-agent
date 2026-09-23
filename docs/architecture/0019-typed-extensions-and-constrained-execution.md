@@ -1,7 +1,8 @@
 # ADR 0019：Typed Extensions、Precise Approvals 与 Constrained Execution
 
-> 状态：**Accepted / 规划合同**（决策已定，实现按 Wave 路线落地；不改变 `0.6.x` 已发布契约，直至对应代码与 migration 落地）
+> 状态：**Accepted / Wave 0–2 已落地**（Wave 3 Tree/Fork/Replay 与编排仍为 Proposed。候选期编号已折叠进 0.9 State v1 / SQL V001，不保留旧 JSON 读取）
 > 日期：2026-08-22
+> 最后核验：2026-09-23
 > 影响：审批模型、扩展接口、工具执行边界、Context 装配、公共协议；继承并扩展 [ADR-0018](0018-next-generation-runtime-kernel.md)
 >
 > 配套工作手册：[next-generation-runtime.md](next-generation-runtime.md)
@@ -25,11 +26,13 @@ Codex **没有推翻** ADR-0018 的路线；它进一步证明：Kernel 应该�
 
 ## 需要解决的问题
 
-1. 当前审批绑定的是「冻结的 callId + 工具契约指纹」，尚未绑定「具体副作用」的完整主体（输入指纹、执行环境、权限 profile、policy 版本）。放宽后的审批可能在环境或参数漂移后仍被复用。
-2. `ContextContributor` 已是 seam，但 ToolProvider / SkillProvider / ApprovalReviewer / LifecycleObserver 等扩展面尚无正式契约；缺一份「Extension 能拿到什么、绝不能做什么」的合同。
-3. 工具默认在宿主进程直接执行；sandbox 只是 MCP 模块内的 Experimental 能力。执行环境与权限没有一级抽象，无法支撑 Docker/K8s/远程执行器等未来实现。
-4. Contributor 每轮全量渲染上下文；长运行 Agent 缺少「状态未变则不重复发给模型」的 world-state 语义。
-5. HTTP `http.contract` 已把公共 DTO 与内部恢复 Schema 解耦,但缺 stable/experimental 分级与独立于内部实现的协议版本化声明。
+下列 1–5 是 2026-08-22 决策时的缺口。Wave 1–2 的实施状态写在各决定小节；Wave 3 仍未开始。
+
+1. 决策时审批绑定的是「冻结的 callId + 工具契约指纹」，尚未绑定「具体副作用」的完整主体（输入指纹、执行环境、权限 profile、policy 版本）。放宽后的审批可能在环境或参数漂移后仍被复用。该缺口已由 `ApprovalSubject` 关闭。
+2. 决策时 `ContextContributor` 已是 seam，但 ToolProvider / SkillProvider / ApprovalReviewer / LifecycleObserver 等扩展面尚无正式契约。该契约已落地；扩展仍然不能批准、不能升为 System、不能取消已发生的副作用。
+3. 决策时工具默认在宿主进程直接执行，执行环境与权限没有一级抽象。`ExecutionEnvironment` / `PermissionProfile` 第一刀已落地，现有身份是 `local` 与 `mcp-sandbox`。Docker/K8s/远程执行器仍未实现，Sandbox 仍是 Experimental。
+4. 决策时 Contributor 每轮全量渲染上下文。Context section 的快照/差量第一刀已落地。显式 Provider cache dialect 仍待，缓存命中不能改变授权或恢复。
+5. 决策时 HTTP 契约缺 stable/experimental 分级。该声明已落地；稳定业务协议仍是 `/api/v1` 与 OpenAPI `1.2.0`，管理面保持 Beta。
 
 ## 决定
 

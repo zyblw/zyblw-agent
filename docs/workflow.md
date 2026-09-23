@@ -1,7 +1,7 @@
 # 声明式 Workflow Graph
 
 > 状态：Experimental
-> 最后核验：2026-08-01
+> 最后核验：2026-09-23
 > 事实来源：`core.workflow` 源码、`WorkflowSpec`、PostgreSQL 18 集成测试与 `GraphWorkflowExample`
 
 `zyblw-agent` 的 Workflow 是一个小型、类型化、可恢复的 StateGraph。它用于“步骤和控制边在运行前可以声明”的确定性长流程，
@@ -149,7 +149,7 @@ Durable 模式对每次节点访问建立稳定 `(runId, step, nodeId)` 台账�
 5. 旧 owner 的 heartbeat、prepare 或 commit 会被 owner/token/generation/expiry fencing 拒绝。
 
 暂停 outcome 也先进入 ledger 并与暂停 checkpoint 原子提交；后续 `resume` 使用新的 step/visit 再次进入同一业务节点。应用状态
-和 pending outcome 需要 `JsonCodec[S]` 才能使用 PostgreSQL Adapter。0.3 基线同时保存确定性 TEXT、JSONB 和 SHA-256，
+和 pending outcome 需要 `JsonCodec[S]` 才能使用 PostgreSQL Adapter。0.9 V001 同时保存确定性 TEXT、JSONB 和 SHA-256，
 读取时对 identity、状态不变量、容量与 checksum fail-closed。
 
 ### 耐久 timer 与 signal
@@ -192,6 +192,7 @@ val receipt = executionStore.signal(
 - 注册 wait、Prepared execution 与 checkpoint 在同一事务提交；恢复提交时消费旧 wait，也可同时注册下一次 wait；
 - deadline 以 UTC 绝对时间保存并统一到毫秒精度；重启不会重新计时；
 - `(waitKey, signalId)` 是去重身份；相同 ID/相同 payload 返回 `Duplicate`，不同 payload 返回冲突；
+- `signal` 必须绑定 `AuthorizationFingerprint`。相同 signalId 换指纹视为冲突。`HumanTask` 可声明期望指纹；指纹不是 Prompt 约定；
 - signal 仅能在 deadline 前胜出；PostgreSQL 用数据库时钟和行锁裁决 signal/timeout，恰好等于 deadline 时 timeout 胜出；
 - payload 上限默认 64 KiB，不进入 timeline、通用指标或日志；
 - `currentWait` 只返回尚未消费的当前等待；Pending 状态下普通 `resume` 返回 `workflow-wait-pending`；已决议等待则返回

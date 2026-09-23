@@ -1,7 +1,10 @@
 # 管理 API 与运维控制台
 
 > 状态：当前（Beta；不属于稳定 OpenAPI 承诺，见 [HTTP API 演进 §2.1](http-api-versioning.md)）
-> 最后核验：2026-09-15
+> 最后核验：2026-09-23
+>
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+>
 > 事实来源：`modules/agent-core/src/main/scala/com/zyblw/agent/admin/`、
 > `modules/agent-zio-http/.../AdminHttpApi.scala`、`modules/agent-dashboard/`、
 > `agent-postgres` 的 `V001__zyblw_agent_0_9_baseline.sql`

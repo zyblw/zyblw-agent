@@ -2,7 +2,10 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-14
+> 最后核验：2026-09-23
+>
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+>
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -27,6 +30,7 @@
 - `DangerousActionTool`：演示审批，不执行真实危险操作。
 - `knowledge_search` / `knowledge_fetch`：`agent-rag` 的 `KnowledgeTools`。tenant/permissions 由运行时注入，模型不得覆盖。
   `knowledge_search` 支持 `hybrid|vector|lexical|phrase` 与结构化过滤。需要 `knowledge:read`。
+  宿主若在 `RunContext.attributes` 写入 `scopeDocumentId`，检索被锁在该文档；模型把 `documentIds` 改到范围外，或 `knowledge_fetch` 取回范围外的块，都会在返回正文前失败。
 
 生产工具应实现业务级幂等键；支付、删除、发布和外部消息不能仅靠 callId 或普通 Runtime 工具账本默认重试。
 PostgreSQL 业务写应使用 `PostgresReliableWriteTool.make`，它强制经同事务执行器运行，不能用普通 `Tool.json` 后只修改

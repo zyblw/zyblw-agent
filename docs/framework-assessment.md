@@ -1,7 +1,7 @@
 # zyblw-agent 能力审计、框架对照与演进判断
 
 > 状态：当前审计
-> 最后核验：2026-09-19
+> 最后核验：2026-09-23
 > 事实来源：当前源码、测试、构建、迁移、发布工作流，以及文末列出的官方框架资料
 > 演进排序的权威来源：[ADR-0019](architecture/0019-typed-extensions-and-constrained-execution.md) 的 Wave 0–3；本文用于能力现状与竞品对照，不另立路线
 
@@ -20,12 +20,11 @@
 
 但它也还不是经过大规模生产证明的通用平台。完成度最高的是“正确、安全、可恢复地执行一次 Agent Run”；完成度较弱的是：
 
-- 完整生产参考宿主，而不是无数据库五分钟路径；
 - 真实长会话下的 Context 质量与 Prompt Cache 成本证据；
-- 一等的计划、目标、任务清单与按需 Skill；Artifact 已有 PostgreSQL 耐久 Adapter，但对象存储、线上保留期和真实业务治理仍未闭环；
-- 跨版本数据库/JSON/API 兼容演练；
-- trace viewer、调试 UI、客户端 SDK 和独立外部用户反馈；
-- 多节点 soak、容量模型、SLO、备份恢复与真实攻击测试。
+- Harness 的 Goal/Plan/Todo/Skill 与按需目录已经落地，仍缺脱敏长任务和人工校准；Artifact 已有 PostgreSQL 耐久 Adapter，对象存储、线上保留期和真实业务治理仍未闭环；
+- 跨版本数据库/JSON/API 兼容演练。`0.9` 是空库基线，不提供从 `0.8` 原地升级；
+- 低敏 Run Inspector、事故包 CLI 和运维控制台 SSE 调试器已落地；筛选导出、客户端 SDK 和独立外部用户反馈仍缺；
+- 多节点 soak、容量模型、SLO、备份恢复与真实攻击测试。生产参考入口已经是 `ProductionSupportHost` 与 `KnowledgeQaHost`，无数据库五分钟路径已删除。
 
 因此，项目当前最重要的动作不是继续拆模块或增加多 Agent 名词，而是让已有单 Agent 主线更易用、更可测、更可运营。
 
@@ -43,11 +42,11 @@ lease/fencing、PostgreSQL、RAG 引用和低敏观测已经形成可信地基�
 
 | 证据 | 结果 | 能证明什么 | 不能证明什么 |
 |---|---|---|---|
-| `sbt -batch 'scalafmtCheckAll;scalafmtSbtCheck;testFull'` | pass（当前工作树全量通过） | 全模块格式、确定性单元和契约基线可编译、可执行 | 真实 Provider、数据库主备、长时负载 |
-| `RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull` | pass | PostgreSQL 18.6 / pgvector 0.8.6 Testcontainers 的唯一 V001、并发、事务、RAG ACL、embedding 身份 fail-closed、恢复契约 | 生产数据量、跨可用区故障、RPO/RTO |
-| Dashboard `typecheck` / `lint` / production `build` | pass（Node.js 26、React 19.3、TypeScript 6） | 当前管理 DTO 与 UI 可类型检查并产出生产静态构建 | 浏览器、真实宿主授权和线上负载 |
-| 280 个主 Scala 源码文件、195 个测试 Scala 源码文件 | 事实 | 不是示例级代码库，测试投入较高 | 文件数量和测试数量本身不等于成熟度 |
-| `AgentRuntimeDriver.scala` 814 行、`PostgresWorkflowCheckpointStore.scala` 1,896 行 | 风险信号 | Driver 已与纯 Kernel 分离；Workflow SQL 效果编排仍集中，需要按变化原因继续收口 | 不能仅凭行数判定设计错误 |
+| `sbt -batch 'scalafmtCheckAll;scalafmtSbtCheck;testFull'` | pass（2026-09-23） | 全模块格式、确定性单元和契约基线可编译、可执行 | 真实 Provider、数据库主备、长时负载 |
+| `RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull` | pass（2026-09-23，114 项，0 忽略） | PostgreSQL 18.6 / pgvector 0.8.6 Testcontainers 的唯一 V001、并发、事务、RAG ACL、embedding 身份 fail-closed、恢复契约 | 生产数据量、跨可用区故障、RPO/RTO |
+| Dashboard `typecheck` / `lint` / production `build` / Playwright e2e | pass（2026-09-23；Node.js 26、React 19.3、TypeScript 6） | 当前管理 DTO、静态构建和五条浏览器契约 | 真实宿主授权和线上负载 |
+| 283 个主 Scala 源码文件、199 个测试 Scala 源码文件 | 事实 | 不是示例级代码库，测试投入较高 | 文件数量和测试数量本身不等于成熟度 |
+| `AgentRuntimeDriver.scala` 773 行、`PostgresWorkflowCheckpointStore.scala` 1,812 行 | 风险信号 | Driver 已与纯 Kernel 分离；Workflow SQL 效果编排仍集中，需要按变化原因继续收口 | 不能仅凭行数判定设计错误 |
 
 发布候选仍必须补充精确 Central 制品的独立 consumer、真实 Provider 小额度 smoke、业务固定数据集、部署环境恢复和
 生产观测证据。测试通过只说明当前已编码契约成立，不授予未测试能力更高成熟度。
@@ -178,10 +177,10 @@ execution claim 与完成 cycle 一一对应。下一步是部署节点丢失、
 2. **文档示例密度不足**：需要按“最小内存 → 真实 Provider → 工具 → PostgreSQL → HTTP → RAG”逐步递进。
 3. **Context 工程仍缺线上闭环**：已有预算和压缩机制，但缓存命中率、上下文丢弃与答案质量的关联还没有长期数据。
 4. **Harness 有基础设施、缺业务证据**：Goal/Plan/Todo/Skill ADT、CAS Store、PostgreSQL Adapter、Steering/FollowUp、
-   ArtifactReference 与跨 Run 任务预算已落地，但真实脱敏长任务数据、人工校准与 on-demand SkillCatalog（Wave 2）仍缺；
+   ArtifactReference、跨 Run 任务预算与 Wave 2 的按需 Skill 目录已落地。真实脱敏长任务数据、人工校准仍缺。
    Artifact 已有 PostgreSQL 耐久 Adapter；对象存储、多模态正文、线上保留治理和 Tool 接入仍待真实需求验证。
-5. **开发工具仍处早期**：已有安全 Run Inspector、分页 Timeline 和机械一致性诊断，但尚无成熟 CLI/UI、筛选导出和
-   checkpoint fork/time-travel。
+5. **开发工具仍处早期**：已有安全 Run Inspector、`RunTrajectory`、分页 Timeline、事故包 CLI 和运维控制台的低敏 SSE 调试器。筛选导出、真实事故验证和
+   checkpoint fork/time-travel 仍缺。
 6. **生态小**：没有独立下游、第三方 Provider/Tool 插件和真实公开发布反馈。
 
 ## 四、本轮吸收的能力
@@ -219,7 +218,7 @@ fail-closed。框架仍不会保存隐藏推理正文。
 `ProductionSupportHost` 是官方入口：PostgreSQL、真实 Provider、可信身份、审批写工具和 ZIO HTTP。
 `AgentQuickstart` 已删除；未注册工具仍在正式 Application 路径上于模型调用前失败。`RunInspection`
 把权威状态和事件投影为低敏 Timeline，检查 sequence、审批、usage 与终态一致性，
-OpenAPI `1.1.0` 已提供授权后的 `/api/v1/runs/{runId}/inspection`。
+OpenAPI `1.2.0` 已提供授权后的 `/api/v1/runs/{runId}/inspection`。
 
 这只是调试基础，不是成熟 Run Studio，也不是可执行 time-travel。详细边界见
 [Run Inspector、Timeline 与安全调试](run-inspection.md)。

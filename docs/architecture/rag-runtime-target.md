@@ -2,7 +2,7 @@
 
 > 状态：Implemented baseline + staged roadmap（“当前事实”以源码和测试为准，后续能力仍按阶段门禁）  
 > 适用基线：zyblw-agent 0.9.x 当前代码  
-> 最后核验：2026-09-10  
+> 最后核验：2026-09-23
 > 面向读者：框架维护者、Cursor/编码代理、宿主应用开发者、评测与运维负责人
 
 本文给出 zyblw-agent RAG 能力的完整目标架构、兼容演进方式、数据库模型、Provider 契约、检索与重排流水线、评测、安全、可观测性、上线和回滚方案。它不是“从零重写”提案，而是在现有 `agent-rag`、`agent-document-loaders`、`agent-rerank`、`agent-providers`、`agent-postgres` 和 `agent-evals` 上做可验证的增强。
@@ -10,7 +10,7 @@
 本文的核心结论是：
 
 1. 保留现有模块边界、`RagApplication` 门面、结构化切分、PostgreSQL 混合检索、RRF、rerank、citation、ACL 和索引 staging/activation；这些已经构成可靠基线。
-2. 下一步首先补“协议和版本切换正确性”，而不是先堆新算法：Embedding v2、Knowledge Space/Profile、原子蓝绿激活、Evidence Bundle 和真实领域评测集。
+2. Space/Profile、原子激活、census 与 EvidenceBundle 已进入 0.9 基线。下一步是真实 OCR/恶意 PDF、tokenizer 对齐切分和领域评测，而不是再堆一套检索内核。Embedding 稀疏路与 planner assist 默认关闭。
 3. Qwen3.7 dense+sparse、query/document 区分和 instruct 应由能力协商表达；Qwen 稀疏向量是可选的第三路召回，不替换 PostgreSQL FTS，也不成为 Provider 无关内核的硬依赖。
 4. RAG 的授权边界必须在召回和展开之前生效；检索内容永远是不可信数据，不能改变 Agent 权限、工具策略或系统指令。
 5. 任何增强都必须通过固定数据集的消融实验获得增益证明；GraphRAG、通用 agentic retrieval、multimodal、late interaction 暂不进入当前主线。

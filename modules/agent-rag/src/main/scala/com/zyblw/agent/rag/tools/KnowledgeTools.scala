@@ -13,6 +13,9 @@ object KnowledgeTools:
   val FetchName: ToolName    = ToolName("knowledge_fetch")
   val Allowed: Set[ToolName] = Set(SearchName, FetchName)
 
+  /** 宿主写入的资料范围。模型可以收窄，不能改写或省略后搜全集。 */
+  val ScopeDocumentAttribute: String = "scopeDocumentId"
+
   val policyFragment: ToolPolicyConfig = ToolPolicyConfig(allowedTools = Allowed)
 
   final case class SearchInput(
@@ -83,7 +86,7 @@ object KnowledgeTools:
   def searchTool(rag: RagApplication): Tool[Any, SearchInput, AgentError, SearchOutput] =
     Tool.json[Any, SearchInput, AgentError, SearchOutput](
       SearchName,
-      "在已授权的知识库中检索可引用资料。返回短摘录与 chunkId，细讲时再 knowledge_fetch。不要填写 tenant 或 permissions。",
+      "在已授权的知识库中检索可引用资料。返回短摘录与 chunkId，细讲时再 knowledge_fetch。不要填写 tenant 或 permissions。宿主已限定资料时，documentIds 只能收窄，不能改到范围外。",
       searchSchema,
       None,
       knowledgeReadMetadata()
@@ -92,7 +95,7 @@ object KnowledgeTools:
         _      <- rejectCallerOverride(input.tenantId, input.permissions)
         scope  <- trustedScope(context)
         mode   <- parseMode(input.mode)
-        filter <- parseFilter(input)
+        filter <- parseFilter(input, context)
         result <- rag
           .retrieve(RagQuery(input.query, scope, input.limit, mode, filter))
           .mapError(error => AgentError.ToolExecutionFailed(SearchName.value, error.message, error.retryable))
@@ -113,6 +116,11 @@ object KnowledgeTools:
         result <- rag
           .fetch(Set(input.chunkId), scope)
           .mapError(error => AgentError.ToolExecutionFailed(FetchName.value, error.message, error.retryable))
+        _ <- rejectOutsideDocumentScope(
+          FetchName.value,
+          result.hits.map(_.chunk.documentId).toSet,
+          hostDocumentIds(context)
+        )
       yield toOutput(result, includeFullChunkText = true)
     }
 
@@ -147,18 +155,56 @@ object KnowledgeTools:
       case Some(other)                            =>
         ZIO.fail(AgentError.ToolInputInvalid(SearchName.value, s"不支持的检索模式: $other"))
 
-  private def parseFilter(input: SearchInput): IO[AgentError, RetrievalFilter] =
-    ZIO
-      .attempt {
-        RetrievalFilter(
-          documentIds = input.documentIds.fold(Set.empty[String])(_.toSet),
-          chunkIds = input.chunkIds.fold(Set.empty[String])(_.toSet),
-          pages = input.pages.fold(Set.empty[Int])(_.toSet),
-          headingPrefix = Chunk.fromIterable(input.headingPrefix.getOrElse(Nil)),
-          metadataEquals = input.metadataEquals.getOrElse(Map.empty)
-        )
-      }
-      .mapError(error => AgentError.ToolInputInvalid(SearchName.value, error.getMessage))
+  /** 宿主通过 RunContext 限定的文档。空集表示这次 Run 没有资料范围。 */
+  def hostDocumentIds(context: ToolExecutionContext): Set[String] =
+    context.runContext.attributes
+      .get(ScopeDocumentAttribute)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .toSet
+
+  /** 模型给出的 documentIds 只能是宿主范围的子集。未给出时使用宿主范围，不能退回全库。 */
+  def constrainDocumentIds(
+      toolName: String,
+      requested: Set[String],
+      host: Set[String]
+  ): IO[AgentError, Set[String]] =
+    if host.isEmpty then ZIO.succeed(requested.filter(_.trim.nonEmpty))
+    else if requested.isEmpty || requested.subsetOf(host) then
+      ZIO.succeed(if requested.isEmpty then host else requested)
+    else ZIO.fail(AgentError.ToolInputInvalid(toolName, "documentIds 超出宿主限定的资料范围"))
+
+  /** 取回的块必须落在宿主范围内。范围外的正文不会进入工具结果。 */
+  def rejectOutsideDocumentScope(
+      toolName: String,
+      documentIds: Set[String],
+      host: Set[String]
+  ): IO[AgentError, Unit] =
+    if host.isEmpty || documentIds.subsetOf(host) then ZIO.unit
+    else ZIO.fail(AgentError.ToolInputInvalid(toolName, "chunk 不在宿主限定的资料范围内"))
+
+  private def parseFilter(
+      input: SearchInput,
+      context: ToolExecutionContext
+  ): IO[AgentError, RetrievalFilter] =
+    for
+      documentIds <- constrainDocumentIds(
+        SearchName.value,
+        input.documentIds.fold(Set.empty[String])(_.iterator.map(_.trim).filter(_.nonEmpty).toSet),
+        hostDocumentIds(context)
+      )
+      filter <- ZIO
+        .attempt {
+          RetrievalFilter(
+            documentIds = documentIds,
+            chunkIds = input.chunkIds.fold(Set.empty[String])(_.toSet),
+            pages = input.pages.fold(Set.empty[Int])(_.toSet),
+            headingPrefix = Chunk.fromIterable(input.headingPrefix.getOrElse(Nil)),
+            metadataEquals = input.metadataEquals.getOrElse(Map.empty)
+          )
+        }
+        .mapError(error => AgentError.ToolInputInvalid(SearchName.value, error.getMessage))
+    yield filter
 
   def toSearchOutput(result: RetrievalResult, includeFullChunkText: Boolean): SearchOutput =
     val seedCount = result.evidence.acceptedCount.max(0)

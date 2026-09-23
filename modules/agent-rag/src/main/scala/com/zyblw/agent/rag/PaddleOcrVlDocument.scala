@@ -146,10 +146,10 @@ object PaddleOcrVlDocument:
       ordinal += 1
 
     def rememberFigure(pageNumber: Int, blockId: String, raw: RawBlock): Unit =
-      val url = httpsUrl(raw.sourceUrl).getOrElse("")
-      val box = raw.bbox.getOrElse((0.0, 0.0, 0.0, 0.0))
+      val url                        = httpsUrl(raw.sourceUrl).getOrElse("")
+      val box                        = raw.bbox.getOrElse((0.0, 0.0, 0.0, 0.0))
       val (left, top, right, bottom) = box
-      val croppable = right - left >= 8 && bottom - top >= 8
+      val croppable                  = right - left >= 8 && bottom - top >= 8
       if url.nonEmpty || croppable then
         figures = figures :+ PendingFigure(blockId, url, pageNumber, left, top, right, bottom)
 
@@ -182,8 +182,7 @@ object PaddleOcrVlDocument:
                 val text = clampText(title)
                 if text.nonEmpty && !ImageOnly.matches(text) then
                   val blockId = s"p${page.number}-b$ordinal"
-                  if kind == DocumentBlockKind.Picture then
-                    rememberFigure(page.number, blockId, raw)
+                  if kind == DocumentBlockKind.Picture then rememberFigure(page.number, blockId, raw)
                   appendBlock(page, raw, kind, text)
       }
     }

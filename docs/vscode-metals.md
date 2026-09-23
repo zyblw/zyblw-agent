@@ -1,6 +1,10 @@
 # VS Code 与 Metals
 
 > 状态：运行手册
+> 最后核验：2026-09-23
+>
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+>
 > 事实来源：`build.sbt`、`project/build.properties`、`.vscode/` 与 Metals 官方文档
 
 在独立的 `zyblw-agent/` checkout 根目录打开 VS Code；不要把它作为 `zyblw-platform` 的嵌套文件夹打开。这样

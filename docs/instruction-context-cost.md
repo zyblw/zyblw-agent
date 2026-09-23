@@ -1,7 +1,10 @@
 # 指令、Context 与成本工程
 
 > 状态：当前说明
-> 最后核验：2026-09-16
+> 最后核验：2026-09-23
+>
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+>
 > 事实来源：`Instructions.scala`、`AgentDefinitionBuilder.scala`、`ContextManager.scala`、`PromptCompiler.scala`、Provider Adapter、Runtime 与测试
 > 详细契约：[Prompt Runtime](prompt-runtime.md)、[ADR-0029](architecture/0029-context-authority-prompt-lineage.md)
 

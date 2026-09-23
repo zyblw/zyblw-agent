@@ -1,7 +1,10 @@
 # 0.9.0 全新安装
 
 > 状态：当前唯一安装基线
-> 最后核验：2026-09-17
+> 最后核验：2026-09-23
+>
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+>
 
 `0.9.0` 只支持全新数据库。不要导入旧 Flyway history、旧 Run、旧 embedding cache 或旧知识索引；业务资料应按当前 tokenizer、Embedding、切分和 ACL 规则重新摄入。
 

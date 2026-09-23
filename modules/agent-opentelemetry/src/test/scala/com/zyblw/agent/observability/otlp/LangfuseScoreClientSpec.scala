@@ -21,7 +21,8 @@ object LangfuseScoreClientSpec extends ZIOSpecDefault:
   private def routes(
       requests: Ref[Chunk[(String, String)]],
       attempts: Ref[Int],
-      cancelClosed: Promise[Nothing, Unit]
+      cancelClosed: Promise[Nothing, Unit],
+      cancelStarted: Option[Promise[Nothing, Unit]] = None
   ): Routes[Any, Response] = Routes(
     Method.POST / "api" / "public" / "scores" -> handler { (request: Request) =>
       request.body.asString
@@ -39,7 +40,9 @@ object LangfuseScoreClientSpec extends ZIOSpecDefault:
               Response.json("""{"message":"credential-sensitive-body"}""").copy(status = Status.Unauthorized)
             else if body.contains("oversized_score") then Response.text("x" * 2048)
             else if body.contains("cancel_score") then
-              val stream = ZStream.fromZIO(ZIO.never).drain.ensuring(cancelClosed.succeed(()).unit)
+              val markStarted = cancelStarted.fold(ZIO.unit)(_.succeed(()).unit)
+              val stream      =
+                ZStream.fromZIO(markStarted *> ZIO.never).drain.ensuring(cancelClosed.succeed(()).unit)
               Response(body = Body.fromStreamChunked(stream))
             else Response.json("""{"id":"accepted"}""")
         }
@@ -136,11 +139,12 @@ object LangfuseScoreClientSpec extends ZIOSpecDefault:
     },
     test("响应大小有硬上限，调用 Fiber 取消会关闭无限 HTTP Body") {
       for
-        requests     <- Ref.make(Chunk.empty[(String, String)])
-        attempts     <- Ref.make(0)
-        cancelClosed <- Promise.make[Nothing, Unit]
-        result       <- (for
-          port   <- Server.install(routes(requests, attempts, cancelClosed))
+        requests      <- Ref.make(Chunk.empty[(String, String)])
+        attempts      <- Ref.make(0)
+        cancelStarted <- Promise.make[Nothing, Unit]
+        cancelClosed  <- Promise.make[Nothing, Unit]
+        result        <- (for
+          port   <- Server.install(routes(requests, attempts, cancelClosed, Some(cancelStarted)))
           client <- ZIO.service[Client]
           scoreClient = ZioHttpLangfuseScoreClient(
             client,
@@ -148,14 +152,14 @@ object LangfuseScoreClientSpec extends ZIOSpecDefault:
           )
           oversized <- scoreClient.publish(numericScore("oversized_score")).exit
           fiber     <- scoreClient.publish(numericScore("cancel_score")).fork
-          _         <- ZIO.sleep(50.millis)
+          _         <- cancelStarted.await
           cancelled <- fiber.interrupt
-          closed    <- cancelClosed.await.timeout(2.seconds)
-        yield (oversized, cancelled, closed)).provide(
+          _         <- cancelClosed.await
+        yield (oversized, cancelled)).provide(
           Client.default,
           Server.defaultWith(_.onAnyOpenPort)
         )
-      yield assertTrue(result._1.isFailure, result._2.isInterrupted, result._3.isDefined)
+      yield assertTrue(result._1.isFailure, result._2.isInterrupted)
     },
     test("默认拒绝自由文本、comment、NaN 和白名单外名称，校验失败前不发送 HTTP") {
       val restrictive = LangfuseScoresConfig(

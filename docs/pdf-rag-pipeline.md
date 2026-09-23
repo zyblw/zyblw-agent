@@ -1,6 +1,10 @@
 # PDF RAG 生产流水线
 
 > 状态：0.9.0 书籍问答基线；tokenizer 对齐切分 + Hybrid/Vector/Lexical/Phrase
+> 最后核验：2026-09-23
+>
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+>
 > 事实来源：`agent-rag`、`agent-document-loaders`、`agent-postgres`、optional pgvector migrations 与真实 PostgreSQL Testcontainers
 
 本指南回答一个具体问题：一批 PDF 从目录/对象存储进入框架后，如何变成可撤回、可授权、可追溯、可评测的
