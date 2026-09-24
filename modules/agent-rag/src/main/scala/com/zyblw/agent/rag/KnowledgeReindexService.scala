@@ -111,7 +111,12 @@ final class KnowledgeReindexService(
                 request.targetProfileId
               )
             )
-            .as(KnowledgeReindexItem(documentId, KnowledgeReindexStatus.Reindexed))
+            .map {
+              case DocumentIngestionOutcome.Indexed(_, _) =>
+                KnowledgeReindexItem(documentId, KnowledgeReindexStatus.Reindexed)
+              case DocumentIngestionOutcome.Failed(_, _, _, code, _) =>
+                KnowledgeReindexItem(documentId, KnowledgeReindexStatus.Failed, Some(code))
+            }
       }
       .catchAll(error =>
         ZIO.succeed(KnowledgeReindexItem(documentId, KnowledgeReindexStatus.Failed, Some(error.message)))

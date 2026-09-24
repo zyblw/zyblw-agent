@@ -112,6 +112,15 @@ object PaddleOcrVlDocumentSpec extends ZIOSpecDefault:
         box.pageWidth.contains(600)
       )
     },
+    test("百度结果中的空白页保留页序") {
+      val withBlankPage =
+        """{"pages":[{"page_num":0,"layouts":[]},{"page_num":1,"layouts":[{"text":"正文","type":"text"}]}]}"""
+      val parsed = PaddleOcrVlDocument.decode(withBlankPage, None).toOption.get
+      assertTrue(
+        parsed.pageCount == 2,
+        parsed.blocks.head.origins.head.pageNumber == 2
+      )
+    },
     test("Markdown 标题标点不一致时仍恢复层级，缺失时按中文编号兜底") {
       val outline =
         """# 中医之逻辑方法论
@@ -229,5 +238,29 @@ object PaddleOcrVlDocumentSpec extends ZIOSpecDefault:
     },
     test("无法识别的 JSON 不会被当成正文") {
       assertTrue(PaddleOcrVlDocument.decode("{\"error_code\":0}", None).isLeft)
+    },
+    test("超过块与正文上限时拒绝导入，不发布被截断的书") {
+      val oversizedBlock =
+        s"""[{"prunedResult":{"parsing_res_list":[{"block_label":"text","block_content":"${"中" * 100_001}"}]}}]"""
+      val tooMany =
+        "[" + (0 to 20_000)
+          .map(index =>
+            s"""{"prunedResult":{"parsing_res_list":[{"block_label":"text","block_content":"第${index}条"}]}}"""
+          )
+          .mkString(",") + "]"
+      assertTrue(
+        PaddleOcrVlDocument.decode(oversizedBlock).left.exists(_.contains("单块正文超过上限")),
+        PaddleOcrVlDocument.decode(tooMany).left.exists(_.contains("正文块超过上限"))
+      )
+    },
+    test("页面解析缺失和过长标题明确失败") {
+      val missingPage =
+        """[{"prunedResult":{"parsing_res_list":[{"block_label":"text","block_content":"正文"}]}},{}]"""
+      val longTitle =
+        s"""[{"prunedResult":{"parsing_res_list":[{"block_label":"paragraph_title","block_content":"${"章" * 301}"}]}}]"""
+      assertTrue(
+        PaddleOcrVlDocument.decode(missingPage).left.exists(_.contains("页面未完整识别")),
+        PaddleOcrVlDocument.decode(longTitle).left.exists(_.contains("单个标题超过上限"))
+      )
     }
   )

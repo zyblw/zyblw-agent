@@ -19,6 +19,7 @@ object PaddleOcrVlDocument:
   val MaxMarkdownChars    = 4_000_000
   private val MaxBlocks   = 20_000
   private val MaxText     = 100_000
+  private val MaxTitle    = 300
   private val HeadingLine = """^(#{1,6})[ \t]+(.+?)\s*$""".r
   private val ImageOnly   =
     """(?s)^\s*(?:<img\b[^>]*>|!\[[^\]]*\]\([^)]+\)|<div[^>]*>\s*<img\b[^>]*>\s*</div>)\s*$""".r
@@ -74,10 +75,21 @@ object PaddleOcrVlDocument:
         .flatMap { root =>
           val pages = extractPages(root)
           if pages.isEmpty then Left("JSON 里没有可识别的 PaddleOCR 页面")
+          else if declaredPageCount(root).exists(_ != pages.length) then Left("PaddleOCR 页面未完整识别，拒绝导入不完整文档")
+          else if pages.iterator.flatMap(_.blocks).count(raw => !NoiseLabels.contains(raw.label)) > MaxBlocks
+          then Left(s"PaddleOCR 正文块超过上限 $MaxBlocks")
+          else if pages.iterator
+              .flatMap(_.blocks)
+              .exists(raw => !NoiseLabels.contains(raw.label) && raw.text.length > MaxText)
+          then Left(s"PaddleOCR 单块正文超过上限 $MaxText")
           else Right(assemble(pages, outline))
         }
         .flatMap { parsed =>
           if parsed.sections.isEmpty && parsed.blocks.isEmpty then Left("没有可导入的正文")
+          else if parsed.sections.length + parsed.blocks.length > MaxBlocks then
+            Left(s"PaddleOCR 章节和正文块超过上限 $MaxBlocks")
+          else if parsed.sections.exists(_.title.length > MaxTitle) then Left(s"PaddleOCR 单个标题超过上限 $MaxTitle")
+          else if parsed.blocks.exists(_.text.length > MaxText) then Left(s"PaddleOCR 单块正文超过上限 $MaxText")
           else Right(parsed)
         }
 
@@ -170,7 +182,7 @@ object PaddleOcrVlDocument:
       while index < prepared.length do
         val raw     = prepared(index)
         var advance = 1
-        if ordinal < MaxBlocks && !NoiseLabels.contains(raw.label) then
+        if !NoiseLabels.contains(raw.label) then
           val absorbed = prepared.lift(index + 1).flatMap(next => titleContinuation(raw, next, headings))
           val source   =
             absorbed match
@@ -183,7 +195,7 @@ object PaddleOcrVlDocument:
             if !stack.headOption.exists(_._4 == "目录") then
               val level = stack.headOption.fold(1)(parent => math.min(6, parent._1 + 1))
               openSection(level, None, "目录", page.number): Unit
-            appendBlock(page, source, DocumentBlockKind.Paragraph, clampText(title))
+            appendBlock(page, source, DocumentBlockKind.Paragraph, title)
           else
             classify(source.label, title) match
               case None                     => ()
@@ -202,7 +214,7 @@ object PaddleOcrVlDocument:
                   )
                   openSection(level, origin, cleaned, page.number): Unit
               case Some(Right(kind)) =>
-                val text = clampText(title)
+                val text = title
                 if text.nonEmpty && !ImageOnly.matches(text) then
                   val blockId = s"p${page.number}-b$ordinal"
                   if kind == DocumentBlockKind.Picture then rememberFigure(page.number, blockId, source)
@@ -422,6 +434,17 @@ object PaddleOcrVlDocument:
           .getOrElse(Vector.empty)
       case _ => Vector.empty
 
+  private def declaredPageCount(root: Json): Option[Int] =
+    unwrap(root) match
+      case Json.Arr(values) => Some(values.length)
+      case obj: Json.Obj    =>
+        arrayField(obj, "pages")
+          .filter(looksLikeBaiduPages)
+          .orElse(arrayField(obj, "layoutParsingResults"))
+          .orElse(arrayField(obj, "layout_parsing_results"))
+          .map(_.length)
+      case _ => None
+
   private def unwrap(json: Json): Json =
     json match
       case obj: Json.Obj =>
@@ -483,11 +506,15 @@ object PaddleOcrVlDocument:
     val number  = intField(json, "page_num")
       .map(value => if zeroBased then value + 1 else normalizePageNumber(value, index))
       .getOrElse(index + 1)
-    if layouts.isEmpty && stringField(json, "text").isEmpty then None
+    if intField(json, "page_num").isEmpty && arrayField(json, "layouts").isEmpty &&
+      stringField(json, "text").isEmpty
+    then None
     else
       val blocks =
         if layouts.isEmpty then
-          Vector(RawBlock(0, "text", stringField(json, "text").getOrElse("").trim, None, None, None))
+          stringField(json, "text")
+            .filter(_.trim.nonEmpty)
+            .fold(Vector.empty[RawBlock])(text => Vector(RawBlock(0, "text", text.trim, None, None, None)))
         else
           layouts.zipWithIndex.map { case (layout, order) =>
             val id        = stringField(layout, "layout_id")
@@ -677,10 +704,7 @@ object PaddleOcrVlDocument:
   private def clampLevel(level: Int): Int = math.max(1, math.min(6, level))
 
   private def clampTitle(value: String): String =
-    value.replaceAll("\\s+", " ").trim.take(300)
-
-  private def clampText(value: String): String =
-    if value.length <= MaxText then value else value.take(MaxText)
+    value.replaceAll("\\s+", " ").trim
 
   private def field(json: Json, name: String): Option[Json] =
     json match

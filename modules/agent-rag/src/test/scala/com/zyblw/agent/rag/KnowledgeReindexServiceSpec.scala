@@ -188,6 +188,38 @@ object KnowledgeReindexServiceSpec extends ZIOSpecDefault:
           .forall(_.length == 1)
       )
     },
+    test("Continue 摄入返回 Failed 时重建不得误报成功") {
+      for
+        store    <- InMemoryKnowledgeIndexStore.make
+        calls    <- Ref.make(0)
+        registry <- DocumentLoaderRegistry.make(Chunk(loader))
+        seed = DocumentIngestionService(
+          registry,
+          KnowledgeIndexer(SlidingWindowChunker(32, 0), countingEmbedding(calls), store),
+          failureMode = DocumentIngestionFailureMode.FailFast
+        )
+        _ <- seed.ingestOne(
+          DocumentIngestionRequest(markdown("doc-a", "阴阳者天地之道"), tenant, permissions, "seed-a")
+        )
+        before <- store.active(KnowledgeDocumentKey(tenant, "doc-a"))
+        continuing = DocumentIngestionService(
+          registry,
+          KnowledgeIndexer(SlidingWindowChunker(32, 0), countingEmbedding(calls), store),
+          failureMode = DocumentIngestionFailureMode.Continue
+        )
+        service = KnowledgeReindexService(
+          KnowledgeIndexDirectory.inMemory(store),
+          store,
+          continuing,
+          sources(Map("doc-a" -> ""))
+        )
+        report <- service.reindex(request)
+        after  <- store.active(KnowledgeDocumentKey(tenant, "doc-a"))
+      yield assertTrue(
+        report.items.headOption.exists(_.status == KnowledgeReindexStatus.Failed),
+        after.map(_.build.version) == before.map(_.build.version)
+      )
+    },
     test("并行重建同一文档不会留下两个 active") {
       for
         store <- InMemoryKnowledgeIndexStore.make
