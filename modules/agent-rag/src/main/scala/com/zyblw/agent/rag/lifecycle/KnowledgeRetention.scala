@@ -8,7 +8,7 @@ import zio.*
 final case class KnowledgeRetentionPolicy(
     retainAfter: Duration = 14.days,
     batchSize: Int = 50,
-    legalHoldDocumentIds: Set[String] = Set.empty
+    legalHold: Set[KnowledgeDocumentKey] = Set.empty
 ):
   require(retainAfter > Duration.Zero, "retention window 必须为正")
   require(batchSize > 0 && batchSize <= 1000, "retention batchSize 必须位于 1..1000")
@@ -18,16 +18,12 @@ final class KnowledgeRetentionWorker(
     policy: KnowledgeRetentionPolicy = KnowledgeRetentionPolicy(),
     cache: Option[EmbeddingCacheStore] = None
 ):
-  /** 撤回一个空间中的一个文档修订，并失效该租户 embedding cache。 */
-  def withdraw(
-      key: KnowledgeDocumentKey,
-      documentRevisionId: String,
-      knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId("default")
-  ): IO[RetrievalError, Unit] =
-    store.withdraw(key, documentRevisionId, knowledgeSpaceId) *>
+  /** 撤回一个空间中一个文档的一个来源修订，并失效该租户 embedding cache。 */
+  def withdraw(key: KnowledgeDocumentKey, sourceRevisionId: String): IO[RetrievalError, Unit] =
+    store.withdraw(key, sourceRevisionId) *>
       cache.fold(ZIO.unit)(_.invalidateTenant(key.tenantId))
 
   /** 清理到期且非 active 的终态；legal-hold 文档不得进入 purge。 */
   def runOnce(now: Instant = Instant.now()): IO[RetrievalError, Long] =
     val cutoff = now.minusMillis(policy.retainAfter.toMillis)
-    store.purgeInactive(cutoff, policy.batchSize, policy.legalHoldDocumentIds)
+    store.purgeInactive(cutoff, policy.batchSize, policy.legalHold)

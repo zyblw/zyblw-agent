@@ -407,23 +407,25 @@ val knowledgePersistence
 错误绑定到旧暂存块。
 
 `ingestionId` 是业务幂等键：进程在发布成功、确认命令之前崩溃时，重试会直接返回 Ready manifest，不再次调用付费
-Provider。同一键绑定不同 content hash、Embedding 描述、权限、metadata 或 `indexingStrategy` 会失败。切分、清洗、
-OCR 或中文分词算法变化时必须提升 `indexingStrategy`，否则无法证明旧暂存块可安全重放。
+Provider。空白键由 HMAC 覆盖知识空间、Profile、文档、`DocumentLineage` 与构建规格摘要派生。同一键绑定不同谱系、
+`IndexBuildSpec`、权限或请求 metadata 会失败。只改版面结构也会改变 `structureSha256`，因此得到新的摄取。
 
 PostgreSQL `activate` 通过文档级 advisory transaction lock 串行化首次创建和并发发布，并在一个事务中完成：
 
 1. 锁定 Building manifest；
-2. 校验暂存块精确数量；
-3. 将旧 active manifest 标记 `superseded`；
+2. 在 SQL 中重算暂存块集合摘要，并与调用方的 `ChunkSetDigest` 比较；
+3. 将同一 Profile 的旧 active manifest 标记 `superseded`；
 4. 替换正式 chunk 快照；
 5. 将新 manifest 推进到 `ready + active`；
 6. 清理暂存块。
 
-块数不一致、唯一约束或连接故障会回滚整个切换，检索继续读取旧完整版本。
+摘要不一致、唯一约束或连接故障会回滚整个切换，检索继续读取旧完整版本。
 
-文档下线必须调用 `KnowledgeIndexStore.retire(key, expectedActiveVersion)`，不能直接删向量行。它在文档 advisory lock
-下验证 active version、把 manifest 推进为 `Retired` 并在同一事务删除正式块；命令确认前崩溃后用相同版本重试可幂等
-返回。迟到的旧版本删除请求不能误删刚发布的新版本。
+目录下架调用 `KnowledgeIndexStore.retire(key, expectedActiveVersion)`，不能直接删向量行，也不写来源修订墓碑。它在文档 advisory lock
+下验证 active version、把该文档在空间内全部 Profile 的 active 副本推进为 `Retired`，并在同一事务删除正式块。同一版本重试可幂等
+返回，同一审校稿可以再次 `begin`。迟到的旧版本删除请求不能误删刚发布的新版本。
+
+`withdraw(key, sourceRevisionId)` 是另一条路径：错误修订必须永不复活时才使用。未知修订直接失败；命中后删除正式块并写墓碑，墓碑阻止该修订再次 begin/activate。产品下架不要调用它。
 
 `purgeInactive(updatedBefore, limit)` 只领取 Superseded/Failed/Retired，使用稳定顺序与 `SKIP LOCKED` 有界删除；
 Building 和 Ready/active 永不进入 retention 候选。暂存块由 manifest 外键级联清理。

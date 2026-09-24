@@ -193,17 +193,24 @@ object DocumentLoaderRegistry:
       ZIO.fail(AgentError.RetrievalFailed("DocumentLoader structure 超过 block/origin/字段边界"))
     else ZIO.succeed(document.copy(metadata = merged))
 
-/** 一份流式摄取请求；tenant、permissions 与 ingestionId 必须来自可信业务控制面。 */
+/** 一份流式摄取请求；tenant、permissions、ingestionId 与 source 必须来自可信业务控制面。
+  *
+  * @param ingestionId
+  *   稳定幂等键；空字符串表示由完整谱系与构建规格推导
+  * @param source
+  *   原件修订；缺失时以解析输入字节摘要作为来源修订
+  */
 final case class DocumentIngestionRequest(
     input: DocumentInput,
     tenantId: TenantId,
     permissions: Set[String],
     ingestionId: String,
     expectation: ActiveVersionExpectation = ActiveVersionExpectation.AnyVersion,
-    knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId("default"),
-    targetProfileId: Option[IndexProfileId] = None
+    knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId.Default,
+    targetProfileId: Option[IndexProfileId] = None,
+    source: Option[SourceRevision] = None
 ):
-  require(ingestionId.trim.nonEmpty && ingestionId.length <= 500, "Document ingestionId 长度必须位于 1..500")
+  require(ingestionId.length <= 200, "Document ingestionId 长度不能超过 200")
 
 /** 批量摄取的错误传播方式。 */
 enum DocumentIngestionFailureMode:
@@ -277,7 +284,8 @@ final class DocumentIngestionService(
   ): ZStream[Any, RetrievalError, DocumentIngestionOutcome] =
     requests.mapZIOPar(maxParallelism) { request =>
       val process = for
-        document <- loaders.load(request.input)
+        digest   <- ZIO.succeed(DocumentIngestionService.ArtifactDigest())
+        document <- loaders.load(request.input.copy(content = request.input.content.mapChunks(digest.update)))
         result   <- indexer.index(
           document,
           request.tenantId,
@@ -285,7 +293,8 @@ final class DocumentIngestionService(
           request.ingestionId,
           request.expectation,
           request.knowledgeSpaceId,
-          request.targetProfileId
+          request.targetProfileId,
+          IngestionProvenance(request.source, digest.result, Some(request.input.declaredMediaType))
         )
       yield DocumentIngestionOutcome.Indexed(
         document.id,
@@ -307,6 +316,23 @@ final class DocumentIngestionService(
       .someOrFail(AgentError.RetrievalFailed("Document ingestion 未产生结果"))
 
 object DocumentIngestionService:
+  /** Loader 顺序消费输入流时累积的字节摘要；Loader 未读取任何字节时没有摘要。 */
+  final private[rag] class ArtifactDigest:
+    private val digest = java.security.MessageDigest.getInstance("SHA-256")
+    private var bytes  = 0L
+
+    def update(chunk: Chunk[Byte]): Chunk[Byte] =
+      synchronized {
+        digest.update(chunk.toArray)
+        bytes += chunk.length
+      }
+      chunk
+
+    def result: Option[String] =
+      synchronized {
+        Option.when(bytes > 0L)(digest.clone().asInstanceOf[java.security.MessageDigest].digest())
+      }.map(_.iterator.map(byte => f"${byte & 0xff}%02x").mkString)
+
   /** 从注册表与索引器构造高层摄取服务，避免宿主手写无状态 glue layer。 */
   def layer(
       maxParallelism: Int = 2,

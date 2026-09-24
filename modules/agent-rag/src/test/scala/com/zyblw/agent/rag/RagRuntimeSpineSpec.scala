@@ -5,16 +5,25 @@ import zio.*
 import zio.test.*
 
 object RagRuntimeSpineSpec extends ZIOSpecDefault:
-  private def publication(build: KnowledgeIndexBuild): ProfilePublication =
-    val census = Chunk(ProfileDocument(build.key.documentId, build.version, build.contentHash, 1))
-    ProfilePublication(census, "contract-evaluation", ProfilePublication.digest(census), qualityPassed = true)
+  import KnowledgeFixtures.*
 
   def spec = suite("RAG runtime spine")(
     test("ingestionKey 可推导且确定性") {
-      val a = IngestionKeys.hmac(KnowledgeSpaceId("s"), IndexProfileId("p"), "doc", "rev1", "a" * 64)
-      val b = IngestionKeys.hmac(KnowledgeSpaceId("s"), IndexProfileId("p"), "doc", "rev1", "a" * 64)
-      val c = IngestionKeys.hmac(KnowledgeSpaceId("s"), IndexProfileId("p"), "doc", "rev2", "a" * 64)
-      assertTrue(a == b, a != c, a.length == 64)
+      val keySpec               = KnowledgeFixtures.buildSpec().sha256
+      def key(revision: String) =
+        IngestionKeys
+          .hmac(KnowledgeSpaceId("s"), IndexProfileId("p"), "doc", lineage("doc", revision), keySpec)
+      assertTrue(key("rev1") == key("rev1"), key("rev1") != key("rev2"), key("rev1").length == 64)
+    },
+    test("ingestionKey 覆盖结构摘要：只改版面结构也必须产生新摄取") {
+      val base      = lineage("doc")
+      val relaidOut = base.copy(structureSha256 = "c" * 64)
+      val specSha   = KnowledgeFixtures.buildSpec().sha256
+      val space     = KnowledgeSpaceId.Default
+      assertTrue(
+        IngestionKeys.hmac(space, IndexProfileId("p"), "doc", base, specSha) !=
+          IngestionKeys.hmac(space, IndexProfileId("p"), "doc", relaidOut, specSha)
+      )
     },
     test("planner 不能改 trusted scope；Comparison 最多拆 2 条子查询") {
       val scope =
@@ -73,97 +82,47 @@ object RagRuntimeSpineSpec extends ZIOSpecDefault:
         )(ApprovedSourceResolver.validate)
         .as(assertTrue(true))
     },
-    test("撤回后检索不可见") {
+    test("撤回后检索不可见；未知来源修订的撤回必须失败") {
       val tenant = TenantId("t")
-      val chunk  = DocumentChunk("c1", "doc-1", "可见条文", "book://x", tenant, Set("read"))
+      val key    = KnowledgeDocumentKey(tenant, "doc-1")
+      val vector = Embedding(Chunk(1.0f, 0.0f))
       for
-        store <- InMemoryKnowledgeIndexStore.make
-        vector = Embedding(Chunk(1.0f, 0.0f))
-        _      <- store.upsert(Chunk(IndexedChunk(chunk, vector)))
-        before <- store.search(vector, RetrievalScope(tenant, Set("read")), 5)
-        _      <- store.withdraw(KnowledgeDocumentKey(tenant, "doc-1"), "1")
-        after  <- store.search(vector, RetrievalScope(tenant, Set("read")), 5)
-      yield assertTrue(before.nonEmpty, after.isEmpty)
+        store   <- InMemoryKnowledgeIndexStore.make
+        _       <- beginAndPublish(store, begin(key, "ing-1"), "c1")
+        before  <- store.search(vector, RetrievalScope(tenant, Set("read")), 5)
+        unknown <- store.withdraw(key, "rev-unknown").exit
+        _       <- store.withdraw(key, "rev-1")
+        after   <- store.search(vector, RetrievalScope(tenant, Set("read")), 5)
+      yield assertTrue(before.nonEmpty, unknown.isFailure, after.isEmpty)
     },
-    test("撤回只隐藏同一空间的同一修订，同一修订重新发布仍然不可见") {
-      val tenant                                             = TenantId("t")
-      val vector                                             = Embedding(Chunk(1.0f, 0.0f))
-      def chunk(id: String, revision: String, space: String) =
-        DocumentChunk(id, "doc-1", id, "book://x", tenant, Set("read")).copy(
-          documentRevisionId = Some(revision),
-          knowledgeSpaceId = Some(KnowledgeSpaceId(space))
-        )
-      val descriptor = EmbeddingProviderDescriptor("hash", "hash-2", 2, 8, false)
-      def begin(ingestionId: String, hash: String, space: String) = BeginKnowledgeIndex(
-        KnowledgeDocumentKey(tenant, "doc-1"),
-        ingestionId,
-        "book://x",
-        hash,
-        Set("read"),
-        Map.empty,
-        descriptor,
-        "structure-v1",
-        knowledgeSpaceId = KnowledgeSpaceId(space)
-      )
+    test("撤回只作用于同一空间的同一修订；墓碑阻止同修订重新摄取") {
+      val tenant = TenantId("t")
+      val vector = Embedding(Chunk(1.0f, 0.0f))
+      val spaceA = KnowledgeSpaceId("space-a")
+      val spaceB = KnowledgeSpaceId("space-b")
+      val keyA   = KnowledgeDocumentKey(tenant, "doc-1", spaceA)
+      val keyB   = KnowledgeDocumentKey(tenant, "doc-1", spaceB)
+      def search(space: KnowledgeSpaceId, store: InMemoryKnowledgeIndexStore) =
+        store.search(vector, RetrievalScope(tenant, Set("read"), knowledgeSpaceId = Some(space)), 5)
       for
-        store <- InMemoryKnowledgeIndexStore.make
-        _     <- store.upsert(
-          Chunk(
-            IndexedChunk(chunk("old", "rev-1", "space-a"), vector),
-            IndexedChunk(chunk("newer", "rev-2", "space-a"), vector),
-            IndexedChunk(chunk("other-space", "rev-1", "space-b"), vector)
-          )
+        store  <- InMemoryKnowledgeIndexStore.make
+        _      <- beginAndPublish(store, begin(keyA, "a-rev-1"), "old")
+        _      <- beginAndPublish(store, begin(keyB, "b-rev-1"), "other-space")
+        _      <- store.withdraw(keyA, "rev-1")
+        hidden <- search(spaceA, store)
+        other  <- search(spaceB, store)
+        replay <- store.begin(begin(keyA, "a-rev-1-again", text = "b" * 64)).exit
+        _      <- beginAndPublish(
+          store,
+          begin(keyA, "a-rev-2", revision = "rev-2", text = "c" * 64),
+          "visible-new"
         )
-        _      <- store.withdraw(KnowledgeDocumentKey(tenant, "doc-1"), "rev-1", KnowledgeSpaceId("space-a"))
-        spaceA <- store.search(
-          vector,
-          RetrievalScope(tenant, Set("read"), knowledgeSpaceId = Some(KnowledgeSpaceId("space-a"))),
-          5
-        )
-        spaceB <- store.search(
-          vector,
-          RetrievalScope(tenant, Set("read"), knowledgeSpaceId = Some(KnowledgeSpaceId("space-b"))),
-          5
-        )
-        replay <- store.begin(begin("ingest-same", "a" * 64, "space-a"))
-        _      <- store.stage(
-          replay,
-          Chunk(
-            IndexedChunk(
-              chunk("replay", "rev-1", "space-a").copy(catalogVersion = replay.version),
-              vector
-            )
-          )
-        )
-        _      <- store.activate(replay, 1)
-        hidden <- store.search(
-          vector,
-          RetrievalScope(tenant, Set("read"), knowledgeSpaceId = Some(KnowledgeSpaceId("space-a"))),
-          5
-        )
-        revived <- store.begin(begin("ingest-new", "b" * 64, "space-a"))
-        _       <- store.stage(
-          revived,
-          Chunk(
-            IndexedChunk(
-              chunk("visible-new", "rev-2", "space-a").copy(catalogVersion = revived.version),
-              vector
-            )
-          )
-        )
-        _     <- store.activate(revived, 1)
-        after <- store.search(
-          vector,
-          RetrievalScope(tenant, Set("read"), knowledgeSpaceId = Some(KnowledgeSpaceId("space-a"))),
-          5
-        )
+        after <- search(spaceA, store)
       yield assertTrue(
-        spaceA.map(_.chunk.id).toSet == Set("newer"),
-        spaceB.map(_.chunk.id).toSet == Set("other-space"),
-        !hidden.exists(_.chunk.id == "replay"),
-        hidden.exists(_.chunk.id == "newer"),
-        after.map(_.chunk.id).toSet == Set("newer", "visible-new"),
-        !after.exists(_.chunk.id == "replay")
+        hidden.isEmpty,
+        other.map(_.chunk.id) == Chunk("other-space"),
+        replay.isFailure,
+        after.map(_.chunk.id) == Chunk("visible-new")
       )
     },
     test("sparse 第三路默认关闭，开启后参与 hybrid 融合") {
@@ -189,11 +148,14 @@ object RagRuntimeSpineSpec extends ZIOSpecDefault:
       )
     },
     test("HMAC 对同一密钥确定，更换密钥必须改键") {
-      val args = (KnowledgeSpaceId("s"), IndexProfileId("p"), "doc", "rev1", "a" * 64)
-      val a    = IngestionKeys.hmac(args._1, args._2, args._3, args._4, args._5, "secret-a")
-      val b    = IngestionKeys.hmac(args._1, args._2, args._3, args._4, args._5, "secret-a")
-      val c    = IngestionKeys.hmac(args._1, args._2, args._3, args._4, args._5, "secret-b")
-      assertTrue(a == b, a != c, IngestionKeys.configuredSecret == IngestionKeys.TestSecret)
+      val specSha             = KnowledgeFixtures.buildSpec().sha256
+      def key(secret: String) =
+        IngestionKeys.hmac(KnowledgeSpaceId("s"), IndexProfileId("p"), "doc", lineage("doc"), specSha, secret)
+      assertTrue(
+        key("secret-a") == key("secret-a"),
+        key("secret-a") != key("secret-b"),
+        IngestionKeys.configuredSecret == IngestionKeys.TestSecret
+      )
     },
     test("EvidenceBundle 按 token 与来源多样性裁剪") {
       val tenant = TenantId("t")
@@ -221,192 +183,108 @@ object RagRuntimeSpineSpec extends ZIOSpecDefault:
       val key    = KnowledgeDocumentKey(tenant, "held")
       for
         store <- InMemoryKnowledgeIndexStore.make
-        begin <- store.begin(
-          BeginKnowledgeIndex(
-            key,
-            "ingest-held",
-            "book://held",
-            "a" * 64,
-            Set("read"),
-            Map.empty,
-            EmbeddingProviderDescriptor("hash", "hash-2", 2, 8, false),
-            "structure-v1"
-          )
-        )
-        _ <- store.stage(
-          begin,
-          Chunk(
-            IndexedChunk(
-              DocumentChunk("c", "held", "条文", "book://held", tenant, Set("read"))
-                .copy(catalogVersion = begin.version),
-              Embedding(Chunk(1.0f, 0.0f))
-            )
-          )
-        )
-        ready <- store.activate(begin, 1)
-        _     <- store.retire(key, ready.build.version)
+        build <- beginAndPublish(store, begin(key, "ingest-held"), "c")
+        _     <- store.retire(key, build.version)
         now   <- Clock.instant
-        held  <- store.purgeInactive(now.plusSeconds(1), 10, Set("held"))
+        held  <- store.purgeInactive(now.plusSeconds(1), 10, Set(key))
         gone  <- store.purgeInactive(now.plusSeconds(1), 10)
       yield assertTrue(held == 0L, gone == 1L)
     },
     test("换模完整重建不切换 active 指针；评测 census 与空间级 CAS 后才可见") {
-      val tenant     = TenantId("t")
-      val space      = KnowledgeSpaceId("default")
-      val firstDesc  = EmbeddingProviderDescriptor("hash", "model-a", 2, 8, false)
-      val secondDesc = EmbeddingProviderDescriptor("hash", "model-b", 2, 8, false)
-      val vector     = Embedding(Chunk(1.0f, 0.0f))
+      val tenant = TenantId("t")
+      val space  = KnowledgeSpaceId.Default
+      val first  = buildSpec(model = "model-a")
+      val second = buildSpec(model = "model-b")
+      val keyA   = KnowledgeDocumentKey(tenant, "doc-a")
+      val vector = Embedding(Chunk(1.0f, 0.0f))
       for
-        store <- InMemoryKnowledgeIndexStore.make
-        first <- store.begin(
-          BeginKnowledgeIndex(
-            KnowledgeDocumentKey(tenant, "doc-a"),
-            "ing-a",
-            "book://a",
-            "a" * 64,
-            Set("read"),
-            Map.empty,
-            firstDesc,
-            "s-v1"
-          )
-        )
-        _ <- store.stage(
-          first,
-          Chunk(
-            IndexedChunk(
-              DocumentChunk("c1", "doc-a", "旧模条文", "book://a", tenant, Set("read"))
-                .copy(catalogVersion = first.version),
-              vector
-            )
-          )
-        )
-        _       <- store.activate(first, 1)
-        active1 <- store.resolveActiveProfile(tenant, space)
-        second  <- store.begin(
-          BeginKnowledgeIndex(
-            KnowledgeDocumentKey(tenant, "doc-a"),
-            "ing-b",
-            "book://a",
-            "a" * 64,
-            Set("read"),
-            Map.empty,
-            secondDesc,
-            "s-v1"
-          )
-        )
-        _ <- store.stage(
-          second,
-          Chunk(
-            IndexedChunk(
-              DocumentChunk("c2", "doc-a", "新模条文", "book://a", tenant, Set("read"))
-                .copy(catalogVersion = second.version),
-              vector
-            )
-          )
-        )
-        _         <- store.activate(second, 1)
+        store     <- InMemoryKnowledgeIndexStore.make
+        old       <- beginAndPublish(store, begin(keyA, "ing-a", first), "c1")
+        active1   <- store.resolveActiveProfile(tenant, space)
+        next      <- beginAndPublish(store, begin(keyA, "ing-b", second), "c2")
         active2   <- store.resolveActiveProfile(tenant, space)
         beforeCas <- store.search(vector, RetrievalScope(tenant, Set("read")), 5)
-        cas       <- store.activateProfile(
-          tenant,
-          space,
-          second.profileId,
-          expectedRevision = 1L,
-          reason = "cutover",
-          publication = Some(publication(second))
-        )
-        afterCas <- store.search(
-          vector,
-          RetrievalScope(tenant, Set("read"), pinnedProfileId = Some(second.profileId)),
-          5
-        )
-        oldMutation <- store
-          .begin(
-            BeginKnowledgeIndex(
-              KnowledgeDocumentKey(tenant, "doc-a"),
-              "ing-old-after-cutover",
-              "book://a",
-              "b" * 64,
-              Set("read"),
-              Map.empty,
-              firstDesc,
-              "s-v1",
-              targetProfileId = Some(first.profileId)
-            )
-          )
-          .exit
-        rollback <- store.activateProfile(
-          tenant,
-          space,
-          first.profileId,
-          expectedRevision = cas,
-          reason = "rollback",
-          publication = Some(publication(first))
-        )
-        _             <- store.withdraw(KnowledgeDocumentKey(tenant, "doc-a"), "a" * 64)
-        afterRollback <- store.search(
-          vector,
-          RetrievalScope(tenant, Set("read"), pinnedProfileId = Some(first.profileId)),
-          5
-        )
+        evidence  <- publicationFor(store, next.profileId)
+        cas       <- store.activateProfile(tenant, space, next.profileId, 1L, "cutover", Some(evidence))
+        afterCas  <- store.search(vector, RetrievalScope(tenant, Set("read")), 5)
       yield assertTrue(
-        !first.casActiveProfile || active1.contains(first.profileId),
+        old.casActiveProfile,
+        active1.contains(old.profileId),
+        !next.casActiveProfile,
         active2 == active1,
         beforeCas.map(_.chunk.id) == Chunk("c1"),
-        afterCas.map(_.chunk.id) == Chunk("c2"),
-        oldMutation.isFailure,
-        rollback > cas,
-        afterRollback.isEmpty
+        cas == 2L,
+        afterCas.map(_.chunk.id) == Chunk("c2")
       )
     },
-    test("retire 只删除当前 active Profile 的块并保留旧 Profile 快照") {
-      val tenant = TenantId("retire-profile")
-      val space  = KnowledgeSpaceId("default")
-      val key    = KnowledgeDocumentKey(tenant, "doc-a")
+    test("切换后新文档继续写入 active Profile，回滚目标可显式补齐后回滚（无 Profile 死锁）") {
+      val tenant = TenantId("t")
+      val space  = KnowledgeSpaceId.Default
+      val first  = buildSpec(model = "model-a")
+      val second = buildSpec(model = "model-b")
+      val keyA   = KnowledgeDocumentKey(tenant, "doc-a")
+      val keyB   = KnowledgeDocumentKey(tenant, "doc-b")
+      val pinned =
+        (profile: IndexProfileId) => RetrievalScope(tenant, Set("read"), pinnedProfileId = Some(profile))
       val vector = Embedding(Chunk(1.0f, 0.0f))
-      def build(
-          store: InMemoryKnowledgeIndexStore,
-          ingestionId: String,
-          model: String,
-          chunkId: String
-      ) =
-        for
-          handle <- store.begin(
-            BeginKnowledgeIndex(
-              key,
-              ingestionId,
-              "book://a",
-              "a" * 64,
-              Set("read"),
-              Map.empty,
-              EmbeddingProviderDescriptor("hash", model, 2, 8, false),
-              "s-v1"
-            )
-          )
-          _ <- store.stage(
-            handle,
-            Chunk(
-              IndexedChunk(
-                DocumentChunk(chunkId, "doc-a", chunkId, "book://a", tenant, Set("read"))
-                  .copy(catalogVersion = handle.version),
-                vector
-              )
-            )
-          )
-          _ <- store.activate(handle, 1)
-        yield handle
+      for
+        store       <- InMemoryKnowledgeIndexStore.make
+        old         <- beginAndPublish(store, begin(keyA, "a-old", first), "a-old")
+        next        <- beginAndPublish(store, begin(keyA, "a-new", second), "a-new")
+        evidence    <- publicationFor(store, next.profileId)
+        cas         <- store.activateProfile(tenant, space, next.profileId, 1L, "cutover", Some(evidence))
+        afterWrite  <- beginAndPublish(store, begin(keyB, "b-new", second, text = "b" * 64), "b-new")
+        implicitOld <- store.begin(begin(keyB, "b-old-implicit", first, text = "b" * 64)).exit
+        early       <- publicationFor(store, old.profileId)
+        blocked     <- store.activateProfile(tenant, space, old.profileId, cas, "rollback", Some(early)).exit
+        diff        <- store.profileCorpusDiff(tenant, space, old.profileId)
+        catchUp     <- beginAndPublish(
+          store,
+          begin(keyB, "b-old", first, text = "b" * 64, targetProfileId = Some(old.profileId)),
+          "b-old"
+        )
+        ready    <- publicationFor(store, old.profileId)
+        rollback <- store.activateProfile(tenant, space, old.profileId, cas, "rollback", Some(ready))
+        hits     <- store.search(vector, pinned(old.profileId), 5)
+      yield assertTrue(
+        afterWrite.profileId == next.profileId,
+        implicitOld.isFailure,
+        blocked.isFailure,
+        diff.missing.map(_.documentId) == Chunk("doc-b"),
+        catchUp.profileId == old.profileId,
+        rollback > cas,
+        hits.map(_.chunk.id).toSet == Set("a-old", "b-old")
+      )
+    },
+    test("较早的失败尝试不阻塞 Profile 发布：只看每份文档的最新版本") {
+      val tenant = TenantId("t")
+      val space  = KnowledgeSpaceId.Default
+      val key    = KnowledgeDocumentKey(tenant, "doc-a")
       for
         store  <- InMemoryKnowledgeIndexStore.make
-        first  <- build(store, "retire-a", "model-a", "old")
-        second <- build(store, "retire-b", "model-b", "new")
-        _      <- store.activateProfile(
-          tenant,
-          space,
-          second.profileId,
-          1L,
-          "cutover",
-          Some(publication(second))
+        _      <- beginAndPublish(store, begin(key, "a-old", buildSpec(model = "model-a")), "old")
+        failed <- store.begin(begin(key, "a-fail", buildSpec(model = "model-b")))
+        _      <- store.markFailed(failed, "embedding_timeout")
+        retry  <- beginAndPublish(
+          store,
+          begin(key, "a-retry", buildSpec(model = "model-b"), text = "a" * 64),
+          "new"
         )
+        evidence <- publicationFor(store, retry.profileId)
+        revision <- store.activateProfile(tenant, space, retry.profileId, 1L, "cutover", Some(evidence))
+      yield assertTrue(failed.profileId == retry.profileId, revision == 2L)
+    },
+    test("retire 下线文档在空间内全部 Profile 的副本") {
+      val tenant = TenantId("retire-profile")
+      val space  = KnowledgeSpaceId.Default
+      val key    = KnowledgeDocumentKey(tenant, "doc-a")
+      val vector = Embedding(Chunk(1.0f, 0.0f))
+      for
+        store    <- InMemoryKnowledgeIndexStore.make
+        first    <- beginAndPublish(store, begin(key, "retire-a", buildSpec(model = "model-a")), "old")
+        second   <- beginAndPublish(store, begin(key, "retire-b", buildSpec(model = "model-b")), "new")
+        evidence <- publicationFor(store, second.profileId)
+        _        <- store.activateProfile(tenant, space, second.profileId, 1L, "cutover", Some(evidence))
         _        <- store.retire(key, second.version)
         snapshot <- store.published(key)
         oldHits  <- store.search(
@@ -414,138 +292,93 @@ object RagRuntimeSpineSpec extends ZIOSpecDefault:
           RetrievalScope(tenant, Set("read"), pinnedProfileId = Some(first.profileId)),
           5
         )
+        firstNow <- store.find(key, "retire-a")
       yield assertTrue(
-        snapshot.map(_.chunk.id) == Chunk("old"),
-        oldHits.map(_.chunk.id) == Chunk("old")
+        snapshot.isEmpty,
+        oldHits.isEmpty,
+        firstNow.exists(_.status == KnowledgeIndexStatus.Retired)
       )
     },
     test("并行 Profile 缺少 active corpus 文档时拒绝切换") {
       val tenant = TenantId("partial")
-      val space  = KnowledgeSpaceId("default")
-      val old    = EmbeddingProviderDescriptor("hash", "model-a", 2, 8, false)
-      val next   = EmbeddingProviderDescriptor("hash", "model-b", 2, 8, false)
-      val vector = Embedding(Chunk(1.0f, 0.0f))
-      def begin(
-          store: KnowledgeIndexStore,
-          documentId: String,
-          ingestionId: String,
-          hash: String,
-          descriptor: EmbeddingProviderDescriptor
-      ) =
-        store.begin(
-          BeginKnowledgeIndex(
-            KnowledgeDocumentKey(tenant, documentId),
-            ingestionId,
-            s"book://$documentId",
-            hash,
-            Set("read"),
-            Map.empty,
-            descriptor,
-            "s-v1"
-          )
+      val space  = KnowledgeSpaceId.Default
+      val old    = buildSpec(model = "model-a")
+      val next   = buildSpec(model = "model-b")
+      for
+        store <- InMemoryKnowledgeIndexStore.make
+        _     <- beginAndPublish(store, begin(KnowledgeDocumentKey(tenant, "doc-a"), "old-a", old), "old-a")
+        _     <- beginAndPublish(
+          store,
+          begin(KnowledgeDocumentKey(tenant, "doc-b"), "old-b", old, text = "b" * 64),
+          "old-b"
         )
-      def publish(store: KnowledgeIndexStore, build: KnowledgeIndexBuild, chunkId: String) =
-        store.stage(
-          build,
-          Chunk(
-            IndexedChunk(
-              DocumentChunk(
-                chunkId,
-                build.key.documentId,
-                chunkId,
-                s"book://${build.key.documentId}",
-                tenant,
-                Set("read")
-              )
-                .copy(catalogVersion = build.version),
-              vector
-            )
-          )
-        ) *> store.activate(build, 1)
+        target <- beginAndPublish(store, begin(KnowledgeDocumentKey(tenant, "doc-a"), "new-a", next), "new-a")
+        evidence <- publicationFor(store, target.profileId)
+        cutover  <- store.activateProfile(tenant, space, target.profileId, 1L, "cutover", Some(evidence)).exit
+        diff     <- store.profileCorpusDiff(tenant, space, target.profileId)
+      yield assertTrue(cutover.isFailure, diff.missing.map(_.documentId) == Chunk("doc-b"))
+    },
+    test("块集合摘要不一致时拒绝发布") {
+      val tenant = TenantId("t")
+      val key    = KnowledgeDocumentKey(tenant, "doc-a")
+      for
+        store <- InMemoryKnowledgeIndexStore.make
+        build <- store.begin(begin(key, "ing-a"))
+        staged = Chunk(chunk(build, "c1"), chunk(build, "c2"))
+        _     <- store.stage(build, staged.map(IndexedChunk(_, Embedding(Chunk(1.0f, 0.0f)))))
+        wrong <- store.activate(build, ChunkSetDigest.of(staged.take(1))).exit
+        right <- store.activate(build, ChunkSetDigest.of(staged.reverse))
+      yield assertTrue(
+        wrong.isFailure,
+        right.chunkCount == 2,
+        right.chunkSetSha256.contains(ChunkSetDigest.of(staged).sha256)
+      )
+    },
+    test("同一文档 ID 在不同空间互不影响版本与 active 状态") {
+      val tenant = TenantId("t")
+      val keyA   = KnowledgeDocumentKey(tenant, "doc", KnowledgeSpaceId("space-a"))
+      val keyB   = KnowledgeDocumentKey(tenant, "doc", KnowledgeSpaceId("space-b"))
       for
         store   <- InMemoryKnowledgeIndexStore.make
-        first   <- begin(store, "doc-a", "old-a", "a" * 64, old)
-        _       <- publish(store, first, "old-a")
-        second  <- begin(store, "doc-b", "old-b", "b" * 64, old)
-        _       <- publish(store, second, "old-b")
-        target  <- begin(store, "doc-a", "new-a", "a" * 64, next)
-        _       <- publish(store, target, "new-a")
-        cutover <- store
-          .activateProfile(tenant, space, target.profileId, 1L, "cutover", Some(publication(target)))
-          .exit
-      yield assertTrue(cutover.isFailure)
+        a1      <- beginAndPublish(store, begin(keyA, "same-ingestion"), "a1")
+        b1      <- beginAndPublish(store, begin(keyB, "same-ingestion"), "b1")
+        a2      <- beginAndPublish(store, begin(keyA, "a-2", revision = "rev-2", text = "b" * 64), "a2")
+        activeB <- store.active(keyB)
+      yield assertTrue(
+        a1.version == 1L,
+        b1.version == 1L,
+        a2.version == 2L,
+        activeB.map(_.build.version).contains(1L)
+      )
     },
     test("钉死 profile 后切换不影响进行中查询") {
       val tenant = TenantId("t")
       val vector = Embedding(Chunk(1.0f, 0.0f))
       for
         store <- InMemoryKnowledgeIndexStore.make
-        first <- store.begin(
-          BeginKnowledgeIndex(
-            KnowledgeDocumentKey(tenant, "doc-a"),
-            "ing-a",
-            "book://a",
-            "a" * 64,
-            Set("read"),
-            Map.empty,
-            EmbeddingProviderDescriptor("hash", "model-a", 2, 8, false),
-            "s-v1"
-          )
-        )
-        _ <- store.stage(
-          first,
-          Chunk(
-            IndexedChunk(
-              DocumentChunk("c1", "doc-a", "旧", "book://a", tenant, Set("read"))
-                .copy(catalogVersion = first.version),
-              vector
-            )
-          )
-        )
-        _ <- store.activate(first, 1)
+        first <- beginAndPublish(store, begin(KnowledgeDocumentKey(tenant, "doc-a"), "ing-a"), "c1")
         pinned = RetrievalScope(tenant, Set("read"), pinnedProfileId = Some(first.profileId))
-        during <- store.search(vector, pinned, 5)
-        _      <- store.activateProfile(
+        during   <- store.search(vector, pinned, 5)
+        evidence <- publicationFor(store, first.profileId)
+        _        <- store.activateProfile(
           tenant,
-          KnowledgeSpaceId("default"),
+          KnowledgeSpaceId.Default,
           first.profileId,
           1L,
           "noop",
-          Some(publication(first))
+          Some(evidence)
         )
       yield assertTrue(during.exists(_.chunk.documentId == "doc-a"))
     },
     test("CAS 并发只有一个成功") {
       val tenant = TenantId("t")
-      val space  = KnowledgeSpaceId("default")
-      val desc   = EmbeddingProviderDescriptor("hash", "model-a", 2, 8, false)
+      val space  = KnowledgeSpaceId.Default
       for
-        store <- InMemoryKnowledgeIndexStore.make
-        first <- store.begin(
-          BeginKnowledgeIndex(
-            KnowledgeDocumentKey(tenant, "doc-a"),
-            "ing-a",
-            "book://a",
-            "a" * 64,
-            Set("read"),
-            Map.empty,
-            desc,
-            "s-v1"
-          )
-        )
-        _ <- store.stage(
-          first,
-          Chunk(
-            IndexedChunk(
-              DocumentChunk("c1", "doc-a", "旧", "book://a", tenant, Set("read"))
-                .copy(catalogVersion = first.version),
-              Embedding(Chunk(1.0f, 0.0f))
-            )
-          )
-        )
-        _   <- store.activate(first, 1)
-        one <- store.activateProfile(tenant, space, first.profileId, 1L, "a", Some(publication(first))).exit
-        two <- store.activateProfile(tenant, space, first.profileId, 1L, "b", Some(publication(first))).exit
+        store    <- InMemoryKnowledgeIndexStore.make
+        first    <- beginAndPublish(store, begin(KnowledgeDocumentKey(tenant, "doc-a"), "ing-a"), "c1")
+        evidence <- publicationFor(store, first.profileId)
+        one      <- store.activateProfile(tenant, space, first.profileId, 1L, "a", Some(evidence)).exit
+        two      <- store.activateProfile(tenant, space, first.profileId, 1L, "b", Some(evidence)).exit
       yield assertTrue(one.isSuccess, two.isFailure)
     },
     test("sparse NNZ 超限必须失败") {
@@ -559,6 +392,7 @@ object RagRuntimeSpineSpec extends ZIOSpecDefault:
       for
         cache <- ZIO.service[EmbeddingCacheStore].provide(EmbeddingCacheStore.inMemory)
         store <- InMemoryKnowledgeIndexStore.make
+        _     <- beginAndPublish(store, begin(KnowledgeDocumentKey(TenantId("t"), "doc-1"), "ing-1"), "c1")
         now = java.time.Instant.parse("2026-09-05T00:00:00Z")
         key = EmbeddingCacheKey(
           TenantId("t"),
@@ -572,7 +406,7 @@ object RagRuntimeSpineSpec extends ZIOSpecDefault:
         _ <- cache.put(Chunk(EmbeddingCacheEntry(key, Embedding(Chunk(1.0f, 0.0f)), now.plusSeconds(60))))
         before <- cache.get(Chunk(key), now)
         worker = KnowledgeRetentionWorker(store, cache = Some(cache))
-        _     <- worker.withdraw(KnowledgeDocumentKey(TenantId("t"), "doc-1"), "1")
+        _     <- worker.withdraw(KnowledgeDocumentKey(TenantId("t"), "doc-1"), "rev-1")
         after <- cache.get(Chunk(key), now)
       yield assertTrue(before.contains(key), after.isEmpty)
     }

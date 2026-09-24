@@ -68,16 +68,16 @@ migration 下进行。
 | 表 | 事实与用途 | 可见性规则 |
 |---|---|---|
 | `agent_knowledge_spaces` | 知识空间与 CAS `active_profile_id` | 检索只读 pinned Profile |
-| `agent_knowledge_profiles` | 不可变 dense/lexical/fusion 身份 | 换模必须新建 Profile |
-| `agent_knowledge_profile_documents` | Profile 内文档 census 与幂等摄取身份 | 每个 space/document 至多一个 active 修订 |
+| `agent_knowledge_profiles` | 不可变 `build_spec` JSONB 与其 SHA-256；provider/model/dimension/strategy 是生成列 | 规格不同即不同 Profile；同 ID 换规格被外键和 UNIQUE 拒绝 |
+| `agent_knowledge_profile_documents` | 以 `(tenant, space, document, version)` 为主键的构建 manifest：来源谱系、构建规格摘要、块集合摘要 | 每个 space/profile/document 至多一个 active 版本 |
 | `agent_knowledge_profile_chunk_staging` | Building 文档的可重放暂存块 | Retriever 永远不查询该表 |
-| `agent_knowledge_profile_chunks` | 不可变 Profile 块：display/lexical、dense 1024、可选 sparse、ACL、谱系 | 查询排除 withdrawn；只读 active Profile |
-| `agent_knowledge_profile_activation_audit` | Space 指针 CAS 审计 | 回滚也追加一行 |
-| `agent_knowledge_withdrawn` | `(tenant, space, document, revision)` tombstone | 只隐藏该空间的该修订；其他空间和更新修订仍可见。没有隐式全局禁令 |
+| `agent_knowledge_profile_chunks` | 不可变 Profile 块：display/lexical、dense 1024、可选 sparse、ACL、谱系、`source_revision_id` | 只读绑定的 Profile；撤回在写路径删除，查询不做墓碑检查 |
+| `agent_knowledge_profile_activation_audit` | Space 指针 CAS 审计，`audit_id` 自增主键 | 回滚也追加一行 |
+| `agent_knowledge_withdrawn` | `(tenant, space, document, source_revision_id)` tombstone | 阻止该空间的该来源修订再次 begin/activate；其他空间和更新修订不受影响 |
 
-知识 manifest 状态为 Building/Ready/Superseded/Failed/Retired。三张知识表的中文说明由
+知识 manifest 状态为 Building/Ready/Superseded/Failed/Retired。知识表的中文说明由
 `R__agent_knowledge_1024_comments.sql` 覆盖写入。`retire` 在文档 advisory lock 和 active-version 乐观条件下
-原子删除正式块并写 Retired；`purgeInactive` 通过部分索引和 `SKIP LOCKED` 只清理截止时间前的非活动终态，绝不删除
+原子删除该文档在空间内全部 Profile 的正式块并写 Retired；`purgeInactive` 通过部分索引和 `SKIP LOCKED` 只清理截止时间前的非活动终态，绝不删除
 Building 或 Ready/active。
 
 0.6 的 1024 optional pgvector location 固定管理 `zyblw_agent_knowledge` schema 及其中独立的
@@ -248,11 +248,41 @@ val autoMigrated: RLayer[DataSource, KnowledgeIndexStore & VectorStore] =
 `PostgresAgentPersistence.knowledge(1024)`。两种模式不可重复实现自己的建表 SQL。
 
 索引写入不是逐行覆盖正式表。`begin` 分配 Building 版本，`stage` 分批幂等 upsert，`activate` 在文档 advisory
-transaction lock 下校验块数并原子切换 active 快照。Embedding HTTP 不进入数据库事务。失败版本保留稳定
+transaction lock 下以 SQL 重算暂存块集合摘要（`ChunkSetDigest`）并与调用方期望比较，一致才原子切换 active 快照。Embedding HTTP 不进入数据库事务。失败版本保留稳定
 `failure_code`，相同 ingestionId 重试前会清空残留 staging；已 superseded 的旧 ingestion 不允许重新激活。
 
 全文基线固定使用 `simple` regconfig。中文可把可信分词结果写入 `search_text`；使用 pg_jieba 时必须同时修改
 migration 生成列与运行时 `textSearchConfig`。
+
+### 知识身份与 Profile 写入规则
+
+- **文档键**：`KnowledgeDocumentKey(tenant, documentId, knowledgeSpaceId)`。版本号在 space 内按文档递增，与 Profile 无关。
+- **来源谱系** `DocumentLineage`：`source_id / source_revision_id / source_sha256 / source_media_type`（原件修订），
+  `parser_id / artifact_sha256`（解析输入），`structure_sha256`（块结构、标题路径与版面 origin 的规范化摘要），`text_sha256`。
+  任一字段变化都会得到不同的派生 ingestionId；只改版面结构同样会重新摄取。
+- **构建规格** `IndexBuildSpec`：provider、model、dimension、tokenizer、document instruction、切分策略、enricher、距离。
+  Profile ID 由规格派生（`provider-model-dim-<sha 前 16 位>`），`build_spec_sha256` 通过复合外键钉在每个文档上。
+- **写入规则**：active 与 building Profile 可写；superseded Profile 只接受显式 `targetProfileId`（回滚前补齐语料）；
+  failed/retired/cancelled 封存。切换后新文档继续写入新的 active Profile，不存在“切换后不可写”的死锁。
+- **切换门禁**：`activateProfile` 要求评测 census 与目标 Profile 每份文档的最新版本一致，并且目标与当前 active Profile 的
+  `(documentId, source_revision_id)` 语料完全一致；`profileCorpusDiff` 给出 missing/stale/extra/notReady 明细。较早的失败尝试不会阻塞发布。
+- **撤回**：按 `source_revision_id` 生效；未知修订直接失败。撤回在同一事务删除正式块与暂存块并写墓碑，墓碑阻止该修订再次 begin/activate。
+
+### 向量物理设计
+
+查询路径不再有相关子查询：`PostgresPgVectorStore` 在同一只读短事务里先解析 pinned 或 active Profile，再把
+`knowledge_space_id = ? AND profile_id = ?` 作为绑定参数执行，同时以 `set_config(..., true)` 设置
+`hnsw.iterative_scan`、`hnsw.ef_search`、`hnsw.max_scan_tuples`（`PostgresHybridSearchConfig` 的 `enableHnswIterativeScan`、
+`hnswEfSearch`、`hnswMaxScanTuples`）。向量、hybrid、sparse 融合、fetch 与上下文扩展全部走这一入口。
+
+`permissions` 没有 GIN 索引：ACL 以 `permissions <@ caller` 行过滤实现，宽权限调用方会让 GIN 诱导 planner 放弃 HNSW 排序改走位图全扫。
+选择性过滤由迭代扫描填满 `limit`。
+
+没有采用按 Profile 的列表分区：新 Profile 需要运行时 DDL，而平台是单租户、每个空间同时只有一到两个 Profile，分区带来的迁移与锁风险大于收益。
+Profile 已是绑定参数，HNSW 过滤开销由迭代扫描承担。数据量或 Profile 数显著增长时再评估分区或每 Profile 部分索引。
+
+`PostgresVectorPlanIntegrationSpec` 用 5000 条聚类 1024 维向量守护这些结论：执行计划无 SubPlan、不访问 spaces 表、宽过滤走
+HNSW；与暴力精确排序比较 recall@10，并在强制 HNSW 时验证 10% 权限选择性与 25% metadata 过滤下迭代扫描仍填满 limit。
 
 HNSW 的参数不是通用最优值；应使用自己的中医文档、引用正确率和延迟评测集调优。pgvector 的索引、过滤和
 迭代扫描能力以 [pgvector 官方文档](https://github.com/pgvector/pgvector) 为准。

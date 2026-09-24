@@ -6,46 +6,47 @@ import zio.*
 
 /** 知识索引清单目录的排序游标。
   *
-  * 目录按 `(updatedAt DESC, documentId DESC, indexVersion DESC)` 稳定排序，因此翻页必须使用 keyset 游标而不是 OFFSET：摄入与退役会持续改写
-  * `updatedAt`，OFFSET 会让同一份清单重复出现或被整页跳过。
+  * 目录按 `(updatedAt DESC, knowledgeSpaceId DESC, documentId DESC, indexVersion DESC)` 稳定排序，因此翻页必须使用 keyset
+  * 游标而不是 OFFSET：摄入与退役会持续改写 `updatedAt`，OFFSET 会让同一份清单重复出现或被整页跳过。
   *
-  * `indexVersion` 必须进入游标。发布新版本时旧版本被置为 `Superseded`、新版本被置为 `Ready`，两者的 `updatedAt` 来自同一个事务时间点，只用
-  * `(updatedAt, documentId)` 无法区分它们，翻页会在同一份文档的两个版本之间丢行。
+  * 空间与版本号必须进入游标：同一 documentId 可以存在于多个空间；发布新版本时旧版本转 `Superseded`、新版本转 `Ready` 的两行来自同一事务时间点。缺任一列都会让翻页在这些行之间丢行。
   *
-  * 游标只包含时间、文档 ID 与版本号，不含租户、权限或正文，可以安全地出现在 URL 中。
-  *
-  * 时间戳使用微秒而不是毫秒，理由见 [[com.zyblw.agent.admin.CursorTime]]：游标精度低于排序列精度会让翻页静默丢行， 而“旧版本转 Superseded、新版本转
-  * Ready”恰好会在同一微秒写入两行，是最容易触发该缺陷的路径。
-  *
-  * @param updatedAtEpochMicro
-  *   上一页最后一条清单的更新时间，精度与排序列一致
-  * @param documentId
-  *   上一页最后一条清单的业务文档 ID
-  * @param indexVersion
-  *   上一页最后一条清单的索引版本
+  * 游标只包含时间、空间、文档 ID 与版本号，不含租户、权限或正文，可以安全地出现在 URL 中。时间戳使用微秒，理由见 [[com.zyblw.agent.admin.CursorTime]]。
   */
-final case class KnowledgeIndexCursor(updatedAtEpochMicro: Long, documentId: String, indexVersion: Long):
+final case class KnowledgeIndexCursor(
+    updatedAtEpochMicro: Long,
+    knowledgeSpaceId: KnowledgeSpaceId,
+    documentId: String,
+    indexVersion: Long
+):
   /** 编码为可放入查询参数的不透明文本。 */
-  def encoded: String = s"$updatedAtEpochMicro:$documentId:$indexVersion"
+  def encoded: String =
+    s"v2.$updatedAtEpochMicro.$indexVersion.${KnowledgeIndexCursor.b64(knowledgeSpaceId.value)}.${KnowledgeIndexCursor.b64(documentId)}"
 
 object KnowledgeIndexCursor:
-  /** 解析客户端回传的游标；非法值返回安全校验消息而不是抛异常。
-    *
-    * documentId 允许包含 `:`，因此按第一个和最后一个分隔符切分，而不是简单地按分隔符拆成三段。
-    */
+  private val encoder = java.util.Base64.getUrlEncoder.withoutPadding()
+  private val decoder = java.util.Base64.getUrlDecoder
+
+  private def b64(value: String): String = encoder.encodeToString(value.getBytes("UTF-8"))
+
+  /** 解析客户端回传的游标；非法值返回安全校验消息而不是抛异常。 */
   def decode(value: String): Either[String, KnowledgeIndexCursor] =
-    val invalid    = Left(s"非法知识索引游标: $value")
-    val firstColon = value.indexOf(':')
-    val lastColon  = value.lastIndexOf(':')
-    if firstColon <= 0 || lastColon <= firstColon then invalid
-    else
-      val documentId = value.substring(firstColon + 1, lastColon).trim
-      val micros     = value.substring(0, firstColon).toLongOption
-      val version    = value.substring(lastColon + 1).toLongOption
-      (micros, version) match
-        case (Some(updatedAt), Some(indexVersion)) if documentId.nonEmpty && indexVersion > 0L =>
-          Right(KnowledgeIndexCursor(updatedAt, documentId, indexVersion))
-        case _ => invalid
+    val invalid = Left(s"非法知识索引游标: ${value.take(200)}")
+    value.split('.') match
+      case Array("v2", micros, version, space, document) =>
+        (for
+          updatedAt    <- micros.toLongOption
+          indexVersion <- version.toLongOption.filter(_ > 0L)
+          spaceId <- scala.util.Try(String(decoder.decode(space), "UTF-8")).toOption.filter(_.trim.nonEmpty)
+          documentId <- scala.util
+            .Try(String(decoder.decode(document), "UTF-8"))
+            .toOption
+            .filter(_.trim.nonEmpty)
+          cursor <- scala.util
+            .Try(KnowledgeIndexCursor(updatedAt, KnowledgeSpaceId(spaceId), documentId, indexVersion))
+            .toOption
+        yield cursor).toRight(invalid.value)
+      case _ => invalid
 
 /** 一页知识索引清单。 */
 final case class KnowledgeIndexPage(
@@ -60,7 +61,7 @@ final case class KnowledgeIndexPage(
   * 增加抽象方法会让所有外部实现无法编译。职责也不同——`KnowledgeIndexStore` 是摄入路径的权威读写协议，只按 `(tenant, document)`
   * 或幂等键定位；目录是管理面的扫描投影，需要过滤、排序和分页。把扫描能力塞进发布协议 还会诱使摄入代码用扫描代替按键读取。
   *
-  * 实现必须保证：结果按 `(updatedAt DESC, documentId DESC, indexVersion DESC)` 稳定排序，`limit` 被收敛到
+  * 实现必须保证：结果按 `(updatedAt DESC, knowledgeSpaceId DESC, documentId DESC, indexVersion DESC)` 稳定排序，`limit` 被收敛到
   * `KnowledgeIndexDirectory.MaxLimit`，且只返回 manifest——正文与向量不属于管理列表。
   */
 trait KnowledgeIndexDirectory:
@@ -146,23 +147,39 @@ object KnowledgeIndexDirectory:
       )
     )
 
-  /** 排序键；与 SQL `ORDER BY updated_at DESC, document_id DESC, index_version DESC` 等价。 */
-  private def sortKey(manifest: KnowledgeIndexManifest): (Long, String, Long) =
-    (CursorTime.epochMicro(manifest.updatedAt), manifest.build.key.documentId, manifest.build.version)
+  private type SortKey = (Long, String, String, Long)
+
+  /** 排序键；与 SQL `ORDER BY updated_at DESC, knowledge_space_id DESC, document_id DESC, index_version DESC` 在
+    * `COLLATE "C"` 下等价。字符串按 UTF-8 字节序比较。
+    */
+  private def sortKey(manifest: KnowledgeIndexManifest): SortKey =
+    (
+      CursorTime.epochMicro(manifest.updatedAt),
+      manifest.build.knowledgeSpaceId.value,
+      manifest.build.key.documentId,
+      manifest.build.version
+    )
+
+  private val bytewise: Ordering[String] = (left: String, right: String) =>
+    java.util.Arrays.compareUnsigned(left.getBytes("UTF-8"), right.getBytes("UTF-8"))
+
+  private val keyOrdering: Ordering[SortKey] =
+    Ordering.Tuple4(using Ordering.Long, bytewise, bytewise, Ordering.Long)
 
   private val descending: Ordering[KnowledgeIndexManifest] =
-    Ordering.by[KnowledgeIndexManifest, (Long, String, Long)](sortKey).reverse
+    Ordering.by[KnowledgeIndexManifest, SortKey](sortKey)(using keyOrdering).reverse
 
   private def cursorOf(manifest: KnowledgeIndexManifest): KnowledgeIndexCursor =
     KnowledgeIndexCursor(
       CursorTime.epochMicro(manifest.updatedAt),
+      manifest.build.knowledgeSpaceId,
       manifest.build.key.documentId,
       manifest.build.version
     )
 
   /** keyset 游标判定：在降序序列中严格位于游标之后。 */
   private def after(cursor: KnowledgeIndexCursor)(manifest: KnowledgeIndexManifest): Boolean =
-    Ordering[(Long, String, Long)].lt(
+    keyOrdering.lt(
       sortKey(manifest),
-      (cursor.updatedAtEpochMicro, cursor.documentId, cursor.indexVersion)
+      (cursor.updatedAtEpochMicro, cursor.knowledgeSpaceId.value, cursor.documentId, cursor.indexVersion)
     )

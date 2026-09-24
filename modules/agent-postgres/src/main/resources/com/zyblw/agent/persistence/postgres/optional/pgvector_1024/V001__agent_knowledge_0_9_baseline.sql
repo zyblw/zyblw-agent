@@ -1,5 +1,11 @@
--- zyblw-agent next-minor 1024-dimension RAG greenfield baseline.
--- Unique knowledge V001: Space / Profile / census / chunks / audit / withdrawn.
+-- zyblw-agent 0.9 1024-dimension RAG greenfield baseline.
+-- Unique knowledge V001: Space / Profile(build spec) / document lineage / staging / chunks / audit / withdrawn.
+--
+-- Identity rules enforced here rather than in application code:
+--   * every document key is (tenant, space, document); versions are numbered inside that key;
+--   * a document build must carry the exact build-spec digest of its profile (composite FK);
+--   * ready builds carry the chunk-set digest that activation verified;
+--   * no identity column has a DEFAULT, so a caller that forgets space/profile fails loudly.
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
 
@@ -15,31 +21,22 @@ CREATE TABLE agent_knowledge_spaces (
 );
 
 CREATE TABLE agent_knowledge_profiles (
-  tenant_id TEXT NOT NULL CHECK (length(btrim(tenant_id)) BETWEEN 1 AND 1000),
-  knowledge_space_id TEXT NOT NULL CHECK (length(btrim(knowledge_space_id)) BETWEEN 1 AND 200),
+  tenant_id TEXT NOT NULL,
+  knowledge_space_id TEXT NOT NULL,
   profile_id TEXT NOT NULL CHECK (length(btrim(profile_id)) BETWEEN 1 AND 200),
   profile_version BIGINT NOT NULL CHECK (profile_version > 0),
-  status TEXT NOT NULL CHECK (status IN ('building', 'ready', 'active', 'superseded', 'failed', 'retired', 'cancelled')),
-  embedding_provider TEXT NOT NULL CHECK (length(btrim(embedding_provider)) BETWEEN 1 AND 200),
-  embedding_model TEXT NOT NULL CHECK (length(btrim(embedding_model)) BETWEEN 1 AND 500),
-  embedding_dimension INTEGER NOT NULL CHECK (embedding_dimension = 1024),
-  embedding_max_batch_size INTEGER NOT NULL CHECK (embedding_max_batch_size BETWEEN 1 AND 10000),
-  embedding_supports_dimensions BOOLEAN NOT NULL,
-  dense_distance TEXT NOT NULL DEFAULT 'cosine',
-  sparse_provider TEXT,
-  sparse_model TEXT,
-  sparse_dimension INTEGER CHECK (sparse_dimension IS NULL OR sparse_dimension > 0),
-  lexical_analyzer TEXT NOT NULL DEFAULT 'simple',
-  lexical_strategy_id TEXT NOT NULL DEFAULT 'simple-zh',
-  chunking_strategy_id TEXT NOT NULL,
-  normalization_id TEXT NOT NULL DEFAULT 'display-retrieval-v1',
-  normalization_version TEXT NOT NULL DEFAULT '1',
-  metadata_schema_id TEXT NOT NULL DEFAULT 'generic',
-  metadata_schema_version TEXT NOT NULL DEFAULT '1',
-  fusion_strategy TEXT NOT NULL DEFAULT 'weighted-rrf',
-  fusion_version TEXT NOT NULL DEFAULT '1',
+  status TEXT NOT NULL CHECK (status IN ('building', 'active', 'superseded', 'failed', 'retired', 'cancelled')),
+  build_spec JSONB NOT NULL CHECK (jsonb_typeof(build_spec) = 'object'),
+  build_spec_sha256 CHAR(64) NOT NULL CHECK (build_spec_sha256 ~ '^[0-9a-f]{64}$'),
+  embedding_provider TEXT GENERATED ALWAYS AS (build_spec ->> 'embeddingProvider') STORED
+    CHECK (length(btrim(embedding_provider)) BETWEEN 1 AND 200),
+  embedding_model TEXT GENERATED ALWAYS AS (build_spec ->> 'embeddingModel') STORED
+    CHECK (length(btrim(embedding_model)) BETWEEN 1 AND 500),
+  embedding_dimension INTEGER GENERATED ALWAYS AS ((build_spec ->> 'embeddingDimension')::INTEGER) STORED
+    CHECK (embedding_dimension = 1024),
+  indexing_strategy TEXT GENERATED ALWAYS AS (build_spec ->> 'indexingStrategy') STORED
+    CHECK (length(btrim(indexing_strategy)) BETWEEN 1 AND 500),
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  ready_at TIMESTAMPTZ,
   activated_at TIMESTAMPTZ,
   publication_evaluation_id TEXT CHECK (publication_evaluation_id IS NULL OR length(btrim(publication_evaluation_id)) BETWEEN 1 AND 200),
   publication_census_sha256 CHAR(64) CHECK (publication_census_sha256 IS NULL OR publication_census_sha256 ~ '^[0-9a-f]{64}$'),
@@ -47,7 +44,10 @@ CREATE TABLE agent_knowledge_profiles (
   failure_code TEXT CHECK (failure_code IS NULL OR length(btrim(failure_code)) BETWEEN 1 AND 160),
   PRIMARY KEY (tenant_id, knowledge_space_id, profile_id),
   UNIQUE (tenant_id, knowledge_space_id, profile_version),
-  FOREIGN KEY (tenant_id, knowledge_space_id) REFERENCES agent_knowledge_spaces(tenant_id, knowledge_space_id) ON DELETE CASCADE
+  UNIQUE (tenant_id, knowledge_space_id, profile_id, build_spec_sha256),
+  FOREIGN KEY (tenant_id, knowledge_space_id) REFERENCES agent_knowledge_spaces(tenant_id, knowledge_space_id) ON DELETE CASCADE,
+  CHECK (status <> 'active' OR activated_at IS NOT NULL),
+  CHECK ((status = 'failed') = (failure_code IS NOT NULL))
 );
 
 ALTER TABLE agent_knowledge_spaces
@@ -57,101 +57,113 @@ ALTER TABLE agent_knowledge_spaces
   DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE agent_knowledge_profile_documents (
-  tenant_id TEXT NOT NULL CHECK (length(btrim(tenant_id)) BETWEEN 1 AND 1000),
-  knowledge_space_id TEXT NOT NULL DEFAULT 'default' CHECK (length(btrim(knowledge_space_id)) BETWEEN 1 AND 200),
-  profile_id TEXT NOT NULL DEFAULT 'default' CHECK (length(btrim(profile_id)) BETWEEN 1 AND 200),
+  tenant_id TEXT NOT NULL,
+  knowledge_space_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
   document_id TEXT NOT NULL CHECK (length(btrim(document_id)) BETWEEN 1 AND 1000),
   index_version BIGINT NOT NULL CHECK (index_version > 0),
-  document_revision_id TEXT NOT NULL DEFAULT '1' CHECK (length(btrim(document_revision_id)) BETWEEN 1 AND 200),
-  ingestion_id TEXT NOT NULL CHECK (length(btrim(ingestion_id)) BETWEEN 1 AND 500),
+  ingestion_id TEXT NOT NULL CHECK (length(btrim(ingestion_id)) BETWEEN 1 AND 200),
   source_uri TEXT NOT NULL CHECK (length(btrim(source_uri)) BETWEEN 1 AND 8192),
-  content_hash CHAR(64) NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
-  permissions TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[] CHECK (cardinality(permissions) <= 256 AND array_position(permissions, NULL) IS NULL),
-  metadata JSONB NOT NULL DEFAULT '{}'::JSONB CHECK (jsonb_typeof(metadata) = 'object'),
-  embedding_provider TEXT NOT NULL CHECK (length(btrim(embedding_provider)) BETWEEN 1 AND 200),
-  embedding_model TEXT NOT NULL CHECK (length(btrim(embedding_model)) BETWEEN 1 AND 500),
-  embedding_dimension INTEGER NOT NULL CHECK (embedding_dimension = 1024),
-  embedding_max_batch_size INTEGER NOT NULL CHECK (embedding_max_batch_size BETWEEN 1 AND 10000),
-  embedding_supports_dimensions BOOLEAN NOT NULL,
-  indexing_strategy TEXT NOT NULL CHECK (length(btrim(indexing_strategy)) BETWEEN 1 AND 500),
+  source_id TEXT NOT NULL CHECK (length(btrim(source_id)) BETWEEN 1 AND 1000),
+  source_revision_id TEXT NOT NULL CHECK (length(btrim(source_revision_id)) BETWEEN 1 AND 200),
+  source_sha256 CHAR(64) NOT NULL CHECK (source_sha256 ~ '^[0-9a-f]{64}$'),
+  source_media_type TEXT NOT NULL CHECK (length(btrim(source_media_type)) BETWEEN 1 AND 200),
+  parser_id TEXT NOT NULL CHECK (length(btrim(parser_id)) BETWEEN 1 AND 200),
+  artifact_sha256 CHAR(64) NOT NULL CHECK (artifact_sha256 ~ '^[0-9a-f]{64}$'),
+  structure_sha256 CHAR(64) NOT NULL CHECK (structure_sha256 ~ '^[0-9a-f]{64}$'),
+  text_sha256 CHAR(64) NOT NULL CHECK (text_sha256 ~ '^[0-9a-f]{64}$'),
+  build_spec_sha256 CHAR(64) NOT NULL,
+  chunk_set_sha256 CHAR(64) CHECK (chunk_set_sha256 IS NULL OR chunk_set_sha256 ~ '^[0-9a-f]{64}$'),
+  permissions TEXT[] NOT NULL CHECK (cardinality(permissions) BETWEEN 1 AND 256 AND array_position(permissions, NULL) IS NULL),
+  metadata JSONB NOT NULL CHECK (jsonb_typeof(metadata) = 'object'),
   status TEXT NOT NULL CHECK (status IN ('building', 'ready', 'superseded', 'failed', 'retired')),
-  active BOOLEAN NOT NULL DEFAULT FALSE,
-  chunk_count INTEGER NOT NULL DEFAULT 0 CHECK (chunk_count >= 0),
+  active BOOLEAN NOT NULL,
+  chunk_count INTEGER NOT NULL CHECK (chunk_count >= 0),
   failure_code TEXT CHECK (failure_code IS NULL OR length(btrim(failure_code)) BETWEEN 1 AND 160),
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (tenant_id, document_id, index_version),
-  UNIQUE (tenant_id, document_id, ingestion_id),
+  PRIMARY KEY (tenant_id, knowledge_space_id, document_id, index_version),
+  UNIQUE (tenant_id, knowledge_space_id, document_id, ingestion_id),
+  CONSTRAINT agent_knowledge_profile_documents_identity_key
+    UNIQUE (tenant_id, knowledge_space_id, profile_id, document_id, index_version),
+  CONSTRAINT agent_knowledge_profile_documents_build_spec_fk
+    FOREIGN KEY (tenant_id, knowledge_space_id, profile_id, build_spec_sha256)
+    REFERENCES agent_knowledge_profiles(tenant_id, knowledge_space_id, profile_id, build_spec_sha256)
+    ON DELETE CASCADE,
   CHECK (updated_at >= created_at),
   CHECK (NOT active OR status = 'ready'),
-  CHECK ((status = 'failed' AND failure_code IS NOT NULL) OR (status <> 'failed' AND failure_code IS NULL))
+  CHECK ((status = 'failed') = (failure_code IS NOT NULL)),
+  CHECK (status NOT IN ('ready', 'superseded') OR (chunk_set_sha256 IS NOT NULL AND chunk_count > 0)),
+  CHECK (status <> 'building' OR (chunk_set_sha256 IS NULL AND chunk_count = 0))
 );
 CREATE UNIQUE INDEX agent_knowledge_profile_documents_one_active_idx
   ON agent_knowledge_profile_documents(tenant_id, knowledge_space_id, profile_id, document_id) WHERE active;
 CREATE INDEX agent_knowledge_profile_documents_recovery_idx
-  ON agent_knowledge_profile_documents(updated_at, tenant_id, document_id, index_version) WHERE status = 'building';
+  ON agent_knowledge_profile_documents(updated_at, tenant_id, knowledge_space_id, document_id, index_version)
+  WHERE status = 'building';
 CREATE INDEX agent_knowledge_profile_documents_retention_idx
-  ON agent_knowledge_profile_documents(updated_at, tenant_id, document_id, index_version)
+  ON agent_knowledge_profile_documents(updated_at, tenant_id, knowledge_space_id, document_id, index_version)
   WHERE active = FALSE AND status IN ('superseded', 'failed', 'retired');
-ALTER TABLE agent_knowledge_profile_documents
-  ADD CONSTRAINT agent_knowledge_profile_documents_identity_key
-  UNIQUE (tenant_id, knowledge_space_id, profile_id, document_id, index_version);
+CREATE INDEX agent_knowledge_profile_documents_directory_idx
+  ON agent_knowledge_profile_documents(
+    tenant_id, updated_at DESC, knowledge_space_id COLLATE "C" DESC, document_id COLLATE "C" DESC, index_version DESC
+  );
 
 CREATE TABLE agent_knowledge_profile_chunk_staging (
   tenant_id TEXT NOT NULL,
-  knowledge_space_id TEXT NOT NULL DEFAULT 'default',
-  profile_id TEXT NOT NULL DEFAULT 'default',
+  knowledge_space_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
   document_id TEXT NOT NULL,
   index_version BIGINT NOT NULL CHECK (index_version > 0),
-  chunk_id TEXT NOT NULL CHECK (length(btrim(chunk_id)) BETWEEN 1 AND 1200),
+  chunk_id TEXT NOT NULL CHECK (length(btrim(chunk_id)) BETWEEN 1 AND 1200 AND chunk_id !~ '[\t\n\r]'),
   chunk_text TEXT NOT NULL CHECK (length(btrim(chunk_text)) > 0),
   search_text TEXT NOT NULL CHECK (length(btrim(search_text)) > 0),
   dense_text TEXT,
-  display_sha256 CHAR(64),
-  dense_sha256 CHAR(64),
-  lexical_sha256 CHAR(64),
+  display_sha256 CHAR(64) NOT NULL CHECK (display_sha256 ~ '^[0-9a-f]{64}$'),
+  dense_sha256 CHAR(64) NOT NULL CHECK (dense_sha256 ~ '^[0-9a-f]{64}$'),
+  lexical_sha256 CHAR(64) NOT NULL CHECK (lexical_sha256 ~ '^[0-9a-f]{64}$'),
   source_uri TEXT NOT NULL CHECK (length(btrim(source_uri)) BETWEEN 1 AND 8192),
-  permissions TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[] CHECK (cardinality(permissions) <= 256 AND array_position(permissions, NULL) IS NULL),
-  metadata JSONB NOT NULL DEFAULT '{}'::JSONB CHECK (jsonb_typeof(metadata) = 'object'),
+  permissions TEXT[] NOT NULL CHECK (cardinality(permissions) BETWEEN 1 AND 256 AND array_position(permissions, NULL) IS NULL),
+  metadata JSONB NOT NULL CHECK (jsonb_typeof(metadata) = 'object'),
   embedding public.vector(1024) NOT NULL,
   sparse_embedding TEXT,
   parent_id TEXT, lineage_ordinal INTEGER CHECK (lineage_ordinal >= 0), previous_chunk_id TEXT, next_chunk_id TEXT,
-  heading_path TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[], page_numbers INTEGER[] NOT NULL DEFAULT ARRAY[]::INTEGER[],
-  origins JSONB NOT NULL DEFAULT '[]'::JSONB CHECK (jsonb_typeof(origins) = 'array'), block_ids TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+  heading_path TEXT[] NOT NULL, page_numbers INTEGER[] NOT NULL,
+  origins JSONB NOT NULL CHECK (jsonb_typeof(origins) = 'array'), block_ids TEXT[] NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (tenant_id, document_id, index_version, chunk_id),
+  PRIMARY KEY (tenant_id, knowledge_space_id, document_id, index_version, chunk_id),
   FOREIGN KEY (tenant_id, knowledge_space_id, profile_id, document_id, index_version)
     REFERENCES agent_knowledge_profile_documents(tenant_id, knowledge_space_id, profile_id, document_id, index_version)
     ON DELETE CASCADE,
   CHECK (updated_at >= created_at)
 );
 CREATE UNIQUE INDEX agent_knowledge_profile_chunk_staging_lineage_order_idx
-  ON agent_knowledge_profile_chunk_staging(tenant_id, document_id, index_version, lineage_ordinal)
+  ON agent_knowledge_profile_chunk_staging(tenant_id, knowledge_space_id, document_id, index_version, lineage_ordinal)
   WHERE lineage_ordinal IS NOT NULL;
 
 CREATE TABLE agent_knowledge_profile_chunks (
-  tenant_id TEXT NOT NULL CHECK (length(btrim(tenant_id)) BETWEEN 1 AND 1000),
-  knowledge_space_id TEXT NOT NULL DEFAULT 'default' CHECK (length(btrim(knowledge_space_id)) BETWEEN 1 AND 200),
-  profile_id TEXT NOT NULL DEFAULT 'default' CHECK (length(btrim(profile_id)) BETWEEN 1 AND 200),
-  document_id TEXT NOT NULL CHECK (length(btrim(document_id)) BETWEEN 1 AND 1000),
-  document_revision_id TEXT NOT NULL DEFAULT '1',
-  chunk_id TEXT NOT NULL CHECK (length(btrim(chunk_id)) BETWEEN 1 AND 1200),
+  tenant_id TEXT NOT NULL,
+  knowledge_space_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  document_id TEXT NOT NULL,
+  source_revision_id TEXT NOT NULL CHECK (length(btrim(source_revision_id)) BETWEEN 1 AND 200),
+  chunk_id TEXT NOT NULL CHECK (length(btrim(chunk_id)) BETWEEN 1 AND 1200 AND chunk_id !~ '[\t\n\r]'),
   index_version BIGINT NOT NULL CHECK (index_version > 0),
   chunk_text TEXT NOT NULL CHECK (length(btrim(chunk_text)) > 0),
   search_text TEXT NOT NULL CHECK (length(btrim(search_text)) > 0),
   dense_text TEXT,
   search_vector TSVECTOR GENERATED ALWAYS AS (to_tsvector('simple', search_text)) STORED,
-  display_sha256 CHAR(64),
-  dense_sha256 CHAR(64),
-  lexical_sha256 CHAR(64),
+  display_sha256 CHAR(64) NOT NULL CHECK (display_sha256 ~ '^[0-9a-f]{64}$'),
+  dense_sha256 CHAR(64) NOT NULL CHECK (dense_sha256 ~ '^[0-9a-f]{64}$'),
+  lexical_sha256 CHAR(64) NOT NULL CHECK (lexical_sha256 ~ '^[0-9a-f]{64}$'),
   source_uri TEXT NOT NULL CHECK (length(btrim(source_uri)) BETWEEN 1 AND 8192),
-  permissions TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[] CHECK (cardinality(permissions) <= 256 AND array_position(permissions, NULL) IS NULL),
-  metadata JSONB NOT NULL DEFAULT '{}'::JSONB CHECK (jsonb_typeof(metadata) = 'object'),
+  permissions TEXT[] NOT NULL CHECK (cardinality(permissions) BETWEEN 1 AND 256 AND array_position(permissions, NULL) IS NULL),
+  metadata JSONB NOT NULL CHECK (jsonb_typeof(metadata) = 'object'),
   embedding public.vector(1024) NOT NULL,
   sparse_embedding TEXT,
   parent_id TEXT, lineage_ordinal INTEGER CHECK (lineage_ordinal >= 0), previous_chunk_id TEXT, next_chunk_id TEXT,
-  heading_path TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[], page_numbers INTEGER[] NOT NULL DEFAULT ARRAY[]::INTEGER[],
-  origins JSONB NOT NULL DEFAULT '[]'::JSONB CHECK (jsonb_typeof(origins) = 'array'), block_ids TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+  heading_path TEXT[] NOT NULL, page_numbers INTEGER[] NOT NULL,
+  origins JSONB NOT NULL CHECK (jsonb_typeof(origins) = 'array'), block_ids TEXT[] NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (tenant_id, knowledge_space_id, profile_id, document_id, chunk_id),
   FOREIGN KEY (tenant_id, knowledge_space_id, profile_id, document_id, index_version)
@@ -159,14 +171,12 @@ CREATE TABLE agent_knowledge_profile_chunks (
     ON DELETE CASCADE,
   CHECK (updated_at >= created_at)
 );
-CREATE INDEX agent_knowledge_profile_chunks_document_version_idx
-  ON agent_knowledge_profile_chunks(tenant_id, document_id, index_version);
-CREATE INDEX agent_knowledge_profile_chunks_permissions_idx
-  ON agent_knowledge_profile_chunks USING GIN(permissions);
+-- ACL is applied as a row filter (permissions <@ caller). A GIN index on permissions is deliberately absent:
+-- broad caller permissions make the planner pick a full bitmap scan instead of the HNSW order-by.
 CREATE INDEX agent_knowledge_profile_chunks_search_vector_idx
   ON agent_knowledge_profile_chunks USING GIN(search_vector);
 CREATE INDEX agent_knowledge_profile_chunks_parent_order_idx
-  ON agent_knowledge_profile_chunks(tenant_id, document_id, parent_id, lineage_ordinal, chunk_id)
+  ON agent_knowledge_profile_chunks(tenant_id, knowledge_space_id, profile_id, document_id, parent_id, lineage_ordinal, chunk_id)
   WHERE parent_id IS NOT NULL;
 CREATE UNIQUE INDEX agent_knowledge_profile_chunks_lineage_order_idx
   ON agent_knowledge_profile_chunks(tenant_id, knowledge_space_id, profile_id, document_id, lineage_ordinal)
@@ -181,17 +191,14 @@ CREATE INDEX agent_knowledge_profile_chunks_heading_path_idx
   ON agent_knowledge_profile_chunks USING GIN (heading_path);
 CREATE INDEX agent_knowledge_profile_chunks_search_text_trgm_idx
   ON agent_knowledge_profile_chunks USING GIN (search_text public.gin_trgm_ops);
-CREATE INDEX agent_knowledge_profile_chunks_profile_idx
-  ON agent_knowledge_profile_chunks(tenant_id, knowledge_space_id, profile_id);
-CREATE INDEX agent_knowledge_profile_chunk_staging_metadata_idx
-  ON agent_knowledge_profile_chunk_staging USING GIN (metadata jsonb_path_ops);
 
 CREATE TABLE agent_knowledge_profile_activation_audit (
-  tenant_id TEXT NOT NULL,
-  knowledge_space_id TEXT NOT NULL,
+  audit_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id TEXT NOT NULL CHECK (length(btrim(tenant_id)) BETWEEN 1 AND 1000),
+  knowledge_space_id TEXT NOT NULL CHECK (length(btrim(knowledge_space_id)) BETWEEN 1 AND 200),
   old_profile_id TEXT,
-  new_profile_id TEXT NOT NULL,
-  expected_space_revision BIGINT NOT NULL,
+  new_profile_id TEXT NOT NULL CHECK (length(btrim(new_profile_id)) BETWEEN 1 AND 200),
+  expected_space_revision BIGINT NOT NULL CHECK (expected_space_revision >= 0),
   reason TEXT NOT NULL CHECK (length(btrim(reason)) BETWEEN 1 AND 160),
   evaluation_id TEXT CHECK (evaluation_id IS NULL OR length(btrim(evaluation_id)) BETWEEN 1 AND 200),
   evaluated_census_sha256 CHAR(64) CHECK (evaluated_census_sha256 IS NULL OR evaluated_census_sha256 ~ '^[0-9a-f]{64}$'),
@@ -202,10 +209,10 @@ CREATE INDEX agent_knowledge_profile_activation_audit_idx
   ON agent_knowledge_profile_activation_audit(tenant_id, knowledge_space_id, activated_at DESC);
 
 CREATE TABLE agent_knowledge_withdrawn (
-  tenant_id TEXT NOT NULL,
-  knowledge_space_id TEXT NOT NULL,
-  document_id TEXT NOT NULL,
-  document_revision_id TEXT NOT NULL CHECK (length(btrim(document_revision_id)) BETWEEN 1 AND 200),
+  tenant_id TEXT NOT NULL CHECK (length(btrim(tenant_id)) BETWEEN 1 AND 1000),
+  knowledge_space_id TEXT NOT NULL CHECK (length(btrim(knowledge_space_id)) BETWEEN 1 AND 200),
+  document_id TEXT NOT NULL CHECK (length(btrim(document_id)) BETWEEN 1 AND 1000),
+  source_revision_id TEXT NOT NULL CHECK (length(btrim(source_revision_id)) BETWEEN 1 AND 200),
   withdrawn_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (tenant_id, knowledge_space_id, document_id, document_revision_id)
+  PRIMARY KEY (tenant_id, knowledge_space_id, document_id, source_revision_id)
 );

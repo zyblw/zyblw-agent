@@ -9,7 +9,7 @@ final case class KnowledgeReindexRequest(
     permissions: Set[String],
     limit: Int = 32,
     afterDocumentId: Option[String] = None,
-    knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId("default"),
+    knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId.Default,
     targetProfileId: Option[IndexProfileId] = None
 ):
   require(limit > 0 && limit <= 200, "reindex limit 必须位于 1..200")
@@ -33,7 +33,7 @@ trait KnowledgeSourceResolver:
   def load(tenantId: TenantId, documentId: String): IO[RetrievalError, Option[DocumentInput]]
 
 object KnowledgeSourceResolver:
-  /** Resolver-provided stable source revision/hash used to make a reindex retry idempotent. */
+  /** 解析器可选提供的来源修订号；缺失时重建沿用原构建的来源修订。 */
   val SourceRevisionMetadata: String = "knowledge.sourceRevision"
 
   val unavailable: ULayer[KnowledgeSourceResolver] = ZLayer.succeed(
@@ -88,27 +88,26 @@ final class KnowledgeReindexService(
         case None =>
           ZIO.succeed(KnowledgeReindexItem(documentId, KnowledgeReindexStatus.SourceUnavailable))
         case Some(input) =>
-          val target = request.targetProfileId
-            .map(_.value)
-            .getOrElse(manifest.build.profileId.value)
-          val sourceRevision = input.metadata
+          // 默认保留原来源修订，使新 Profile 与 active Profile 的逻辑语料可比较；解析器给出新修订时视为内容更新。
+          val source = input.metadata
             .get(KnowledgeSourceResolver.SourceRevisionMetadata)
-            .orElse(input.metadata.get("contentHash"))
-            .filter(_.trim.nonEmpty)
-            .getOrElse(manifest.build.contentHash)
-          val ingestionId = s"reindex-${IngestionKeys.sha256(
-              s"${request.knowledgeSpaceId.value}\n$target\n$documentId\n$sourceRevision"
-            )}"
+            .map(_.trim)
+            .filter(_.nonEmpty)
+            .filterNot(_ == manifest.build.lineage.sourceRevisionId)
+            .fold(SourceRevision.of(manifest.build.lineage))(revision =>
+              SourceRevision(manifest.build.lineage.sourceId, revision)
+            )
           ingestion
             .ingestOne(
               DocumentIngestionRequest(
                 input,
                 request.tenantId,
                 manifest.permissions,
-                ingestionId,
+                "",
                 ActiveVersionExpectation.AnyVersion,
                 request.knowledgeSpaceId,
-                request.targetProfileId
+                request.targetProfileId,
+                Some(source)
               )
             )
             .map {
