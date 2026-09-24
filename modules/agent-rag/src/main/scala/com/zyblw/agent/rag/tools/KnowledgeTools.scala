@@ -44,10 +44,21 @@ object KnowledgeTools:
   ) derives JsonCodec
 
   final case class FetchInput(
-      chunkId: String,
+      chunkId: String = "",
       tenantId: Option[String] = None,
-      permissions: Option[List[String]] = None
+      permissions: Option[List[String]] = None,
+      chunkIds: Option[List[String]] = None
   ) derives JsonCodec
+
+  /** 一次核对 1 到 6 个块。单个 chunkId 与 chunkIds 合并后去重。 */
+  def fetchChunkIds(input: FetchInput): Either[String, Set[String]] =
+    val ids = (
+      input.chunkIds.getOrElse(Nil).iterator.map(_.trim).filter(_.nonEmpty) ++
+        Option(input.chunkId).iterator.map(_.trim).filter(_.nonEmpty)
+    ).toList.distinct
+    if ids.isEmpty then Left("需要 chunkId，或 1 到 6 个 chunkIds")
+    else if ids.length > 6 then Left("一次最多取 6 个 chunkId")
+    else Right(ids.toSet)
 
   final case class CitationOut(
       id: String,
@@ -118,7 +129,7 @@ object KnowledgeTools:
   def fetchTool(rag: RagApplication): Tool[Any, FetchInput, AgentError, SearchOutput] =
     Tool.json[Any, FetchInput, AgentError, SearchOutput](
       FetchName,
-      "按 chunkId 精确取回已授权知识块全文（切分上限内），用于细讲。不要填写 tenant 或 permissions。",
+      "按 chunkId 或 chunkIds 取回 1 到 6 个已授权知识块全文，用于细讲不同要点。不要填写 tenant 或 permissions。",
       fetchSchema,
       None,
       knowledgeReadMetadata()
@@ -130,8 +141,11 @@ object KnowledgeTools:
         filter = hostScope match
           case DocumentScope.Unrestricted    => RetrievalFilter.empty
           case DocumentScope.Restricted(ids) => RetrievalFilter(documentIds = ids)
+        chunkIds <- ZIO.fromEither(fetchChunkIds(input)).mapError { message =>
+          AgentError.ToolInputInvalid(FetchName.value, message)
+        }
         result <- rag
-          .fetch(Set(input.chunkId), scope, filter)
+          .fetch(chunkIds, scope, filter)
           .mapError(error => AgentError.ToolExecutionFailed(FetchName.value, error.message, error.retryable))
         _ <- rejectOutsideDocumentScope(FetchName.value, result, hostScope)
       yield toOutput(result, includeFullChunkText = true)
@@ -292,6 +306,8 @@ object KnowledgeTools:
 
   private val fetchSchema: Json.Obj = Json.Obj(
     "type"       -> Json.Str("object"),
-    "properties" -> Json.Obj("chunkId" -> Json.Obj("type" -> Json.Str("string"))),
-    "required"   -> Json.Arr(Json.Str("chunkId"))
+    "properties" -> Json.Obj(
+      "chunkId"  -> Json.Obj("type" -> Json.Str("string")),
+      "chunkIds" -> Json.Obj("type" -> Json.Str("array"))
+    )
   )

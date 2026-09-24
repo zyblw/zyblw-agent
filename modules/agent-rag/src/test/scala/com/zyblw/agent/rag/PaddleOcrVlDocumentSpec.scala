@@ -160,7 +160,7 @@ object PaddleOcrVlDocumentSpec extends ZIOSpecDefault:
       assertTrue(
         parsed.sections.map(section => section.level -> section.title) == zio.Chunk(
           2 -> "一、脏腑经络学说是中医学的理论核心",
-          2 -> "（九）心包与手厥阴经（附：膻中）"
+          5 -> "（九）心包与手厥阴经（附：膻中）"
         ),
         !parsed.blocks.exists(_.text == "理论核心"),
         parsed.blocks.exists(_.text == "脏腑与经络相互为用。"),
@@ -188,6 +188,43 @@ object PaddleOcrVlDocumentSpec extends ZIOSpecDefault:
         parsed.sections.map(section => section.level -> section.title) == zio.Chunk(
           2 -> "一、脏腑经络学说是中医学的理论核心"
         )
+      )
+    },
+    test("扁平井号不压过章、节和条目编号，更深的井号仍留在原处") {
+      val json =
+        """[{
+          |  "prunedResult": {
+          |    "parsing_res_list": [
+          |      {"block_label":"doc_title","block_content":"中医之逻辑方法论","block_order":1},
+          |      {"block_label":"paragraph_title","block_content":"## 第一章人体逻辑的构建","block_order":2},
+          |      {"block_label":"paragraph_title","block_content":"## 第一节 孤立主义与系统的建立","block_order":3},
+          |      {"block_label":"paragraph_title","block_content":"## 一、西医的孤立主义","block_order":4},
+          |      {"block_label":"paragraph_title","block_content":"## （一）器官切割","block_order":5},
+          |      {"block_label":"paragraph_title","block_content":"### 2. 心电脑电","block_order":6}
+          |    ]
+          |  }
+          |}]""".stripMargin
+      val markdown =
+        """# 中医之逻辑方法论
+          |## 第一章人体逻辑的构建
+          |## 第一节 孤立主义与系统的建立
+          |## 一、西医的孤立主义
+          |## （一）器官切割
+          |### 2. 心电脑电
+          |""".stripMargin
+      val parsed = PaddleOcrVlDocument.decode(json, Some(markdown)).toOption.get
+      val child  = parsed.sections.find(_.title == "2. 心电脑电").get
+      val parent = parsed.sections.find(_.title == "（一）器官切割").get
+      assertTrue(
+        parsed.sections.map(section => section.level -> section.title) == zio.Chunk(
+          1 -> "中医之逻辑方法论",
+          2 -> "第一章人体逻辑的构建",
+          3 -> "第一节 孤立主义与系统的建立",
+          4 -> "一、西医的孤立主义",
+          5 -> "（一）器官切割",
+          6 -> "2. 心电脑电"
+        ),
+        child.parentId.contains(parent.id)
       )
     },
     test("无法识别的 JSON 不会被当成正文") {

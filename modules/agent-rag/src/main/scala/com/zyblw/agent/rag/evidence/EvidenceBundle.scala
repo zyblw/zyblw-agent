@@ -42,10 +42,10 @@ object ChunkRepresentations:
 final case class CandidateBudgets(
     perBranch: Int = 80,
     fusion: Int = 80,
-    rerankSeeds: Int = 8,
+    rerankSeeds: Int = 12,
     expansion: Int = 12,
-    maxEvidenceTokens: Long = 6_000L,
-    maxChunksPerSource: Int = 2
+    maxEvidenceTokens: Long = 9_000L,
+    maxChunksPerSource: Int = 4
 ):
   require(maxChunksPerSource > 0 && maxChunksPerSource <= 1000, "Source diversity budget invalid")
   require(perBranch > 0 && fusion > 0 && rerankSeeds > 0, "候选预算必须为正")
@@ -157,8 +157,11 @@ object ContextAssembler:
       then state.drop(hit, keep, EvidenceDecision.DroppedBudget)
       else if withdrawnDocumentIds.contains(hit.chunk.documentId) then
         state.drop(hit, keep, EvidenceDecision.DroppedWithdrawn)
-      else if keep == EvidenceDecision.KeptSeed && state.perSource.getOrElse(sourceKey, 0) >= budgets.maxChunksPerSource then
-        state.drop(hit, keep, EvidenceDecision.DroppedDiversity)
+      else if keep == EvidenceDecision.KeptSeed && state.perSource.getOrElse(
+          sourceKey,
+          0
+        ) >= budgets.maxChunksPerSource
+      then state.drop(hit, keep, EvidenceDecision.DroppedDiversity)
       else if state.tokens + tokens > budgets.maxEvidenceTokens then
         state.drop(hit, keep, EvidenceDecision.DroppedBudget)
       else state.keep(hit, keep, sourceKey, tokens)
@@ -231,7 +234,7 @@ object ContextAssembler:
       dropped: Set[EvidenceDecision] = Set.empty
   ):
     def keep(hit: RetrievalHit, decision: EvidenceDecision, sourceKey: String, added: Long): AssembleState =
-      val seed = hit.chunk.lineage.flatMap(_.seedChunkId).getOrElse(hit.chunk.id)
+      val seed    = hit.chunk.lineage.flatMap(_.seedChunkId).getOrElse(hit.chunk.id)
       val counted =
         if decision == EvidenceDecision.KeptSeed then
           perSource.updated(sourceKey, perSource.getOrElse(sourceKey, 0) + 1)

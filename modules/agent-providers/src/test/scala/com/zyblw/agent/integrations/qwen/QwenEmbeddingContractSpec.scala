@@ -26,7 +26,13 @@ object QwenEmbeddingContractSpec extends ZIOSpecDefault:
               model.capabilities.tokenizerId.contains(TokenCounter.CjkApproximate.id),
               ChunkEmbeddingAlignment.require(chunker.strategyId, model.capabilities).isRight,
               scala.util
-                .Try(QwenEmbeddingConfig(apiKey = "test-key", model = "text-embedding-v4", tokenizerId = "test-hash"))
+                .Try(
+                  QwenEmbeddingConfig(
+                    apiKey = "test-key",
+                    model = "text-embedding-v4",
+                    tokenizerId = "test-hash"
+                  )
+                )
                 .isFailure
             )
           model
@@ -94,15 +100,23 @@ object QwenEmbeddingContractSpec extends ZIOSpecDefault:
         handler { (request: Request) =>
           request.body.asString
             .flatMap { body =>
-              val count = body.fromJson[Json].toOption.flatMap {
-                case Json.Obj(fields) =>
-                  fields.find(_._1 == "input").map(_._2).collect { case Json.Obj(input) =>
-                    input.find(_._1 == "texts").map(_._2).collect { case Json.Arr(values) =>
-                      values.length
-                    }
-                  }.flatten
-                case _ => None
-              }.getOrElse(0)
+              val count = body
+                .fromJson[Json]
+                .toOption
+                .flatMap {
+                  case Json.Obj(fields) =>
+                    fields
+                      .find(_._1 == "input")
+                      .map(_._2)
+                      .collect { case Json.Obj(input) =>
+                        input.find(_._1 == "texts").map(_._2).collect { case Json.Arr(values) =>
+                          values.length
+                        }
+                      }
+                      .flatten
+                  case _ => None
+                }
+                .getOrElse(0)
               val vectors = (0 until count)
                 .map(index => s"""{"text_index":$index,"embedding":[${index + 1}.0,0.0,0.0]}""")
                 .mkString(",")
