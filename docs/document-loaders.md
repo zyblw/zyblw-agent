@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-09-24
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -39,6 +39,11 @@ HTTP Adapter。不需要文件摄取的业务不会被迫携带解析器或 HTTP
 
 因此“PDF→Markdown→分块→向量→检索”是框架应该提供的通用流水线；“这个用户能否上传、资料属于哪个知识库、哪些角色
 可读、保留多久、答案达到什么领域质量”必须留在业务控制面。
+
+`PaddleOcrVlDocument` 是框架中的纯解码器，接受 PaddleOCR-VL 页 JSON 和可选 Markdown：页码、块序、坐标以 JSON
+为准，Markdown 仅辅助恢复标题层级。解码时对页面缺失、块数与单块长度超限、标题超限明确报错；合法空白页保留页序。
+业务负责原件、异步 OCR、人工审校、图像持久化与何时发布。框架的 `KnowledgeReindexService` 必须把摄取的失败结果
+传播为重建失败，不能把 Continue 策略下的失败写成成功。Qwen 重排响应有字节上限与完整 Body 超时，分数必须有限且在 `[0, 1]`，非法值不能截断后充当证据。
 
 ## 2. DocumentInput 的契约
 

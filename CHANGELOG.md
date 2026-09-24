@@ -5,6 +5,7 @@ All notable user-visible changes will be recorded here. The project follows
 
 ## 0.9.0 - Unreleased
 
+- PaddleOCR-VL 页 JSON 解码拒绝缺页和超限内容，保留合法空白页；重建服务不再将 Continue 摄取失败报为成功；Qwen 重排限制响应字节数与完整 Body 耗时，拒绝缺失、空白、重复结果和非法分数。
 - 证据装配默认把重排种子放到 12、单源种子放到 4、证据预算放到 9000 token。`knowledge_fetch` 一次可以取 1 到 6 个 chunk。Qwen 重排缺少密钥或调用失败时按原顺序返回，并标上 `rerankFallback`。
 - 折行标题会跳过空行，并把紧跟的短文本并进章节名；编号小节仍单独成块。同一标题下的相邻块在一次扩展 SQL 里补上。回答里的「未命中」不再清掉已经检索到的引用。
 - 结构切块升到 `document-structure-v3` / `markdown-structure-v3`。`displayText` 只保留原文；dense/lexical 在离线索引时写入书名、完整章节路径和块类型。暂存与发布写入已有的 `dense_text` 和三份 SHA-256。表格、方剂和键值块不与正文合并，超长时按行切开。查询不因此多一次 Embedding 或重排。
