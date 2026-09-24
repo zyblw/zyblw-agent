@@ -368,7 +368,7 @@ final case class ChunkRepresentations(
 
 沿用 `ChunkLineage`，补足以下语义：
 
-- `documentRevisionId`：文档内容版本；
+- `sourceRevisionId`：文档内容版本；
 - `profileId`：派生该 chunk 的全局检索 Profile；
 - `parentId` / `previousId` / `nextId`；
 - heading path、page range、bounding box、block/table/figure type；
@@ -682,7 +682,7 @@ Qwen3.7 rerank adapter 放入 `agent-rerank`，使用 native endpoint；与 Cohe
 
 1. 校验并排序 reranked seeds；
 2. 按 seed 获取 parent/neighbor，所有 fetch 再执行相同 ACL/profile 条件；
-3. 按 `(documentRevisionId, chunkId)` 和 `displaySha256` 去重；
+3. 按 `(sourceRevisionId, chunkId)` 和 `displaySha256` 去重；
 4. 在 token 预算内选择证据；
 5. 只有数据集证明同一来源过度集中时，才启用 MMR/来源配额；
 6. 生成带安全分隔符、稳定引用标记和 provenance 的 Evidence Bundle。
@@ -706,7 +706,7 @@ final case class EvidenceItem(
   scores: Map[String, Double],
   tokenCount: Int,
   profileId: IndexProfileId,
-  documentRevisionId: String
+  sourceRevisionId: String
 )
 
 final case class EvidenceBundle(
@@ -811,7 +811,7 @@ ingestionKey = HMAC(
   knowledgeSpaceId,
   profileId,
   documentId,
-  documentRevisionId,
+  sourceRevisionId,
   sourceContentSha256
 )
 ```
@@ -865,7 +865,7 @@ agent_knowledge_profiles(
 
 agent_knowledge_profile_documents(
   tenant_id, knowledge_space_id, profile_id,
-  document_id, document_revision_id,
+  document_id, source_revision_id,
   source_uri, source_sha256,
   permissions, metadata,
   status, expected_chunks, staged_chunks,
@@ -874,7 +874,7 @@ agent_knowledge_profile_documents(
 
 agent_knowledge_profile_chunks(
   tenant_id, knowledge_space_id, profile_id,
-  document_id, document_revision_id, chunk_id,
+  document_id, source_revision_id, chunk_id,
   display_text, dense_text_or_recipe, lexical_text,
   search_vector, dense_embedding,
   sparse_embedding,
@@ -989,16 +989,19 @@ Embedding/cache/retrieval cache 至少包含：
 
 ### 12.2 删除传播
 
-文档删除/撤回必须产生可审计 tombstone，并传播到：
+下架与撤回是两件事。
 
-- 当前 active profile；
-- rollback window 内仍可恢复的 superseded profiles；
-- staging/building profiles；
+**下架**调用 `retire(key, expectedActiveVersion)`。它下线该文档在空间内全部 Profile 的当前 active 版本并删除正式块，不写墓碑。同一来源修订可以再次摄取。迟到的旧版本号不能误删刚发布的新版本。宿主的「从问答撤回」走这条路径。
+
+**撤回**调用 `withdraw(key, sourceRevisionId)`，只用于必须永不复活的错误修订。它产生可审计 tombstone，并传播到：
+
+- 当前 active profile 中该修订的正式块（写路径直接删除）；
+- 同一修订仍在 staging 的构建；
 - embedding/retrieval/context cache；
 - 对象存储或源系统的保留流程；
 - dashboard/search projection。
 
-撤回后，同一 space 的同一 `document_revision_id` 不能因 profile 回滚复活。tombstone 只匹配租户、空间、文档和修订；它不会隐藏其他空间，也不会隐藏更新的修订。跨空间禁令必须是单独的显式操作。
+撤回后，同一 space 的同一 `source_revision_id` 不能因 profile 回滚或重新摄取复活：撤回删除正式块，墓碑阻止该修订再次 begin/activate，未知修订的撤回直接失败。tombstone 只匹配租户、空间、文档和修订；它不会隐藏其他空间，也不会隐藏更新的修订。跨空间禁令必须是单独的显式操作。查询不再逐行检查墓碑。
 
 ### 12.3 Retention worker
 

@@ -29,7 +29,7 @@ final case class DocumentChunk(
     metadata: Map[String, String] = Map.empty,
     knowledgeSpaceId: Option[KnowledgeSpaceId] = None,
     profileId: Option[IndexProfileId] = None,
-    documentRevisionId: Option[String] = None,
+    sourceRevisionId: Option[String] = None,
     catalogVersion: Long = 1L,
     lineage: Option[ChunkLineage] = None
 ):
@@ -151,7 +151,7 @@ final case class RetrievalScope(
     runId: Option[RunId] = None,
     parentSpanId: Option[String] = None
 ):
-  def spaceId: KnowledgeSpaceId = knowledgeSpaceId.getOrElse(KnowledgeSpaceId("default"))
+  def spaceId: KnowledgeSpaceId = knowledgeSpaceId.getOrElse(KnowledgeSpaceId.Default)
 
   def withPinnedProfile(profileId: IndexProfileId): RetrievalScope =
     copy(pinnedProfileId = Some(profileId))
@@ -367,7 +367,7 @@ trait VectorStore:
   def assertEmbeddingIdentity(
       tenantId: TenantId,
       descriptor: EmbeddingProviderDescriptor,
-      spaceId: KnowledgeSpaceId = KnowledgeSpaceId("default"),
+      spaceId: KnowledgeSpaceId = KnowledgeSpaceId.Default,
       profileId: Option[IndexProfileId] = None
   ): IO[RetrievalError, Unit] =
     val _ = (tenantId, descriptor, spaceId, profileId)
@@ -641,8 +641,7 @@ final class DefaultRetriever(
         resolvedProfile <- scope.pinnedProfileId.fold(
           vectors.resolveActiveProfile(scope.tenantId, scope.spaceId)
         )(id => ZIO.succeed(Some(id)))
-        pinned      = resolvedProfile.getOrElse(IndexProfileId("default"))
-        pinnedScope = scope.withPinnedProfile(pinned)
+        pinnedScope = resolvedProfile.fold(scope)(scope.withPinnedProfile)
         requestId <- pinnedScope.requestId.fold(Random.nextUUID.map(_.toString))(ZIO.succeed(_))
         rewritten <-
           if assistConfig.enabled then
@@ -694,7 +693,7 @@ final class DefaultRetriever(
           pinnedScope.tenantId,
           embeddings.descriptor.denseDescriptor,
           pinnedScope.spaceId,
-          Some(pinned)
+          pinnedScope.pinnedProfileId
         )
         candidateLimit = plan.budgets.perBranch
         lexicalQuery   =
@@ -764,7 +763,7 @@ final class DefaultRetriever(
               ),
               evidence,
               evidenceBudgets,
-              profileId = Some(pinned),
+              profileId = pinnedScope.pinnedProfileId,
               knowledgeSpaceId = Some(pinnedScope.spaceId),
               degradedStages = Chunk.fromIterable(
                 Option.when(assistConfig.enabled && rewritten.isEmpty)("rewrite-fallback") ++
@@ -809,8 +808,7 @@ final class DefaultRetriever(
         ZIO.succeed(Some(id))
       )
       pin.flatMap { resolved =>
-        val pinned      = resolved.getOrElse(IndexProfileId("default"))
-        val pinnedScope = scope.withPinnedProfile(pinned)
+        val pinnedScope = resolved.fold(scope)(scope.withPinnedProfile)
         vectors.fetchChunks(chunkIds, pinnedScope, filter).map { chunks =>
           val hits = chunks.zipWithIndex.map { case (chunk, index) =>
             RetrievalHit(chunk, 1.0d, Map("fetch" -> 1.0d, "ordinal" -> index.toDouble))
@@ -838,7 +836,7 @@ final class DefaultRetriever(
               topAcceptedScore = hits.map(_.score).maxOption
             ),
             RetrievalDiagnostics(
-              profileId = Some(pinned.value),
+              profileId = pinnedScope.pinnedProfileId.map(_.value),
               knowledgeSpaceId = Some(pinnedScope.spaceId.value),
               selections = hits.map(hit =>
                 EvidenceSelection(

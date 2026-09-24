@@ -100,23 +100,69 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
     supportsDimensions = false
   )
 
+  private def specOf(model: String = "v1"): IndexBuildSpec =
+    IndexBuildSpec(
+      "integration-embedding",
+      model,
+      1024,
+      IndexBuildSpec.UndeclaredTokenizer,
+      None,
+      "integration-split-v1",
+      "identity"
+    )
+
+  /** 测试把正文摘要的前缀当作来源修订：不同正文即不同修订。 */
+  private def revisionOf(text: String): String = s"rev-${KnowledgeDigest.sha256(text).take(16)}"
+
+  private def lineageOf(documentId: String, text: String): DocumentLineage =
+    val sha = KnowledgeDigest.sha256(text)
+    DocumentLineage(
+      documentId,
+      revisionOf(text),
+      sha,
+      "text/plain",
+      DocumentLineage.DirectParserId,
+      sha,
+      sha,
+      sha
+    )
+
   /** 构造一个版本请求；正文 hash 由正式工具计算，测试不手写伪长度。 */
   private def request(
       tenant: TenantId,
       ingestionId: String,
       text: String,
-      expectation: ActiveVersionExpectation
-  ): BeginKnowledgeIndex = BeginKnowledgeIndex(
-    KnowledgeDocumentKey(tenant, "doc-1"),
-    ingestionId,
-    "doc://1",
-    KnowledgeIndexer.sha256(text),
-    Set("read"),
-    Map("title" -> "伤寒论测试资料"),
-    descriptor,
-    "integration-split-v1",
-    expectation
-  )
+      expectation: ActiveVersionExpectation,
+      key: Option[KnowledgeDocumentKey] = None,
+      spec: IndexBuildSpec = specOf(),
+      targetProfileId: Option[IndexProfileId] = None
+  ): BeginKnowledgeIndex =
+    val documentKey = key.getOrElse(KnowledgeDocumentKey(tenant, "doc-1"))
+    BeginKnowledgeIndex(
+      documentKey,
+      ingestionId,
+      s"doc://${documentKey.documentId}",
+      lineageOf(documentKey.documentId, text),
+      Set("read"),
+      Map("title" -> "伤寒论测试资料"),
+      spec,
+      expectation,
+      targetProfileId
+    )
+
+  /** 暂存并以真实块集合摘要发布。 */
+  private def publish(
+      harness: Harness,
+      build: KnowledgeIndexBuild,
+      chunks: Chunk[IndexedChunk]
+  ): IO[RetrievalError, KnowledgeIndexManifest] =
+    harness.index
+      .stage(build, chunks) *> harness.index.activate(build, ChunkSetDigest.of(chunks.map(_.chunk)))
+
+  /** 由 manifest 生成评测 census。 */
+  private def gateOf(evaluationId: String, manifests: KnowledgeIndexManifest*): ProfilePublication =
+    val census = Chunk.fromIterable(manifests).map(ProfileDocument.fromManifest)
+    ProfilePublication(census, evaluationId, ProfilePublication.digest(census), true)
 
   /** 为给定 build 创建带显式中文分词文本的暂存块。 */
   private def indexed(
@@ -162,42 +208,50 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
   )
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("PostgreSQL knowledge index")(
-    test("profile publication rejects missing and incomplete evidence, seals writes, and records CAS") {
+    test(
+      "profile publication rejects missing and incomplete evidence, keeps active profile writable, and records CAS"
+    ) {
       (for
         harness <- ZIO.service[Harness]
         tenant = TenantId("profile-publication")
         req    = request(tenant, "initial", "完整原文", ActiveVersionExpectation.AnyVersion)
-        build <- harness.index.begin(req)
-        firstCensus = Chunk(ProfileDocument(build.key.documentId, build.version, build.contentHash, 1))
-        firstGate   = ProfilePublication(
-          firstCensus,
-          "contract-evaluation",
-          ProfilePublication.digest(firstCensus),
-          true
-        )
+        build   <- harness.index.begin(req)
         missing <- harness.index
           .activateProfile(tenant, build.knowledgeSpaceId, build.profileId, 0L, "cutover")
           .exit
         building <- harness.index
-          .activateProfile(tenant, build.knowledgeSpaceId, build.profileId, 0L, "cutover", Some(firstGate))
+          .activateProfile(
+            tenant,
+            build.knowledgeSpaceId,
+            build.profileId,
+            0L,
+            "cutover",
+            Some(
+              ProfilePublication(
+                Chunk.empty,
+                "contract-evaluation",
+                ProfilePublication.digest(Chunk.empty),
+                true
+              )
+            )
+          )
           .exit
-        _      <- harness.index.stage(build, Chunk(indexed(build, "one", "完整原文", "完整 原文", unitVector(0))))
-        _      <- harness.index.activate(build, 1)
-        second <- harness.index.begin(
-          req.copy(
-            key = KnowledgeDocumentKey(tenant, "doc-2"),
-            ingestionId = "initial-2",
-            sourceUri = "doc://2",
-            contentHash = KnowledgeIndexer.sha256("第二份原文")
+        firstReady <- publish(harness, build, Chunk(indexed(build, "one", "完整原文", "完整 原文", unitVector(0))))
+        second     <- harness.index.begin(
+          request(
+            tenant,
+            "initial-2",
+            "第二份原文",
+            ActiveVersionExpectation.AnyVersion,
+            key = Some(KnowledgeDocumentKey(tenant, "doc-2"))
           )
         )
-        _ <- harness.index.stage(second, Chunk(indexed(second, "two", "第二份原文", "第二份 原文", unitVector(1))))
-        _ <- harness.index.activate(second, 1)
-        census = Chunk(
-          ProfileDocument(build.key.documentId, build.version, build.contentHash, 1),
-          ProfileDocument(second.key.documentId, second.version, second.contentHash, 1)
+        secondReady <- publish(
+          harness,
+          second,
+          Chunk(indexed(second, "two", "第二份原文", "第二份 原文", unitVector(1)))
         )
-        gate = ProfilePublication(census, "contract-evaluation", ProfilePublication.digest(census), true)
+        gate = gateOf("contract-evaluation", firstReady, secondReady)
         rejected <- harness.index
           .activateProfile(
             tenant,
@@ -237,24 +291,20 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         stale <- harness.index
           .activateProfile(tenant, build.knowledgeSpaceId, build.profileId, 1L, "cutover", Some(gate))
           .exit
-        mutation <- harness.index.begin(req.copy(ingestionId = "overwrite", contentHash = "b" * 64)).exit
-        partial  <- harness.index.begin(
+        mutation <- harness.index.begin(
+          req.copy(ingestionId = "overwrite", lineage = lineageOf("doc-1", "修订后原文"))
+        )
+        partial <- harness.index.begin(
           req.copy(
             ingestionId = "partial-new-profile",
-            embedding = descriptor.copy(model = "v2"),
+            buildSpec = specOf("v2"),
             targetProfileId = Some(IndexProfileId("parallel-v2"))
           )
         )
-        _ <- harness.index.stage(partial, Chunk(indexed(partial, "partial", "完整原文", "完整 原文", unitVector(2))))
-        _ <- harness.index.activate(partial, 1)
-        partialCensus = Chunk(
-          ProfileDocument(partial.key.documentId, partial.version, partial.contentHash, 1)
-        )
-        partialGate = ProfilePublication(
-          partialCensus,
-          "partial-evaluation",
-          ProfilePublication.digest(partialCensus),
-          true
+        partialReady <- publish(
+          harness,
+          partial,
+          Chunk(indexed(partial, "partial", "完整原文", "完整 原文", unitVector(2)))
         )
         incomplete <- harness.index
           .activateProfile(
@@ -263,9 +313,10 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
             partial.profileId,
             revision,
             "cutover",
-            Some(partialGate)
+            Some(gateOf("partial-evaluation", partialReady))
           )
           .exit
+        diff <- harness.index.profileCorpusDiff(tenant, partial.knowledgeSpaceId, partial.profileId)
       yield assertTrue(
         missing.isFailure,
         building.isFailure,
@@ -273,51 +324,101 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         revision == 2L,
         audit == ((Some(build.profileId.value), gate.evaluationId, gate.evaluatedCensusSha256, 2, "cutover")),
         stale.isFailure,
-        mutation.isFailure,
-        incomplete.isFailure
+        mutation.profileId == build.profileId,
+        mutation.version == 2L,
+        incomplete.isFailure,
+        diff.missing.map(_.documentId) == Chunk("doc-2")
       ))
         .provideLayer(harnessLayer)
     } @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
       3.minutes
     ) @@ TestAspect.sequential,
-    test("retire 仅删除当前 Profile chunks，旧 Profile 快照保持完整") {
+    test("切换后 active Profile 可继续写入，回滚目标显式补齐后可回滚；retire 下线全部 Profile 副本") {
       (for
         harness <- ZIO.service[Harness]
-        tenant = TenantId("profile-retire-isolation")
-        first <- harness.index.begin(
-          request(tenant, "profile-a", "相同正文", ActiveVersionExpectation.AnyVersion)
+        tenant = TenantId("profile-rollback")
+        space  = KnowledgeSpaceId.Default
+        keyA   = KnowledgeDocumentKey(tenant, "doc-a")
+        keyB   = KnowledgeDocumentKey(tenant, "doc-b")
+        pinned = (profile: IndexProfileId) =>
+          RetrievalScope(tenant, Set("read"), pinnedProfileId = Some(profile))
+        oldA <- harness.index.begin(
+          request(tenant, "a-old", "甲文", ActiveVersionExpectation.AnyVersion, Some(keyA))
         )
-        _ <- harness.index.stage(first, Chunk(indexed(first, "old", "旧 Profile", "旧 Profile", unitVector(0))))
-        _ <- harness.index.activate(first, 1)
-        second <- harness.index.begin(
-          request(tenant, "profile-b", "相同正文", ActiveVersionExpectation.AnyVersion)
-            .copy(embedding = descriptor.copy(model = "v2"))
+        oldAR <- publish(harness, oldA, Chunk(indexed(oldA, "a-old", "甲文旧模", "甲 文", unitVector(0))))
+        newA  <- harness.index.begin(
+          request(tenant, "a-new", "甲文", ActiveVersionExpectation.AnyVersion, Some(keyA), specOf("v2"))
         )
-        _ <- harness.index.stage(
-          second,
-          Chunk(indexed(second, "new", "新 Profile", "新 Profile", unitVector(0)))
+        newAR <- publish(harness, newA, Chunk(indexed(newA, "a-new", "甲文新模", "甲 文", unitVector(0))))
+        cas   <- harness.index
+          .activateProfile(tenant, space, newA.profileId, 1L, "cutover", Some(gateOf("cut", newAR)))
+        newB <- harness.index.begin(
+          request(tenant, "b-new", "乙文", ActiveVersionExpectation.AnyVersion, Some(keyB), specOf("v2"))
         )
-        _ <- harness.index.activate(second, 1)
-        census = Chunk(ProfileDocument(second.key.documentId, second.version, second.contentHash, 1))
-        _ <- harness.index.activateProfile(
-          tenant,
-          second.knowledgeSpaceId,
-          second.profileId,
-          1L,
-          "cutover",
-          Some(ProfilePublication(census, "retire-isolation", ProfilePublication.digest(census), true))
-        )
-        _       <- harness.index.retire(second.key, second.version)
-        oldHits <- harness.vectors.search(
-          unitVector(0),
-          RetrievalScope(
+        newBR       <- publish(harness, newB, Chunk(indexed(newB, "b-new", "乙文新模", "乙 文", unitVector(1))))
+        implicitOld <- harness.index
+          .begin(request(tenant, "b-old-implicit", "乙文", ActiveVersionExpectation.AnyVersion, Some(keyB)))
+          .exit
+        blocked <- harness.index
+          .activateProfile(tenant, space, oldA.profileId, cas, "rollback", Some(gateOf("rollback", oldAR)))
+          .exit
+        oldB <- harness.index.begin(
+          request(
             tenant,
-            Set("read"),
-            pinnedProfileId = Some(first.profileId)
-          ),
-          10
+            "b-old",
+            "乙文",
+            ActiveVersionExpectation.AnyVersion,
+            Some(keyB),
+            targetProfileId = Some(oldA.profileId)
+          )
         )
-      yield assertTrue(oldHits.map(_.chunk.id) == Chunk("old"))).provideLayer(harnessLayer)
+        oldBR    <- publish(harness, oldB, Chunk(indexed(oldB, "b-old", "乙文旧模", "乙 文", unitVector(1))))
+        rollback <- harness.index
+          .activateProfile(
+            tenant,
+            space,
+            oldA.profileId,
+            cas,
+            "rollback",
+            Some(gateOf("rollback", oldAR, oldBR))
+          )
+        oldHits        <- harness.vectors.search(unitVector(0), pinned(oldA.profileId), 10)
+        _              <- harness.index.retire(keyA, oldAR.build.version)
+        afterRetireOld <- harness.vectors.search(unitVector(0), pinned(oldA.profileId), 10)
+        afterRetireNew <- harness.vectors.search(unitVector(0), pinned(newA.profileId), 10)
+      yield assertTrue(
+        newBR.build.profileId == newA.profileId,
+        implicitOld.isFailure,
+        blocked.isFailure,
+        oldB.profileId == oldA.profileId,
+        rollback > cas,
+        oldHits.map(_.chunk.id).toSet == Set("a-old", "b-old"),
+        !afterRetireOld.exists(_.chunk.documentId == "doc-a"),
+        !afterRetireNew.exists(_.chunk.documentId == "doc-a")
+      )).provideLayer(harnessLayer)
+    } @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
+      3.minutes
+    ) @@ TestAspect.sequential,
+    test("并发首次导入只引导一次空间 Profile，全部文档发布成功") {
+      (for
+        harness <- ZIO.service[Harness]
+        tenant = TenantId("concurrent-bootstrap")
+        builds <- ZIO.foreachPar(Chunk.range(0, 8)) { i =>
+          val key = KnowledgeDocumentKey(tenant, s"doc-$i")
+          harness.index
+            .begin(request(tenant, s"boot-$i", s"并发正文$i", ActiveVersionExpectation.AnyVersion, Some(key)))
+            .flatMap(build =>
+              publish(harness, build, Chunk(indexed(build, s"c-$i", s"并发正文$i", "并发 正文", unitVector(i))))
+            )
+        }
+        active <- harness.index.resolveActiveProfile(tenant, KnowledgeSpaceId.Default)
+        hits   <- harness.vectors.search(unitVector(0), RetrievalScope(tenant, Set("read")), 20)
+      yield assertTrue(
+        builds.forall(_.active),
+        builds.map(_.build.profileId).toSet.size == 1,
+        active.contains(builds.head.build.profileId),
+        hits.length == 8
+      )).provideLayer(harnessLayer)
     } @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
       3.minutes
     ) @@ TestAspect.sequential,
@@ -344,7 +445,7 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         )
         _          <- harness.index.stage(first, firstChunks)
         before     <- harness.vectors.searchHybrid("桂枝", unitVector(0), scope, 10)
-        firstReady <- harness.index.activate(first, 2)
+        firstReady <- harness.index.activate(first, ChunkSetDigest.of(firstChunks.map(_.chunk)))
         after      <- harness.vectors.searchHybrid("桂枝", unitVector(0), scope, 10)
         // 短查询会走 Phrase；heading_path 过滤有 3 个占位符，绑定数必须对齐否则 JDBC 抛「未设定参数」。
         _ <- harness.vectors.searchFiltered(
@@ -366,10 +467,12 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         second <- harness.index.begin(
           request(tenant, "ingestion-2", "second", ActiveVersionExpectation.Exact(1L))
         )
-        _ <- harness.index.stage(second, Chunk(indexed(second, "doc-1-new", "麻黄汤新版本", "麻黄 汤", unitVector(2))))
-        wrongCount    <- harness.index.activate(second, 2).exit
+        secondChunks = Chunk(indexed(second, "doc-1-new", "麻黄汤新版本", "麻黄 汤", unitVector(2)))
+        _             <- harness.index.stage(second, secondChunks)
+        wrongCount    <- harness.index.activate(second, ChunkSetDigest(2, "0" * 64)).exit
+        wrongDigest   <- harness.index.activate(second, ChunkSetDigest(1, "0" * 64)).exit
         afterRollback <- harness.vectors.search(unitVector(0), scope, 10)
-        secondReady   <- harness.index.activate(second, 1)
+        secondReady   <- harness.index.activate(second, ChunkSetDigest.of(secondChunks.map(_.chunk)))
         finalHits     <- harness.vectors.search(unitVector(2), scope, 10)
         active        <- harness.index.active(KnowledgeDocumentKey(tenant, "doc-1"))
         staleRetire   <- harness.index.retire(KnowledgeDocumentKey(tenant, "doc-1"), 1L).exit
@@ -380,23 +483,33 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         goneFirst     <- harness.index.find(KnowledgeDocumentKey(tenant, "doc-1"), "ingestion-1")
         goneSecond    <- harness.index.find(KnowledgeDocumentKey(tenant, "doc-1"), "ingestion-2")
         sharedA       <- harness.index.begin(
-          request(tenant, "shared-a", "共享标识的第一份文档", ActiveVersionExpectation.AnyVersion)
-            .copy(key = KnowledgeDocumentKey(tenant, "doc-a"))
+          request(
+            tenant,
+            "shared-a",
+            "共享标识的第一份文档",
+            ActiveVersionExpectation.AnyVersion,
+            Some(KnowledgeDocumentKey(tenant, "doc-a"))
+          )
         )
-        _ <- harness.index.stage(
+        _ <- publish(
+          harness,
           sharedA,
           Chunk(indexed(sharedA, "shared-chunk", "共享标识的第一份文档", "共享 标识 第一份", unitVector(3)))
         )
-        _       <- harness.index.activate(sharedA, 1)
         sharedB <- harness.index.begin(
-          request(tenant, "shared-b", "共享标识的第二份文档", ActiveVersionExpectation.AnyVersion)
-            .copy(key = KnowledgeDocumentKey(tenant, "doc-b"))
+          request(
+            tenant,
+            "shared-b",
+            "共享标识的第二份文档",
+            ActiveVersionExpectation.AnyVersion,
+            Some(KnowledgeDocumentKey(tenant, "doc-b"))
+          )
         )
-        _ <- harness.index.stage(
+        _ <- publish(
+          harness,
           sharedB,
           Chunk(indexed(sharedB, "shared-chunk", "共享标识的第二份文档", "共享 标识 第二份", unitVector(3)))
         )
-        _          <- harness.index.activate(sharedB, 1)
         sharedHits <- harness.vectors.searchHybrid("共享标识", unitVector(3), scope, 10)
         orphan     <- harness.vectors
           .upsert(
@@ -405,8 +518,9 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
                 DocumentChunk
                   .fromText("orphan-chunk", "missing-doc", "孤儿块", "doc://orphan", tenant, Set("read"))
                   .copy(
-                    knowledgeSpaceId = Some(KnowledgeSpaceId("default")),
-                    profileId = Some(IndexProfileId("default"))
+                    knowledgeSpaceId = Some(KnowledgeSpaceId.Default),
+                    profileId = Some(IndexProfileId("missing-profile")),
+                    sourceRevisionId = Some("rev-orphan")
                   ),
                 unitVector(4)
               )
@@ -432,6 +546,7 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         expansion.isEmpty,
         firstReplay == first,
         wrongCount.isFailure,
+        wrongDigest.isFailure,
         afterRollback.map(_.chunk.id) == Chunk("doc-1-0"),
         secondReady.build.version == 2L,
         finalHits.map(_.chunk.id) == Chunk("doc-1-new"),
@@ -460,14 +575,19 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         scope  = RetrievalScope(tenant, Set("read"))
         emptyOk <- harness.vectors.assertEmbeddingIdentity(tenant, descriptor).exit
         first   <- harness.index.begin(
-          request(tenant, "ingestion-id-1", "identity-first", ActiveVersionExpectation.NoActiveVersion)
-            .copy(key = KnowledgeDocumentKey(tenant, "doc-identity"))
+          request(
+            tenant,
+            "ingestion-id-1",
+            "identity-first",
+            ActiveVersionExpectation.NoActiveVersion,
+            Some(KnowledgeDocumentKey(tenant, "doc-identity"))
+          )
         )
-        _ <- harness.index.stage(
+        _ <- publish(
+          harness,
           first,
           Chunk(indexed(first, "doc-identity-0", "桂枝汤身份校验", "桂枝 汤", unitVector(0)))
         )
-        _        <- harness.index.activate(first, 1)
         matchOk  <- harness.vectors.assertEmbeddingIdentity(tenant, descriptor).exit
         mismatch <- harness.vectors
           .assertEmbeddingIdentity(
@@ -477,24 +597,54 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
           .exit
         hits  <- harness.vectors.search(unitVector(0), scope, 10)
         other <- harness.index.begin(
-          request(tenant, "ingestion-id-2", "identity-second", ActiveVersionExpectation.AnyVersion)
-            .copy(
-              key = KnowledgeDocumentKey(tenant, "doc-identity-2"),
-              embedding = descriptor.copy(model = "other-model")
-            )
+          request(
+            tenant,
+            "ingestion-id-2",
+            "identity-second",
+            ActiveVersionExpectation.AnyVersion,
+            Some(KnowledgeDocumentKey(tenant, "doc-identity-2")),
+            specOf("other-model")
+          )
         )
-        _ <- harness.index.stage(
+        _ <- publish(
+          harness,
           other,
           Chunk(indexed(other, "doc-identity-2-0", "麻黄汤换模", "麻黄 汤", unitVector(3)))
         )
-        _           <- harness.index.activate(other, 1)
         afterSwitch <- harness.vectors.search(unitVector(0), scope, 10)
         mixed       <- harness.vectors.search(unitVector(3), scope, 10)
-        _           <- harness.index.withdraw(
+        unknown <- harness.index.withdraw(KnowledgeDocumentKey(tenant, "doc-identity"), "rev-unknown").exit
+        _       <- harness.index.withdraw(
           KnowledgeDocumentKey(tenant, "doc-identity"),
-          KnowledgeIndexer.sha256("identity-first")
+          revisionOf("identity-first")
         )
         withdrawn <- harness.vectors.search(unitVector(0), scope, 10)
+        remaining <- ZIO.attemptBlocking {
+          val connection = harness.dataSource.getConnection
+          try
+            val statement = connection.prepareStatement(
+              """SELECT count(*) FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
+                |WHERE tenant_id = ? AND document_id = 'doc-identity'""".stripMargin
+            )
+            try
+              statement.setString(1, tenant.value)
+              val result = statement.executeQuery()
+              result.next()
+              result.getLong(1)
+            finally statement.close()
+          finally connection.close()
+        }
+        replay <- harness.index
+          .begin(
+            request(
+              tenant,
+              "ingestion-id-1-replay",
+              "identity-first",
+              ActiveVersionExpectation.AnyVersion,
+              Some(KnowledgeDocumentKey(tenant, "doc-identity"))
+            )
+          )
+          .exit
       yield assertTrue(
         emptyOk.isSuccess,
         matchOk.isSuccess,
@@ -503,7 +653,10 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
         hits.head.chunk.displayText.contains("桂枝"),
         afterSwitch.map(_.chunk.id) == Chunk("doc-identity-0"),
         !mixed.exists(_.chunk.documentId == "doc-identity-2"),
-        withdrawn.isEmpty
+        unknown.isFailure,
+        withdrawn.isEmpty,
+        remaining == 0L,
+        replay.isFailure
       )).provideLayer(harnessLayer)
     } @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
       3.minutes
@@ -520,45 +673,38 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
       (for
         harness <- ZIO.service[Harness]
         first   <- harness.index.begin(
-          request(tenant, "wd-a1", textA, ActiveVersionExpectation.AnyVersion).copy(
-            key = KnowledgeDocumentKey(tenant, "doc-wd"),
-            knowledgeSpaceId = spaceA
+          request(
+            tenant,
+            "wd-a1",
+            textA,
+            ActiveVersionExpectation.AnyVersion,
+            Some(KnowledgeDocumentKey(tenant, "doc-wd", spaceA))
           )
         )
-        _ <- harness.index.stage(
-          first,
-          Chunk(indexed(first, "wd-a1", textA, "桂枝 汤 甲", unitVector(0)))
-        )
-        _      <- harness.index.activate(first, 1)
+        _      <- publish(harness, first, Chunk(indexed(first, "wd-a1", textA, "桂枝 汤 甲", unitVector(0))))
         second <- harness.index.begin(
-          request(tenant, "wd-b1", textB, ActiveVersionExpectation.AnyVersion).copy(
-            key = KnowledgeDocumentKey(tenant, "doc-wd"),
-            knowledgeSpaceId = spaceB
+          request(
+            tenant,
+            "wd-b1",
+            textA,
+            ActiveVersionExpectation.AnyVersion,
+            Some(KnowledgeDocumentKey(tenant, "doc-wd", spaceB))
           )
         )
-        _ <- harness.index.stage(
-          second,
-          Chunk(indexed(second, "wd-b1", textB, "桂枝 汤 乙", unitVector(1)))
-        )
-        _ <- harness.index.activate(second, 1)
-        _ <- harness.index.withdraw(
-          KnowledgeDocumentKey(tenant, "doc-wd"),
-          KnowledgeIndexer.sha256(textA),
-          spaceA
-        )
+        _       <- publish(harness, second, Chunk(indexed(second, "wd-b1", textB, "桂枝 汤 乙", unitVector(1))))
+        _       <- harness.index.withdraw(KnowledgeDocumentKey(tenant, "doc-wd", spaceA), revisionOf(textA))
         hiddenA <- harness.vectors.search(unitVector(0), scopeOf(spaceA), 10)
         keptB   <- harness.vectors.search(unitVector(1), scopeOf(spaceB), 10)
         newer   <- harness.index.begin(
-          request(tenant, "wd-a2", textA2, ActiveVersionExpectation.AnyVersion).copy(
-            key = KnowledgeDocumentKey(tenant, "doc-wd"),
-            knowledgeSpaceId = spaceA
+          request(
+            tenant,
+            "wd-a2",
+            textA2,
+            ActiveVersionExpectation.AnyVersion,
+            Some(KnowledgeDocumentKey(tenant, "doc-wd", spaceA))
           )
         )
-        _ <- harness.index.stage(
-          newer,
-          Chunk(indexed(newer, "wd-a2", textA2, "桂枝 汤 新", unitVector(2)))
-        )
-        _         <- harness.index.activate(newer, 1)
+        _         <- publish(harness, newer, Chunk(indexed(newer, "wd-a2", textA2, "桂枝 汤 新", unitVector(2))))
         visibleA  <- harness.vectors.search(unitVector(2), scopeOf(spaceA), 10)
         stillKept <- harness.vectors.search(unitVector(1), scopeOf(spaceB), 10)
       yield assertTrue(

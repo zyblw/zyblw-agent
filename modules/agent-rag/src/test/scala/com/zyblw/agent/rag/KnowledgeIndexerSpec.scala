@@ -24,7 +24,7 @@ object KnowledgeIndexerSpec extends ZIOSpecDefault:
           SlidingWindowChunker(maxCharacters = 4, overlap = 0),
           countingEmbedding(calls),
           store,
-          1
+          8
         )
         document = SourceDocument("doc-1", "abcdefgh", "doc://1", Map("title" -> "测试文档"))
         first <- indexer.index(
@@ -54,6 +54,34 @@ object KnowledgeIndexerSpec extends ZIOSpecDefault:
         active.contains(first.manifest),
         published.map(_.chunk.indexVersion) == Chunk(1L, 1L),
         count == 1
+      )
+    },
+    test("空 ingestionId 由谱系派生：重放幂等，新来源修订产生新版本，并按批次调用 Provider") {
+      val tenant = TenantId("tenant-a")
+      for
+        store <- InMemoryKnowledgeIndexStore.make
+        calls <- Ref.make(0)
+        indexer = KnowledgeIndexer(
+          SlidingWindowChunker(maxCharacters = 4, overlap = 0),
+          countingEmbedding(calls),
+          store,
+          1
+        )
+        document = SourceDocument("doc-1", "abcdefgh", "doc://1")
+        rev1     = IngestionProvenance(Some(SourceRevision("book-1", "rev-1")))
+        rev2     = IngestionProvenance(Some(SourceRevision("book-1", "rev-2")))
+        first   <- indexer.index(document, tenant, Set("read"), "", provenance = rev1)
+        replay  <- indexer.index(document, tenant, Set("read"), "", provenance = rev1)
+        batched <- calls.get
+        second  <- indexer.index(document, tenant, Set("read"), "", provenance = rev2)
+      yield assertTrue(
+        first.manifest.build.ingestionId.length == 64,
+        replay.manifest == first.manifest,
+        batched == 2,
+        first.manifest.build.lineage.sourceId == "book-1",
+        second.manifest.build.version == 2L,
+        second.manifest.build.lineage.sourceRevisionId == "rev-2",
+        first.manifest.chunkSetSha256.exists(_.length == 64)
       )
     },
     test("同 ingestionId 的内容漂移与错误 active 前置条件均被拒绝") {

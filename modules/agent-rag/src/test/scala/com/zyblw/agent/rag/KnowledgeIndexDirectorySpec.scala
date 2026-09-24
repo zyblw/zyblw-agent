@@ -12,23 +12,23 @@ import zio.test.*
   */
 object KnowledgeIndexDirectorySpec extends ZIOSpecDefault:
 
-  private val embedding =
-    EmbeddingProviderDescriptor("directory-test", "v1", 2, 10, supportsDimensions = false)
+  private val buildSpec = KnowledgeFixtures.buildSpec(model = "v1", strategy = "directory-test-v1")
 
   /** 构造一份只用于目录投影的 manifest；正文与向量不参与列表。 */
   private def manifest(
       documentId: String,
       version: Long,
       updatedAtEpochMilli: Long,
-      tenant: String = "tenant-a"
+      tenant: String = "tenant-a",
+      space: KnowledgeSpaceId = KnowledgeSpaceId.Default
   ): KnowledgeIndexManifest = KnowledgeIndexManifest(
     build = KnowledgeIndexBuild(
-      key = KnowledgeDocumentKey(TenantId(tenant), documentId),
+      key = KnowledgeDocumentKey(TenantId(tenant), documentId, space),
       version = version,
       ingestionId = s"$documentId-v$version",
-      contentHash = "0" * 64,
-      embedding = embedding,
-      indexingStrategy = "directory-test-v1"
+      lineage = KnowledgeFixtures.lineage(documentId, text = "0" * 64),
+      buildSpec = buildSpec,
+      profileId = IndexProfileIds.fromSpec(buildSpec)
     ),
     sourceUri = s"knowledge://$documentId",
     permissions = Set("knowledge:read"),
@@ -103,8 +103,21 @@ object KnowledgeIndexDirectorySpec extends ZIOSpecDefault:
         pages == 3
       )
     },
-    test("游标只包含时间、文档与版本，可安全往返编解码") {
-      val cursor = KnowledgeIndexCursor(100L, "doc:with:colon", 3L)
+    test("同一时间戳、同一文档 ID 位于不同空间时逐行翻页不丢行") {
+      val spaced = Chunk(
+        manifest("doc-x", 1L, 100L, space = KnowledgeSpaceId("space-a")),
+        manifest("doc-x", 1L, 100L, space = KnowledgeSpaceId("space-b")),
+        manifest("doc-x", 1L, 100L)
+      )
+      val directory = KnowledgeIndexDirectory.fromSnapshots(ZIO.succeed(spaced))
+      for paged <- drain(directory, Some(TenantId("tenant-a")), 1)
+      yield assertTrue(
+        paged._1.map(_.build.knowledgeSpaceId.value).toSet == Set("space-a", "space-b", "default"),
+        paged._1.length == 3
+      )
+    },
+    test("游标包含时间、空间、文档与版本，可安全往返编解码") {
+      val cursor = KnowledgeIndexCursor(100L, KnowledgeSpaceId("space.with:colon"), "doc:with:colon", 3L)
       assertTrue(
         KnowledgeIndexCursor.decode(cursor.encoded) == Right(cursor),
         KnowledgeIndexCursor.decode("not-a-cursor").isLeft,

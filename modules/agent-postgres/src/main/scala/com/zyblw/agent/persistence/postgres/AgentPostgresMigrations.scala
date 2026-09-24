@@ -210,8 +210,29 @@ object AgentPostgresMigrations:
             "heading_path",
             "page_numbers",
             "origins",
-            "block_ids"
+            "block_ids",
+            "source_revision_id"
           )
+        ) ++ requiredColumns(
+          connection,
+          schema,
+          "agent_knowledge_profile_documents",
+          Chunk(
+            "source_id",
+            "source_revision_id",
+            "source_sha256",
+            "parser_id",
+            "artifact_sha256",
+            "structure_sha256",
+            "text_sha256",
+            "build_spec_sha256",
+            "chunk_set_sha256"
+          )
+        ) ++ requiredColumns(
+          connection,
+          schema,
+          "agent_knowledge_profiles",
+          Chunk("build_spec", "build_spec_sha256")
         )
         Chunk("agent_knowledge_profile_chunk_staging", "agent_knowledge_profile_chunks").foreach { table =>
           val actual = querySingleString(

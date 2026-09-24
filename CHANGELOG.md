@@ -5,13 +5,17 @@ All notable user-visible changes will be recorded here. The project follows
 
 ## 0.9.0 - Unreleased
 
+- 知识身份模型重写（知识 V001 原地修改，需重建知识 schema）。文档键加入 `knowledgeSpaceId`；`BeginKnowledgeIndex` / `KnowledgeIndexBuild` 以 `DocumentLineage`（原件修订、解析产物、结构、正文四段 SHA-256）与 `IndexBuildSpec`（含 tokenizer、instruction、enricher）取代 `contentHash` + embedding descriptor + strategy；Profile ID 由规格摘要派生，`build_spec_sha256` 以复合外键钉在每个文档上。`activate(build, ChunkSetDigest)` 在 SQL 中重算块集合摘要，取代块数比较。`withdraw(key, sourceRevisionId)` 对未知修订失败，删除正式块并写墓碑，墓碑阻止该修订再次摄取；`purgeInactive` 的 legal hold 改为 `Set[KnowledgeDocumentKey]`；`documentRevisionId` 更名为 `sourceRevisionId`。空 ingestionId 由 HMAC 覆盖全部谱系字段派生；`DocumentIngestionRequest.source` 传入宿主可信的原件修订，`DocumentIngestionService` 在读流时计算解析产物摘要。
+- 修复 Profile 切换后的写入死锁：active/building Profile 可写，superseded Profile 只接受显式 `targetProfileId` 补齐，终态封存。发布校验只看每份文档的最新版本，较早的失败尝试不再阻塞切换；新增 `profileCorpusDiff`。`retire` 下线文档在空间内全部 Profile 的副本；并发首次导入不再因引导竞争失败；知识目录游标加入空间，同一文档 ID 跨空间翻页不丢行。
+- 向量检索物理设计：查询先在短事务里解析 Profile，再以绑定参数过滤，不再有相关子查询和 `default` 回退；向量、hybrid、sparse、fetch 与上下文扩展统一设置 `hnsw.iterative_scan`、`ef_search`（`hnswEfSearch`，默认 100）与 `max_scan_tuples`（`hnswMaxScanTuples`，默认 20000）。删除 `permissions` GIN 索引。带过滤的 hybrid 也参与 sparse 融合，sparse 候选同样应用结构化过滤。新增执行计划与召回集成测试。未采用按 Profile 分区：需要运行时 DDL，而单租户、每空间一到两个 Profile 的规模收益不足。
+
 - PaddleOCR-VL 页 JSON 解码拒绝缺页和超限内容，保留合法空白页；重建服务不再将 Continue 摄取失败报为成功；Qwen 重排限制响应字节数与完整 Body 耗时，拒绝缺失、空白、重复结果和非法分数。
 - 证据装配默认把重排种子放到 12、单源种子放到 4、证据预算放到 9000 token。`knowledge_fetch` 一次可以取 1 到 6 个 chunk。Qwen 重排缺少密钥或调用失败时按原顺序返回，并标上 `rerankFallback`。
 - 折行标题会跳过空行，并把紧跟的短文本并进章节名；编号小节仍单独成块。同一标题下的相邻块在一次扩展 SQL 里补上。回答里的「未命中」不再清掉已经检索到的引用。
 - 结构切块升到 `document-structure-v3` / `markdown-structure-v3`。`displayText` 只保留原文；dense/lexical 在离线索引时写入书名、完整章节路径和块类型。暂存与发布写入已有的 `dense_text` 和三份 SHA-256。表格、方剂和键值块不与正文合并，超长时按行切开。查询不因此多一次 Embedding 或重排。
 - qwen3.7-text-embedding 的 DashScope 原生调用按最多 20 条分批，并在 `parameters` 中写入 `text_type`、`dimension` 和 `output_type=dense`。`QwenEmbeddingConfig.nativeApiRoot` 把 `/compatible-mode/v1` 换成同一工作空间的 `/api/v1`。Qwen rerank 可附带 `instruct`。
 - Qwen 原生 Embedding 默认声明 `cjk-approx-v1`。OpenAI `text-embedding-3` 的示例配置声明 `cl100k-base`。live 装配拒绝缺失、`test-hash` 和 `codepoints`。
-- 收紧未发布基线的知识与完成态契约：`Retriever.fetch` 按 chunk 身份配对引用；撤回只隐藏同一 space 的同一 `document_revision_id`；未声明 tokenizer 不能建索引，测试哈希向量必须显式使用 `test-hash`；已发布知识块外键必须与文档的 tenant/space/profile/document/index version 一致；删除与 `UNIQUE(run_id, sequence)` 重复的 `agent_events` 索引；dispatcher 只能指向同一 Run 的命令；证据拒绝在 `AgentState.completionDisposition` 记下 `InsufficientEvidence`，普通对话保持未设置。仍不新增 `RunStatus`。
+- 收紧未发布基线的知识与完成态契约：`Retriever.fetch` 按 chunk 身份配对引用；撤回只作用于同一 space 的同一 `source_revision_id`；未声明 tokenizer 不能建索引，测试哈希向量必须显式使用 `test-hash`；已发布知识块外键必须与文档的 tenant/space/profile/document/index version 一致；删除与 `UNIQUE(run_id, sequence)` 重复的 `agent_events` 索引；dispatcher 只能指向同一 Run 的命令；证据拒绝在 `AgentState.completionDisposition` 记下 `InsufficientEvidence`，普通对话保持未设置。仍不新增 `RunStatus`。
 - 知识资料范围改为显式状态：`documentScope=unrestricted` 才允许查授权库，非空 `scopeDocumentId` / `scopeDocumentIds` 限定文档；空白或缺失会拒绝，不再放宽成全库。`knowledge_fetch` 在查询时施加文档条件。证据不足且策略为 `RequireExplicitRefusal` 时，Runtime 直接拒绝，不再把记忆或检索正文交给模型。Qwen Embedding 只声明已启用的 `Dense`，并且不再声称返回 usage。live 知识摄入必须设置 `EMBEDDING_TOKENIZER`，切分计数器与该声明不一致时拒绝建索引。
 - `knowledge_search` / `knowledge_fetch` 遵守宿主写入的文档范围。模型省略文档时锁在该范围；改到范围外或取回范围外的块会在正文返回前失败。
 - Langfuse Score 取消契约改为先确认无限响应流已经开始，再中断调用 Fiber。固定睡眠不再决定 Body 是否关闭。

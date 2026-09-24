@@ -59,17 +59,27 @@ object PostgresKnowledgeIndexDirectoryIntegrationSpec extends ZIOSpecDefault:
       documentId: String,
       ingestionId: String,
       expectation: ActiveVersionExpectation
-  ): BeginKnowledgeIndex = BeginKnowledgeIndex(
-    KnowledgeDocumentKey(tenant, documentId),
-    ingestionId,
-    s"doc://$documentId",
-    KnowledgeIndexer.sha256(s"$documentId-$ingestionId"),
-    Set("read"),
-    Map("title" -> documentId),
-    descriptor,
-    "integration-split-v1",
-    expectation
-  )
+  ): BeginKnowledgeIndex =
+    val sha = KnowledgeDigest.sha256(s"$documentId-$ingestionId")
+    BeginKnowledgeIndex(
+      KnowledgeDocumentKey(tenant, documentId),
+      ingestionId,
+      s"doc://$documentId",
+      DocumentLineage(
+        documentId,
+        s"rev-$ingestionId",
+        sha,
+        "text/plain",
+        DocumentLineage.DirectParserId,
+        sha,
+        sha,
+        sha
+      ),
+      Set("read"),
+      Map("title" -> documentId),
+      IndexBuildSpec.of(descriptor, "integration-split-v1"),
+      expectation
+    )
 
   private def chunk(build: KnowledgeIndexBuild, slot: Int): IndexedChunk = IndexedChunk(
     DocumentChunk.fromText(
@@ -98,8 +108,9 @@ object PostgresKnowledgeIndexDirectoryIntegrationSpec extends ZIOSpecDefault:
   ): IO[RetrievalError, KnowledgeIndexBuild] =
     for
       build <- harness.index.begin(request(tenant, documentId, ingestionId, expectation))
-      _     <- harness.index.stage(build, Chunk(chunk(build, slot)))
-      _     <- harness.index.activate(build, 1)
+      staged = Chunk(chunk(build, slot))
+      _ <- harness.index.stage(build, staged)
+      _ <- harness.index.activate(build, ChunkSetDigest.of(staged.map(_.chunk)))
     yield build
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("PostgreSQL 知识清单目录")(
@@ -141,6 +152,7 @@ object PostgresKnowledgeIndexDirectoryIntegrationSpec extends ZIOSpecDefault:
           Some(
             KnowledgeIndexCursor(
               CursorTime.epochMicro(page2.items.head.updatedAt),
+              page2.items.head.build.knowledgeSpaceId,
               page2.items.head.build.key.documentId,
               page2.items.head.build.version
             )

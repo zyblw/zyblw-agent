@@ -30,33 +30,147 @@ final class PostgresPgVectorStore(
     """chunk_id, document_id, chunk_text, search_text, source_uri, permissions, metadata::text, index_version,
       |       parent_id, lineage_ordinal, previous_chunk_id, next_chunk_id, heading_path,
       |       page_numbers, origins::text, block_ids, knowledge_space_id, profile_id,
-      |       document_revision_id, dense_text""".stripMargin
+      |       source_revision_id, dense_text""".stripMargin
 
+  /** 可见性谓词：空间与 Profile 都是查询前解析好的绑定参数，没有相关子查询，也没有 `default` 回退。
+    *
+    * 撤回在写路径上删除正式块，因此这里不需要逐行检查墓碑。
+    */
   private def visibilitySql(relation: String = "agent_knowledge_profile_chunks"): String =
-    s"""AND $relation.knowledge_space_id = ?
-       |AND $relation.profile_id = COALESCE(?, (
-       |  SELECT s.active_profile_id FROM zyblw_agent_knowledge.agent_knowledge_spaces s
-       |  WHERE s.tenant_id = $relation.tenant_id
-       |    AND s.knowledge_space_id = $relation.knowledge_space_id
-       |), 'default')
-       |AND NOT EXISTS (
-       |  SELECT 1 FROM zyblw_agent_knowledge.agent_knowledge_withdrawn w
-       |  WHERE w.tenant_id = $relation.tenant_id
-       |    AND w.knowledge_space_id = $relation.knowledge_space_id
-       |    AND w.document_id = $relation.document_id
-       |    AND w.document_revision_id = $relation.document_revision_id
-       |)""".stripMargin
+    s"AND $relation.knowledge_space_id = ? AND $relation.profile_id = ?"
 
   private def bindVisibility(
       statement: java.sql.PreparedStatement,
       start: Int,
-      scope: RetrievalScope
+      scope: RetrievalScope,
+      profile: IndexProfileId
   ): Int =
     statement.setString(start, scope.spaceId.value)
-    scope.pinnedProfileId match
-      case Some(id) => statement.setString(start + 1, id.value)
-      case None     => statement.setNull(start + 1, java.sql.Types.VARCHAR)
+    statement.setString(start + 1, profile.value)
     start + 2
+
+  /** 钉住的 Profile，或空间当前 active Profile；两者都没有时该范围没有可见数据。 */
+  private def resolveProfile(connection: Connection, scope: RetrievalScope): Option[IndexProfileId] =
+    scope.pinnedProfileId match
+      case Some(profile) => Some(profile)
+      case None          =>
+        val statement = connection.prepareStatement(
+          """SELECT active_profile_id FROM zyblw_agent_knowledge.agent_knowledge_spaces
+            |WHERE tenant_id = ? AND knowledge_space_id = ?""".stripMargin
+        )
+        try
+          statement.setString(1, scope.tenantId.value)
+          statement.setString(2, scope.spaceId.value)
+          val result = statement.executeQuery()
+          try
+            if result.next() then Option(result.getString(1)).filter(_.trim.nonEmpty).map(IndexProfileId(_))
+            else None
+          finally result.close()
+        finally statement.close()
+
+  /** 在一个只读短事务中执行查询：先解析 Profile，再以 `SET LOCAL` 语义应用 HNSW 参数。 */
+  private def withProfile[A](scope: RetrievalScope, empty: => A, vector: Boolean)(
+      use: (Connection, IndexProfileId) => A
+  ): IO[RetrievalError, A] =
+    withConnection { connection =>
+      ZIO.attemptBlocking {
+        val previousAutoCommit = connection.getAutoCommit
+        connection.setAutoCommit(false)
+        try
+          val result = resolveProfile(connection, scope) match
+            case None          => empty
+            case Some(profile) =>
+              if vector then applyHnswSettings(connection)
+              use(connection, profile)
+          connection.commit()
+          result
+        catch
+          case error: Throwable =>
+            connection.rollback()
+            throw error
+        finally connection.setAutoCommit(previousAutoCommit)
+      }
+    }
+
+  private def applyHnswSettings(connection: Connection): Unit =
+    val statement = connection.prepareStatement(
+      """SELECT set_config('hnsw.iterative_scan', ?, true),
+        |       set_config('hnsw.ef_search', ?, true),
+        |       set_config('hnsw.max_scan_tuples', ?, true)""".stripMargin
+    )
+    try
+      statement.setString(1, if hybridConfig.enableHnswIterativeScan then "strict_order" else "off")
+      statement.setString(2, hybridConfig.hnswEfSearch.toString)
+      statement.setString(3, hybridConfig.hnswMaxScanTuples.toString)
+      statement.executeQuery().close()
+    finally statement.close()
+
+  /** 测试用：以与 `search`/`searchFiltered` 完全相同的 SQL、绑定和会话参数返回 `EXPLAIN` 文本。 */
+  private[postgres] def explainVectorSearch(
+      query: Embedding,
+      scope: RetrievalScope,
+      filter: RetrievalFilter,
+      limit: Int,
+      analyze: Boolean = false
+  ): IO[RetrievalError, String] =
+    validateQueryDimension(query) *> withProfile(scope, "", vector = true) { (connection, profile) =>
+      val statement = connection.prepareStatement(
+        s"EXPLAIN (${if analyze then "ANALYZE, BUFFERS, " else ""}COSTS OFF) ${vectorSql(filtered = !filter.isEmpty)}"
+      )
+      try
+        bindVector(statement, connection, query, scope, profile, filter, limit)
+        val result = statement.executeQuery()
+        val lines  = Vector.newBuilder[String]
+        while result.next() do lines += result.getString(1)
+        lines.result().mkString("\n")
+      finally statement.close()
+    }
+
+  private def vectorSql(filtered: Boolean): String =
+    s"""SELECT $chunkSelectColumns,
+       |       1 - (embedding <=> ?::public.vector) AS score
+       |FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
+       |WHERE tenant_id = ? AND permissions <@ ?::text[]
+       |${visibilitySql()}
+       |${if filtered then FilterSql else ""}
+       |ORDER BY embedding <=> ?::public.vector
+       |LIMIT ?""".stripMargin
+
+  private def bindVector(
+      statement: java.sql.PreparedStatement,
+      connection: Connection,
+      query: Embedding,
+      scope: RetrievalScope,
+      profile: IndexProfileId,
+      filter: RetrievalFilter,
+      limit: Int
+  ): Unit =
+    val vector = vectorLiteral(query)
+    statement.setString(1, vector)
+    statement.setString(2, scope.tenantId.value)
+    statement.setArray(3, connection.createArrayOf("text", scope.permissions.toArray))
+    val vis  = bindVisibility(statement, 4, scope, profile)
+    val next = if filter.isEmpty then vis else bindFilter(statement, connection, vis, filter)
+    statement.setString(next, vector)
+    statement.setInt(next + 1, limit)
+
+  private def runVector(
+      query: Embedding,
+      scope: RetrievalScope,
+      filter: RetrievalFilter,
+      limit: Int
+  ): IO[RetrievalError, Chunk[RetrievalHit]] =
+    validateQueryDimension(query) *> withProfile(scope, Chunk.empty[RetrievalHit], vector = true) {
+      (connection, profile) =>
+        val statement = connection.prepareStatement(vectorSql(filtered = !filter.isEmpty))
+        try
+          bindVector(statement, connection, query, scope, profile, filter, limit)
+          val result  = statement.executeQuery()
+          val builder = ChunkBuilder.make[RetrievalHit]()
+          while result.next() do builder += RetrievalHit(readChunk(result, scope), result.getDouble("score"))
+          builder.result()
+        finally statement.close()
+    }
 
   /** 批量 upsert 文档块。
     *
@@ -66,14 +180,23 @@ final class PostgresPgVectorStore(
     *   批次全部成功时完成；任一向量维度错误会在取得数据库连接前失败
     */
   def upsert(chunks: Chunk[IndexedChunk]): IO[RetrievalError, Unit] =
-    ZIO.foreachDiscard(chunks)(validateDimension) *> withConnection { connection =>
-      ZIO.attemptBlocking {
-        val statement = connection.prepareStatement(
-          """INSERT INTO zyblw_agent_knowledge.agent_knowledge_profile_chunks
+    ZIO.foreachDiscard(chunks)(validateDimension) *> ZIO
+      .fail(
+        AgentError.RetrievalFailed(
+          "pgvector upsert 要求块携带 profileId 与 sourceRevisionId；正常摄取请使用 KnowledgeIndexer"
+        )
+      )
+      .unless(
+        chunks.forall(chunk => chunk.chunk.profileId.nonEmpty && chunk.chunk.sourceRevisionId.nonEmpty)
+      ) *>
+      withConnection { connection =>
+        ZIO.attemptBlocking {
+          val statement = connection.prepareStatement(
+            """INSERT INTO zyblw_agent_knowledge.agent_knowledge_profile_chunks
             |(tenant_id, knowledge_space_id, profile_id, chunk_id, document_id, index_version, chunk_text, search_text, source_uri, permissions, metadata,
             | embedding, parent_id, lineage_ordinal, previous_chunk_id, next_chunk_id, heading_path,
-            | page_numbers, origins, block_ids, dense_text, display_sha256, dense_sha256, lexical_sha256)
-            |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::public.vector, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?)
+            | page_numbers, origins, block_ids, dense_text, display_sha256, dense_sha256, lexical_sha256, source_revision_id)
+            |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::public.vector, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?)
             |ON CONFLICT (tenant_id, knowledge_space_id, profile_id, document_id, chunk_id) DO UPDATE SET
             |index_version = EXCLUDED.index_version,
             |chunk_text = EXCLUDED.chunk_text,
@@ -95,31 +218,32 @@ final class PostgresPgVectorStore(
             |origins = EXCLUDED.origins,
             |block_ids = EXCLUDED.block_ids,
             |updated_at = now()""".stripMargin
-        )
-        try
-          chunks.foreach { indexed =>
-            val chunk = indexed.chunk
-            statement.setString(1, chunk.tenantId.value)
-            statement.setString(2, chunk.knowledgeSpaceId.getOrElse(KnowledgeSpaceId("default")).value)
-            statement.setString(3, chunk.profileId.getOrElse(IndexProfileId("default")).value)
-            statement.setString(4, chunk.id)
-            statement.setString(5, chunk.documentId)
-            statement.setLong(6, chunk.indexVersion)
-            statement.setString(7, chunk.displayText)
-            statement.setString(8, chunk.searchText.getOrElse(chunk.displayText))
-            statement.setString(9, chunk.sourceUri)
-            statement.setArray(10, connection.createArrayOf("text", chunk.permissions.toArray))
-            statement.setString(11, chunk.metadata.toJson)
-            statement.setString(12, vectorLiteral(indexed.embedding))
-            bindLineage(statement, connection, 13, chunk.lineage)
-            bindRepresentations(statement, 21, chunk)
-            statement.addBatch()
-          }
-          statement.executeBatch()
-          ()
-        finally statement.close()
+          )
+          try
+            chunks.foreach { indexed =>
+              val chunk = indexed.chunk
+              statement.setString(1, chunk.tenantId.value)
+              statement.setString(2, chunk.knowledgeSpaceId.getOrElse(KnowledgeSpaceId.Default).value)
+              statement.setString(3, chunk.profileId.map(_.value).orNull)
+              statement.setString(4, chunk.id)
+              statement.setString(5, chunk.documentId)
+              statement.setLong(6, chunk.indexVersion)
+              statement.setString(7, chunk.displayText)
+              statement.setString(8, chunk.searchText.getOrElse(chunk.displayText))
+              statement.setString(9, chunk.sourceUri)
+              statement.setArray(10, connection.createArrayOf("text", chunk.permissions.toArray))
+              statement.setString(11, chunk.metadata.toJson)
+              statement.setString(12, vectorLiteral(indexed.embedding))
+              bindLineage(statement, connection, 13, chunk.lineage)
+              bindRepresentations(statement, 21, chunk)
+              statement.setString(25, chunk.sourceRevisionId.orNull)
+              statement.addBatch()
+            }
+            statement.executeBatch()
+            ()
+          finally statement.close()
+        }
       }
-    }
 
   /** 在授权边界内执行 cosine 相似度查询。
     *
@@ -132,34 +256,7 @@ final class PostgresPgVectorStore(
     */
   def search(query: Embedding, scope: RetrievalScope, limit: Int): IO[RetrievalError, Chunk[RetrievalHit]] =
     if limit <= 0 then ZIO.succeed(Chunk.empty)
-    else
-      validateQueryDimension(query) *> withConnection { connection =>
-        ZIO.attemptBlocking {
-          val sql =
-            s"""SELECT $chunkSelectColumns,
-            |       1 - (embedding <=> ?::public.vector) AS score
-            |FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
-            |WHERE tenant_id = ? AND permissions <@ ?::text[]
-            |${visibilitySql()}
-            |ORDER BY embedding <=> ?::public.vector
-            |LIMIT ?""".stripMargin
-          val statement = connection.prepareStatement(sql)
-          try
-            val vector = vectorLiteral(query)
-            statement.setString(1, vector)
-            statement.setString(2, scope.tenantId.value)
-            statement.setArray(3, connection.createArrayOf("text", scope.permissions.toArray))
-            val next = bindVisibility(statement, 4, scope)
-            statement.setString(next, vector)
-            statement.setInt(next + 1, limit)
-            val result  = statement.executeQuery()
-            val builder = ChunkBuilder.make[RetrievalHit]()
-            while result.next() do
-              builder += RetrievalHit(readChunk(result, scope), result.getDouble("score"))
-            builder.result()
-          finally statement.close()
-        }
-      }
+    else runVector(query, scope, RetrievalFilter.empty, limit)
 
   /** 在一条 SQL 中获取向量候选与 PostgreSQL FTS 候选，再以加权 Reciprocal Rank Fusion 合并。
     *
@@ -183,117 +280,7 @@ final class PostgresPgVectorStore(
   ): IO[RetrievalError, Chunk[RetrievalHit]] =
     if limit <= 0 then ZIO.succeed(Chunk.empty)
     else if queryText.trim.isEmpty then search(query, scope, limit)
-    else
-      validateQueryDimension(query) *> withConnection { connection =>
-        ZIO.attemptBlocking {
-          val previousAutoCommit = connection.getAutoCommit
-          connection.setAutoCommit(false)
-          try
-            if hybridConfig.enableHnswIterativeScan then
-              val setting = connection.createStatement()
-              try
-                setting.execute("SET LOCAL hnsw.iterative_scan = strict_order")
-                ()
-              finally setting.close()
-
-            val sql =
-              s"""WITH search_query AS (
-              |  SELECT websearch_to_tsquery(?::regconfig, ?) AS value
-              |),
-              |vector_hits AS MATERIALIZED (
-              |  SELECT document_id, chunk_id,
-              |         row_number() OVER (ORDER BY embedding <=> ?::public.vector, document_id, chunk_id) AS vector_rank,
-              |         1 - (embedding <=> ?::public.vector) AS vector_score
-              |  FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
-              |  WHERE tenant_id = ? AND permissions <@ ?::text[]
-              |  ${visibilitySql()}
-              |  ORDER BY embedding <=> ?::public.vector, document_id, chunk_id
-              |  LIMIT ?
-              |),
-              |text_hits AS MATERIALIZED (
-              |  SELECT document_id, chunk_id,
-              |         row_number() OVER (
-              |           ORDER BY ts_rank_cd(search_vector, search_query.value, 32) DESC, document_id, chunk_id
-              |         ) AS text_rank,
-              |         ts_rank_cd(search_vector, search_query.value, 32) AS text_score
-              |  FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks CROSS JOIN search_query
-              |  WHERE tenant_id = ?
-              |    AND permissions <@ ?::text[]
-              |    ${visibilitySql()}
-              |    AND search_vector @@ search_query.value
-              |  ORDER BY text_score DESC, document_id, chunk_id
-              |  LIMIT ?
-              |),
-              |ranks AS (
-              |  SELECT COALESCE(vector_hits.document_id, text_hits.document_id) AS document_id,
-              |         COALESCE(vector_hits.chunk_id, text_hits.chunk_id) AS chunk_id,
-              |         vector_rank, text_rank, vector_score, text_score
-              |  FROM vector_hits FULL OUTER JOIN text_hits USING (document_id, chunk_id)
-              |),
-              |fused AS (
-              |  SELECT *,
-              |         CASE WHEN vector_rank IS NULL THEN 0.0
-              |              ELSE ?::double precision / (?::double precision + vector_rank) END +
-              |         CASE WHEN text_rank IS NULL THEN 0.0
-              |              ELSE ?::double precision / (?::double precision + text_rank) END AS fused_score
-              |  FROM ranks
-              |)
-              |SELECT c.chunk_id, c.document_id, c.chunk_text, c.search_text, c.source_uri,
-              |       c.permissions, c.metadata::text, f.fused_score,
-              |       f.vector_score, f.text_score, f.vector_rank, f.text_rank, c.index_version,
-              |       c.parent_id, c.lineage_ordinal, c.previous_chunk_id, c.next_chunk_id,
-              |       c.heading_path, c.page_numbers, c.origins::text, c.block_ids,
-              |       c.knowledge_space_id, c.profile_id, c.document_revision_id, c.dense_text
-              |FROM fused f
-              |JOIN zyblw_agent_knowledge.agent_knowledge_profile_chunks c
-              |  ON c.tenant_id = ? AND c.document_id = f.document_id AND c.chunk_id = f.chunk_id
-              |${visibilitySql("c")}
-              |ORDER BY f.fused_score DESC, c.document_id, c.chunk_id
-              |LIMIT ?""".stripMargin
-            val statement = connection.prepareStatement(sql)
-            try
-              val vector      = vectorLiteral(query)
-              val permissions = connection.createArrayOf("text", scope.permissions.toArray)
-              statement.setString(1, hybridConfig.textSearchConfig)
-              statement.setString(2, queryText)
-              statement.setString(3, vector)
-              statement.setString(4, vector)
-              statement.setString(5, scope.tenantId.value)
-              statement.setArray(6, permissions)
-              var next = bindVisibility(statement, 7, scope)
-              statement.setString(next, vector)
-              statement.setInt(next + 1, hybridConfig.vectorCandidateCount(limit))
-              statement.setString(next + 2, scope.tenantId.value)
-              statement.setArray(next + 3, permissions)
-              next = bindVisibility(statement, next + 4, scope)
-              statement.setInt(next, hybridConfig.textCandidateCount(limit))
-              statement.setDouble(next + 1, hybridConfig.vectorWeight)
-              statement.setDouble(next + 2, hybridConfig.rrfK)
-              statement.setDouble(next + 3, hybridConfig.textWeight)
-              statement.setDouble(next + 4, hybridConfig.rrfK)
-              statement.setString(next + 5, scope.tenantId.value)
-              next = bindVisibility(statement, next + 6, scope)
-              statement.setInt(next, limit)
-              val result  = statement.executeQuery()
-              val builder = ChunkBuilder.make[RetrievalHit]()
-              while result.next() do
-                val chunk   = readChunk(result, scope)
-                val signals = Map.newBuilder[String, Double]
-                Option(result.getObject(9)).foreach(_ => signals += "vectorScore" -> result.getDouble(9))
-                Option(result.getObject(10)).foreach(_ => signals += "textScore" -> result.getDouble(10))
-                Option(result.getObject(11)).foreach(_ => signals += "vectorRank" -> result.getDouble(11))
-                Option(result.getObject(12)).foreach(_ => signals += "textRank" -> result.getDouble(12))
-                builder += RetrievalHit(chunk, result.getDouble(8), signals.result())
-              connection.commit()
-              builder.result()
-            finally statement.close()
-          catch
-            case error: Throwable =>
-              connection.rollback()
-              throw error
-          finally connection.setAutoCommit(previousAutoCommit)
-        }
-      }
+    else hybrid(queryText, query, scope, RetrievalFilter.empty, limit)
 
   override def searchFiltered(
       mode: RetrievalMode,
@@ -305,21 +292,15 @@ final class PostgresPgVectorStore(
       sparseQuery: Option[SparseEmbedding] = None
   ): IO[RetrievalError, Chunk[RetrievalHit]] =
     if limit <= 0 then ZIO.succeed(Chunk.empty)
-    else if filter.isEmpty && mode == RetrievalMode.VectorOnly then search(query, scope, limit)
-    else if filter.isEmpty && mode == RetrievalMode.Hybrid then
-      searchHybrid(queryText, query, scope, limit).flatMap { fused =>
-        fuseSparse(fused, sparseQuery, scope, limit)
-      }
     else
       mode match
         case RetrievalMode.Hybrid if queryText.trim.nonEmpty =>
-          filteredHybrid(queryText, query, scope, filter, limit)
-        case RetrievalMode.LexicalOnly =>
-          filteredLexical(queryText, scope, filter, limit)
-        case RetrievalMode.Phrase =>
-          filteredPhrase(queryText, scope, filter, limit)
-        case RetrievalMode.Hybrid | RetrievalMode.VectorOnly =>
-          filteredVector(query, scope, filter, limit)
+          hybrid(queryText, query, scope, filter, limit).flatMap(
+            fuseSparse(_, sparseQuery, scope, filter, limit)
+          )
+        case RetrievalMode.LexicalOnly => filteredLexical(queryText, scope, filter, limit)
+        case RetrievalMode.Phrase      => filteredPhrase(queryText, scope, filter, limit)
+        case RetrievalMode.Hybrid | RetrievalMode.VectorOnly => runVector(query, scope, filter, limit)
 
   override def fetchChunks(
       chunkIds: Set[String],
@@ -334,29 +315,27 @@ final class PostgresPgVectorStore(
   ): IO[RetrievalError, Chunk[DocumentChunk]] =
     if chunkIds.isEmpty then ZIO.succeed(Chunk.empty)
     else
-      withConnection { connection =>
-        ZIO.attemptBlocking {
-          val statement = connection.prepareStatement(
-            s"""SELECT $chunkSelectColumns
+      withProfile(scope, Chunk.empty[DocumentChunk], vector = false) { (connection, profile) =>
+        val statement = connection.prepareStatement(
+          s"""SELECT $chunkSelectColumns
               |FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
               |WHERE tenant_id = ? AND permissions <@ ?::text[] AND chunk_id = ANY(?)
               |AND (? = 0 OR document_id = ANY(?::text[]))
               |${visibilitySql()}
               |ORDER BY chunk_id""".stripMargin
-          )
-          try
-            statement.setString(1, scope.tenantId.value)
-            statement.setArray(2, connection.createArrayOf("text", scope.permissions.toArray))
-            statement.setArray(3, connection.createArrayOf("text", chunkIds.toArray))
-            statement.setInt(4, filter.documentIds.size)
-            statement.setArray(5, connection.createArrayOf("text", filter.documentIds.toArray))
-            bindVisibility(statement, 6, scope)
-            val result  = statement.executeQuery()
-            val builder = ChunkBuilder.make[DocumentChunk]()
-            while result.next() do builder += readChunk(result, scope)
-            builder.result()
-          finally statement.close()
-        }
+        )
+        try
+          statement.setString(1, scope.tenantId.value)
+          statement.setArray(2, connection.createArrayOf("text", scope.permissions.toArray))
+          statement.setArray(3, connection.createArrayOf("text", chunkIds.toArray))
+          statement.setInt(4, filter.documentIds.size)
+          statement.setArray(5, connection.createArrayOf("text", filter.documentIds.toArray))
+          bindVisibility(statement, 6, scope, profile)
+          val result  = statement.executeQuery()
+          val builder = ChunkBuilder.make[DocumentChunk]()
+          while result.next() do builder += readChunk(result, scope)
+          builder.result()
+        finally statement.close()
       }
 
   /** 在 rerank 之后读取相邻块与同父级块。SQL 重新应用 tenant/permission，扩展行不会因为种子命中已授权就被隐式信任。 */
@@ -396,10 +375,9 @@ final class PostgresPgVectorStore(
       if neighborClaims.isEmpty && parentClaims.isEmpty && (config.headingRadius == 0 || headingSeeds.isEmpty)
       then ZIO.succeed(Chunk.empty)
       else
-        withConnection { connection =>
-          ZIO.attemptBlocking {
-            val sql =
-              s"""WITH seed_key AS (
+        withProfile(scope, Chunk.empty[RetrievalHit], vector = false) { (connection, profile) =>
+          val sql =
+            s"""WITH seed_key AS (
                 |  SELECT * FROM unnest(?::text[], ?::text[]) AS key(document_id, chunk_id)
                 |), neighbor_key AS (
                 |  SELECT * FROM unnest(?::text[], ?::text[]) AS key(document_id, chunk_id)
@@ -443,102 +421,101 @@ final class PostgresPgVectorStore(
                 |         ) THEN 0 ELSE 1 END,
                 |         parent_id NULLS LAST, lineage_ordinal NULLS LAST, chunk_id
                 |LIMIT ?""".stripMargin
-            val statement = connection.prepareStatement(sql)
-            try
-              val seedRows  = seedKeys.toVector.sorted
-              val neighbors = neighborClaims.keys.toVector.sorted
-              val parents   = parentClaims.keys.toVector.sorted
-              statement.setArray(1, connection.createArrayOf("text", seedRows.map(_._1).toArray))
-              statement.setArray(2, connection.createArrayOf("text", seedRows.map(_._2).toArray))
-              statement.setArray(3, connection.createArrayOf("text", neighbors.map(_._1).toArray))
-              statement.setArray(4, connection.createArrayOf("text", neighbors.map(_._2).toArray))
-              statement.setArray(5, connection.createArrayOf("text", parents.map(_._1).toArray))
-              statement.setArray(6, connection.createArrayOf("text", parents.map(_._2).toArray))
-              val headings = headingSeeds.toVector
-              statement.setArray(
-                7,
-                connection.createArrayOf("text", headings.map(_.chunk.documentId).toArray)
+          val statement = connection.prepareStatement(sql)
+          try
+            val seedRows  = seedKeys.toVector.sorted
+            val neighbors = neighborClaims.keys.toVector.sorted
+            val parents   = parentClaims.keys.toVector.sorted
+            statement.setArray(1, connection.createArrayOf("text", seedRows.map(_._1).toArray))
+            statement.setArray(2, connection.createArrayOf("text", seedRows.map(_._2).toArray))
+            statement.setArray(3, connection.createArrayOf("text", neighbors.map(_._1).toArray))
+            statement.setArray(4, connection.createArrayOf("text", neighbors.map(_._2).toArray))
+            statement.setArray(5, connection.createArrayOf("text", parents.map(_._1).toArray))
+            statement.setArray(6, connection.createArrayOf("text", parents.map(_._2).toArray))
+            val headings = headingSeeds.toVector
+            statement.setArray(
+              7,
+              connection.createArrayOf("text", headings.map(_.chunk.documentId).toArray)
+            )
+            statement.setArray(
+              8,
+              connection.createArrayOf(
+                "text",
+                headings
+                  .map(seed =>
+                    RetrievalExpansion.headingKey(
+                      seed.chunk.lineage.fold(Chunk.empty[String])(_.headingPath)
+                    )
+                  )
+                  .toArray
               )
-              statement.setArray(
-                8,
-                connection.createArrayOf(
-                  "text",
-                  headings
-                    .map(seed =>
-                      RetrievalExpansion.headingKey(
-                        seed.chunk.lineage.fold(Chunk.empty[String])(_.headingPath)
-                      )
-                    )
-                    .toArray
-                )
+            )
+            statement.setArray(
+              9,
+              connection.createArrayOf(
+                "integer",
+                headings.map(seed => Int.box(seed.chunk.lineage.fold(0)(_.ordinal))).toArray
               )
-              statement.setArray(
-                9,
-                connection.createArrayOf(
-                  "integer",
-                  headings.map(seed => Int.box(seed.chunk.lineage.fold(0)(_.ordinal))).toArray
-                )
+            )
+            statement.setString(10, scope.tenantId.value)
+            statement.setArray(11, connection.createArrayOf("text", scope.permissions.toArray))
+            val vis = bindVisibility(statement, 12, scope, profile)
+            statement.setInt(vis, config.headingRadius)
+            statement.setInt(vis + 1, config.headingRadius)
+            statement.setInt(vis + 2, (config.maxAdditionalChunks * 6).max(config.maxAdditionalChunks))
+            val result = statement.executeQuery()
+            val found  = Vector.newBuilder[DocumentChunk]
+            while result.next() do found += readChunk(result, scope)
+            val authorized   = found.result()
+            val neighborHits = authorized
+              .flatMap(chunk =>
+                neighborClaims
+                  .get(chunk.documentId -> chunk.id)
+                  .map { case (score, seedId) =>
+                    expandedHit(RetrievalExpansion.stamp(chunk, seedId), score, "neighbor", config)
+                  }
               )
-              statement.setString(10, scope.tenantId.value)
-              statement.setArray(11, connection.createArrayOf("text", scope.permissions.toArray))
-              val vis = bindVisibility(statement, 12, scope)
-              statement.setInt(vis, config.headingRadius)
-              statement.setInt(vis + 1, config.headingRadius)
-              statement.setInt(vis + 2, (config.maxAdditionalChunks * 6).max(config.maxAdditionalChunks))
-              val result = statement.executeQuery()
-              val found  = Vector.newBuilder[DocumentChunk]
-              while result.next() do found += readChunk(result, scope)
-              val authorized   = found.result()
-              val neighborHits = authorized
-                .flatMap(chunk =>
-                  neighborClaims
-                    .get(chunk.documentId -> chunk.id)
-                    .map { case (score, seedId) =>
-                      expandedHit(RetrievalExpansion.stamp(chunk, seedId), score, "neighbor", config)
-                    }
-                )
-              val neighborKeys = neighborHits.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
-              val headingHits  = authorized
-                .filterNot(chunk => neighborKeys.contains(chunk.documentId -> chunk.id))
-                .flatMap(chunk =>
-                  RetrievalExpansion
-                    .bestSeed(seeds, chunk, config.headingRadius)
-                    .map(seed =>
-                      expandedHit(
-                        RetrievalExpansion.stamp(chunk, seed.chunk.id),
-                        seed.score,
-                        "heading",
-                        config
-                      )
+            val neighborKeys = neighborHits.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
+            val headingHits  = authorized
+              .filterNot(chunk => neighborKeys.contains(chunk.documentId -> chunk.id))
+              .flatMap(chunk =>
+                RetrievalExpansion
+                  .bestSeed(seeds, chunk, config.headingRadius)
+                  .map(seed =>
+                    expandedHit(
+                      RetrievalExpansion.stamp(chunk, seed.chunk.id),
+                      seed.score,
+                      "heading",
+                      config
                     )
-                )
-              val headingKeys = headingHits.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
-              val siblingHits =
-                parentClaims.toVector.sortBy(_._1).flatMap { case (parentKey, (score, seedId)) =>
-                  authorized
-                    .filter(chunk =>
-                      chunk.documentId == parentKey._1 && chunk.lineage
-                        .flatMap(_.parentId)
-                        .contains(parentKey._2)
-                    )
-                    .filterNot(chunk =>
-                      neighborKeys.contains(chunk.documentId -> chunk.id) || headingKeys.contains(
-                        chunk.documentId -> chunk.id
-                      )
-                    )
-                    .sortBy(chunk => (chunk.lineage.fold(Int.MaxValue)(_.ordinal), chunk.id))
-                    .take(config.maxSiblingsPerParent)
-                    .map(chunk =>
-                      expandedHit(RetrievalExpansion.stamp(chunk, seedId), score, "parentSibling", config)
-                    )
-                }
-              Chunk.fromIterable(
-                (neighborHits ++ headingHits ++ siblingHits)
-                  .distinctBy(hit => hit.chunk.documentId -> hit.chunk.id)
-                  .take(config.maxAdditionalChunks)
+                  )
               )
-            finally statement.close()
-          }
+            val headingKeys = headingHits.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
+            val siblingHits =
+              parentClaims.toVector.sortBy(_._1).flatMap { case (parentKey, (score, seedId)) =>
+                authorized
+                  .filter(chunk =>
+                    chunk.documentId == parentKey._1 && chunk.lineage
+                      .flatMap(_.parentId)
+                      .contains(parentKey._2)
+                  )
+                  .filterNot(chunk =>
+                    neighborKeys.contains(chunk.documentId -> chunk.id) || headingKeys.contains(
+                      chunk.documentId -> chunk.id
+                    )
+                  )
+                  .sortBy(chunk => (chunk.lineage.fold(Int.MaxValue)(_.ordinal), chunk.id))
+                  .take(config.maxSiblingsPerParent)
+                  .map(chunk =>
+                    expandedHit(RetrievalExpansion.stamp(chunk, seedId), score, "parentSibling", config)
+                  )
+              }
+            Chunk.fromIterable(
+              (neighborHits ++ headingHits ++ siblingHits)
+                .distinctBy(hit => hit.chunk.documentId -> hit.chunk.id)
+                .take(config.maxAdditionalChunks)
+            )
+          finally statement.close()
         }
 
   /** 删除一个租户下指定原始文档的所有块。
@@ -593,51 +570,15 @@ final class PostgresPgVectorStore(
     statement.setString(start + 10, metadata)
     start + 11
 
-  private def filteredVector(
-      query: Embedding,
-      scope: RetrievalScope,
-      filter: RetrievalFilter,
-      limit: Int
-  ): IO[RetrievalError, Chunk[RetrievalHit]] =
-    validateQueryDimension(query) *> withConnection { connection =>
-      ZIO.attemptBlocking {
-        val sql =
-          s"""SELECT $chunkSelectColumns,
-             |       1 - (embedding <=> ?::public.vector) AS score
-             |FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
-             |WHERE tenant_id = ? AND permissions <@ ?::text[]
-             |${visibilitySql()}
-             |$FilterSql
-             |ORDER BY embedding <=> ?::public.vector
-             |LIMIT ?""".stripMargin
-        val statement = connection.prepareStatement(sql)
-        try
-          val vector = vectorLiteral(query)
-          statement.setString(1, vector)
-          statement.setString(2, scope.tenantId.value)
-          statement.setArray(3, connection.createArrayOf("text", scope.permissions.toArray))
-          val vis  = bindVisibility(statement, 4, scope)
-          val next = bindFilter(statement, connection, vis, filter)
-          statement.setString(next, vector)
-          statement.setInt(next + 1, limit)
-          val result  = statement.executeQuery()
-          val builder = ChunkBuilder.make[RetrievalHit]()
-          while result.next() do builder += RetrievalHit(readChunk(result, scope), result.getDouble("score"))
-          builder.result()
-        finally statement.close()
-      }
-    }
-
   private def filteredLexical(
       queryText: String,
       scope: RetrievalScope,
       filter: RetrievalFilter,
       limit: Int
   ): IO[RetrievalError, Chunk[RetrievalHit]] =
-    withConnection { connection =>
-      ZIO.attemptBlocking {
-        val sql =
-          s"""SELECT $chunkSelectColumns,
+    withProfile(scope, Chunk.empty[RetrievalHit], vector = false) { (connection, profile) =>
+      val sql =
+        s"""SELECT $chunkSelectColumns,
              |       ts_rank_cd(search_vector, websearch_to_tsquery(?::regconfig, ?), 32) AS score
              |FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
              |WHERE tenant_id = ? AND permissions <@ ?::text[]
@@ -646,25 +587,24 @@ final class PostgresPgVectorStore(
              |$FilterSql
              |ORDER BY score DESC, document_id, chunk_id
              |LIMIT ?""".stripMargin
-        val statement = connection.prepareStatement(sql)
-        try
-          statement.setString(1, hybridConfig.textSearchConfig)
-          statement.setString(2, queryText)
-          statement.setString(3, scope.tenantId.value)
-          statement.setArray(4, connection.createArrayOf("text", scope.permissions.toArray))
-          statement.setString(5, hybridConfig.textSearchConfig)
-          statement.setString(6, queryText)
-          val vis  = bindVisibility(statement, 7, scope)
-          val next = bindFilter(statement, connection, vis, filter)
-          statement.setInt(next, limit)
-          val result  = statement.executeQuery()
-          val builder = ChunkBuilder.make[RetrievalHit]()
-          while result.next() do
-            val score = result.getDouble("score")
-            builder += RetrievalHit(readChunk(result, scope), score, Map("textScore" -> score))
-          builder.result()
-        finally statement.close()
-      }
+      val statement = connection.prepareStatement(sql)
+      try
+        statement.setString(1, hybridConfig.textSearchConfig)
+        statement.setString(2, queryText)
+        statement.setString(3, scope.tenantId.value)
+        statement.setArray(4, connection.createArrayOf("text", scope.permissions.toArray))
+        statement.setString(5, hybridConfig.textSearchConfig)
+        statement.setString(6, queryText)
+        val vis  = bindVisibility(statement, 7, scope, profile)
+        val next = bindFilter(statement, connection, vis, filter)
+        statement.setInt(next, limit)
+        val result  = statement.executeQuery()
+        val builder = ChunkBuilder.make[RetrievalHit]()
+        while result.next() do
+          val score = result.getDouble("score")
+          builder += RetrievalHit(readChunk(result, scope), score, Map("textScore" -> score))
+        builder.result()
+      finally statement.close()
     }
 
   private def filteredPhrase(
@@ -673,10 +613,9 @@ final class PostgresPgVectorStore(
       filter: RetrievalFilter,
       limit: Int
   ): IO[RetrievalError, Chunk[RetrievalHit]] =
-    withConnection { connection =>
-      ZIO.attemptBlocking {
-        val sql =
-          s"""SELECT $chunkSelectColumns,
+    withProfile(scope, Chunk.empty[RetrievalHit], vector = false) { (connection, profile) =>
+      val sql =
+        s"""SELECT $chunkSelectColumns,
              |       similarity(search_text, ?) AS score
              |FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
              |WHERE tenant_id = ? AND permissions <@ ?::text[]
@@ -685,35 +624,40 @@ final class PostgresPgVectorStore(
              |$FilterSql
              |ORDER BY score DESC, document_id, chunk_id
              |LIMIT ?""".stripMargin
-        val statement = connection.prepareStatement(sql)
-        try
-          statement.setString(1, queryText)
-          statement.setString(2, scope.tenantId.value)
-          statement.setArray(3, connection.createArrayOf("text", scope.permissions.toArray))
-          statement.setString(4, queryText)
-          val vis  = bindVisibility(statement, 5, scope)
-          val next = bindFilter(statement, connection, vis, filter)
-          statement.setInt(next, limit)
-          val result  = statement.executeQuery()
-          val builder = ChunkBuilder.make[RetrievalHit]()
-          while result.next() do
-            val score = result.getDouble("score")
-            builder += RetrievalHit(readChunk(result, scope), score, Map("phraseScore" -> score))
-          builder.result()
-        finally statement.close()
-      }
+      val statement = connection.prepareStatement(sql)
+      try
+        statement.setString(1, queryText)
+        statement.setString(2, scope.tenantId.value)
+        statement.setArray(3, connection.createArrayOf("text", scope.permissions.toArray))
+        statement.setString(4, queryText)
+        val vis  = bindVisibility(statement, 5, scope, profile)
+        val next = bindFilter(statement, connection, vis, filter)
+        statement.setInt(next, limit)
+        val result  = statement.executeQuery()
+        val builder = ChunkBuilder.make[RetrievalHit]()
+        while result.next() do
+          val score = result.getDouble("score")
+          builder += RetrievalHit(readChunk(result, scope), score, Map("phraseScore" -> score))
+        builder.result()
+      finally statement.close()
     }
 
-  private def filteredHybrid(
+  /** 在一条 SQL 中获取向量候选与 PostgreSQL FTS 候选，再以加权 Reciprocal Rank Fusion 合并。
+    *
+    * 两个候选 CTE 都先应用 tenant/space/profile 与 `permissions <@ caller_permissions`；未授权行不会进入向量距离、全文排名或 RRF。 RRF
+    * 使用名次而不是直接混合不可比的 cosine/ts_rank 数值，并以 document/chunk ID 作为稳定 tie-breaker。
+    */
+  private def hybrid(
       queryText: String,
       query: Embedding,
       scope: RetrievalScope,
       filter: RetrievalFilter,
       limit: Int
   ): IO[RetrievalError, Chunk[RetrievalHit]] =
-    validateQueryDimension(query) *> withConnection { connection =>
-      ZIO.attemptBlocking {
-        val sql =
+    validateQueryDimension(query) *> withProfile(scope, Chunk.empty[RetrievalHit], vector = true) {
+      (connection, profile) =>
+        val filterSql = if filter.isEmpty then "" else FilterSql
+        val sql       =
           s"""WITH search_query AS (
              |  SELECT websearch_to_tsquery(?::regconfig, ?) AS value
              |),
@@ -724,7 +668,7 @@ final class PostgresPgVectorStore(
              |  FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
              |  WHERE tenant_id = ? AND permissions <@ ?::text[]
              |  ${visibilitySql()}
-             |  $FilterSql
+             |  $filterSql
              |  ORDER BY embedding <=> ?::public.vector, document_id, chunk_id
              |  LIMIT ?
              |),
@@ -739,7 +683,7 @@ final class PostgresPgVectorStore(
              |    AND permissions <@ ?::text[]
              |    ${visibilitySql()}
              |    AND search_vector @@ search_query.value
-             |    $FilterSql
+             |    $filterSql
              |  ORDER BY text_score DESC, document_id, chunk_id
              |  LIMIT ?
              |),
@@ -762,7 +706,7 @@ final class PostgresPgVectorStore(
              |       f.vector_score, f.text_score, f.vector_rank, f.text_rank, c.index_version,
              |       c.parent_id, c.lineage_ordinal, c.previous_chunk_id, c.next_chunk_id,
              |       c.heading_path, c.page_numbers, c.origins::text, c.block_ids,
-             |       c.knowledge_space_id, c.profile_id, c.document_revision_id, c.dense_text
+             |       c.knowledge_space_id, c.profile_id, c.source_revision_id, c.dense_text
              |FROM fused f
              |JOIN zyblw_agent_knowledge.agent_knowledge_profile_chunks c
              |  ON c.tenant_id = ? AND c.document_id = f.document_id AND c.chunk_id = f.chunk_id
@@ -779,21 +723,21 @@ final class PostgresPgVectorStore(
           statement.setString(4, vector)
           statement.setString(5, scope.tenantId.value)
           statement.setArray(6, permissions)
-          var next = bindVisibility(statement, 7, scope)
-          next = bindFilter(statement, connection, next, filter)
+          var next = bindVisibility(statement, 7, scope, profile)
+          next = if filter.isEmpty then next else bindFilter(statement, connection, next, filter)
           statement.setString(next, vector)
           statement.setInt(next + 1, hybridConfig.vectorCandidateCount(limit))
           statement.setString(next + 2, scope.tenantId.value)
           statement.setArray(next + 3, permissions)
-          next = bindVisibility(statement, next + 4, scope)
-          next = bindFilter(statement, connection, next, filter)
+          next = bindVisibility(statement, next + 4, scope, profile)
+          next = if filter.isEmpty then next else bindFilter(statement, connection, next, filter)
           statement.setInt(next, hybridConfig.textCandidateCount(limit))
           statement.setDouble(next + 1, hybridConfig.vectorWeight)
           statement.setDouble(next + 2, hybridConfig.rrfK)
           statement.setDouble(next + 3, hybridConfig.textWeight)
           statement.setDouble(next + 4, hybridConfig.rrfK)
           statement.setString(next + 5, scope.tenantId.value)
-          next = bindVisibility(statement, next + 6, scope)
+          next = bindVisibility(statement, next + 6, scope, profile)
           statement.setInt(next, limit)
           val result  = statement.executeQuery()
           val builder = ChunkBuilder.make[RetrievalHit]()
@@ -815,77 +759,77 @@ final class PostgresPgVectorStore(
             builder += RetrievalHit(chunk, result.getDouble("fused_score"), signals.result())
           builder.result()
         finally statement.close()
-      }
     }
 
   private def fuseSparse(
       fused: Chunk[RetrievalHit],
       sparseQuery: Option[SparseEmbedding],
       scope: RetrievalScope,
+      filter: RetrievalFilter,
       limit: Int
   ): IO[RetrievalError, Chunk[RetrievalHit]] =
     if !hybridConfig.sparseEnabled || sparseQuery.isEmpty then ZIO.succeed(fused)
     else if sparseQuery.exists(_.requireWithinNnz(hybridConfig.maxSparseNnz).isLeft) then
       ZIO.fail(AgentError.RetrievalFailed("sparse NNZ 超过容量门禁"))
     else
-      withConnection { connection =>
-        ZIO.attemptBlocking {
-          val sql =
-            s"""SELECT $chunkSelectColumns, sparse_embedding
+      withProfile(scope, fused, vector = false) { (connection, profile) =>
+        val sql =
+          s"""SELECT $chunkSelectColumns, sparse_embedding
                |FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
                |WHERE tenant_id = ? AND permissions <@ ?::text[]
                |${visibilitySql()}
+               |${if filter.isEmpty then "" else FilterSql}
                |AND sparse_embedding IS NOT NULL
                |LIMIT ?""".stripMargin
-          val statement = connection.prepareStatement(sql)
-          try
-            statement.setString(1, scope.tenantId.value)
-            statement.setArray(2, connection.createArrayOf("text", scope.permissions.toArray))
-            val vis = bindVisibility(statement, 3, scope)
-            statement.setInt(vis, hybridConfig.sparseCandidateCount(limit))
-            val result  = statement.executeQuery()
-            val builder = ChunkBuilder.make[(DocumentChunk, SparseEmbedding)]()
-            while result.next() do
-              Option(result.getString("sparse_embedding")).flatMap(parseSparse).foreach { sparse =>
-                builder += readChunk(result, scope) -> sparse
-              }
-            val querySparse = sparseQuery.get
-            val ranked      = builder
-              .result()
-              .map { case (chunk, sparse) =>
-                val score = RetrievalScoring.sparseScore(querySparse, sparse)
-                RetrievalHit(chunk, score, Map("sparseScore" -> score))
-              }
-              .sortBy(hit => (-hit.score, hit.chunk.documentId, hit.chunk.id))
-              .zipWithIndex
-            val sparseById = ranked.map { case (hit, index) =>
-              (hit.chunk.documentId, hit.chunk.id) -> (index + 1, hit)
-            }.toMap
-            val k      = hybridConfig.rrfK
-            val merged = fused.map { hit =>
-              sparseById.get(hit.chunk.documentId -> hit.chunk.id) match
-                case Some((rank, sparseHit)) =>
-                  hit.copy(
-                    score = hit.score + hybridConfig.sparseWeight / (k + rank),
-                    signals = hit.signals ++ sparseHit.signals + ("sparseRank" -> rank.toDouble)
-                  )
-                case None => hit
+        val statement = connection.prepareStatement(sql)
+        try
+          statement.setString(1, scope.tenantId.value)
+          statement.setArray(2, connection.createArrayOf("text", scope.permissions.toArray))
+          val vis  = bindVisibility(statement, 3, scope, profile)
+          val next = if filter.isEmpty then vis else bindFilter(statement, connection, vis, filter)
+          statement.setInt(next, hybridConfig.sparseCandidateCount(limit))
+          val result  = statement.executeQuery()
+          val builder = ChunkBuilder.make[(DocumentChunk, SparseEmbedding)]()
+          while result.next() do
+            Option(result.getString("sparse_embedding")).flatMap(parseSparse).foreach { sparse =>
+              builder += readChunk(result, scope) -> sparse
             }
-            val extras = ranked.collect {
-              case (hit, index)
-                  if !fused.exists(existing =>
-                    existing.chunk.documentId == hit.chunk.documentId && existing.chunk.id == hit.chunk.id
-                  ) =>
+          val querySparse = sparseQuery.get
+          val ranked      = builder
+            .result()
+            .map { case (chunk, sparse) =>
+              val score = RetrievalScoring.sparseScore(querySparse, sparse)
+              RetrievalHit(chunk, score, Map("sparseScore" -> score))
+            }
+            .sortBy(hit => (-hit.score, hit.chunk.documentId, hit.chunk.id))
+            .zipWithIndex
+          val sparseById = ranked.map { case (hit, index) =>
+            (hit.chunk.documentId, hit.chunk.id) -> (index + 1, hit)
+          }.toMap
+          val k      = hybridConfig.rrfK
+          val merged = fused.map { hit =>
+            sparseById.get(hit.chunk.documentId -> hit.chunk.id) match
+              case Some((rank, sparseHit)) =>
                 hit.copy(
-                  score = hybridConfig.sparseWeight / (k + index + 1),
-                  signals = hit.signals + ("sparseRank" -> (index + 1).toDouble)
+                  score = hit.score + hybridConfig.sparseWeight / (k + rank),
+                  signals = hit.signals ++ sparseHit.signals + ("sparseRank" -> rank.toDouble)
                 )
-            }
-            Chunk.fromIterable(
-              (merged ++ extras).sortBy(hit => (-hit.score, hit.chunk.documentId, hit.chunk.id)).take(limit)
-            )
-          finally statement.close()
-        }
+              case None => hit
+          }
+          val extras = ranked.collect {
+            case (hit, index)
+                if !fused.exists(existing =>
+                  existing.chunk.documentId == hit.chunk.documentId && existing.chunk.id == hit.chunk.id
+                ) =>
+              hit.copy(
+                score = hybridConfig.sparseWeight / (k + index + 1),
+                signals = hit.signals + ("sparseRank" -> (index + 1).toDouble)
+              )
+          }
+          Chunk.fromIterable(
+            (merged ++ extras).sortBy(hit => (-hit.score, hit.chunk.documentId, hit.chunk.id)).take(limit)
+          )
+        finally statement.close()
       }
 
   private def parseSparse(text: String): Option[SparseEmbedding] =
@@ -925,7 +869,7 @@ final class PostgresPgVectorStore(
   override def assertEmbeddingIdentity(
       tenantId: TenantId,
       descriptor: EmbeddingProviderDescriptor,
-      spaceId: KnowledgeSpaceId = KnowledgeSpaceId("default"),
+      spaceId: KnowledgeSpaceId = KnowledgeSpaceId.Default,
       profileId: Option[IndexProfileId] = None
   ): IO[RetrievalError, Unit] =
     withConnection { connection =>
@@ -1018,7 +962,7 @@ final class PostgresPgVectorStore(
         knowledgeSpaceId =
           Option(result.getString("knowledge_space_id")).filter(_.nonEmpty).map(KnowledgeSpaceId(_)),
         profileId = Option(result.getString("profile_id")).filter(_.nonEmpty).map(IndexProfileId(_)),
-        documentRevisionId = Option(result.getString("document_revision_id")).map(_.trim).filter(_.nonEmpty)
+        sourceRevisionId = Option(result.getString("source_revision_id")).map(_.trim).filter(_.nonEmpty)
       )
 
   /** 谱系整体不存在时返回 None；损坏的 origins JSON 会终止查询，不静默丢失引用几何。 */
@@ -1160,7 +1104,11 @@ object PostgresPgVectorStore:
   * @param textWeight
   *   全文名次权重
   * @param enableHnswIterativeScan
-  *   是否在短事务中启用严格迭代扫描；要求 pgvector >= 0.8
+  *   是否在每个向量查询的短事务中启用 `hnsw.iterative_scan = strict_order`；过滤后仍能填满 limit。要求 pgvector >= 0.8
+  * @param hnswEfSearch
+  *   每个向量查询的 `hnsw.ef_search`，决定每轮候选宽度与召回
+  * @param hnswMaxScanTuples
+  *   迭代扫描的 `hnsw.max_scan_tuples` 上限；高选择性过滤下限制最坏延迟
   */
 final case class PostgresHybridSearchConfig(
     textSearchConfig: String = "simple",
@@ -1170,6 +1118,8 @@ final case class PostgresHybridSearchConfig(
     vectorWeight: Double = 1.0,
     textWeight: Double = 1.0,
     enableHnswIterativeScan: Boolean = true,
+    hnswEfSearch: Int = 100,
+    hnswMaxScanTuples: Int = 20000,
     sparseEnabled: Boolean = false,
     sparseWeight: Double = 1.0,
     sparseCandidateMultiplier: Int = 4,
@@ -1183,6 +1133,8 @@ final case class PostgresHybridSearchConfig(
   require(sparseWeight >= 0.0, "sparseWeight 不能为负数")
   require(sparseCandidateMultiplier > 0, "sparseCandidateMultiplier 必须为正数")
   require(maxSparseNnz > 0, "maxSparseNnz 必须为正数")
+  require(hnswEfSearch >= 1 && hnswEfSearch <= 1000, "hnswEfSearch 必须位于 1..1000")
+  require(hnswMaxScanTuples >= 1, "hnswMaxScanTuples 必须为正数")
 
   /** 计算向量候选数。
     *

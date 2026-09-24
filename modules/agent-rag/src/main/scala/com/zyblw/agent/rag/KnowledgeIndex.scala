@@ -1,14 +1,19 @@
 package com.zyblw.agent.rag
 
 import com.zyblw.agent.core.*
-import java.nio.charset.StandardCharsets
-import java.security.MessageDigest
 import java.time.Instant
 import zio.*
 
-/** 文档在一个租户内的稳定主键；不同租户可以复用相同业务 documentId。 */
-final case class KnowledgeDocumentKey(tenantId: TenantId, documentId: String):
-  require(documentId.trim.nonEmpty, "knowledge documentId 不能为空")
+/** 文档在一个租户、一个知识空间内的稳定主键。
+  *
+  * 版本号、active 指针、撤回和 retention 都按 `(tenant, space, document)` 计算；不同空间可以复用相同业务 documentId 而互不干扰。
+  */
+final case class KnowledgeDocumentKey(
+    tenantId: TenantId,
+    documentId: String,
+    knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId.Default
+):
+  require(documentId.trim.nonEmpty && documentId.length <= 1000, "knowledge documentId 长度必须位于 1..1000")
 
 /** 开始新索引版本时对当前 active 版本的乐观前置条件。
   *
@@ -31,41 +36,42 @@ enum KnowledgeIndexStatus:
 /** 新建索引版本的不可变请求。
   *
   * @param key
-  *   租户与业务文档键
+  *   租户、知识空间与业务文档键
   * @param ingestionId
-  *   调用方生成的稳定幂等键；重试必须复用，内容改变必须换新键
+  *   调用方生成的稳定幂等键；重试必须复用，输入改变必须换新键
   * @param sourceUri
   *   可进入引用结果的来源地址
-  * @param contentHash
-  *   原始正文的 SHA-256，用于发现同一 ingestionId 被错误复用
+  * @param lineage
+  *   原件修订 → 解析产物 → 结构 → 正文的完整来源链；同一 ingestionId 下任何一层变化都必须失败
   * @param permissions
-  *   检索授权标签；来自认证业务层，绝不能来自模型输出
+  *   检索授权标签，至少一个；来自认证业务层，绝不能来自模型输出
   * @param metadata
   *   不含密钥和原文的业务索引元数据
-  * @param embedding
-  *   固化本版本使用的 Provider、模型和维度
-  * @param indexingStrategy
-  *   切分、清洗和中文分词策略的稳定版本；算法变化必须更换该值
+  * @param buildSpec
+  *   固化本版本的完整构建规格；必须与目标 Profile 的规格一致
   * @param expectation
   *   对当前 active 版本的乐观条件
+  * @param targetProfileId
+  *   显式目标 Profile；用于并行重建或回滚前补齐 superseded Profile
   */
 final case class BeginKnowledgeIndex(
     key: KnowledgeDocumentKey,
     ingestionId: String,
     sourceUri: String,
-    contentHash: String,
+    lineage: DocumentLineage,
     permissions: Set[String],
     metadata: Map[String, String],
-    embedding: EmbeddingProviderDescriptor,
-    indexingStrategy: String,
+    buildSpec: IndexBuildSpec,
     expectation: ActiveVersionExpectation = ActiveVersionExpectation.AnyVersion,
-    knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId("default"),
     targetProfileId: Option[IndexProfileId] = None
 ):
-  require(ingestionId.trim.nonEmpty, "ingestionId 不能为空")
+  require(ingestionId.trim.nonEmpty && ingestionId.length <= 200, "ingestionId 长度必须位于 1..200")
   require(sourceUri.trim.nonEmpty, "sourceUri 不能为空")
-  require(contentHash.matches("[0-9a-f]{64}"), "contentHash 必须是小写 SHA-256")
-  require(indexingStrategy.trim.nonEmpty, "indexingStrategy 不能为空")
+  require(
+    permissions.nonEmpty && permissions.size <= KnowledgeIndexer.MaxPermissions,
+    s"索引权限标签数量必须位于 1..${KnowledgeIndexer.MaxPermissions}；租户内公开请使用显式标签"
+  )
+  require(permissions.forall(label => label.trim.nonEmpty && label.length <= 200), "权限标签长度必须位于 1..200")
 
 /** 已被存储层分配版本号的构建句柄。
   *
@@ -75,16 +81,22 @@ final case class KnowledgeIndexBuild(
     key: KnowledgeDocumentKey,
     version: Long,
     ingestionId: String,
-    contentHash: String,
-    embedding: EmbeddingProviderDescriptor,
-    indexingStrategy: String,
-    knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId("default"),
-    profileId: IndexProfileId = IndexProfileId("default"),
+    lineage: DocumentLineage,
+    buildSpec: IndexBuildSpec,
+    profileId: IndexProfileId,
     casActiveProfile: Boolean = false
 ):
   require(version > 0L, "knowledge index version 必须为正数")
+  def knowledgeSpaceId: KnowledgeSpaceId = key.knowledgeSpaceId
+  def contentHash: String                = lineage.textSha256
+  def indexingStrategy: String           = buildSpec.indexingStrategy
+  def embeddingDimension: Int            = buildSpec.embeddingDimension
 
-/** 一份可查询的索引 manifest，不承载正文和向量。 */
+/** 一份可查询的索引 manifest，不承载正文和向量。
+  *
+  * @param chunkSetSha256
+  *   发布时由 Store 从暂存块计算的块集合摘要；Building/Failed 时为 None
+  */
 final case class KnowledgeIndexManifest(
     build: KnowledgeIndexBuild,
     sourceUri: String,
@@ -96,7 +108,8 @@ final case class KnowledgeIndexManifest(
     failureCode: Option[String],
     createdAt: Instant,
     updatedAt: Instant,
-    checkpoint: IngestCheckpoint = IngestCheckpoint.Resolved
+    checkpoint: IngestCheckpoint = IngestCheckpoint.Resolved,
+    chunkSetSha256: Option[String] = None
 ):
   require(chunkCount >= 0, "chunkCount 不能为负数")
   require(!active || status == KnowledgeIndexStatus.Ready, "只有 Ready 索引可以 active")
@@ -111,13 +124,17 @@ trait KnowledgeIndexStore:
   /** 分配或幂等读取 Building 版本；同 ingestionId 的不可变字段不一致必须失败。 */
   def begin(request: BeginKnowledgeIndex): IO[RetrievalError, KnowledgeIndexBuild]
 
-  /** 幂等写入一批暂存块；块必须属于 build 的租户、文档、版本和向量维度。 */
+  /** 幂等写入一批暂存块；块必须属于 build 的租户、空间、文档、版本和向量维度。 */
   def stage(build: KnowledgeIndexBuild, chunks: Chunk[IndexedChunk]): IO[RetrievalError, Unit]
 
-  /** 校验暂存块总数并原子发布；重复激活同一 active Ready 版本应返回相同 manifest。 */
+  /** 校验暂存块集合摘要并原子发布；重复激活同一 active Ready 版本应返回相同 manifest。
+    *
+    * @param expected
+    *   索引器根据全部已嵌入块计算的块数与摘要；Store 必须从暂存表重新计算并逐字比较
+    */
   def activate(
       build: KnowledgeIndexBuild,
-      expectedChunkCount: Int
+      expected: ChunkSetDigest
   ): IO[RetrievalError, KnowledgeIndexManifest]
 
   /** 把仍处于 Building 的版本标记失败；failureCode 必须是稳定分类，不能放原文或 Provider 错误正文。 */
@@ -141,12 +158,12 @@ trait KnowledgeIndexStore:
   ): IO[RetrievalError, KnowledgeIndexManifest]
 
   /** 有界清理截止时间前的 Superseded/Failed/Retired manifest 和暂存块。 Ready/active 与 Building 绝不能被 retention 作业删除。
-    * `excludeDocumentIds` 用于 legal-hold，这些文档不得进入 purge 候选。
+    * `legalHold` 中的文档不得进入 purge 候选。
     */
   def purgeInactive(
       updatedBefore: Instant,
       limit: Int,
-      excludeDocumentIds: Set[String] = Set.empty
+      legalHold: Set[KnowledgeDocumentKey] = Set.empty
   ): IO[RetrievalError, Long]
 
   /** 写入当前摄入 checkpoint；不改变 Building/Ready 状态机。 */
@@ -174,13 +191,21 @@ trait KnowledgeIndexStore:
     val _ = (tenantId, spaceId, profileId, expectedRevision, reason, publication)
     ZIO.fail(AgentError.RetrievalFailed("KnowledgeIndexStore 未实现 activateProfile"))
 
-  /** 撤回一个知识空间里的一个文档修订。其他空间和更新的修订保持可见；没有跨空间的隐式禁令。 */
-  def withdraw(
-      key: KnowledgeDocumentKey,
-      documentRevisionId: String,
-      knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId("default")
-  ): IO[RetrievalError, Unit] =
-    val _ = (key, documentRevisionId, knowledgeSpaceId)
+  /** 比较目标 Profile 与当前 active Profile 的逻辑语料，列出切换前需要补齐、更新或下线的文档。 */
+  def profileCorpusDiff(
+      tenantId: TenantId,
+      spaceId: KnowledgeSpaceId,
+      target: IndexProfileId
+  ): IO[RetrievalError, ProfileCorpusDiff] =
+    val _ = (tenantId, spaceId, target)
+    ZIO.fail(AgentError.RetrievalFailed("KnowledgeIndexStore 未实现 profileCorpusDiff"))
+
+  /** 撤回一个知识空间里一个文档的一个来源修订。
+    *
+    * 该键下从未出现过此修订时必须失败，防止调用方误传索引版本号等值而得到静默的空操作。 撤回写入墓碑并下线匹配的 active 版本；之后 `begin` 同一修订会失败。其他空间和其他修订保持可见。
+    */
+  def withdraw(key: KnowledgeDocumentKey, sourceRevisionId: String): IO[RetrievalError, Unit] =
+    val _ = (key, sourceRevisionId)
     ZIO.fail(AgentError.RetrievalFailed("KnowledgeIndexStore 未实现 withdraw"))
 
 /** 一次索引发布的结果。
@@ -230,18 +255,29 @@ final class KnowledgeIndexer(
       .getOrElse(s"${chunker.strategyId}:lexical=${lexical.strategyId}")
   require(resolvedIndexingStrategy.trim.nonEmpty, "Chunker strategyId 不能为空")
 
+  /** 本索引器产出的完整构建规格；它决定 Profile 身份。 */
+  def buildSpec: IndexBuildSpec =
+    IndexBuildSpec.of(
+      embeddings.descriptor.denseDescriptor,
+      resolvedIndexingStrategy,
+      tokenizerId = embeddings.capabilities.tokenizerId.getOrElse(IndexBuildSpec.UndeclaredTokenizer),
+      enricher = IndexBuildSpec.enricherId(enricher.descriptor)
+    )
+
   /** 为一份文档建立并发布新索引版本。
     *
     * @param document
-    *   原始文档；正文只用于切分和计算 hash，不写入 manifest
+    *   原始文档；正文只用于切分和计算摘要，不写入 manifest
     * @param tenantId
     *   可信租户 ID
     * @param permissions
-    *   允许检索该文档所需的权限标签
+    *   允许检索该文档所需的权限标签，至少一个
     * @param ingestionId
-    *   业务重试必须复用的稳定幂等键
+    *   业务重试必须复用的稳定幂等键；空字符串表示由谱系与构建规格推导
     * @param expectation
     *   对当前 active 版本的并发写前置条件
+    * @param provenance
+    *   可信控制面提供的原件修订与解析产物摘要
     * @return
     *   已发布 manifest 与 Embedding usage
     */
@@ -251,47 +287,43 @@ final class KnowledgeIndexer(
       permissions: Set[String],
       ingestionId: String,
       expectation: ActiveVersionExpectation = ActiveVersionExpectation.AnyVersion,
-      knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId("default"),
-      targetProfileId: Option[IndexProfileId] = None
+      knowledgeSpaceId: KnowledgeSpaceId = KnowledgeSpaceId.Default,
+      targetProfileId: Option[IndexProfileId] = None,
+      provenance: IngestionProvenance = IngestionProvenance()
   ): IO[RetrievalError, KnowledgeIndexResult] =
-    val key         = KnowledgeDocumentKey(tenantId, document.id)
-    val contentHash = KnowledgeIndexer.sha256(document.text)
-    val mediaType   =
-      document.metadata.getOrElse("mediaType", document.metadata.getOrElse("contentType", "text/plain"))
-    val artifact   = SourceArtifactRef(document.sourceUri, mediaType, contentHash)
-    val derivedKey =
-      if ingestionId.trim.nonEmpty then ingestionId
-      else
+    val key = KnowledgeDocumentKey(tenantId, document.id, knowledgeSpaceId)
+    for
+      _       <- ZIO.fromEither(ChunkEmbeddingAlignment.require(chunker.strategyId, embeddings.capabilities))
+      _       <- ApprovedSourceResolver.validate(document.sourceUri)
+      spec    <- ZIO.attempt(buildSpec).mapError(error => AgentError.RetrievalFailed(error.getMessage))
+      lineage <- ZIO
+        .attempt(DocumentLineage.derive(document, provenance))
+        .mapError(error => AgentError.RetrievalFailed(s"文档谱系无效: ${error.getMessage}"))
+      derivedKey = Option(ingestionId.trim).filter(_.nonEmpty).getOrElse {
         IngestionKeys.hmac(
           knowledgeSpaceId,
-          targetProfileId.getOrElse(
-            IndexProfileIds.fromEmbedding(embeddings.descriptor.denseDescriptor, resolvedIndexingStrategy)
-          ),
+          targetProfileId.getOrElse(IndexProfileIds.fromSpec(spec)),
           document.id,
-          contentHash,
-          contentHash,
+          lineage,
+          spec.sha256,
           hmacSecret
         )
-    val request = BeginKnowledgeIndex(
-      key = key,
-      ingestionId = derivedKey,
-      sourceUri = document.sourceUri,
-      contentHash = contentHash,
-      permissions = permissions,
-      metadata = document.metadata ++ Map(
-        "source.uri"           -> artifact.uri,
-        "source.contentSha256" -> artifact.contentSha256,
-        "source.mediaType"     -> artifact.mediaType
-      ),
-      embedding = embeddings.descriptor.denseDescriptor,
-      indexingStrategy = resolvedIndexingStrategy,
-      expectation = expectation,
-      knowledgeSpaceId = knowledgeSpaceId,
-      targetProfileId = targetProfileId
-    )
-    for
-      _        <- ZIO.fromEither(ChunkEmbeddingAlignment.require(chunker.strategyId, embeddings.capabilities))
-      _        <- ApprovedSourceResolver.validate(document.sourceUri)
+      }
+      request <- ZIO
+        .attempt(
+          BeginKnowledgeIndex(
+            key = key,
+            ingestionId = derivedKey,
+            sourceUri = document.sourceUri,
+            lineage = lineage,
+            permissions = permissions,
+            metadata = document.metadata,
+            buildSpec = spec,
+            expectation = expectation,
+            targetProfileId = targetProfileId
+          )
+        )
+        .mapError(error => AgentError.RetrievalFailed(error.getMessage))
       build    <- store.begin(request)
       existing <- store.find(key, derivedKey)
       result   <- existing match
@@ -301,14 +333,18 @@ final class KnowledgeIndexer(
         case Some(manifest) if manifest.isQuarantined =>
           ZIO.fail(AgentError.RetrievalFailed("knowledge ingestion 已被隔离，不能激活"))
         case _ =>
-          ingestPipeline(document, tenantId, permissions, contentHash, derivedKey, build).onExit {
-            case Exit.Success(_)     => ZIO.unit
-            case Exit.Failure(cause) =>
-              val code = cause.failureOption match
-                case Some(error) if error.message.contains("隔离") => KnowledgeIndexer.QuarantineFailureCode
-                case Some(error)                                 => error.category.toString
-                case None                                        => "InterruptedOrDefect"
-              store.markFailed(build, code).ignore
+          Ref.make(false).flatMap { quarantined =>
+            ingestPipeline(document, tenantId, permissions, derivedKey, build, quarantined).onExit {
+              case Exit.Success(_)     => ZIO.unit
+              case Exit.Failure(cause) =>
+                quarantined.get.flatMap { isQuarantine =>
+                  val code = cause.failureOption match
+                    case Some(_) if isQuarantine => KnowledgeIndexer.QuarantineFailureCode
+                    case Some(error)             => error.category.toString
+                    case None                    => "InterruptedOrDefect"
+                  store.markFailed(build, code).ignore
+                }
+            }
           }
     yield result
 
@@ -316,14 +352,42 @@ final class KnowledgeIndexer(
       document: SourceDocument,
       tenantId: TenantId,
       permissions: Set[String],
-      contentHash: String,
       derivedKey: String,
-      build: KnowledgeIndexBuild
+      build: KnowledgeIndexBuild,
+      quarantined: Ref[Boolean]
   ): IO[RetrievalError, KnowledgeIndexResult] =
     def checkpoint(value: IngestCheckpoint) = store.setCheckpoint(build, value)
     def quarantine(reason: String)          =
-      checkpoint(IngestCheckpoint.Quarantined) *>
+      quarantined.set(true) *> checkpoint(IngestCheckpoint.Quarantined) *>
         ZIO.fail(AgentError.RetrievalFailed(s"knowledge ingestion 已被隔离: $reason"))
+    val embedBatchSize = math.min(stageBatchSize, embeddings.descriptor.denseDescriptor.maxBatchSize)
+    def embedAndStage(batch: Chunk[DocumentChunk], ordinal: Int) =
+      for
+        detailed <- embeddings.embed(
+          EmbeddingRequest(
+            batch.map(_.denseText),
+            EmbeddingInputRole.Document,
+            EmbeddingOutputKind.Dense,
+            context = EmbeddingRequestContext(
+              tenantId,
+              EmbeddingPurpose.Indexing,
+              s"knowledge-index:${document.id}:$derivedKey:$ordinal",
+              knowledgeSpaceId = Some(build.knowledgeSpaceId)
+            )
+          )
+        )
+        _ <- ZIO
+          .fail(
+            AgentError.RetrievalFailed(
+              s"Embedding 输出数量 ${detailed.denseEmbeddings.length} != chunk 数量 ${batch.length}"
+            )
+          )
+          .unless(detailed.denseEmbeddings.length == batch.length)
+        _ <- store.stage(
+          build,
+          batch.zip(detailed.denseEmbeddings).map((chunk, vector) => IndexedChunk(chunk, vector))
+        )
+      yield detailed.usage
     for
       _ <- checkpoint(IngestCheckpoint.Resolved)
       _ <-
@@ -331,11 +395,14 @@ final class KnowledgeIndexer(
         else if !ExtractionQuality.assess(document.text).sufficient(qualityPolicy) then
           quarantine("extraction-quality")
         else ZIO.unit
-      _          <- checkpoint(IngestCheckpoint.Extracted)
-      _          <- checkpoint(IngestCheckpoint.Normalized)
-      chunks     <- chunker.split(document, tenantId, permissions)
-      _          <- checkpoint(IngestCheckpoint.Chunked)
-      _          <- quarantine("empty-chunks").when(chunks.isEmpty)
+      _      <- checkpoint(IngestCheckpoint.Extracted)
+      _      <- checkpoint(IngestCheckpoint.Normalized)
+      chunks <- chunker.split(document, tenantId, permissions)
+      _      <- checkpoint(IngestCheckpoint.Chunked)
+      _      <- quarantine("empty-chunks").when(chunks.isEmpty)
+      _      <- ZIO
+        .fail(AgentError.RetrievalFailed("chunk ID 不能为空或包含制表符/换行"))
+        .unless(chunks.forall(chunk => ChunkSetDigest.validChunkId(chunk.id)))
       enrichment <- enricher.enrich(document, chunks)
       _          <- ZIO
         .fail(AgentError.RetrievalFailed("DocumentEnricher 不能改写权限或来源"))
@@ -351,48 +418,45 @@ final class KnowledgeIndexer(
           .copy(
             metadata = chunk.metadata ++ enrichment.metadata,
             catalogVersion = build.version,
-            documentRevisionId = Some(contentHash),
+            sourceRevisionId = Some(build.lineage.sourceRevisionId),
             knowledgeSpaceId = Some(build.knowledgeSpaceId),
             profileId = Some(build.profileId)
           )
       }
-      detailed <- embeddings.embed(
-        EmbeddingRequest(
-          lexicalized.map(_.denseText),
-          EmbeddingInputRole.Document,
-          EmbeddingOutputKind.Dense,
-          context = EmbeddingRequestContext(
-            tenantId,
-            EmbeddingPurpose.Indexing,
-            s"knowledge-index:${document.id}:$derivedKey",
-            knowledgeSpaceId = Some(build.knowledgeSpaceId)
-          )
-        )
-      )
-      _ <- checkpoint(IngestCheckpoint.Embedded)
-      _ <- ZIO
-        .fail(
-          AgentError.RetrievalFailed(
-            s"Embedding 输出数量 ${detailed.denseEmbeddings.length} != chunk 数量 ${lexicalized.length}"
-          )
-        )
-        .unless(detailed.denseEmbeddings.length == lexicalized.length)
-      indexed = lexicalized.zip(detailed.denseEmbeddings).map { case (chunk, vector) =>
-        IndexedChunk(chunk, vector)
+      digest <- ZIO
+        .attempt(ChunkSetDigest.of(lexicalized))
+        .mapError(error => AgentError.RetrievalFailed(s"chunk 集合无效: ${error.getMessage}"))
+      usages <- ZIO.foreach(Chunk.fromIterable(lexicalized.grouped(embedBatchSize).toList).zipWithIndex) {
+        case (batch, ordinal) => embedAndStage(batch, ordinal)
       }
-      batches = indexed.grouped(stageBatchSize).toList
-      _     <- ZIO.foreachDiscard(batches)(batch => store.stage(build, batch))
+      _     <- checkpoint(IngestCheckpoint.Embedded)
       _     <- checkpoint(IngestCheckpoint.Staged)
       _     <- checkpoint(IngestCheckpoint.Validated)
-      _     <- store.activate(build, indexed.length)
+      _     <- store.activate(build, digest)
       _     <- checkpoint(IngestCheckpoint.Ready)
       ready <- store
         .find(build.key, derivedKey)
         .someOrFail(AgentError.RetrievalFailed("knowledge activate 后 manifest 丢失"))
-    yield KnowledgeIndexResult(ready.copy(checkpoint = IngestCheckpoint.Ready), detailed.usage)
+    yield KnowledgeIndexResult(
+      ready.copy(checkpoint = IngestCheckpoint.Ready),
+      KnowledgeIndexer.sumUsage(usages)
+    )
 
 object KnowledgeIndexer:
   val QuarantineFailureCode: String = "ingestion.quarantine"
+
+  /** 单个文档或块允许的权限标签上限；与数据库 CHECK 一致。 */
+  val MaxPermissions: Int = 256
+
+  /** 所有子批次都返回 usage 时才汇总；任一缺失则整体未知。 */
+  def sumUsage(usages: Chunk[Option[EmbeddingUsage]]): Option[EmbeddingUsage] =
+    if usages.isEmpty || usages.exists(_.isEmpty) then None
+    else
+      Some(
+        usages.flatten.foldLeft(EmbeddingUsage(0L, 0L))((acc, next) =>
+          EmbeddingUsage(acc.inputTokens + next.inputTokens, acc.totalTokens + next.totalTokens)
+        )
+      )
 
   val ForbiddenEnrichmentKeys: Set[String] =
     Set("tenantId", "tenant_id", "permissions", "sourceUri", "source_uri")
@@ -406,13 +470,7 @@ object KnowledgeIndexer:
     metadata.filterNot((key, _) => key.startsWith("ingest."))
 
   /** 对 UTF-8 正文计算稳定小写 SHA-256；用于幂等冲突检测，不用作认证签名。 */
-  def sha256(text: String): String =
-    MessageDigest
-      .getInstance("SHA-256")
-      .digest(text.getBytes(StandardCharsets.UTF_8))
-      .iterator
-      .map(byte => f"${byte & 0xff}%02x")
-      .mkString
+  def sha256(text: String): String = KnowledgeDigest.sha256(text)
 
   /** 从三个可替换服务和显式 batch 配置构造 Layer。 */
   def layer(
