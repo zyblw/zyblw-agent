@@ -14,6 +14,17 @@ object ModelRoutingSpec extends ZIOSpecDefault:
   private val budget = BudgetState(RunLimits(), UsageSummary(), 0)
 
   def spec = suite("Model routing contract")(
+    test("可信宿主固定的 Run 模型不被后来部署覆盖改写") {
+      val pinned    = ModelSettings(temperature = Some(0.2)).pinModel("first", "reasoning")
+      val policy    = ModelPolicy(provider = Some("second"), model = Some("fast"), temperature = Some(0.7))
+      val effective = policy.applyTo(pinned)
+      assertTrue(
+        effective.provider.contains("first"),
+        effective.model.contains("reasoning"),
+        effective.temperature.contains(0.7),
+        policy.applyTo(ModelSettings()).provider.contains("second")
+      )
+    },
     test("重试资格与故障切换资格独立，鉴权/安全/协议错误不得换模型") {
       val conflict    = AgentError.ModelHttpFailure("p", 409)
       val unavailable = AgentError.ModelHttpFailure("p", 503)
@@ -197,10 +208,13 @@ object ModelRoutingSpec extends ZIOSpecDefault:
     },
     test("旧 ModelSettings JSON 可读取，显式 requirement 进入组合指纹") {
       val legacy = "{}".fromJson[ModelSettings]
+      val base   = ModelSettings(provider = Some("first"), model = Some("reasoning"))
       assertTrue(
         legacy == Right(ModelSettings()),
         RuntimeComposition.modelSettingsFingerprint(ModelSettings()) !=
-          RuntimeComposition.modelSettingsFingerprint(ModelSettings(requirement = Some(ModelRequirement())))
+          RuntimeComposition.modelSettingsFingerprint(ModelSettings(requirement = Some(ModelRequirement()))),
+        RuntimeComposition.modelSettingsFingerprint(base) !=
+          RuntimeComposition.modelSettingsFingerprint(base.pinModel("first", "reasoning"))
       )
     }
   )

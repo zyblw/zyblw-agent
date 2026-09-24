@@ -5,6 +5,8 @@ All notable user-visible changes will be recorded here. The project follows
 
 ## 0.9.0 - Unreleased
 
+- `ModelSettings.pinModel` 可把业务在单次 Run 中已校验的 provider/model 选择标记为 `RunPinned`。部署级 `ModelPolicySource` 仍可覆盖温度与输出上限，但不能改变该 Run 的模型身份；未 pin 的定义继续遵循原有管理面热切换策略。pin 标记进入组合指纹，保证恢复时不混用不同模型。
+
 - 知识身份模型重写（知识 V001 原地修改，需重建知识 schema）。文档键加入 `knowledgeSpaceId`；`BeginKnowledgeIndex` / `KnowledgeIndexBuild` 以 `DocumentLineage`（原件修订、解析产物、结构、正文四段 SHA-256）与 `IndexBuildSpec`（含 tokenizer、instruction、enricher）取代 `contentHash` + embedding descriptor + strategy；Profile ID 由规格摘要派生，`build_spec_sha256` 以复合外键钉在每个文档上。`activate(build, ChunkSetDigest)` 在 SQL 中重算块集合摘要，取代块数比较。`withdraw(key, sourceRevisionId)` 对未知修订失败，删除正式块并写墓碑，墓碑阻止该修订再次摄取；`purgeInactive` 的 legal hold 改为 `Set[KnowledgeDocumentKey]`；`documentRevisionId` 更名为 `sourceRevisionId`。空 ingestionId 由 HMAC 覆盖全部谱系字段派生；`DocumentIngestionRequest.source` 传入宿主可信的原件修订，`DocumentIngestionService` 在读流时计算解析产物摘要。
 - 修复 Profile 切换后的写入死锁：active/building Profile 可写，superseded Profile 只接受显式 `targetProfileId` 补齐，终态封存。发布校验只看每份文档的最新版本，较早的失败尝试不再阻塞切换；新增 `profileCorpusDiff`。`retire` 下线文档在空间内全部 Profile 的副本；并发首次导入不再因引导竞争失败；知识目录游标加入空间，同一文档 ID 跨空间翻页不丢行。
 - 向量检索物理设计：查询先在短事务里解析 Profile，再以绑定参数过滤，不再有相关子查询和 `default` 回退；向量、hybrid、sparse、fetch 与上下文扩展统一设置 `hnsw.iterative_scan`、`ef_search`（`hnswEfSearch`，默认 100）与 `max_scan_tuples`（`hnswMaxScanTuples`，默认 20000）。删除 `permissions` GIN 索引。带过滤的 hybrid 也参与 sparse 融合，sparse 候选同样应用结构化过滤。新增执行计划与召回集成测试。未采用按 Profile 分区：需要运行时 DDL，而单租户、每空间一到两个 Profile 的规模收益不足。
