@@ -513,17 +513,22 @@ final class InMemoryVectorStore private (
               .flatMap(chunk =>
                 RetrievalExpansion
                   .bestSeed(seeds, chunk, config.headingRadius)
-                  .map(seed => expandedHit(RetrievalExpansion.stamp(chunk, seed.chunk.id), seed.score, "heading", config))
+                  .map(seed =>
+                    expandedHit(RetrievalExpansion.stamp(chunk, seed.chunk.id), seed.score, "heading", config)
+                  )
               )
         val headingKeys = headingHits.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
         val siblingHits = parentClaims.toVector.sortBy(_._1).flatMap { case (parentKey, (score, seedId)) =>
           siblingsByParent
             .getOrElse(parentKey, Vector.empty)
             .filterNot(chunk =>
-              neighborKeys.contains(chunk.documentId -> chunk.id) || headingKeys.contains(chunk.documentId -> chunk.id)
+              neighborKeys.contains(chunk.documentId -> chunk.id) || headingKeys
+                .contains(chunk.documentId -> chunk.id)
             )
             .take(config.maxSiblingsPerParent)
-            .map(chunk => expandedHit(RetrievalExpansion.stamp(chunk, seedId), score, "parentSibling", config))
+            .map(chunk =>
+              expandedHit(RetrievalExpansion.stamp(chunk, seedId), score, "parentSibling", config)
+            )
         }
         Chunk.fromIterable(
           (neighborHits ++ headingHits ++ siblingHits)
@@ -727,12 +732,11 @@ final class DefaultRetriever(
         validated <- validateReranked(candidates, reranked, pinnedScope, limit)
         // 阈值只作用于 seed 命中。RRF fused score 只排序；余弦/词法决定是否接受。
         // 扩展块按 expandedScoreFactor 主动降分，不得再用同一阈值筛掉它们。
-        hits     = validated.filter(hit => DefaultRetriever.acceptsSeed(hit, policy.minimumScore))
+        hits            = validated.filter(hit => DefaultRetriever.acceptsSeed(hit, policy.minimumScore))
         evidenceBudgets =
           if request.filter.documentIds.size == 1 then
-            plan.budgets.copy(maxChunksPerSource =
-              math.max(plan.budgets.maxChunksPerSource, plan.budgets.rerankSeeds)
-            )
+            plan.budgets
+              .copy(maxChunksPerSource = math.max(plan.budgets.maxChunksPerSource, plan.budgets.rerankSeeds))
           else plan.budgets
         evidence = RetrievalEvidence(
           status =

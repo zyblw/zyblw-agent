@@ -112,7 +112,8 @@ final class DocumentStructureChunker(
     blocks.foreach { block =>
       if atomic(block.kind) then
         flush()
-        if fits(title, block.headingPath, Some(block.kind), block.text) then result += fromBlocks(Vector(block))
+        if fits(title, block.headingPath, Some(block.kind), block.text) then
+          result += fromBlocks(Vector(block))
         else result ++= splitOversized(title, block)
       else if !fits(title, block.headingPath, Some(block.kind), block.text) then
         flush()
@@ -151,7 +152,7 @@ final class DocumentStructureChunker(
 
   private def splitOversized(title: Option[String], block: DocumentBlock): Vector[Draft] =
     block.kind match
-      case DocumentBlockKind.Table => splitTable(title, block)
+      case DocumentBlockKind.Table                                => splitTable(title, block)
       case DocumentBlockKind.Formula | DocumentBlockKind.KeyValue =>
         val lines = splitLines(title, block)
         if lines.nonEmpty then lines else splitCharacters(title, block)
@@ -186,9 +187,9 @@ final class DocumentStructureChunker(
 
   /** 方剂和键值按完整行切开。只有放不进预算的那一行才按字切开。 */
   private def splitLines(title: Option[String], block: DocumentBlock): Vector[Draft] =
-    val lines   = block.text.split("\n", -1).toVector
-    val built   = Vector.newBuilder[Draft]
-    val pending = mutable.ArrayBuffer.empty[String]
+    val lines         = block.text.split("\n", -1).toVector
+    val built         = Vector.newBuilder[Draft]
+    val pending       = mutable.ArrayBuffer.empty[String]
     def flush(): Unit =
       if pending.nonEmpty then
         built += draftOf(block, pending.mkString("\n"))

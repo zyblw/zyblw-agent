@@ -393,8 +393,8 @@ final class PostgresPgVectorStore(
             parentKey -> values.map(_._2).reduce(preferSeed)
         }
       val headingSeeds = seeds.filter(_.chunk.lineage.exists(_.headingPath.nonEmpty))
-      if neighborClaims.isEmpty && parentClaims.isEmpty && (config.headingRadius == 0 || headingSeeds.isEmpty) then
-        ZIO.succeed(Chunk.empty)
+      if neighborClaims.isEmpty && parentClaims.isEmpty && (config.headingRadius == 0 || headingSeeds.isEmpty)
+      then ZIO.succeed(Chunk.empty)
       else
         withConnection { connection =>
           ZIO.attemptBlocking {
@@ -455,13 +455,20 @@ final class PostgresPgVectorStore(
               statement.setArray(5, connection.createArrayOf("text", parents.map(_._1).toArray))
               statement.setArray(6, connection.createArrayOf("text", parents.map(_._2).toArray))
               val headings = headingSeeds.toVector
-              statement.setArray(7, connection.createArrayOf("text", headings.map(_.chunk.documentId).toArray))
+              statement.setArray(
+                7,
+                connection.createArrayOf("text", headings.map(_.chunk.documentId).toArray)
+              )
               statement.setArray(
                 8,
                 connection.createArrayOf(
                   "text",
                   headings
-                    .map(seed => RetrievalExpansion.headingKey(seed.chunk.lineage.fold(Chunk.empty[String])(_.headingPath)))
+                    .map(seed =>
+                      RetrievalExpansion.headingKey(
+                        seed.chunk.lineage.fold(Chunk.empty[String])(_.headingPath)
+                      )
+                    )
                     .toArray
                 )
               )
@@ -496,25 +503,35 @@ final class PostgresPgVectorStore(
                 .flatMap(chunk =>
                   RetrievalExpansion
                     .bestSeed(seeds, chunk, config.headingRadius)
-                    .map(seed => expandedHit(RetrievalExpansion.stamp(chunk, seed.chunk.id), seed.score, "heading", config))
-                )
-              val headingKeys  = headingHits.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
-              val siblingHits  = parentClaims.toVector.sortBy(_._1).flatMap { case (parentKey, (score, seedId)) =>
-                authorized
-                  .filter(chunk =>
-                    chunk.documentId == parentKey._1 && chunk.lineage
-                      .flatMap(_.parentId)
-                      .contains(parentKey._2)
-                  )
-                  .filterNot(chunk =>
-                    neighborKeys.contains(chunk.documentId -> chunk.id) || headingKeys.contains(
-                      chunk.documentId -> chunk.id
+                    .map(seed =>
+                      expandedHit(
+                        RetrievalExpansion.stamp(chunk, seed.chunk.id),
+                        seed.score,
+                        "heading",
+                        config
+                      )
                     )
-                  )
-                  .sortBy(chunk => (chunk.lineage.fold(Int.MaxValue)(_.ordinal), chunk.id))
-                  .take(config.maxSiblingsPerParent)
-                  .map(chunk => expandedHit(RetrievalExpansion.stamp(chunk, seedId), score, "parentSibling", config))
-              }
+                )
+              val headingKeys = headingHits.map(hit => hit.chunk.documentId -> hit.chunk.id).toSet
+              val siblingHits =
+                parentClaims.toVector.sortBy(_._1).flatMap { case (parentKey, (score, seedId)) =>
+                  authorized
+                    .filter(chunk =>
+                      chunk.documentId == parentKey._1 && chunk.lineage
+                        .flatMap(_.parentId)
+                        .contains(parentKey._2)
+                    )
+                    .filterNot(chunk =>
+                      neighborKeys.contains(chunk.documentId -> chunk.id) || headingKeys.contains(
+                        chunk.documentId -> chunk.id
+                      )
+                    )
+                    .sortBy(chunk => (chunk.lineage.fold(Int.MaxValue)(_.ordinal), chunk.id))
+                    .take(config.maxSiblingsPerParent)
+                    .map(chunk =>
+                      expandedHit(RetrievalExpansion.stamp(chunk, seedId), score, "parentSibling", config)
+                    )
+                }
               Chunk.fromIterable(
                 (neighborHits ++ headingHits ++ siblingHits)
                   .distinctBy(hit => hit.chunk.documentId -> hit.chunk.id)

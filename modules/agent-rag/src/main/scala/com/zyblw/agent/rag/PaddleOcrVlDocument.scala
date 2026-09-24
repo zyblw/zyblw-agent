@@ -10,8 +10,8 @@ import scala.util.Try
   *
   * 同时接受两种已经验证过的 JSON：官网/自建 `/layout-parsing` 的页数组（`prunedResult.parsing_res_list`， bbox 为
   * `[left, top, right, bottom]`），以及百度智能云 `parse_result_url` 对象（`pages[].layouts`， `position` 为
-  * `[x, y, width, height]`，`page_num` 从 0 起）。页码、阅读顺序和坐标以 JSON 为准； 可选 Markdown 只按标题文本纠正层级。页眉、页脚和页码不进入正文。不调用
-  * `PdfTextStructure.normalize`。
+  * `[x, y, width, height]`，`page_num` 从 0 起）。页码、阅读顺序和坐标以 JSON 为准；可选 Markdown
+  * 按标题文本纠正层级。井号没有把章、节和条目分开时，改用编号。页眉、页脚和页码不进入正文。不调用 `PdfTextStructure.normalize`。
   */
 object PaddleOcrVlDocument:
   val Method              = "paddleocr-vl-1.6"
@@ -98,27 +98,36 @@ object PaddleOcrVlDocument:
   )
 
   private def assemble(pages: Vector[RawPage], markdown: Option[String]): Parsed =
-    val headings      = markdown.fold(Vector.empty[(Int, String)])(text =>
+    val headings = markdown.fold(Vector.empty[(Int, String)])(text =>
       markdownHeadings(text, jsonTitles(pages), continuationTexts(pages))
     )
-    var headingCursor = 0
-    var stack         = List.empty[(Int, String, String)]
-    var sections      = Vector.empty[Section]
-    var blocks        = Vector.empty[DocumentBlock]
-    var figures       = Vector.empty[PendingFigure]
-    var current       = Option.empty[String]
-    var ordinal       = 0
+    val outlineSources = observedOutlineSources(pages, headings)
+    var headingCursor  = 0
+    var stack          = List.empty[(Int, Option[Int], String, String)]
+    var sections       = Vector.empty[Section]
+    var blocks         = Vector.empty[DocumentBlock]
+    var figures        = Vector.empty[PendingFigure]
+    var current        = Option.empty[String]
+    var ordinal        = 0
 
-    def openSection(level: Int, title: String, pageNumber: Int): String =
-      val parent = stack.dropWhile(_._1 >= level).headOption
+    def openSection(level: Int, source: Option[Int], title: String, pageNumber: Int): String =
+      val resolved =
+        stack.headOption match
+          case Some((parentLevel, Some(parentSource), _, _)) =>
+            source match
+              case Some(own) if own > parentSource && level <= parentLevel =>
+                math.min(6, parentLevel + 1)
+              case _ => level
+          case _ => level
+      val parent = stack.dropWhile(_._1 >= resolved).headOption
       val id     = s"p${pageNumber}-h$ordinal"
-      stack = (level, id, title) :: stack.dropWhile(_._1 >= level)
+      stack = (resolved, source, id, title) :: stack.dropWhile(_._1 >= resolved)
       current = Some(id)
       sections = sections :+ Section(
         id,
-        parent.map(_._2),
+        parent.map(_._3),
         sections.length,
-        level,
+        resolved,
         title,
         Some(pageNumber),
         Some(pageNumber)
@@ -127,8 +136,8 @@ object PaddleOcrVlDocument:
       id
 
     def appendBlock(page: RawPage, raw: RawBlock, kind: DocumentBlockKind, text: String): Unit =
-      val sectionId = current.getOrElse(openSection(1, "正文", page.number))
-      val path      = Chunk.fromIterable(stack.reverseIterator.map(_._3).toList).filter(_.nonEmpty)
+      val sectionId = current.getOrElse(openSection(1, None, "正文", page.number))
+      val path      = Chunk.fromIterable(stack.reverseIterator.map(_._4).toList).filter(_.nonEmpty)
       val origin    = DocumentOrigin(
         page.number,
         boundingBox = raw.bbox.map { case (left, top, right, bottom) =>
@@ -159,8 +168,8 @@ object PaddleOcrVlDocument:
       val prepared = pairFigures(page.blocks)
       var index    = 0
       while index < prepared.length do
-        val raw      = prepared(index)
-        var advance  = 1
+        val raw     = prepared(index)
+        var advance = 1
         if ordinal < MaxBlocks && !NoiseLabels.contains(raw.label) then
           val absorbed = prepared.lift(index + 1).flatMap(next => titleContinuation(raw, next, headings))
           val source   =
@@ -171,9 +180,9 @@ object PaddleOcrVlDocument:
               case None => raw
           val (hashLevel, title) = splitHeading(source.text)
           if source.label == "content" && title.nonEmpty && !ImageOnly.matches(title) then
-            if !stack.headOption.exists(_._3 == "目录") then
+            if !stack.headOption.exists(_._4 == "目录") then
               val level = stack.headOption.fold(1)(parent => math.min(6, parent._1 + 1))
-              openSection(level, "目录", page.number): Unit
+              openSection(level, None, "目录", page.number): Unit
             appendBlock(page, source, DocumentBlockKind.Paragraph, clampText(title))
           else
             classify(source.label, title) match
@@ -181,16 +190,17 @@ object PaddleOcrVlDocument:
               case Some(Left(defaultLevel)) =>
                 val cleaned = clampTitle(title)
                 if cleaned.nonEmpty then
-                  val level = resolveLevel(
+                  val (level, origin) = resolveLevel(
                     defaultLevel,
                     hashLevel,
                     source.levelHint,
                     cleaned,
                     headings,
+                    outlineSources,
                     () => headingCursor,
                     next => headingCursor = next
                   )
-                  openSection(level, cleaned, page.number): Unit
+                  openSection(level, origin, cleaned, page.number): Unit
               case Some(Right(kind)) =>
                 val text = clampText(title)
                 if text.nonEmpty && !ImageOnly.matches(text) then
@@ -214,17 +224,64 @@ object PaddleOcrVlDocument:
       hint: Option[Int],
       title: String,
       headings: Vector[(Int, String)],
+      outlineSources: Map[Int, Set[Int]],
       cursor: () => Int,
       setCursor: Int => Unit
-  ): Int =
-    val matched = matchHeading(title, headings, cursor(), setCursor)
-    clampLevel(
-      matched
-        .orElse(hashLevel)
-        .orElse(hint)
-        .orElse(inferHeadingLevel(title))
-        .getOrElse(defaultLevel)
-    )
+  ): (Int, Option[Int]) =
+    val matched  = matchHeading(title, headings, cursor(), setCursor)
+    val origin   = matched.orElse(hashLevel).orElse(hint)
+    val inferred = inferHeadingLevel(title)
+    val chosen   =
+      (origin, inferred) match
+        case (Some(level), Some(rank)) if outlineCollapsed(level, rank, outlineSources) => rank
+        case (Some(level), _)                                                           => level
+        case (None, Some(rank))                                                         => rank
+        case _                                                                          => defaultLevel
+    clampLevel(chosen) -> origin
+
+  /** 章、节、一、（一）若被同一级井号盖住，改用编号。井号本身已经逐级变深时保持原样。 */
+  private def outlineCollapsed(level: Int, rank: Int, observed: Map[Int, Set[Int]]): Boolean =
+    observed.exists { case (shallower, sources) =>
+      shallower < rank && sources.exists(_ >= level)
+    }
+
+  private def observedOutlineSources(
+      pages: Vector[RawPage],
+      headings: Vector[(Int, String)]
+  ): Map[Int, Set[Int]] =
+    var cursor   = 0
+    var observed = Map.empty[Int, Set[Int]]
+    pages.foreach { page =>
+      val prepared = pairFigures(page.blocks)
+      var index    = 0
+      while index < prepared.length do
+        val raw     = prepared(index)
+        var advance = 1
+        if !NoiseLabels.contains(raw.label) then
+          val absorbed = prepared.lift(index + 1).flatMap(next => titleContinuation(raw, next, headings))
+          val source   =
+            absorbed match
+              case Some(rest) =>
+                advance = 2
+                raw.copy(text = joinTitle(raw.text, rest))
+              case None => raw
+          val (hashLevel, title) = splitHeading(source.text)
+          if !(source.label == "content" && title.nonEmpty && !ImageOnly.matches(title)) then
+            classify(source.label, title) match
+              case Some(Left(_)) =>
+                val cleaned = clampTitle(title)
+                if cleaned.nonEmpty then
+                  val matched = matchHeading(cleaned, headings, cursor, next => cursor = next)
+                  val origin  = matched.orElse(hashLevel).orElse(source.levelHint)
+                  (origin, inferHeadingLevel(cleaned)) match
+                    case (Some(level), Some(rank)) =>
+                      val prior = observed.getOrElse(rank, Set.empty)
+                      observed = observed.updated(rank, prior + level)
+                    case _ => ()
+              case _ => ()
+        index += advance
+    }
+    observed
 
   private def matchHeading(
       title: String,
@@ -252,13 +309,11 @@ object PaddleOcrVlDocument:
         setCursor(found + 1)
         Some(headings(found)._1)
 
-  /** Markdown 标题仍是层级事实源。遇到网页 JSON 与 Markdown 只差句号、括号或 OCR 空格时做宽松匹配； Markdown 确实缺失时，再按常见中文目录编号恢复最小可用层级，避免所有
-    * paragraph_title 都坍成二级。
-    */
+  /** 井号能分出层级时以井号为准。井号把不同编号压成同一级，或 Markdown 缺失时，再按中文目录编号恢复层级。章、节后面可以没有空格。 */
   private def inferHeadingLevel(title: String): Option[Int] =
     val value = splitHeading(title)._2.trim
-    if value.matches("""^第[一二三四五六七八九十百零〇\d]+章(?:\s|[:：、.]|$).*""") then Some(2)
-    else if value.matches("""^第[一二三四五六七八九十百零〇\d]+节(?:\s|[:：、.]|$).*""") then Some(3)
+    if value.matches("""^第[一二三四五六七八九十百零〇\d]+章.*""") then Some(2)
+    else if value.matches("""^第[一二三四五六七八九十百零〇\d]+节.*""") then Some(3)
     else if value.matches("""^[一二三四五六七八九十百零〇]+[、.．]\s*.*""") then Some(4)
     else if value.matches("""^[（(][一二三四五六七八九十百零〇\d]+[）)]\s*.*""") then Some(5)
     else if value.matches("""^\d+[、.．]\s*.*""") then Some(5)

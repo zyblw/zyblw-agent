@@ -147,7 +147,8 @@ object RetrievalExpansion:
     if radius <= 0 || seed.chunk.documentId != chunk.documentId || seed.chunk.id == chunk.id then false
     else
       (seed.chunk.lineage, chunk.lineage) match
-        case (Some(left), Some(right)) if left.headingPath.nonEmpty && left.headingPath == right.headingPath =>
+        case (Some(left), Some(right))
+            if left.headingPath.nonEmpty && left.headingPath == right.headingPath =>
           left.ordinal != right.ordinal && math.abs(left.ordinal - right.ordinal) <= radius
         case _ => false
 

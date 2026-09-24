@@ -192,6 +192,16 @@ object KnowledgeToolsSpec extends ZIOSpecDefault:
         denied <- KnowledgeTools.fetchTool(rag).execute(KnowledgeTools.FetchInput(chunkId), host).exit
       yield assertTrue(found.citations.nonEmpty, denied.isFailure)
     }.provide(memoryRag),
+    test("批量 fetch 去重并限制为六个不同块") {
+      val accepted = KnowledgeTools.fetchChunkIds(
+        KnowledgeTools.FetchInput(" a ", chunkIds = Some(List("b", "a", " ")))
+      )
+      val empty   = KnowledgeTools.fetchChunkIds(KnowledgeTools.FetchInput(" ", chunkIds = Some(Nil)))
+      val tooMany = KnowledgeTools.fetchChunkIds(
+        KnowledgeTools.FetchInput("a", chunkIds = Some(List("b", "c", "d", "e", "f", "g")))
+      )
+      assertTrue(accepted == Right(Set("a", "b")), empty.isLeft, tooMany.isLeft)
+    },
     test("空白或缺失的资料范围不能放宽成全库") {
       val blank = context.copy(runContext =
         context.runContext.copy(attributes = Map(KnowledgeTools.ScopeDocumentAttribute -> "  "))

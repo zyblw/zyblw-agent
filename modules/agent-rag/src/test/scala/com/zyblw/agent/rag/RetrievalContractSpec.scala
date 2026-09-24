@@ -127,7 +127,9 @@ object RetrievalContractSpec extends ZIOSpecDefault:
         CandidateBudgets(maxChunksPerSource = 2)
       )
       assertTrue(
-        bundle.items.exists(item => item.chunk.id == "neighbor" && item.decision == EvidenceDecision.KeptExpanded),
+        bundle.items.exists(item =>
+          item.chunk.id == "neighbor" && item.decision == EvidenceDecision.KeptExpanded
+        ),
         bundle.toRetrievalResult.hits.map(_.chunk.id).toSet == Set("seed", "second", "neighbor")
       )
     },
@@ -148,7 +150,9 @@ object RetrievalContractSpec extends ZIOSpecDefault:
       )
       assertTrue(
         bundle.toRetrievalResult.hits.map(_.chunk.id).toSet == Set("same-a", "other"),
-        bundle.items.exists(item => item.chunk.id == "same-b" && item.decision == EvidenceDecision.DroppedDiversity)
+        bundle.items.exists(item =>
+          item.chunk.id == "same-b" && item.decision == EvidenceDecision.DroppedDiversity
+        )
       )
     },
     test("单书检索放宽来源上限，邻居经完整检索进入结果") {
@@ -164,7 +168,7 @@ object RetrievalContractSpec extends ZIOSpecDefault:
       )
       (for
         store <- ZIO.service[VectorStore]
-        _ <- store.upsert(
+        _     <- store.upsert(
           Chunk(
             IndexedChunk(seed, matched),
             IndexedChunk(neighbor, Embedding(Chunk(0.01f, 0.0f)))

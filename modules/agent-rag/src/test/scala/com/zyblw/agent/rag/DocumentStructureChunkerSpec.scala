@@ -185,7 +185,7 @@ object DocumentStructureChunkerSpec extends ZIOSpecDefault:
       )
     },
     test("表格和方剂不与正文合并，方剂按行切开") {
-      val formula = "桂枝 9g\n白芍 9g\n甘草 6g\n" + ("生姜 9g\n" * 40)
+      val formula   = "桂枝 9g\n白芍 9g\n甘草 6g\n" + ("生姜 9g\n" * 40)
       val structure = DocumentStructure(
         "paddleocr-vl-1.6",
         None,
@@ -219,8 +219,8 @@ object DocumentStructureChunkerSpec extends ZIOSpecDefault:
       )
     },
     test("方剂里只有超长的那一行按字切开") {
-      val longLine = "甘草" * 80
-      val formula  = s"桂枝 9g\n$longLine\n白芍 9g"
+      val longLine  = "甘草" * 80
+      val formula   = s"桂枝 9g\n$longLine\n白芍 9g"
       val structure = DocumentStructure(
         "paddleocr-vl-1.6",
         None,

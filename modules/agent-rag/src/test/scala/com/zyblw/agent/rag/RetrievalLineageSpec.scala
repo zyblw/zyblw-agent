@@ -90,8 +90,8 @@ object RetrievalLineageSpec extends ZIOSpecDefault:
         chunk("other", 3, Some("c-2"), None)
       )
       for
-        store <- ZIO.service[VectorStore]
-        _     <- store.upsert(chunks.map(value => IndexedChunk(value, Embedding(Chunk(1.0f, 0.0f)))))
+        store    <- ZIO.service[VectorStore]
+        _        <- store.upsert(chunks.map(value => IndexedChunk(value, Embedding(Chunk(1.0f, 0.0f)))))
         expanded <- store.expandContext(
           Chunk(RetrievalHit(chunks.head, 0.9)),
           scope,
