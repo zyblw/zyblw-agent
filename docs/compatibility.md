@@ -1,7 +1,7 @@
 # 当前兼容性与版本边界
 
 > 状态：0.9.0 全新安装基线
-> 最后核验：2026-09-24
+> 最后核验：2026-09-25
 >
 > 2026-09-24 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。知识文档以来源谱系和构建规格为身份，向量查询绑定 Profile 并使用 HNSW 迭代扫描，不按 Profile 分区。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -42,7 +42,7 @@
 - State：`AgentState` schemaVersion 1，包含有界 citation、retrieval evidence 与 `suspension`。
 - ModelCall：`lineage` 增加 compiler/layout 版本、稳定前缀数量与指纹、整体 plan 指纹；不保存 Prompt 正文。
 - TokenUsage：`cachedInputTokens` 仍是 JSON 字段名（含义为 cache read），另加 `cacheWriteInputTokens`；硬预算使用逻辑 `inputTokens`。
-- ModelSettings：新增带默认值的 `reasoningEffort`；它会进入组合指纹。显式设置但模型未在 `reasoningEfforts` 中声明支持时 fail closed。
+- ModelSettings：`reasoningEffort` 和 `selectionAuthority` 均有默认值；前者进入组合指纹，显式设置但模型未声明支持时 fail closed。后者在 `RunPinned` 时进入指纹并保护 provider/model 不被部署级策略覆盖。
 - Database：核心、知识各有独立 schema/history；知识向量固定为 1024 维。知识 V001 以 `DocumentLineage`、`IndexBuildSpec` 和 `ChunkSetDigest` 为身份，已有知识库必须清空重建。`approval_requests` 归位为 `agent_suspensions`。
 - Retrieval：支持 Hybrid、VectorOnly、LexicalOnly 与 Phrase，ACL 在打分和 fetch 前强制执行。查询先解析 Profile，再以绑定参数过滤，并设置 `hnsw.iterative_scan`、`ef_search` 与 `max_scan_tuples`。不按 Profile 做列表分区。目录下架用 `retire`（可再次索引）；`withdraw` 只给必须永不复活的来源修订写墓碑。
 - Provider：业务只依赖 provider-neutral SPI；密钥只由宿主环境注入。

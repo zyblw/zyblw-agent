@@ -19,6 +19,10 @@ final case class ToolDefinition(
 enum ReasoningEffort derives JsonCodec:
   case None, Low, Medium, High, Max
 
+/** 宿主已校验并冻结的单次模型选择，不接受模型输出或未授权请求直接设置。 */
+enum ModelSelectionAuthority derives JsonCodec:
+  case Deployment, RunPinned
+
 /** 厂商无关的生成参数；Provider 不支持的字段必须显式拒绝或按配置降级。 */
 final case class ModelSettings(
     provider: Option[String] = None,
@@ -33,8 +37,17 @@ final case class ModelSettings(
     /** 步骤需求；仅启用 RuntimeProfile.modelRouting 时生效，否则显式失败。 */
     requirement: Option[com.zyblw.agent.model.ModelRequirement] = None,
     /** 推理深度而非推理正文；实际可用档位由选中模型的 `ModelCapabilities` 决定。 */
-    reasoningEffort: Option[ReasoningEffort] = None
-) derives JsonCodec
+    reasoningEffort: Option[ReasoningEffort] = None,
+    selectionAuthority: ModelSelectionAuthority = ModelSelectionAuthority.Deployment
+) derives JsonCodec:
+  /** 可信宿主校验目录、权限和费用后调用；运行时覆盖仍可调整采样参数。 */
+  def pinModel(providerId: String, modelId: String): ModelSettings =
+    require(providerId.trim.nonEmpty && modelId.trim.nonEmpty, "固定模型需要 provider/model")
+    copy(
+      provider = Some(providerId.trim),
+      model = Some(modelId.trim),
+      selectionAuthority = ModelSelectionAuthority.RunPinned
+    )
 
 enum ToolChoice derives JsonCodec:
   case Auto, None, Required

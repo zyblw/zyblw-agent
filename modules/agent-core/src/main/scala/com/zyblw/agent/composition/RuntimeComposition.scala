@@ -468,7 +468,11 @@ object RuntimeComposition:
     val routed = settings.requirement.fold(material)(requirement =>
       Json.Obj(material.fields :+ ("requirement" -> Json.Str(requirement.toJson)))
     )
-    CanonicalDigest.sha256(routed.toJson)
+    val governed =
+      if settings.selectionAuthority == ModelSelectionAuthority.RunPinned then
+        Json.Obj(routed.fields :+ ("selectionAuthority" -> Json.Str("RunPinned")))
+      else routed
+    CanonicalDigest.sha256(governed.toJson)
 
   /** 低敏能力目录，供 DX / 运维 introspection。 */
   def catalog(

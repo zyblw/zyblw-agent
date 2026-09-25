@@ -91,7 +91,7 @@ Hikari DataSource
 
 两个生产参考宿主共用同一模型选择规则：存在 `ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON` 时使用配置驱动的多端点路由；否则
 读取单一 `OPENAI_*`。多端点配置可以让同一中转 URL/Key 注册多个逻辑 Provider，但每个 Provider 只能选择一个明确的
-wire profile。完整配置和逐模型 smoke 见 [Provider 与能力协商](providers.md)与
+wire profile。业务若已自行校验某次 Run 的 provider/model，用 `ModelSettings.pinModel` 把它标成 `RunPinned`；未 pin 的定义仍由部署策略热切换。完整配置和逐模型 smoke 见 [Provider 与能力协商](providers.md)与
 [真实 Provider smoke](provider-live-smoke.md)。
 
 ## 4. 定义 Agent 与工具

@@ -47,8 +47,12 @@ final case class ModelPolicy(
     if isEmpty then settings
     else
       settings.copy(
-        provider = provider.orElse(settings.provider),
-        model = model.orElse(settings.model),
+        provider =
+          if settings.selectionAuthority == ModelSelectionAuthority.RunPinned then settings.provider
+          else provider.orElse(settings.provider),
+        model =
+          if settings.selectionAuthority == ModelSelectionAuthority.RunPinned then settings.model
+          else model.orElse(settings.model),
         temperature = temperature.orElse(settings.temperature),
         maxOutputTokens = maxOutputTokens.orElse(settings.maxOutputTokens)
       )

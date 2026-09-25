@@ -193,6 +193,11 @@ Adapter，不能假定中转层会无损翻译。
 覆盖是稀疏的：只改 provider 不会把模型名一起抹成该 provider 的默认值。`toolChoice`、`providerOptions` 与
 `metadata` **不可**被部署级覆盖改动——它们是 Agent 的行为契约，而不是部署工作点。
 
+业务若在提交前已经通过自己的允许列表校验用户选择，可对本次定义调用
+`modelSettings.pinModel(providerId, modelId)`。`RunPinned` 只锁住本次 Run 的 provider/model，
+部署级策略仍可调整温度与输出上限；普通定义仍由运维策略按调用热切换。业务要在自己的提交事实中保存选择，
+恢复和重试时从该事实重建同一 `AgentDefinition`；框架不会把客户端传来的任意字符串直接解释为可路由端点。
+
 **凭据不在这条路径上。** API Key 只在装配阶段从 ZIO Config（环境变量、系统属性，或宿主替换的任何配置后端）解析。
 管理面能看到的只有「凭据是否就位」和一个像 `env:DEEPSEEK_API_KEY` 的展示引用，没有任何端点接收、返回或存储 Key
 的值。需要对接 Vault 或 K8s Secret 的部署替换 `ConfigProvider` 即可，框架只要求装配时拿到一个已解析的配置对象。
