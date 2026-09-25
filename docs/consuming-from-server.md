@@ -1,7 +1,7 @@
 # 业务项目接入 zyblw-agent 0.9
 
 > 状态：当前运行手册
-> 最后核验：2026-09-23
+> 最后核验：2026-09-25
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -18,6 +18,7 @@
 - 命名档案支持 DeepSeek、Qwen、GLM、Kimi、OpenAI、Anthropic 和 Gemini；`ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON` 支持多个 OpenAI-compatible 官方端点或中转站；
 - 平台消费必填 `AgentState.threadId`、冻结 `definition` / `composition`、`suspension`、citations 与 retrieval evidence，不保留旧状态形状的兼容分支；
 - 命名档案的 additional provider 仅是显式路由目标，不得宣称为自动 failover。
+- 业务在提交前用自己的允许列表校验用户选择后，对该次定义调用 `ModelSettings.pinModel`。`RunPinned` 只锁住本次 Run 的 provider/model；部署级策略仍可调整温度与输出上限。选择本身保存在业务提交事实里，恢复时从该事实重建，框架不把客户端字符串直接当成可路由端点。
 
 公开制品发布后，独立消费者可固定精确坐标：
 
