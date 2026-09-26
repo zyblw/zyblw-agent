@@ -59,7 +59,7 @@ smoke 命令见 [Provider 与能力协商](docs/providers.md#中转站与多端�
 
 创建 Run 返回 `202`：HTTP 只提交耐久命令，Worker 随后推进。调用方用 `Idempotency-Key`、`X-Tenant-Id`、`X-User-Id` 和 runId 查询 `/api/v1/runs/{runId}`。退款工具会停在 `WaitingForApproval`，必须由可信身份调用审批接口。
 
-业务项目引入。`0.9.0` 仍是待发布候选，Maven Central 上的正式版本仍是 `0.8.0`；下面的坐标要等本版本发布并能从 Central 解析后再当作安装版本：
+业务项目固定引入精确版本 `0.9.0`。它是全新安装基线，不能从已发布的 `0.8.0` 原地升级数据库。Maven Central 以 annotated tag `v0.9.0` 的发布工作流在 Central Portal 显示 Published 为准；在此之前从 Central 解析会失败，应使用本仓库该 tag 的源码，或仅在本机使用 `0.9.0-local`。
 
 ```scala
 libraryDependencies ++= Seq(

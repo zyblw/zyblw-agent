@@ -3,7 +3,9 @@
 All notable user-visible changes will be recorded here. The project follows
 [Semantic Versioning](https://semver.org/) with early-semver compatibility during `0.x`.
 
-## 0.9.0 - Unreleased
+## 0.9.0 - 2026-09-26
+
+`0.9.0` 是全新安装发布，不是 `0.8.0` 的原地升级。宿主要新建空 PostgreSQL，并按当前 tokenizer、Embedding 与 ACL 重新摄入知识。核心与 1024 知识各只有一份 V001，这两份脚本自本版本起冻结。稳定业务 HTTP 仍是 OpenAPI `1.2.0`。Workflow、Harness、MCP 与 Eval 趋势门禁保持 Experimental，RAG 与管理面保持 Beta。下面是相对已发布 `0.8.0` 的用户可见变化。
 
 - `PostgresArtifactStore` 读取 `metadata_json` 时必须得到字符串映射。损坏 JSON 或非字符串值返回持久化失败，不再把该版本当成空元数据。
 

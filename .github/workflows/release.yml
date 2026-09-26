@@ -230,5 +230,11 @@ jobs:
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             echo "GitHub release already exists: ${RELEASE_TAG}"
           else
-            gh release create "${RELEASE_TAG}" --verify-tag --generate-notes
+            notes_file="$(mktemp)"
+            awk 'BEGIN { printing = 0 } /^## [0-9]+\.[0-9]+\.[0-9]+/ { if (printing) exit; printing = 1 } printing { print }' CHANGELOG.md > "$notes_file"
+            if [[ ! -s "$notes_file" ]]; then
+              echo "CHANGELOG has no release notes for ${RELEASE_TAG}" >&2
+              exit 1
+            fi
+            gh release create "${RELEASE_TAG}" --verify-tag --title "zyblw-agent ${RELEASE_TAG#v}" --notes-file "$notes_file"
           fi
