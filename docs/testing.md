@@ -103,7 +103,7 @@ Benchmark 为 CC-BY-NC-4.0，仅用于测试，不随 Maven 制品或容器分�
 - 上述变更后的 `scalafmtCheckAll; scalafmtSbtCheck; Test/testFull` 已全部通过（本轮 734 项，0 失败；PostgreSQL 集成用例在未 fork/`RUN_POSTGRES_INTEGRATION` 时按环境门控跳过）；
 - 两个脚本在同一个常驻 sbt thin server 上顺序运行也通过；每次 `runMain` 显式覆盖 forked JVM 的临时数据库环境，第二条演练不会继承第一条已经销毁的容器端点；
 - V008 为 Goal/Plan 追加带空数组默认值的 JSONB 列，不修改已执行 migration，也不为 JSON 增加无查询依据的索引。
-- V010 新增两张预算表；费用使用 `NUMERIC`，`(status, created_at, run_id)` 只服务有界恢复扫描，`(goal_id, status)` 服务 Goal 关联与级联。当前 V010 尚未发布，因此本轮格式化后仍可在候选内完善；发布后必须冻结 checksum。
+- V010 新增两张预算表；费用使用 `NUMERIC`，`(status, created_at, run_id)` 只服务有界恢复扫描，`(goal_id, status)` 服务 Goal 关联与级联。该句记录 2026-08-21 增量线当时的状态。现行 0.9 安装已把这些表折叠进核心 V001，不再存在独立 V010；自 `0.9.0` 起该 V001 checksum 冻结。
 
 2026-08-08 的 `0.5.0` 发布候选复核：
 

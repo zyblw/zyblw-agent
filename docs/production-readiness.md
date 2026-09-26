@@ -2,7 +2,7 @@
 
 > 状态：当前运行手册
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-09-26
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -19,8 +19,8 @@
 PostgreSQL 直连**；7 项宿主环境证据已延期。新业务统一基于当前 **0.9 空库基线**（源码或 `0.9.0-local`）构建垂直切片；平台以固定 commit 消费同一份 0.9 源码。
 不需要等待 Harness、多 Agent、Graph Studio 或完整 GraphRAG。
 
-**`0.9.0` 是当前全新安装基线（尚未推 Central）**：核心与 1024 知识各一份 V001；适合本机 Compose 演练后进入
-受限生产验收，而不是已经通过任意规模验证的通用 GA：
+**`0.9.0` 是当前全新安装基线，由 annotated tag `v0.9.0` 触发 Central 发布**：核心与 1024 知识各一份 V001；适合本机 Compose 演练后进入
+受限生产验收，而不是已经通过任意规模验证的通用 GA。Portal 显示 Published 之前，可重复构建使用该 tag 的源码或本机 `0.9.0-local`。当前契约是：
 
 - 核心与 1024 知识各一份 0.9 V001；业务 HTTP v1 / OpenAPI 1.2.0、fresh-install state schema v1 与知识检索 mode 是当前契约；
 - RAG 固定使用独立 1024 knowledge schema/history；所有新索引都按同一模型身份、维度与 lexical strategy 建立；

@@ -1,7 +1,7 @@
 # 开源发布与版本维护
 
 > 状态：运行手册  
-> 最后核验：2026-09-23
+> 最后核验：2026-09-26
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -16,8 +16,8 @@
 | 业务接入 | 业务仓库用 Docker + 自管 PostgreSQL 引入框架 | `scripts/verify-business-ready.sh`：格式、`testFull`、问答契约、证据清单结构与 PostgreSQL 18 全量契约。然后 `publishM2` 得到 `0.9.0-local`，或 `compose.business.yml` 启动 | 长时 soak、主备、PgBouncer、滚动发布、备份 RPO/RTO、SLO owner |
 | 公开发布 | annotated tag 上 Maven Central | 现有 release workflow：`testFull`、`publishM2`、Maven consumer、签名、Portal | 在没有宿主环境时不把 7 项证据改成 `verified_host`，也不因此阻塞业务接入 |
 
-业务项目固定精确版本，不要写版本范围或 `SNAPSHOT`。当前全新安装和发布候选均为 `0.9.0`。
-annotated tag `v0.9.0` 必须打在已经包含定日 CHANGELOG 条目与 `docs/fresh-install-0.9.0.md` 的 `origin/main` commit 上。见
+业务项目固定精确版本，不要写版本范围或 `SNAPSHOT`。当前全新安装版本是 `0.9.0`。
+annotated tag `v0.9.0` 必须打在已经包含定日 CHANGELOG 条目（`## 0.9.0 - 2026-09-26`）与 `docs/fresh-install-0.9.0.md` 的 `origin/main` commit 上。见
 [0.9.0 全新安装](fresh-install-0.9.0.md)。
 
 ## 发布目标

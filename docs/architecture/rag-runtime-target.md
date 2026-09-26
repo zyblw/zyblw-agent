@@ -950,8 +950,8 @@ CAS 更新 0 行表示并发冲突，必须重新读取状态，不能覆盖另�
 
 ### 11.6 从 0.9 baseline 迁移
 
-- `0.9.0` 尚未发布，当前 `optional/pgvector_1024/V001__agent_knowledge_0_9_baseline.sql`
-  是 fresh-install Space/Profile 基线；冻结发布后不得修改；
+- `0.9.0` 的 `optional/pgvector_1024/V001__agent_knowledge_0_9_baseline.sql`
+  是 fresh-install Space/Profile 基线；自本版本发布起不得修改；
 - 已使用旧 0.9 candidate 或 0.8 数据库的宿主必须建立新库，并通过 `KnowledgeSourceResolver` 从权威源重建，
   不对开发候选库执行 `flyway repair`；
 - 0.9.0 发布后的 schema 变更才使用 `V002__...` 等追加迁移；

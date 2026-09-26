@@ -1,7 +1,7 @@
 # zyblw-agent 成熟度、取舍与路线
 
 > 状态：路线图
-> 最后核验：2026-09-24
+> 最后核验：2026-09-26
 > 事实来源：`build.sbt`、模块源码、测试、发布工作流、迁移与当前文档
 
 ## 成熟度语义
@@ -16,6 +16,8 @@
 2026-09-24 复审：当前工作树的 `sbt -batch testFull` 通过，套件仍有 3 项 ignored；
 `scalafmtCheckAll` 通过。本次没有把 Beta 或 Experimental 因测试通过而升级，
 真实领域金标、Provider/OCR 运行、长时多节点 soak、主备切换和生产 SLO 仍按下表列为缺口。
+
+2026-09-26 发布复核：`0.9.0` 作为全新安装基线进入 Maven 发布。发布不提升任何 Beta 或 Experimental 等级。宿主长时 soak、主备 SLO、领域金标、真实 OCR 与恶意 PDF corpus 仍是发布后的证据缺口。
 
 版本语义与能力成熟度是两条轴：整个仓库当前按 `0.x` Early SemVer 发布；表中 Foundation 只表示内部契约和测试基础
 较稳，不表示已经承诺 `1.x` 的长期二进制兼容或大规模生产 SLO。

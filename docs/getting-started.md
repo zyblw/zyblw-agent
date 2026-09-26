@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-09-26
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -26,7 +26,7 @@ libraryDependencies ++= Seq(
 需要 ZIO HTTP 控制面再加入 `zyblw-agent-zio-http`；需要 PostgreSQL 耐久化再加入
 `zyblw-agent-postgres`。完整矩阵见 [模块选择](modules.md)。
 
-当前全新安装是 **0.9 空库基线**，目标坐标是 `0.9.0`。源码联调固定 sibling checkout 的精确 commit；制品发布前用
+当前全新安装是 **0.9 空库基线**，坐标是精确版本 `0.9.0`。不能从 `0.8.0` 或更早的数据库原地升级：创建空库并执行当前 V001，知识按当前 tokenizer 与 Embedding 重新摄入。`knowledge_search` 要求宿主显式给出 `documentScope=unrestricted` 或非空文档 ID，空白范围不会放宽成全库。Central 在 `v0.9.0` 发布工作流显示 Published 之后才能解析该坐标；在此之前固定 sibling checkout 的精确 commit，并用
 `sbt -batch 'set ThisBuild / version := "0.9.0-local"; publishM2'` 验证独立 Maven consumer。不要把本地版本或
 `SNAPSHOT` 当作可重复生产发布物。完整命令见
 [server 消费指南](consuming-from-server.md)。
