@@ -38,7 +38,7 @@ jobs:
           # build the exact already-published tag commit, never the workflow fix.
           ref: ${{ env.RELEASE_TAG }}
 
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
