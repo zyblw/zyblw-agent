@@ -2,7 +2,7 @@
 
 > 状态：0.9.0 当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-09-26
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -233,8 +233,7 @@ Run State 推导 scope，不能采信模型输出或请求 JSON 给出的 scope�
 type 和 metadata。metadata 也可能是业务敏感信息，因此不自动进入 telemetry、公开 API 或 Context。`ArtifactStore` 不会自动将
 二进制转换为模型可见图片/文本；业务必须选择经过 Provider 能力协商、内容扫描和权限校验的显式 Tool 或 Adapter。
 
-当前内存实现不会跨进程保存，也不提供“删除即物理抹除”的虚假承诺。持久化对象存储/PostgreSQL metadata、保留期、用户删除与授权审计会在
-真实业务需求和数据治理策略明确后作为独立 Adapter 实现，不能修改已经发布的 Flyway migration。
+内存实现不会跨进程保存，也不提供“删除即物理抹除”的虚假承诺。`PostgresArtifactStore` 已保存版本元数据、可选外置正文和审计；`metadata_json` 必须解码为字符串映射，损坏时读取返回持久化失败，不会当成空元数据。对象存储正文的生产演练、保留期工人和容量演练仍未完成，也不能回改已经发布的 Flyway migration。详见 [持久化](persistence.md)。
 
 ### 6.2 LLM MemoryExtractor
 

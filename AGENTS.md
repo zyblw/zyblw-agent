@@ -109,6 +109,29 @@ migrations as separate compatibility surfaces. Never edit a migration that has b
 `/api/v1/admin/**` is a deliberately Beta surface outside the stable `AgentHttpContract` OpenAPI
 promise; anything that needs long-term integration stability belongs on the business `/api/v1`.
 
+## Change spec
+
+A spec records intent. Source, tests, and migrations record facts. The agent implements an accepted
+spec; the spec does not grant authority and cannot by itself rewrite a Scala API, HTTP or state
+schema, Maven coordinate, or released Flyway migration.
+
+Write the spec before editing when the work is a new capability or public contract, touches a
+compatibility surface, crosses modules or sessions, or has more than one credible design. Cover
+outcome, the current contract and files, in-scope and out-of-scope, observable acceptance,
+verification commands, and compatibility or rollback. Confirm it when intent is still ambiguous.
+
+A request that already states outcome, constraints, and acceptance, and that stays inside one
+module without a compatibility surface, goes straight to implementation. Do not install a Spec Kit
+or OpenSpec toolchain, and do not add a `specs/` tree, `mission.md`, or per-feature `plan.md` /
+`requirements.md` / `validation.md`. The constitution is this file plus the canonical docs and
+ADRs already linked from `docs/README.md`.
+
+Implement from the accepted spec and the current code. Start a fresh session when the planning
+thread is long. Check acceptance with the repository's existing commands. When code and a document
+disagree, executable facts win and the document is repaired in the same change. Update an existing
+constitution page or add an ADR only when the durable goal, boundary, or technical constraint
+changed.
+
 ## Implementation order
 
 1. Define or amend the domain contract and its typed error or stop reason.

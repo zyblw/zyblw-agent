@@ -1,7 +1,7 @@
 # zyblw-agent 文档地图
 
 > 状态：当前
-> 最后核验：2026-09-25
+> 最后核验：2026-09-26
 > 事实来源：`build.sbt`、发布工作流、模块源码、测试与数据库迁移
 
 ## 按目标选择阅读路径
@@ -67,6 +67,7 @@
 
 ## 开源维护与发布
 
+- 变更规范写在根目录 [AGENTS.md](../AGENTS.md)；讨论新能力、兼容表面或跨模块改动时带上结果、范围、验收和回滚
 - [贡献指南](../CONTRIBUTING.md)
 - [代码注释与源码阅读约定](code-commenting-guide.md)
 - [VS Code 与 Metals](vscode-metals.md)

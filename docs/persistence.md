@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-09-26
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -71,7 +71,7 @@ modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/m
 记录 ID 与冲突字段名，不回显状态、事件、工具结果或模型请求正文。时间列不参与交叉比较，避免 PostgreSQL/JDBC 精度差异
 产生虚假冲突。该规则不增加第二事实源：JSON 仍是可恢复负载，冗余列负责约束、索引和完整性证明。
 
-`PostgresHarnessStore` 将 Goal/Plan 的有界 `ArtifactReference` 写入 JSONB；Todo 引用随 `todos_json` 保存。引用不含制品 bytes、私有 metadata 或创建时间。读取时必须成功解码为领域类型，否则返回持久化失败；引用本身不授予 ArtifactStore 读取权限。`agent_artifacts` / `agent_artifact_versions` / `agent_artifact_audit` 保存 Artifact 元数据和审计；配置 `ArtifactBlobStore` 时版本表的 `bytes` 可空，正文按 sha256 外置。上述现行结构都由核心 0.9 V001 一次建立。
+`PostgresHarnessStore` 将 Goal/Plan 的有界 `ArtifactReference` 写入 JSONB；Todo 引用随 `todos_json` 保存。引用不含制品 bytes、私有 metadata 或创建时间。读取时必须成功解码为领域类型，否则返回持久化失败；引用本身不授予 ArtifactStore 读取权限。`agent_artifacts` / `agent_artifact_versions` / `agent_artifact_audit` 保存 Artifact 元数据和审计；配置 `ArtifactBlobStore` 时版本表的 `bytes` 可空，正文按 sha256 外置。`metadata_json` 必须解码为 `Map[String, String]`。`read` 与 `list` 遇到损坏 JSON 或非字符串值时返回 `PersistenceFailure`，不会把该版本当成空元数据继续返回。上述现行结构都由核心 0.9 V001 一次建立。
 
 `harness_goal_budgets` 与 `harness_budget_reservations` 由核心 0.9 V001 建立。前者保存不可变总策略以及 Reserved/Consumed 原子计数器；后者以全局 RunId 保存完整 `RunLimits`、状态与结算后的 `UsageSummary`。预留事务先锁 Goal budget 行，再验证所有剩余额度并同时更新计数器和 reservation；相同 RunId/limits 幂等，不同绑定冲突。`NUMERIC` 保存费用，不能经过浮点数。`RunLimits`/`UsageSummary` 虽有 Scala 构造默认值，Adapter 读取耐久 JSON 时仍要求当前全部字段存在，避免 `{}` 被静默解码为宽松默认配置。
 
