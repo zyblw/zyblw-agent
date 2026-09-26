@@ -7,6 +7,7 @@ import java.util.UUID
 import javax.sql.DataSource
 import org.postgresql.ds.PGSimpleDataSource
 import org.testcontainers.utility.DockerImageName
+import scala.util.Try
 import zio.*
 import zio.test.*
 
@@ -93,6 +94,16 @@ object ArtifactStoreConformanceSpec extends ZIOSpecDefault:
 
   def spec: Spec[TestEnvironment & Scope, Any] =
     suite("ArtifactStoreConformance")(
+      test("损坏的元数据不能被静默当作空对象") {
+        val valid   = PostgresArtifactStore.decodeMetadata("""{"source":"study"}""")
+        val invalid = Try(PostgresArtifactStore.decodeMetadata("""{"source":42}""")).failed.toOption
+        assertTrue(
+          valid == Map("source" -> "study"),
+          invalid.exists(error =>
+            error.isInstanceOf[IllegalStateException] && error.getMessage == "invalid artifact metadata"
+          )
+        )
+      },
       suite("memory")(
         test("内存实现通过同一组删除不变量") {
           (for

@@ -403,7 +403,7 @@ final class PostgresArtifactStore(
       result.getLong("byte_size"),
       result.getString("sha256"),
       result.getTimestamp("created_at").toInstant,
-      result.getString("metadata_json").fromJson[Map[String, String]].getOrElse(Map.empty)
+      PostgresArtifactStore.decodeMetadata(result.getString("metadata_json"))
     )
 
   /** User scope 使用与 MemoryStore 相同的长度前缀编码。PostgreSQL TEXT 不能保存 NUL，因此禁止 `\u0000` 分隔。 */
@@ -511,6 +511,14 @@ final class PostgresArtifactStore(
   final private case class Reject(name: String, reason: String) extends RuntimeException(s"reject:$reason")
 
 object PostgresArtifactStore:
+  private[postgres] def decodeMetadata(json: String): Map[String, String] =
+    json
+      .fromJson[Map[String, String]]
+      .fold(
+        _ => throw IllegalStateException("invalid artifact metadata"),
+        identity
+      )
+
   val layer: URLayer[DataSource, ArtifactStore] =
     ZLayer.fromFunction((dataSource: DataSource) => PostgresArtifactStore(dataSource))
 

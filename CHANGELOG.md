@@ -5,6 +5,8 @@ All notable user-visible changes will be recorded here. The project follows
 
 ## 0.9.0 - Unreleased
 
+- `PostgresArtifactStore` 读取 `metadata_json` 时必须得到字符串映射。损坏 JSON 或非字符串值返回持久化失败，不再把该版本当成空元数据。
+
 - `ModelSettings.pinModel` 可把业务在单次 Run 中已校验的 provider/model 选择标记为 `RunPinned`。部署级 `ModelPolicySource` 仍可覆盖温度与输出上限，但不能改变该 Run 的模型身份；未 pin 的定义继续遵循原有管理面热切换策略。pin 标记进入组合指纹，保证恢复时不混用不同模型。
 
 - 知识身份模型重写（知识 V001 原地修改，需重建知识 schema）。文档键加入 `knowledgeSpaceId`；`BeginKnowledgeIndex` / `KnowledgeIndexBuild` 以 `DocumentLineage`（原件修订、解析产物、结构、正文四段 SHA-256）与 `IndexBuildSpec`（含 tokenizer、instruction、enricher）取代 `contentHash` + embedding descriptor + strategy；Profile ID 由规格摘要派生，`build_spec_sha256` 以复合外键钉在每个文档上。`activate(build, ChunkSetDigest)` 在 SQL 中重算块集合摘要，取代块数比较。`withdraw(key, sourceRevisionId)` 对未知修订失败，删除正式块并写墓碑，墓碑阻止该修订再次摄取；`purgeInactive` 的 legal hold 改为 `Set[KnowledgeDocumentKey]`；`documentRevisionId` 更名为 `sourceRevisionId`。空 ingestionId 由 HMAC 覆盖全部谱系字段派生；`DocumentIngestionRequest.source` 传入宿主可信的原件修订，`DocumentIngestionService` 在读流时计算解析产物摘要。
