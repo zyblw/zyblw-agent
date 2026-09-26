@@ -15,6 +15,9 @@ Work from the checked-in implementation, not from an imagined framework.
    `docs/maturity-and-roadmap.md`, `docs/compatibility.md`, and `docs/releasing.md`.
 4. Inspect the relevant build, source, tests, examples, migrations, and generated POM. Code and tests
    take precedence over roadmap prose.
+5. Follow the change-spec rule in `AGENTS.md`. Write that spec before editing a new capability,
+   public contract, compatibility surface, cross-module change, or ambiguous design. Keep ordinary
+   single-module fixes on the direct path.
 
 ## Preserve framework boundaries
 

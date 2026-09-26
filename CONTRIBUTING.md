@@ -15,6 +15,9 @@ the Apache License 2.0 in [LICENSE](LICENSE).
 3. Keep the model/provider boundary separate from authorization, tools, persistence and business
    policy.
 4. Discuss large public API, schema, protocol or module changes before implementation.
+5. For a new capability, compatibility surface, or cross-module slice, include the change spec from
+   `AGENTS.md` in the discussion: outcome, scope, acceptance, and rollback. Small single-module
+   fixes do not need a separate spec file.
 
 ## Local verification
 
@@ -85,7 +88,7 @@ line keeps that line's public contracts.
 
 Describe:
 
-- the user or maintainer problem;
+- the user or maintainer problem, plus acceptance and deliberate exclusions when a change spec was required;
 - public API and data changes;
 - risk and rollback;
 - tests/evals actually run;

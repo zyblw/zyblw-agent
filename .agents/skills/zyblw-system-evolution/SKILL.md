@@ -9,6 +9,13 @@ Turn architecture ideas into repository-grounded, reversible decisions. Optimize
 change that improves a named user or operational outcome; do not optimize for the number of
 technologies, modules, or patterns adopted.
 
+## Change spec
+
+Cross-cutting and architectural work uses the change spec in `AGENTS.md` before any design is
+chosen. The required handoff at the end of this skill is the durable form of that spec. Record it
+in the existing ADR or canonical document when the decision must outlive the session. Do not add a
+second spec tree or an external spec-kit workflow.
+
 ## Start with local truth
 
 1. Read the nearest `AGENTS.md`, the repository-local implementation skill, and the shortest
