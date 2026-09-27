@@ -17,6 +17,13 @@ target/
 !.vscode/extensions.json
 !.vscode/tasks.json
 .vscode/*.local
+# Understand Anything writes a local architecture graph under .ua/.
+# The graph, fingerprints, and scratch batches are regenerated from source
+# and stay on this machine. Share only the analysis policy.
+.ua/*
+!.ua/.understandignore
+!.ua/config.json
+
 .idea/
 .DS_Store
 **/__pycache__/

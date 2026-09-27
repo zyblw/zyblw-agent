@@ -1,0 +1,22 @@
+# .understandignore — 架构知识图谱的排除规则
+# 语法与 .gitignore 相同。生产源码、文档、部署和 CI 保留在分析范围内。
+
+# 第三方 Cursor skills 副本，不属于 zyblw-agent 运行时。
+.agents/
+
+# 本工具自己的分析产物。
+.ua/
+
+# IDE / 构建输出（与 .gitignore 一致，避免脏工作区混入）。
+**/.bloop/
+**/.bsp/
+**/.metals/
+**/.scala-build/
+**/metals.sbt
+project/project/
+project/target/
+**/target/
+
+# ZIO Test 规格。图谱覆盖生产源码与架构文档；
+# src/test 体量很大，且大多复述同一套类型。
+**/src/test/**
