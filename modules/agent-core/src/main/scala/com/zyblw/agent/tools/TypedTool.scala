@@ -89,9 +89,6 @@ final case class ToolMetadata(
   def onlineRetryable: Boolean =
     Set(SideEffect.None, SideEffect.IdempotentWrite, SideEffect.TransactionalOutboxWrite).contains(sideEffect)
 
-  /** 兼容旧调用点：含义与 [[onlineRetryable]] 相同，不再用于崩溃恢复。 */
-  def automaticallyRetryable: Boolean = onlineRetryable
-
   /** 进程死后对 Running/Unknown 账本的恢复策略，由 [[sideEffect]] 推导，不受部署 `ToolRetryPolicy` 影响。 */
   def recoveryPolicy: ToolRecoveryPolicy = sideEffect match
     case SideEffect.None                                                  => ToolRecoveryPolicy.ReplaySafe

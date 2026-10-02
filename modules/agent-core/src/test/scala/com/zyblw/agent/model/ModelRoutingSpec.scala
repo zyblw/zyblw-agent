@@ -2,6 +2,7 @@ package com.zyblw.agent.model
 
 import com.zyblw.agent.composition.*
 import com.zyblw.agent.core.*
+import com.zyblw.agent.runtime.ModelRouterGateway
 import zio.*
 import zio.json.*
 import zio.test.*
@@ -14,6 +15,65 @@ object ModelRoutingSpec extends ZIOSpecDefault:
   private val budget = BudgetState(RunLimits(), UsageSummary(), 0)
 
   def spec = suite("Model routing contract")(
+    test(
+      "direct dispatch with a cost ceiling rejects unknown prices, while explicit free prices remain valid"
+    ) {
+      val agent = AgentDefinition(AgentId("direct"), "direct", "answer")
+      val now   = java.time.Instant.EPOCH
+      val state = AgentState(
+        RunId(java.util.UUID.randomUUID()),
+        SessionId(java.util.UUID.randomUUID()),
+        agent.id,
+        RunStatus.Running,
+        Chunk.empty,
+        Chunk.empty,
+        UsageSummary(),
+        BudgetState(RunLimits(maxEstimatedCost = Some(BigDecimal(1))), UsageSummary(), 0),
+        None,
+        now,
+        now,
+        Version.initial,
+        agent,
+        RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings),
+        ThreadId("direct")
+      )
+      val model = new ChatModel:
+        def provider                 = "provider"
+        def complete(r: ChatRequest) = ZIO.fail(AgentError.InvalidConfiguration("must not dispatch"))
+      val gateway = new ModelRouterGateway(model, RuntimeProfile.default)
+      val input   =
+        request.copy(settings = request.settings.copy(provider = Some("provider"), model = Some("model")))
+      for
+        unknown <- gateway.route(state, input, 10, ModelPriceBook.empty).either
+        free    <- gateway
+          .route(state, input, 10, ModelPriceBook.of(("provider", "model", ModelPrice(0, 0))))
+          .either
+      yield assertTrue(unknown.left.exists(_.isInstanceOf[AgentError.InvalidConfiguration]), free.isRight)
+    },
+    test("version-aware host preserves frozen routed prices while new Runs use current prices") {
+      val old    = ModelPriceBook.of(("provider", "model", ModelPrice(1, 2)))
+      val next   = ModelPriceBook.of(("provider", "model", ModelPrice(3, 4)))
+      val source = new ModelPolicySource:
+        def current()                               = ModelPolicy.default
+        override def prices                         = next
+        override def pricesFor(key: Option[String]) = key match
+          case Some(value) if value == old.fingerprint => old
+          case Some(_)                                 => ModelPriceBook.empty
+          case None                                    => next
+      val profile =
+        RuntimeProfile.default.copy(modelRouting = Some(ModelRoutingPolicy("v1", Chunk(candidate))))
+      val agent     = AgentDefinition(AgentId("versioned"), "versioned", "answer")
+      val live      = LiveComposition.make(profile, source, Chunk.empty, Chunk.empty, "host", "permissions")
+      val frozen    = live.fingerprint(agent, agent.modelSettings, old)
+      val recovered = live.freezeFor(agent, frozen.modelPricingFingerprint)
+      val missing   = live.freezeFor(agent, Some("missing"))
+      assertTrue(
+        recovered == frozen,
+        live.freeze(agent).modelPricingFingerprint.contains(next.fingerprint),
+        RuntimeComposition.compare(frozen, recovered, Set.empty) == CompositionDrift.Compatible,
+        RuntimeComposition.compare(frozen, missing, Set.empty) != CompositionDrift.Compatible
+      )
+    },
     test("可信宿主固定的 Run 模型不被后来部署覆盖改写") {
       val pinned    = ModelSettings(temperature = Some(0.2)).pinModel("first", "reasoning")
       val policy    = ModelPolicy(provider = Some("second"), model = Some("fast"), temperature = Some(0.7))
@@ -100,6 +160,24 @@ object ModelRoutingSpec extends ZIOSpecDefault:
         None
       )
       assertTrue(codes.contains("vision"))
+    },
+    test("缓存写入高于普通输入价时，预算预检采用最高价且包含已消费费用") {
+      val limited = budget.copy(
+        limits = RunLimits(maxEstimatedCost = Some(BigDecimal(1))),
+        consumed = UsageSummary(estimatedCost = BigDecimal("0.5"))
+      )
+      val price =
+        ModelPrice(0, 0, Some(BigDecimal(0)), cacheWriteInputPerMillionTokens = Some(BigDecimal(100000)))
+      val codes = ModelRouter.rejectionCodes(
+        candidate,
+        ModelRequirement(),
+        request,
+        ModelCapabilities(),
+        10,
+        limited,
+        Some(price)
+      )
+      assertTrue(codes.contains("budget-cost"), price.estimate(TokenUsage(10, 10)) == BigDecimal(0))
     },
     test("未知价格不能通过费用硬限，明确零价格可以") {
       val limited = budget.copy(limits = RunLimits(maxEstimatedCost = Some(BigDecimal(1))))

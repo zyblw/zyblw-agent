@@ -23,7 +23,7 @@
   只有在 `ModelRequirement.strictToolSchema=true` 时作为硬约束；普通 `ToolDefinition.strict` 仍服从既有 Adapter 兼容策略。
 - 配置通过已有 `RoutedChatModel` 注册表取 Adapter；不允许嵌套 `FallbackChatModel`。
 - `RouteDecision` 为 ModelCall 的可选 JSON 字段，不建表、不改迁移；旧 JSON 缺字段仍可读取。内存与 PostgreSQL 的状态转换都禁止改写已冻结 Decision。
-- 路由启用时 `CapturePolicy.Disabled` 只禁止正文采集，最小执行账本仍按 MetadataOnly 写入；未启用时保持旧 Disabled 语义。
+- 路由或费用上限启用时 `CapturePolicy.Disabled` 只禁止正文采集，最小执行账本仍按 MetadataOnly 写入；两者均未启用时不写账本。
 - 路由配置内容摘要和价目内容摘要进入恢复兼容检查。即使 version 文本未变，改候选顺序或价格仍拒绝旧 Run 静默继续。
 - 新 Run 可通过替换候选顺序换主模型；旧 Run 恢复需要原配置，或显式新建 Run。此阶段不实现历史配置自动查找。
 - 原生 providerOptions 要求显式模型；候选路由只允许 FullSnapshot。辅助压缩/记忆调用尚未接入本面。

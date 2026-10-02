@@ -218,7 +218,7 @@ fail-closed。框架仍不会保存隐藏推理正文。
 `ProductionSupportHost` 是官方入口：PostgreSQL、真实 Provider、可信身份、审批写工具和 ZIO HTTP。
 `AgentQuickstart` 已删除；未注册工具仍在正式 Application 路径上于模型调用前失败。`RunInspection`
 把权威状态和事件投影为低敏 Timeline，检查 sequence、审批、usage 与终态一致性，
-OpenAPI `1.2.0` 已提供授权后的 `/api/v1/runs/{runId}/inspection`。
+OpenAPI `1.0.0` 已提供授权后的 `/api/v1/runs/{runId}/inspection`。
 
 这只是调试基础，不是成熟 Run Studio，也不是可执行 time-travel。详细边界见
 [Run Inspector、Timeline 与安全调试](run-inspection.md)。

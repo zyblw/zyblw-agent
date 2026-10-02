@@ -32,7 +32,7 @@ Codex **没有推翻** ADR-0018 的路线；它进一步证明：Kernel 应该�
 2. 决策时 `ContextContributor` 已是 seam，但 ToolProvider / SkillProvider / ApprovalReviewer / LifecycleObserver 等扩展面尚无正式契约。该契约已落地；扩展仍然不能批准、不能升为 System、不能取消已发生的副作用。
 3. 决策时工具默认在宿主进程直接执行，执行环境与权限没有一级抽象。`ExecutionEnvironment` / `PermissionProfile` 第一刀已落地，现有身份是 `local` 与 `mcp-sandbox`。Docker/K8s/远程执行器仍未实现，Sandbox 仍是 Experimental。
 4. 决策时 Contributor 每轮全量渲染上下文。Context section 的快照/差量第一刀已落地。显式 Provider cache dialect 仍待，缓存命中不能改变授权或恢复。
-5. 决策时 HTTP 契约缺 stable/experimental 分级。该声明已落地；稳定业务协议仍是 `/api/v1` 与 OpenAPI `1.2.0`，管理面保持 Beta。
+5. 决策时 HTTP 契约缺 stable/experimental 分级。该声明已落地；稳定业务协议仍是 `/api/v1` 与 OpenAPI `1.0.0`，管理面保持 Beta。
 
 ## 决定
 

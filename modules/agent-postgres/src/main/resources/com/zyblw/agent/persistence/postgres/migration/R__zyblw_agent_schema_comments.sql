@@ -104,7 +104,7 @@ BEGIN
         '外部 signal 正文；不得进入 timeline、日志或指标。'
       WHEN column_record.table_name = 'agent_embedding_cache'
            AND column_record.column_name = 'purpose' THEN
-        'Embedding 的可信用途（query/indexing/memory）；legacy 为升级前安全失效的缓存行。'
+        'Embedding 的可信用途（query/indexing/memory），参与缓存身份隔离。'
       WHEN column_record.table_name = 'agent_embedding_quota_reservations'
            AND column_record.column_name = 'purpose' THEN
         '本次配额预留对应的 Embedding 用途：query、indexing 或 memory。'

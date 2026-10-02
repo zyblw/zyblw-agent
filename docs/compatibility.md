@@ -1,9 +1,9 @@
 # 当前兼容性与版本边界
 
 > 状态：0.9.0 全新安装基线
-> 最后核验：2026-09-25
+> 最后核验：2026-10-01；未发布结构检索变更见下文
 >
-> 2026-09-24 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。知识文档以来源谱系和构建规格为身份，向量查询绑定 Profile 并使用 HNSW 迭代扫描，不按 Profile 分区。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+> 2026-09-24 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。知识文档以来源谱系和构建规格为身份，向量查询绑定 Profile 并使用 HNSW 迭代扫描，不按 Profile 分区。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
 
 ## 已验证工具链矩阵
@@ -29,16 +29,14 @@
 
 ## 唯一安装基线
 
-当前源码只支持 `0.9.0` 绿场安装。核心数据库只执行
-`V001__zyblw_agent_0_9_baseline.sql`，1024 维知识库只执行
-`V001__agent_knowledge_0_9_baseline.sql`。框架不提供旧 schema、旧向量维度、旧 Flyway history 或旧 Run 状态的转换入口；结构探针发现非当前基线时直接拒绝启动。
+当前源码是尚未发布的首版 `0.9.0` 空库候选，包含全部最新 Runtime、模型计量和结构 RAG。核心数据库执行 `V001__zyblw_agent_0_9_baseline.sql`，1024 知识执行 `V001__agent_knowledge_0_9_baseline.sql`；两者各配一份 R__ 中文数据字典。结构表直接包含在知识 V001，不保留 V002。
 
-旧发布物只存在于不可变 Git tag 和制品仓库中，不参与当前构建、CI、发布评估或业务接入。当前开发线不设置历史 MiMa/version-policy 基线。`0.9.0` 正式发布后，后续 `0.9.x` 才以该版本为兼容基线。
+没有历史 schema、旧向量维度、旧 Run 形状转换入口、MiMa 或旧 OpenAPI 对照快照。开发库遇到 checksum 或结构不符须显式重建，不能 repair 或静默转换。本次未连接或重建任何已有环境数据库，也不改远端 tag/制品。首版公开发布后才冻结该基线并开始兼容维护。
 
 ## 当前公共契约
 
 - Scala：十一项公开 Maven artifact 使用同一精确版本，禁止版本范围和 SNAPSHOT 进入生产。
-- HTTP：稳定业务协议是 `/api/v1` 与 OpenAPI `1.2.0`；`/api/v1/admin/**` 是 Beta 管理面。`RunView.suspension` 为可选加法字段。
+- HTTP：稳定业务协议是 `/api/v1`；初始 OpenAPI `1.0.0` 含检索配方和策略；`/api/v1/admin/**` 是 Beta 管理面。`RunView.suspension` 为可选加法字段。
 - State：`AgentState` schemaVersion 1，包含有界 citation、retrieval evidence 与 `suspension`。
 - ModelCall：`lineage` 增加 compiler/layout 版本、稳定前缀数量与指纹、整体 plan 指纹；不保存 Prompt 正文。
 - TokenUsage：`cachedInputTokens` 仍是 JSON 字段名（含义为 cache read），另加 `cacheWriteInputTokens`；硬预算使用逻辑 `inputTokens`。

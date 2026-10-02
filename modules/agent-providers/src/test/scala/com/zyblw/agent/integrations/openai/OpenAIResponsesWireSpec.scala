@@ -54,6 +54,13 @@ object OpenAIResponsesWireSpec extends ZIOSpecDefault:
       |""".stripMargin
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("OpenAI Responses wire")(
+    test("响应没有 usage 时保留未报告标记") {
+      OpenAIResponsesWire
+        .decodeResponse(
+          """{"id":"r","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}"""
+        )
+        .map(value => assertTrue(!value.usageReported))
+    },
     test("请求使用原生扁平工具结构、store=false，并能回填 reasoning item 与工具结果") {
       for
         decoded <- OpenAIResponsesWire.decodeResponse(responsePayload)

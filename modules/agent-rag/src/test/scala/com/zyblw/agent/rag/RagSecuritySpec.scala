@@ -7,6 +7,22 @@ import zio.test.*
 
 object RagSecuritySpec extends ZIOSpecDefault:
   def spec = suite("RAG tenant security")(
+    test("exact fetch rejects a compromised store before returning foreign or unrequested chunks") {
+      val foreign =
+        DocumentChunk("wanted", "book", "private", "book://private", TenantId("other"), Set("read"))
+      val store = new VectorStore:
+        def upsert(chunks: Chunk[IndexedChunk])                         = ZIO.unit
+        def search(query: Embedding, scope: RetrievalScope, limit: Int) = ZIO.succeed(Chunk.empty)
+        def deleteByDocument(id: String, tenant: TenantId)              = ZIO.unit
+        override def fetchChunks(ids: Set[String], scope: RetrievalScope, filter: RetrievalFilter) =
+          ZIO.succeed(Chunk(foreign))
+      val reranker = new Reranker:
+        def rerank(q: String, hits: Chunk[RetrievalHit], n: Int) = ZIO.succeed(hits.take(n))
+      for result <- DefaultRetriever(HashEmbedding(16), store, reranker)
+          .fetch(Set("wanted"), RetrievalScope(TenantId("reader"), Set("read")))
+          .exit
+      yield assertTrue(result.isFailure)
+    },
     test("在相似度计算候选集之前过滤 tenant 和权限") {
       (for
         store <- ZIO.service[VectorStore]
@@ -71,6 +87,25 @@ object RagSecuritySpec extends ZIOSpecDefault:
         result.hits.head.signals("textRank") == 2.0,
         result.citations.head.sourceUri == "doc://1"
       )
+    },
+    test("存储返回越权候选时，远端重排不得看到正文") {
+      for
+        calls <- Ref.make(0)
+        foreign = RetrievalHit(
+          DocumentChunk("private", "book", "private body", "doc://private", TenantId("other"), Set("read")),
+          1.0
+        )
+        store = new VectorStore:
+          def upsert(chunks: Chunk[IndexedChunk])                         = ZIO.unit
+          def search(query: Embedding, scope: RetrievalScope, limit: Int) = ZIO.succeed(Chunk(foreign))
+          def deleteByDocument(documentId: String, tenantId: TenantId)    = ZIO.unit
+        reranker = new Reranker:
+          def rerank(query: String, hits: Chunk[RetrievalHit], limit: Int) = calls.update(_ + 1).as(hits)
+        result <- DefaultRetriever(EmbeddingModel.stub(), store, reranker)
+          .retrieve("query", RetrievalScope(TenantId("caller"), Set("read")), 1)
+          .either
+        count <- calls.get
+      yield assertTrue(result.isLeft, count == 0)
     },
     test("limit 非正数时不调用 Provider 或存储") {
       val explodingEmbedding =

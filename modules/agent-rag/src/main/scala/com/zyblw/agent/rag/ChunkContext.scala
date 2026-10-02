@@ -26,7 +26,7 @@ object ChunkContext:
     ).flatten
     take(lines.mkString("\n"), maxPrefixCodePoints.max(0))
 
-  private def take(value: String, limit: Int): String =
+  private[rag] def take(value: String, limit: Int): String =
     if limit <= 0 || value.isEmpty then ""
     else
       val count = value.codePointCount(0, value.length)

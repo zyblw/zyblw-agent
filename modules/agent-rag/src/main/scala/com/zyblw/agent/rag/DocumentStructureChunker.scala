@@ -17,7 +17,7 @@ final case class DocumentStructureChunkerConfig(
     maxCharacters: Int = 1200,
     overlapCharacters: Int = 120,
     mergePeers: Boolean = true,
-    strategyVersion: String = "document-structure-v3",
+    strategyVersion: String = "document-structure-v4",
     /** token 装箱预算。默认计数器是 cl100k，只适用于声明了同一 tokenizer 的 Embedding；`maxCharacters` 是硬性安全上限。 */
     maxTokens: Option[Int] = Some(512),
     tokenCounter: TokenCounter = TokenCounter.Cl100k
@@ -39,17 +39,38 @@ final class DocumentStructureChunker(
 
   override val strategyId: String =
     val base =
-      s"${config.strategyVersion}:max=${config.maxCharacters}:overlap=${config.overlapCharacters}:merge=${config.mergePeers}"
+      s"${config.strategyVersion}:max=${config.maxCharacters}:overlap=${config.overlapCharacters}:merge=${config.mergePeers}:fallback=${fallback.strategyId}"
     config.maxTokens.fold(base)(limit => s"$base:tokens=$limit:counter=${config.tokenCounter.id}")
 
   def split(
       document: SourceDocument,
       tenantId: TenantId,
       permissions: Set[String]
-  ): UIO[Chunk[DocumentChunk]] =
+  ): IO[RetrievalError, Chunk[DocumentChunk]] =
     document.structure match
-      case None            => fallback.split(document, tenantId, permissions)
-      case Some(structure) => ZIO.succeed(build(document, structure, tenantId, permissions))
+      case None =>
+        fallback.split(document, tenantId, permissions).flatMap { initial =>
+          val blocks = initial.zipWithIndex.map { case (chunk, index) =>
+            DocumentBlock(
+              chunk.id,
+              chunk.lineage.flatMap(_.parentId),
+              index,
+              DocumentBlockKind.Paragraph,
+              chunk.displayText,
+              chunk.lineage.fold(Chunk.empty[String])(_.headingPath),
+              chunk.lineage.fold(Chunk.empty[DocumentOrigin])(_.origins)
+            )
+          }
+          ZIO
+            .attempt(
+              build(document, DocumentStructure("markdown-fallback", None, blocks), tenantId, permissions)
+            )
+            .mapError(_ => AgentError.RetrievalFailed("Markdown 文本无法满足切分预算"))
+        }
+      case Some(structure) =>
+        ZIO
+          .attempt(build(document, structure, tenantId, permissions))
+          .mapError(_ => AgentError.RetrievalFailed("结构文本无法满足切分预算"))
 
   private def build(
       document: SourceDocument,
@@ -57,13 +78,17 @@ final class DocumentStructureChunker(
       tenantId: TenantId,
       permissions: Set[String]
   ): Chunk[DocumentChunk] =
-    val title    = document.metadata.get("title").map(_.trim).filter(_.nonEmpty)
-    val drafts   = pack(structure.blocks.sortBy(_.ordinal), title)
-    val prepared = drafts.zipWithIndex.map { case (draft, ordinal) =>
+    val title       = document.metadata.get("title").map(_.trim).filter(_.nonEmpty)
+    val drafts      = pack(structure.blocks.sortBy(_.ordinal), title)
+    val occurrences = mutable.HashMap.empty[String, Int]
+    val prepared    = drafts.zipWithIndex.map { case (draft, ordinal) =>
       val identity = KnowledgeIndexer.sha256(
         s"${document.id}\u0000${draft.blockIds.mkString("\u001f")}\u0000${draft.text}"
       )
-      Prepared(s"${document.id.take(160)}-${identity.take(24)}", draft, ordinal)
+      val occurrence = occurrences.getOrElse(identity, 0)
+      occurrences.update(identity, occurrence + 1)
+      val suffix = if occurrence == 0 then "" else s"-${occurrence + 1}"
+      Prepared(s"${document.id.take(160)}-${identity.take(24)}$suffix", draft, ordinal)
     }
     Chunk.fromIterable(prepared.zipWithIndex.map { case (preparedChunk, index) =>
       val draft      = preparedChunk.draft
@@ -74,7 +99,9 @@ final class DocumentStructureChunker(
         "chunkOrdinal"    -> preparedChunk.ordinal.toString,
         "chunkContentSha" -> KnowledgeIndexer.sha256(draft.text),
         "contentFormat"   -> document.representation.toString.toLowerCase(java.util.Locale.ROOT)
-      ) ++ Option.when(draft.headingPath.nonEmpty)("headingPath" -> draft.headingPath.mkString(" > "))
+      ) ++ draft.parentId.map("structureSectionId" -> _) ++ Option.when(draft.headingPath.nonEmpty)(
+        "headingPath" -> draft.headingPath.mkString(" > ")
+      )
       DocumentChunk.fromText(
         id = preparedChunk.id,
         documentId = document.id,
@@ -208,29 +235,27 @@ final class DocumentStructureChunker(
     built.result()
 
   private def splitCharacters(title: Option[String], block: DocumentBlock): Vector[Draft] =
-    val size = availableBody(title, block.headingPath, Some(block.kind)).max(1)
-    val step = (size - config.overlapCharacters.min(size - 1)).max(1)
-    Iterator
-      .iterate(0)(_ + step)
-      .takeWhile(_ < codePoints(block.text))
-      .map { start =>
-        val text = slice(block.text, start, (start + size).min(codePoints(block.text)))
-        draftOf(block, text)
-      }
-      .toVector
+    val total  = codePoints(block.text)
+    val result = Vector.newBuilder[Draft]
+    var start  = 0
+    while start < total do
+      var low  = 1
+      var high = math.min(config.maxCharacters, total - start)
+      var size = 0
+      while low <= high do
+        val mid = low + (high - low) / 2
+        if fits(title, block.headingPath, Some(block.kind), slice(block.text, start, start + mid)) then
+          size = mid
+          low = mid + 1
+        else high = mid - 1
+      require(size > 0, "prefix or character exceeds token budget")
+      result += draftOf(block, slice(block.text, start, start + size))
+      if start + size >= total then start = total
+      else start += size - config.overlapCharacters.min(size / 2)
+    result.result()
 
   private def draftOf(block: DocumentBlock, text: String): Draft =
     Draft(block.parentId, block.headingPath, Some(block.kind), text, block.origins, Chunk(block.id))
-
-  private def availableBody(
-      title: Option[String],
-      path: Chunk[String],
-      kind: Option[DocumentBlockKind]
-  ): Int =
-    val head       = ChunkContext.prefix(title, path.toSeq, kind.map(_.toString), config.maxCharacters / 3)
-    val separator  = if head.isEmpty then 0 else 2
-    val charBudget = (config.maxCharacters - codePoints(head) - separator).max(1)
-    config.maxTokens.fold(charBudget)(limit => charBudget.min(limit).max(1))
 
   private def fits(
       title: Option[String],
@@ -270,18 +295,19 @@ object DocumentStructureChunker:
 
   /** 按 Embedding 声明的 tokenizer 构造切分器。未声明时仍使用 cl100k，并依赖索引对齐检查拒绝假装对齐的 live 模型。 */
   val alignedLayer: ZLayer[EmbeddingModel, RetrievalError, Chunker] =
+    aligned(DocumentStructureChunkerConfig())
+
+  def aligned(config: DocumentStructureChunkerConfig): ZLayer[EmbeddingModel, RetrievalError, Chunker] =
     ZLayer.fromZIO {
       ZIO.serviceWithZIO[EmbeddingModel] { model =>
         model.capabilities.tokenizerId match
           case None | Some(ChunkEmbeddingAlignment.TestTokenizerId) =>
-            ZIO.succeed(DocumentStructureChunker(): Chunker)
+            ZIO.succeed(DocumentStructureChunker(config): Chunker)
           case Some(id) =>
             ZIO
               .fromOption(TokenCounter.get(id))
               .orElseFail(AgentError.RetrievalFailed(s"未知 Embedding tokenizer: $id"))
-              .map(counter =>
-                DocumentStructureChunker(DocumentStructureChunkerConfig(tokenCounter = counter))
-              )
+              .map(counter => DocumentStructureChunker(config.copy(tokenCounter = counter)))
       }
     }
 

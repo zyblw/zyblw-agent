@@ -192,7 +192,7 @@ ZIO Scope 资源寿命
 explicit production dependencies
 ```
 
-`automaticallyRetryable` **FACT：** 现为 `onlineRetryable` 的别名，只服务部署 `ToolRetryPolicy` 热重试。崩溃是否重放看 `ToolMetadata.recoveryPolicy` / `mayReplayAfterCrash`。未改 `tool_executions` 表。
+`onlineRetryable` **FACT：** 只服务部署 `ToolRetryPolicy` 热重试；首版不保留旧名称别名。崩溃是否重放看 `ToolMetadata.recoveryPolicy` / `mayReplayAfterCrash`。未改 `tool_executions` 表。
 
 ---
 

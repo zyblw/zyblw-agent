@@ -212,6 +212,10 @@ PostgreSQL Testcontainers 与故障注入证据。
 
 ## P1-B：可信 RAG 生产化
 
+未发布的 [结构检索基础](architecture/0030-structural-retrieval.md) 保持 Experimental：
+通用章节、Paddle 产物配对、真实 token 切分、独立快照、Value Search/Reasoned 原文物化、摘要恢复/缓存、受限模型 Adapter、Adaptive 启发式、跨书协调/共享 query embedding、配方与 HTTP/工具/宿主已有确定性及 PostgreSQL 契约回归；
+模型测试为可控 stub，尚无真实领域 A/B、生产容量或模型质量/费用验收，不提升 RAG 整体成熟度。
+
 1. **已完成 R1**：来源 URI、content hash/index version、tenant ACL、乐观撤回和原子 active 发布；
 2. **已完成 R1**：ingestion 幂等、Building/stage/activate、批量有界并发、失败隔离与取消传播；
 3. **已完成 R1**：Embedding model/dimension 身份、租户缓存、原子配额、pgvector+FTS weighted RRF 与模型 Reranker；

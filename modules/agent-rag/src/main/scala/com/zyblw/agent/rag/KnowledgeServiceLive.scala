@@ -49,7 +49,10 @@ final class KnowledgeServiceLive(
           result.evidenceStatus,
           result.candidateCount,
           result.acceptedCount,
-          result.topAcceptedScore
+          result.topAcceptedScore,
+          result.recipe,
+          result.strategy,
+          result.degradedStages
         )
       }
 

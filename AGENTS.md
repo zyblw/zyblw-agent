@@ -38,7 +38,7 @@ lifecycle, protocol, security, or license boundary plus an ADR.
 
 ## Current state
 
-The only supported version line is `0.9.0`: folded Flyway (core + 1024 knowledge each a single V001), retrieval modes, knowledge HTTP, citation source types, and `KnowledgeQaHost`.
+The first, unreleased candidate is `0.9.0`; all current capabilities belong to this single fresh-install baseline: folded Flyway (core + 1024 knowledge each a single V001), structural retrieval, PaddleOCR, model usage/price snapshots, knowledge HTTP, citation source types, and `KnowledgeQaHost`.
 Installation starts from an empty database and follows `docs/fresh-install-0.9.0.md`.
 
 Internal runtime structure is Functional Kernel + Driver ([ADR-0028](docs/architecture/0028-functional-kernel-runtime-driver.md)): pure `AgentKernel` decides, `AgentRuntimeDriver` owns effects. Public entry remains `AgentRuntime` / `AgentApplication`. Context authority and Prompt Cache are governed by [ADR-0029](docs/architecture/0029-context-authority-prompt-lineage.md) and [prompt-runtime.md](docs/prompt-runtime.md): Memory/RAG/summary never become System, and cache is not a fact source.

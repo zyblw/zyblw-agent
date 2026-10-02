@@ -111,7 +111,13 @@ private[anthropic] object AnthropicMessagesWire:
       message = base.copy(metadata =
         base.metadata.updated(RawContentBlocksMetadata, Json.Arr(dto.content).toJson)
       )
-    yield ChatResponse(message, finishReason(dto.stop_reason, calls.nonEmpty), usage, dto.id)
+    yield ChatResponse(
+      message,
+      finishReason(dto.stop_reason, calls.nonEmpty),
+      usage,
+      dto.id,
+      usageReported = dto.usage.nonEmpty
+    )
 
   /** 从标准错误 envelope 中只提取 `error.type`，避免完整 body 进入日志。 */
   def errorType(body: String): Option[String] =

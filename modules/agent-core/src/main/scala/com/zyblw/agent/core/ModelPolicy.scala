@@ -79,6 +79,11 @@ trait ModelPolicySource:
     */
   def prices: ModelPriceBook = ModelPriceBook.empty
 
+  /** Resolve a Run's frozen routed price book. Missing historical versions must fail closed. */
+  def pricesFor(fingerprint: Option[String]): ModelPriceBook =
+    val _ = fingerprint
+    prices
+
 object ModelPolicySource:
   /** 永远返回同一份工作点;未接入管理面覆盖时使用。 */
   def static(policy: ModelPolicy, priceBook: ModelPriceBook = ModelPriceBook.empty): ModelPolicySource =

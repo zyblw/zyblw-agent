@@ -2,12 +2,21 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-10-01
 >
-> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
 >
 > 事实来源：对应模块源码、测试与构建定义
+
+## 未发布结构检索的评测入口
+
+`StructuralRagEval` 通过同一个 Retriever 执行配方，不另建评测检索器。
+单书仍可填 expectedSectionIds；多书节点金标必须用 expectedNodesByDocument，避免同名 node ID 跨书混计。
+expectedDocumentIds 为空或多书节点金标有歧义会失败。未标注节点/块不算 recall=1；
+汇总仅纳入有对应金标的用例，并返回 evaluatedNodeCases/evaluatedChunkCases。
+引用必须链接返回的 gold chunk/文档，来源、真实摘录、页码与几何也须一致；支持状态本身不能冒充引用正确。
+耗时使用执行期单调时钟。检索指标与生成答案逐条事实/引用蕴含检查是不同门禁，模型 stub 不是领域质量基线。
 
 ## 1. 不能只测“最终回答看起来不错”
 

@@ -220,7 +220,8 @@ final case class KnowledgeIndexResult(
     embeddingUsage: Option[EmbeddingUsage],
     extraction: Option[ExtractionReport] = None,
     extractedMarkdown: Option[String] = None,
-    extractedOutline: Chunk[ExtractedHeading] = Chunk.empty
+    extractedOutline: Chunk[ExtractedHeading] = Chunk.empty,
+    structureStatus: StructurePublicationStatus = StructurePublicationStatus.Disabled
 )
 
 /** 组合 Chunker、EmbeddingModel 与 KnowledgeIndexStore 的高层摄取服务。
@@ -246,7 +247,8 @@ final class KnowledgeIndexer(
     lexical: LexicalProcessor = SimpleChineseLexicalProcessor,
     enricher: DocumentEnricher = DocumentEnricher.identity,
     qualityPolicy: ExtractionQualityPolicy = KnowledgeIndexer.DefaultQualityPolicy,
-    hmacSecret: String = IngestionKeys.configuredSecret
+    hmacSecret: String = IngestionKeys.configuredSecret,
+    structureIndexing: Option[StructureIndexing] = None
 ):
   require(stageBatchSize > 0, "stageBatchSize 必须为正数")
   private val resolvedIndexingStrategy =
@@ -329,7 +331,30 @@ final class KnowledgeIndexer(
       result   <- existing match
         // HTTP/worker 可能在发布成功后、确认命令前崩溃；幂等重试不能再次调用付费 Provider。
         case Some(manifest) if manifest.status == KnowledgeIndexStatus.Ready =>
-          ZIO.succeed(KnowledgeIndexResult(manifest, None))
+          structureIndexing match
+            case None           => ZIO.succeed(KnowledgeIndexResult(manifest, None))
+            case Some(indexing) =>
+              chunker.split(document, tenantId, permissions).flatMap { chunks =>
+                enricher.enrich(document, chunks).flatMap { enrichment =>
+                  val permitted =
+                    !enrichment.metadata.keys.exists(KnowledgeIndexer.ForbiddenEnrichmentKeys.contains)
+                  val aligned = chunks.map(chunk =>
+                    chunk
+                      .copy(
+                        catalogVersion = build.version,
+                        sourceRevisionId = Some(build.lineage.sourceRevisionId),
+                        knowledgeSpaceId = Some(build.knowledgeSpaceId),
+                        profileId = Some(build.profileId),
+                        metadata = chunk.metadata ++ enrichment.metadata
+                      )
+                      .withLexical(lexical.document(chunk.denseText))
+                  )
+                  ZIO.fail(AgentError.RetrievalFailed("DocumentEnricher 不能改写权限或来源")).unless(permitted) *>
+                    indexing
+                      .stage(document, build, aligned)
+                      .map(status => KnowledgeIndexResult(manifest, None, structureStatus = status))
+                }
+              }
         case Some(manifest) if manifest.isQuarantined =>
           ZIO.fail(AgentError.RetrievalFailed("knowledge ingestion 已被隔离，不能激活"))
         case _ =>
@@ -426,6 +451,9 @@ final class KnowledgeIndexer(
       digest <- ZIO
         .attempt(ChunkSetDigest.of(lexicalized))
         .mapError(error => AgentError.RetrievalFailed(s"chunk 集合无效: ${error.getMessage}"))
+      structureStatus <- structureIndexing.fold[IO[RetrievalError, StructurePublicationStatus]](
+        ZIO.succeed(StructurePublicationStatus.Disabled)
+      )(_.stage(document, build, lexicalized))
       usages <- ZIO.foreach(Chunk.fromIterable(lexicalized.grouped(embedBatchSize).toList).zipWithIndex) {
         case (batch, ordinal) => embedAndStage(batch, ordinal)
       }
@@ -439,7 +467,8 @@ final class KnowledgeIndexer(
         .someOrFail(AgentError.RetrievalFailed("knowledge activate 后 manifest 丢失"))
     yield KnowledgeIndexResult(
       ready.copy(checkpoint = IngestCheckpoint.Ready),
-      KnowledgeIndexer.sumUsage(usages)
+      KnowledgeIndexer.sumUsage(usages),
+      structureStatus = structureStatus
     )
 
 object KnowledgeIndexer:
@@ -459,7 +488,7 @@ object KnowledgeIndexer:
       )
 
   val ForbiddenEnrichmentKeys: Set[String] =
-    Set("tenantId", "tenant_id", "permissions", "sourceUri", "source_uri")
+    Set("tenantId", "tenant_id", "permissions", "sourceUri", "source_uri", "structureSectionId")
 
   /** 摄入默认质量门：拒绝空正文与无字母/表意文字的扫描垃圾，短测试文档仍可通过。 */
   val DefaultQualityPolicy: ExtractionQualityPolicy =

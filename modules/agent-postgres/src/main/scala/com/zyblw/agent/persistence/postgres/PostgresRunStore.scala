@@ -728,7 +728,10 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
             |WHERE run_id = ?::uuid AND request_id = ?::uuid AND status = ? AND attempt = ?
             |  AND provider = ? AND model = ? AND fingerprint = ? AND capture_policy = ?
             |  AND COALESCE(record_json -> 'routeDecision', 'null'::jsonb)
-            |      = COALESCE(?::jsonb -> 'routeDecision', 'null'::jsonb)""".stripMargin
+            |      = COALESCE(?::jsonb -> 'routeDecision', 'null'::jsonb)
+            |  AND (record_json -> 'priceSnapshot') IS NOT DISTINCT FROM (?::jsonb -> 'priceSnapshot')
+            |  AND (record_json -> 'priceBookFingerprint') IS NOT DISTINCT FROM (?::jsonb -> 'priceBookFingerprint')
+            |  AND (record_json -> 'usageReporting') IS NOT DISTINCT FROM (?::jsonb -> 'usageReporting')""".stripMargin
         )
         try
           update.setString(1, next.status.toString)
@@ -744,6 +747,9 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
           update.setString(11, next.fingerprint)
           update.setString(12, next.capturePolicy.toString)
           update.setString(13, next.toJson)
+          update.setString(14, next.toJson)
+          update.setString(15, next.toJson)
+          update.setString(16, next.toJson)
           if update.executeUpdate() != 1 then
             throw ModelCallLedgerConflict(next.requestId.asString, expectedStatus.toString, expectedAttempt)
         finally update.close()

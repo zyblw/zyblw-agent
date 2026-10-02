@@ -31,6 +31,8 @@ private[anthropic] object AnthropicMessagesSse:
       cacheReadInputTokens: Long = 0L,
       cacheWriteInputTokens: Long = 0L,
       outputTokens: Long = 0L,
+      inputReported: Boolean = false,
+      outputReported: Boolean = false,
       stopReason: Option[String] = None,
       started: Boolean = false,
       terminal: Boolean = false
@@ -98,6 +100,7 @@ private[anthropic] object AnthropicMessagesSse:
         val next = state.copy(
           responseId = id,
           inputTokens = normalized.inputTokens,
+          inputReported = usage.flatMap(AnthropicMessagesWire.longField(_, "input_tokens")).nonEmpty,
           cacheReadInputTokens = cacheRead,
           cacheWriteInputTokens = cacheWrite,
           started = true
@@ -196,7 +199,12 @@ private[anthropic] object AnthropicMessagesSse:
     val stop = AnthropicMessagesWire.stringField(delta, "stop_reason").orElse(state.stopReason)
     if output < 0L then ZIO.fail(AgentError.InvalidModelResponse("message_delta usage.output_tokens 不能为负数"))
     else
-      val next       = state.copy(outputTokens = output, stopReason = stop)
+      val next = state.copy(
+        outputTokens = output,
+        stopReason = stop,
+        outputReported =
+          state.outputReported || usage.flatMap(AnthropicMessagesWire.longField(_, "output_tokens")).nonEmpty
+      )
       val usageEvent = ModelStreamEvent.UsageUpdated(
         TokenUsage(
           next.inputTokens,
@@ -237,7 +245,8 @@ private[anthropic] object AnthropicMessagesSse:
         message,
         AnthropicMessagesWire.finishReason(state.stopReason, calls.nonEmpty),
         usage,
-        state.responseId
+        state.responseId,
+        usageReported = state.inputReported && state.outputReported
       )
       ZIO.succeed(state.copy(terminal = true) -> Chunk(ModelStreamEvent.Completed(response)))
 

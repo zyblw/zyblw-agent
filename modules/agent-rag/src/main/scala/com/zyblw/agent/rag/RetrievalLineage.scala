@@ -33,7 +33,7 @@ final case class DocumentOrigin(
   require(blockId.forall(_.trim.nonEmpty), "原文 blockId 不能是空字符串")
 
 /** 解析器恢复的文档元素类型。枚举是 Provider-neutral 的，Docling/Tika/未来 OCR Adapter 必须显式映射而不泄漏自身类型。 */
-enum DocumentBlockKind:
+enum DocumentBlockKind derives JsonCodec:
   case Title, SectionHeading, Paragraph, ListItem, Table, Picture, Code, Formula, KeyValue, Other
 
 /** 一个可回溯到原文的结构元素。
@@ -59,21 +59,42 @@ final case class DocumentBlock(
     text: String,
     headingPath: Chunk[String] = Chunk.empty,
     origins: Chunk[DocumentOrigin] = Chunk.empty
-):
+) derives JsonCodec:
   require(id.trim.nonEmpty, "DocumentBlock.id 不能为空")
   require(parentId.forall(_.trim.nonEmpty), "DocumentBlock.parentId 不能为空")
   require(ordinal >= 0, "DocumentBlock.ordinal 不能为负数")
   require(text.trim.nonEmpty, "DocumentBlock.text 不能为空")
 
+/** 原书章节身份；同名章节不能按标题去重。 */
+final case class DocumentSection(
+    id: String,
+    parentId: Option[String],
+    ordinal: Int,
+    level: Int,
+    title: String,
+    pageStart: Option[Int] = None,
+    pageEnd: Option[Int] = None
+) derives JsonCodec:
+  require(
+    id.trim.nonEmpty && id.length <= 1000 && parentId.forall(p => p.trim.nonEmpty && p.length <= 1000),
+    "section ID 长度必须位于 1..1000"
+  )
+  require(ordinal >= 0 && level > 0 && level <= 64, "section 顺序/层级无效")
+  require(title.trim.nonEmpty && title.length <= 4000, "section 标题无效")
+  require(pageStart.forall(_ > 0) && pageEnd.forall(_ > 0), "section 页码无效")
+  require(!pageStart.exists(start => pageEnd.exists(_ < start)), "section 页码倒置")
+
 /** 解析器的无损结构投影。不保存 Provider 原始 JSON，只保存框架后续切分、引用与评测必需的类型化字段。 */
 final case class DocumentStructure(
     schemaName: String,
     schemaVersion: Option[String],
-    blocks: Chunk[DocumentBlock]
-):
+    blocks: Chunk[DocumentBlock],
+    sections: Chunk[DocumentSection] = Chunk.empty
+) derives JsonCodec:
   require(schemaName.trim.nonEmpty, "DocumentStructure.schemaName 不能为空")
   require(schemaVersion.forall(_.trim.nonEmpty), "DocumentStructure.schemaVersion 不能为空")
   require(blocks.map(_.id).distinct.length == blocks.length, "DocumentStructure block ID 必须唯一")
+  require(sections.map(_.id).distinct.length == sections.length, "DocumentStructure section ID 必须唯一")
 
 /** 知识块的结构化谱系。
   *

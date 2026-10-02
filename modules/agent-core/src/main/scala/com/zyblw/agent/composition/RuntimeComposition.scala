@@ -219,6 +219,10 @@ trait LiveComposition:
   /** 当前进程对给定 Agent 定义会冻结出的组合指纹。 */
   def freeze(agent: AgentDefinition): RuntimeCompositionFingerprint
 
+  def freezeFor(agent: AgentDefinition, pricingFingerprint: Option[String]): RuntimeCompositionFingerprint =
+    val _ = pricingFingerprint
+    freeze(agent)
+
   /** 带显式生效模型设置的现场指纹；用于单次模型调用前的比较。
     *
     * 价格表是否进入指纹由本实现按"路由是否启用"决定，与 [[freeze]] 保持同一口径；调用方只需交出价格表本身。
@@ -252,6 +256,12 @@ object LiveComposition:
         executionEnvironmentId,
         permissionProfileFingerprint
       )
+
+    override def freezeFor(
+        agent: AgentDefinition,
+        pricingFingerprint: Option[String]
+    ): RuntimeCompositionFingerprint =
+      fingerprint(agent, effectiveModelSettings(agent), modelPolicies.pricesFor(pricingFingerprint))
 
     def fingerprint(
         agent: AgentDefinition,

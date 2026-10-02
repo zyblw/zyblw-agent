@@ -126,8 +126,17 @@ final case class KnowledgeRetrievalRequest(
     chunkIds: Set[String] = Set.empty,
     pages: Set[Int] = Set.empty,
     headingPrefix: List[String] = Nil,
-    metadataEquals: Map[String, String] = Map.empty
+    metadataEquals: Map[String, String] = Map.empty,
+    recipe: Option[String] = None,
+    strategy: Option[String] = None
 )
+
+final case class KnowledgeStructureSelectionView(
+    documentId: String,
+    generation: String,
+    nodeId: String,
+    materializedCount: Int
+) derives JsonCodec
 
 /** 检索调试结果，包含足以复现和解释本次召回的全部低敏信息。 */
 final case class KnowledgeRetrievalResult(
@@ -147,7 +156,10 @@ final case class KnowledgeRetrievalResult(
     knowledgeSpaceId: Option[String] = None,
     degradedStages: Chunk[String] = Chunk.empty,
     evidenceSelections: Chunk[KnowledgeEvidenceSelectionView] = Chunk.empty,
-    maxEvidenceTokens: Long = 0L
+    maxEvidenceTokens: Long = 0L,
+    recipe: Option[String] = None,
+    strategy: Option[String] = None,
+    structureSelections: Chunk[KnowledgeStructureSelectionView] = Chunk.empty
 ) derives JsonCodec
 
 /** 异步摄入任务的生命周期。
@@ -356,7 +368,10 @@ final case class KnowledgeSearchResult(
     evidenceStatus: String,
     candidateCount: Int,
     acceptedCount: Int,
-    topAcceptedScore: Option[Double]
+    topAcceptedScore: Option[Double],
+    recipe: Option[String] = None,
+    strategy: Option[String] = None,
+    degradedStages: Chunk[String] = Chunk.empty
 ) derives JsonCodec
 
 final case class KnowledgeReindexItemView(

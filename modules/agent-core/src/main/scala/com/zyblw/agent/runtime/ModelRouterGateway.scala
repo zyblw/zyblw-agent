@@ -31,10 +31,58 @@ final private[agent] class ModelRouterGateway(
           _ <- ZIO
             .fail(AgentError.InvalidConfiguration("ModelRequirement 需要显式启用 modelRouting"))
             .when(request.settings.requirement.nonEmpty)
+          _ <- ZIO
+            .fail(AgentError.InvalidConfiguration("费用上限要求实际执行模型具有已知价格"))
+            .when(
+              state.budget.limits.maxEstimatedCost.nonEmpty && prices
+                .price(
+                  request.settings.provider.getOrElse(model.provider),
+                  request.settings.model.getOrElse("default")
+                )
+                .isEmpty
+            )
           capabilities <- model.capabilities(request.settings.model)
-          _            <- CapabilityValidator.validate(request, capabilities)
-        yield Routing(request, model, capabilities, None)
+          bounded      <- boundDirectRequest(state, request, estimatedInputTokens, prices, capabilities)
+          _            <- CapabilityValidator.validate(bounded, capabilities)
+        yield Routing(bounded, model, capabilities, None)
       case Some(policy) => routeWithin(policy, state, request, estimatedInputTokens, prices)
+
+  private def boundDirectRequest(
+      state: AgentState,
+      request: ChatRequest,
+      estimatedInputTokens: Long,
+      prices: ModelPriceBook,
+      capabilities: ModelCapabilities
+  ): IO[AgentError, ChatRequest] =
+    if state.budget.limits.maxEstimatedCost.isEmpty then ZIO.succeed(request)
+    else
+      val limits    = state.budget.limits
+      val usage     = state.budget.consumed
+      val remaining = (BigInt(limits.maxOutputTokens) - usage.outputTokens)
+        .min(BigInt(limits.maxTotalTokens) - usage.totalTokens - estimatedInputTokens)
+        .min(BigInt(capabilities.maxOutputTokens.getOrElse(Int.MaxValue.toLong)))
+        .max(BigInt(1))
+        .min(BigInt(Int.MaxValue))
+        .toInt
+      val bounded = request.copy(settings =
+        request.settings.copy(
+          maxOutputTokens = Some(request.settings.maxOutputTokens.getOrElse(remaining))
+        )
+      )
+      val ref = ModelRef(
+        request.settings.provider.getOrElse(model.provider),
+        request.settings.model.getOrElse("default")
+      )
+      val codes = ModelRouter.rejectionCodes(
+        ModelRouteCandidate(ref),
+        ModelRequirement(),
+        bounded,
+        capabilities,
+        estimatedInputTokens,
+        state.budget,
+        prices.price(ref.provider, ref.model)
+      )
+      ZIO.fromEither(ModelRouter.select(Chunk(ModelCandidateDecision(ref, codes)), limits)).as(bounded)
 
   private def routeWithin(
       policy: ModelRoutingPolicy,

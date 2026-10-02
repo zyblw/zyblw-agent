@@ -4,13 +4,13 @@
 >
 > 最后核验：2026-09-23
 >
-> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
 >
 > 事实来源：对应模块源码、测试与构建定义
 
 本文说明 `zyblw-agent` 如何把内部耐久状态与对外 HTTP 协议分离，以及业务后端应该怎样安全接入和升级。当前基线是
-`/api/v1`、OpenAPI `1.2.0`；框架版本是 `0.9.0`。不保留无版本旧路径，也不为草案协议制造历史负担。加法字段包括
+`/api/v1`、OpenAPI `1.0.0`；框架版本是 `0.9.0`。不保留无版本旧路径，也不为草案协议制造历史负担。加法字段包括
 `RunView.citations` / `evidence`、`GET /api/v1/runs/{runId}/citations` 与稳定 `/api/v1/knowledge/**`。
 `CitationView.sourceKind` 为可选 allowlist 字段，缺省 JSON 兼容旧客户端。`RunView.suspension` 是可选加法字段，只含
 kind / deadline / 到期决议，不含 prompt 或审批正文；审批客户端仍可读 `pendingApproval`。

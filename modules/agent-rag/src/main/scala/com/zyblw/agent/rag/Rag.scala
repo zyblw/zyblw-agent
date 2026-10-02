@@ -62,7 +62,7 @@ object DocumentChunk:
   ): DocumentChunk =
     fromText(id, documentId, text, sourceUri, tenantId, permissions)
 
-  /** 展示正文、向量正文和词法正文分开。未提供 dense 时三份相同，兼容旧调用。 */
+  /** 展示正文、向量正文和词法正文分开。未提供 dense 时三份使用相同正文。 */
   def fromText(
       id: String,
       documentId: String,
@@ -255,7 +255,11 @@ trait Chunker:
   def strategyId: String
 
   /** 切分时绑定 tenant 和权限，确保权限过滤可在相似度计算之前发生。 */
-  def split(document: SourceDocument, tenantId: TenantId, permissions: Set[String]): UIO[Chunk[DocumentChunk]]
+  def split(
+      document: SourceDocument,
+      tenantId: TenantId,
+      permissions: Set[String]
+  ): IO[RetrievalError, Chunk[DocumentChunk]]
 
 /** 按字符窗口确定性切分，保留 overlap；生产可替换为 token/语义切分器。 */
 final class SlidingWindowChunker(maxCharacters: Int = 1200, overlap: Int = 120) extends Chunker:
@@ -578,6 +582,14 @@ object Reranker:
   )
 
 trait Retriever:
+  /** Request-local sharing for coordinated subqueries; custom retrievers keep their own behavior. */
+  def querySession: UIO[Retriever] = ZIO.succeed(this)
+
+  /** Pin once before coordinating subqueries; custom stores must implement snapshot resolution. */
+  def pinScope(scope: RetrievalScope): IO[RetrievalError, RetrievalScope] =
+    if scope.pinnedProfileId.nonEmpty then ZIO.succeed(scope)
+    else ZIO.fail(AgentError.RetrievalFailed("Retriever does not support profile pinning"))
+
   /** 完成 query embedding、权限检索、rerank 和引用组装。 */
   def retrieve(query: String, scope: RetrievalScope, limit: Int): IO[RetrievalError, RetrievalResult] =
     retrieve(RetrievalRequest(query, scope, limit))
@@ -608,8 +620,59 @@ final class DefaultRetriever(
     sparseEnabled: Boolean = false,
     assist: QueryAssist = QueryAssist.disabled,
     assistConfig: QueryAssistConfig = QueryAssistConfig(),
-    telemetry: Option[com.zyblw.agent.observability.AgentOperationTelemetry] = None
+    telemetry: Option[com.zyblw.agent.observability.AgentOperationTelemetry] = None,
+    structural: Option[StructuralRetrieval] = None,
+    defaultRecipe: Option[RetrievalRecipe] = None,
+    expansionEnabled: Boolean = true
 ) extends Retriever:
+  override def querySession: UIO[Retriever] =
+    for
+      cache  <- Ref.make(Map.empty[EmbeddingRequest, EmbeddingResponse])
+      permit <- Semaphore.make(1)
+    yield
+      val shared = new EmbeddingModel:
+        val capabilities                                                            = embeddings.capabilities
+        val descriptor                                                              = embeddings.descriptor
+        def embed(request: EmbeddingRequest): IO[RetrievalError, EmbeddingResponse] =
+          if request.role != EmbeddingInputRole.Query then embeddings.embed(request)
+          else
+            permit.withPermit {
+              val key = request.copy(context = request.context.copy(requestId = "shared-query"))
+              cache.get.flatMap(_.get(key) match
+                case Some(value) => ZIO.succeed(value.copy(usage = None, providerRequestId = None))
+                case None        =>
+                  embeddings
+                    .embed(request)
+                    .tap(value =>
+                      cache.update { entries =>
+                        // ponytail: at most 64 distinct query batches per session; excess batches bypass sharing.
+                        if entries.size < 64 then entries.updated(key, value) else entries
+                      }
+                    ))
+            }
+      DefaultRetriever(
+        shared,
+        vectors,
+        reranker,
+        expansion,
+        policies,
+        lexical,
+        budgets,
+        sparseEnabled,
+        assist,
+        assistConfig,
+        telemetry,
+        structural,
+        defaultRecipe,
+        expansionEnabled
+      )
+
+  override def pinScope(scope: RetrievalScope): IO[RetrievalError, RetrievalScope] =
+    scope.pinnedProfileId.fold(vectors.resolveActiveProfile(scope.tenantId, scope.spaceId).flatMap {
+      case Some(id) => ZIO.succeed(scope.withPinnedProfile(id))
+      case None     => ZIO.succeed(scope)
+    })(_ => ZIO.succeed(scope))
+
   /** 把单 query 编码后搜索并重排，最终引用保留 source 与 metadata。 */
   def retrieve(request: RetrievalRequest): IO[RetrievalError, RetrievalResult] =
     val query = request.text
@@ -626,11 +689,39 @@ final class DefaultRetriever(
     else if query.trim.isEmpty then ZIO.fail(AgentError.RetrievalFailed("Retrieval query 不能为空"))
     else
       // 单次检索内只读取一次工作点，避免同一次调用的重排开关和阈值来自不同版本的覆盖。
-      val policy = policies.current()
-      val plan   = DeterministicQueryPlanner.plan(
+      val policy         = policies.current()
+      val selectedRecipe =
+        request.recipe.orElse(defaultRecipe.filter(_ => request.mode != RetrievalMode.Phrase))
+      val (requestedStrategy, effectiveBudgets, recipeExpansion) = selectedRecipe match
+        case Some(recipe) =>
+          val (strat, b, exp) = RetrievalRecipe.resolve(recipe, budgets, expansion)
+          (request.strategy.getOrElse(strat), b, exp)
+        case None =>
+          val strat = request.strategy.getOrElse(
+            if structural.isDefined && request.mode != RetrievalMode.Phrase then RetrievalStrategy.Structural
+            else RetrievalStrategy.Classic
+          )
+          (strat, budgets, expansion)
+      val effectiveExpansion =
+        if expansionEnabled then recipeExpansion else recipeExpansion.copy(maxAdditionalChunks = 0)
+      val effectiveStrategy =
+        if requestedStrategy == RetrievalStrategy.Adaptive then
+          RetrievalRecipe.adapt(
+            query,
+            request.mode,
+            structural.nonEmpty,
+            structural.exists(_.navigator != TreeNavigator.deterministic)
+          )
+        else requestedStrategy
+      val rerankLimit =
+        if selectedRecipe.nonEmpty then
+          math.max(limit, effectiveBudgets.rerankSeeds).min(effectiveBudgets.fusion)
+        else limit
+      val finalBudgets = effectiveBudgets.copy(rerankSeeds = limit)
+      val plan         = DeterministicQueryPlanner.plan(
         query,
         request.mode,
-        budgets.copy(rerankSeeds = limit, perBranch = math.max(budgets.perBranch, limit)),
+        effectiveBudgets.copy(perBranch = math.max(effectiveBudgets.perBranch, rerankLimit)),
         sparseEnabled
       )
       val wantSparse =
@@ -720,23 +811,45 @@ final class DefaultRetriever(
             sparseQuery = None
           )
         }
-        candidates = DefaultRetriever.mergeHits(first +: rest, plan.budgets.fusion)
+        classic = DefaultRetriever.mergeHits(first +: rest, plan.budgets.fusion)
+        _ <- validateReranked(classic, classic, pinnedScope, plan.budgets.fusion)
+        _ <- ZIO
+          .fail(AgentError.RetrievalFailed("检索候选违反请求过滤条件"))
+          .unless(classic.forall(hit => request.filter.matches(hit.chunk)))
+        structure <- observe(traceRun, scope, "structure_search")(
+          if effectiveStrategy == RetrievalStrategy.Classic then
+            ZIO.succeed(StructuralRetrievalResult(Chunk.empty, false))
+          else
+            structural.fold[IO[RetrievalError, StructuralRetrievalResult]](
+              ZIO.succeed(StructuralRetrievalResult(Chunk.empty, true))
+            )(
+              _.retrieve(
+                request.copy(scope = pinnedScope, strategy = Some(effectiveStrategy)),
+                lexicalQuery,
+                queryEmbedding,
+                classic,
+                vectors
+              )
+            )
+        )(_.hits.length.toLong)
+        candidates = StructuralRetrieval.fuse(classic, structure.hits, plan.budgets.fusion)
         // 关闭重排时直接截断候选池。这里不能跳过后续校验：截断结果同样要满足数量、去重和权限契约，
         // 而 searchFiltered 来自存储 Adapter，与 reranker 一样位于信任边界之外。
         reranked <-
-          if policy.rerankEnabled then
-            observe(traceRun, scope, "rerank")(reranker.rerank(query, candidates, limit))(_.length.toLong)
-          else ZIO.succeed(candidates.take(limit))
+          if policy.rerankEnabled && !selectedRecipe.contains(RetrievalRecipe.LowLatency) then
+            observe(traceRun, scope, "rerank")(reranker.rerank(query, candidates, rerankLimit))(
+              _.length.toLong
+            )
+          else ZIO.succeed(candidates.take(rerankLimit))
         // Reranker 可能是远端或业务自定义实现；即使它失陷，也不能注入候选集外或未授权文档。
-        validated <- validateReranked(candidates, reranked, pinnedScope, limit)
+        validated <- validateReranked(candidates, reranked, pinnedScope, rerankLimit)
         // 阈值只作用于 seed 命中。RRF fused score 只排序；余弦/词法决定是否接受。
         // 扩展块按 expandedScoreFactor 主动降分，不得再用同一阈值筛掉它们。
         hits            = validated.filter(hit => DefaultRetriever.acceptsSeed(hit, policy.minimumScore))
         evidenceBudgets =
           if request.filter.documentIds.size == 1 then
-            plan.budgets
-              .copy(maxChunksPerSource = math.max(plan.budgets.maxChunksPerSource, plan.budgets.rerankSeeds))
-          else plan.budgets
+            finalBudgets.copy(maxChunksPerSource = math.max(finalBudgets.maxChunksPerSource, limit))
+          else finalBudgets
         evidence = RetrievalEvidence(
           status =
             if candidates.isEmpty then RetrievalEvidenceStatus.NoCandidates
@@ -748,30 +861,61 @@ final class DefaultRetriever(
           topAcceptedScore = hits.map(DefaultRetriever.relevanceScore).maxOption,
           minimumScore = policy.minimumScore
         )
-        expanded <- observe(traceRun, scope, "expand")(vectors.expandContext(hits, pinnedScope, expansion))(
-          _.length.toLong
-        )
-        context <- validateExpanded(hits, expanded, pinnedScope, expansion.maxAdditionalChunks)
+        expanded <- observe(traceRun, scope, "expand")(
+          for
+            lineageExpanded   <- vectors.expandContext(hits, pinnedScope, effectiveExpansion)
+            structureExpanded <- structural.fold[IO[RetrievalError, Chunk[RetrievalHit]]](
+              ZIO.succeed(Chunk.empty)
+            ) { st =>
+              if effectiveStrategy != RetrievalStrategy.Classic && effectiveExpansion.maxAdditionalChunks > 0
+              then
+                StructuralExpansion.expand(
+                  hits,
+                  pinnedScope,
+                  st.store,
+                  st.spec,
+                  vectors,
+                  request.filter,
+                  effectiveExpansion
+                )
+              else ZIO.succeed(Chunk.empty)
+            }
+            combined = (lineageExpanded ++ structureExpanded)
+              .distinctBy(h => h.chunk.documentId -> h.chunk.id)
+              .take(effectiveExpansion.maxAdditionalChunks)
+          yield combined
+        )(_.length.toLong)
+        context <- validateExpanded(hits, expanded, pinnedScope, effectiveExpansion.maxAdditionalChunks)
         bundle  <- observe(traceRun, scope, "assemble")(
           ZIO.succeed(
-            ContextAssembler.assemble(
-              hits,
-              context.filterNot(hit =>
-                hits.exists(seed =>
-                  seed.chunk.documentId == hit.chunk.documentId && seed.chunk.id == hit.chunk.id
+            ContextAssembler
+              .assemble(
+                hits,
+                context
+                  .filter(hit => request.filter.matches(hit.chunk))
+                  .filterNot(hit =>
+                    hits.exists(seed =>
+                      seed.chunk.documentId == hit.chunk.documentId && seed.chunk.id == hit.chunk.id
+                    )
+                  ),
+                evidence,
+                evidenceBudgets,
+                profileId = pinnedScope.pinnedProfileId,
+                knowledgeSpaceId = Some(pinnedScope.spaceId),
+                degradedStages = Chunk.fromIterable(
+                  Option.when(structure.degraded)("structure-fallback") ++
+                    Option.when(structure.budgetLimited)("structure-budget") ++
+                    Option.when(assistConfig.enabled && rewritten.isEmpty)("rewrite-fallback") ++
+                    Option.when(plan.includeSparse && !wantSparse)("sparse-disabled") ++
+                    Option
+                      .when(reranked.exists(_.signals.get("rerankFallback").contains(1.0)))("rerank-fallback")
                 )
-              ),
-              evidence,
-              evidenceBudgets,
-              profileId = pinnedScope.pinnedProfileId,
-              knowledgeSpaceId = Some(pinnedScope.spaceId),
-              degradedStages = Chunk.fromIterable(
-                Option.when(assistConfig.enabled && rewritten.isEmpty)("rewrite-fallback") ++
-                  Option.when(plan.includeSparse && !wantSparse)("sparse-disabled") ++
-                  Option
-                    .when(reranked.exists(_.signals.get("rerankFallback").contains(1.0)))("rerank-fallback")
               )
-            )
+              .copy(
+                structureSelections = structure.selections,
+                recipe = selectedRecipe.map(_.toString),
+                strategy = Some(effectiveStrategy.toString)
+              )
           )
         )(
           _.items
@@ -809,46 +953,62 @@ final class DefaultRetriever(
       )
       pin.flatMap { resolved =>
         val pinnedScope = resolved.fold(scope)(scope.withPinnedProfile)
-        vectors.fetchChunks(chunkIds, pinnedScope, filter).map { chunks =>
-          val hits = chunks.zipWithIndex.map { case (chunk, index) =>
-            RetrievalHit(chunk, 1.0d, Map("fetch" -> 1.0d, "ordinal" -> index.toDouble))
+        vectors
+          .fetchChunks(chunkIds, pinnedScope, filter)
+          .flatMap { chunks =>
+            val valid =
+              chunks.length <= chunkIds.size && chunks.map(_.id).distinct.length == chunks.length && chunks
+                .forall(c =>
+                  chunkIds.contains(c.id) && filter.matches(c) && c.tenantId == pinnedScope.tenantId &&
+                    c.permissions.nonEmpty && c.permissions.subsetOf(pinnedScope.permissions) &&
+                    c.knowledgeSpaceId.getOrElse(KnowledgeSpaceId.Default) == pinnedScope.spaceId &&
+                    pinnedScope.pinnedProfileId.forall(id => c.profileId.contains(id))
+                )
+            ZIO
+              .fail(AgentError.RetrievalFailed("fetch output scope/identity violation"))
+              .unless(valid)
+              .as(chunks)
           }
-          val citations = hits.zipWithIndex.map { case (hit, index) =>
-            val origins = hit.chunk.lineage.fold(Chunk.empty[DocumentOrigin])(_.origins)
-            Citation(
-              s"cite-${index + 1}",
-              hit.chunk.sourceUri,
-              hit.chunk.displayText.take(500),
-              hit.score,
-              origins.map(_.pageNumber).distinct,
-              origins,
-              Some(hit.chunk.id)
-            )
-          }
-          RetrievalResult(
-            hits,
-            citations,
-            RetrievalEvidence(
-              if hits.isEmpty then RetrievalEvidenceStatus.NoAcceptedHits
-              else RetrievalEvidenceStatus.Supported,
-              candidateCount = hits.length,
-              acceptedCount = hits.length,
-              topAcceptedScore = hits.map(_.score).maxOption
-            ),
-            RetrievalDiagnostics(
-              profileId = pinnedScope.pinnedProfileId.map(_.value),
-              knowledgeSpaceId = Some(pinnedScope.spaceId.value),
-              selections = hits.map(hit =>
-                EvidenceSelection(
-                  hit.chunk.documentId,
-                  hit.chunk.id,
-                  hit.chunk.lineage.flatMap(_.seedChunkId).getOrElse(hit.chunk.id),
-                  EvidenceDecision.KeptSeed
+          .map { chunks =>
+            val hits = chunks.zipWithIndex.map { case (chunk, index) =>
+              RetrievalHit(chunk, 1.0d, Map("fetch" -> 1.0d, "ordinal" -> index.toDouble))
+            }
+            val citations = hits.zipWithIndex.map { case (hit, index) =>
+              val origins = hit.chunk.lineage.fold(Chunk.empty[DocumentOrigin])(_.origins)
+              Citation(
+                s"cite-${index + 1}",
+                hit.chunk.sourceUri,
+                ChunkContext.take(hit.chunk.displayText, 500),
+                hit.score,
+                origins.map(_.pageNumber).distinct,
+                origins,
+                Some(hit.chunk.id)
+              )
+            }
+            RetrievalResult(
+              hits,
+              citations,
+              RetrievalEvidence(
+                if hits.isEmpty then RetrievalEvidenceStatus.NoAcceptedHits
+                else RetrievalEvidenceStatus.Supported,
+                candidateCount = hits.length,
+                acceptedCount = hits.length,
+                topAcceptedScore = hits.map(_.score).maxOption
+              ),
+              RetrievalDiagnostics(
+                profileId = pinnedScope.pinnedProfileId.map(_.value),
+                knowledgeSpaceId = Some(pinnedScope.spaceId.value),
+                selections = hits.map(hit =>
+                  EvidenceSelection(
+                    hit.chunk.documentId,
+                    hit.chunk.id,
+                    hit.chunk.lineage.flatMap(_.seedChunkId).getOrElse(hit.chunk.id),
+                    EvidenceDecision.KeptSeed
+                  )
                 )
               )
             )
-          )
-        }
+          }
       }
 
   /** 在 Reranker 信任边界之后重新验证身份、授权、数量和数值。
@@ -868,6 +1028,8 @@ final class DefaultRetriever(
       candidateChunks.contains(hit.chunk) &&
       hit.chunk.tenantId == scope.tenantId &&
       hit.chunk.permissions.subsetOf(scope.permissions) &&
+      hit.chunk.knowledgeSpaceId.getOrElse(KnowledgeSpaceId.Default) == scope.spaceId &&
+      scope.pinnedProfileId.forall(id => hit.chunk.profileId.contains(id)) &&
       java.lang.Double.isFinite(hit.score) &&
       hit.signals.values.forall(java.lang.Double.isFinite)
     }
@@ -887,6 +1049,11 @@ final class DefaultRetriever(
       expanded.length <= maxAdditionalChunks && expandedKeys.distinct.length == expandedKeys.length &&
         expandedKeys.forall(key => !seedKeys.contains(key)) && expanded.forall { hit =>
           hit.chunk.tenantId == scope.tenantId && hit.chunk.permissions.subsetOf(scope.permissions) &&
+          seeds.exists(seed =>
+            seed.chunk.documentId == hit.chunk.documentId &&
+              seed.chunk.catalogVersion == hit.chunk.catalogVersion && seed.chunk.profileId == hit.chunk.profileId &&
+              seed.chunk.knowledgeSpaceId == hit.chunk.knowledgeSpaceId && seed.chunk.sourceRevisionId == hit.chunk.sourceRevisionId
+          ) &&
           java.lang.Double.isFinite(hit.score) && hit.signals.values.forall(java.lang.Double.isFinite)
         }
     if valid then ZIO.succeed(seeds ++ expanded)
@@ -900,8 +1067,7 @@ object DefaultRetriever:
   def relevanceScore(hit: RetrievalHit): Double =
     hit.signals.get("vectorScore").getOrElse {
       if hasLexicalSupport(hit) && hit.signals.contains("textScore") then hit.signals("textScore")
-      else if hasLexicalSupport(hit) then hit.score
-      else hit.score
+      else hit.signals.get("phraseScore").orElse(hit.signals.get("retrievalScore")).getOrElse(hit.score)
     }
 
   private def hasLexicalSupport(hit: RetrievalHit): Boolean =

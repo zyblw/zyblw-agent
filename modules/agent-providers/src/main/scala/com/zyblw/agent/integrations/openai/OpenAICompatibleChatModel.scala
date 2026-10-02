@@ -320,7 +320,13 @@ private[openai] object OpenAIWire:
           "response.usage"
         )
       )
-    yield ChatResponse(message, finishReason(choice.finish_reason), usage, decoded.id)
+    yield ChatResponse(
+      message,
+      finishReason(choice.finish_reason),
+      usage,
+      decoded.id,
+      usageReported = decoded.usage.nonEmpty
+    )
 
   /** Provider usage 必须是非负数；负 token 会绕过预算门禁，因此视为无效响应而不是自动归零。 */
   private def validatedUsage(
@@ -481,6 +487,7 @@ private[openai] object OpenAISse:
       reasoning: String = "",
       tools: Map[Int, PartialTool] = Map.empty,
       usage: TokenUsage = TokenUsage(),
+      usageReported: Boolean = false,
       finish: FinishReason = FinishReason.Other("streaming"),
       started: Boolean = false,
       completed: Boolean = false
@@ -540,7 +547,7 @@ private[openai] object OpenAISse:
             if state.started then Chunk.empty else Chunk(ModelStreamEvent.ResponseStarted(dto.id))
           val withId = state.copy(requestId = dto.id.orElse(state.requestId), started = true)
           validateUsage(dto.usage).flatMap { validUsage =>
-            val withUsage = validUsage.fold(withId)(usage => withId.copy(usage = usage))
+            val withUsage = validUsage.fold(withId)(usage => withId.copy(usage = usage, usageReported = true))
             dto.choices.headOption match
               case None =>
                 val usageEvents = validUsage
@@ -634,7 +641,13 @@ private[openai] object OpenAISse:
             if compatibility.preserveReasoningContent && state.reasoning.nonEmpty then
               base.copy(metadata = base.metadata.updated("reasoning_content", state.reasoning))
             else base
-          val response       = ChatResponse(message, state.finish, state.usage, state.requestId)
+          val response = ChatResponse(
+            message,
+            state.finish,
+            state.usage,
+            state.requestId,
+            usageReported = state.usageReported
+          )
           val completedTools = calls.map(ModelStreamEvent.ToolCallCompleted(_))
           state.copy(completed = true) -> (completedTools :+ ModelStreamEvent.Completed(response))
         }

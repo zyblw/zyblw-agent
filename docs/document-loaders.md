@@ -2,9 +2,9 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-24
+> 最后核验：2026-10-01
 >
-> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
 >
 > 事实来源：对应模块源码、测试与构建定义
@@ -42,8 +42,69 @@ HTTP Adapter。不需要文件摄取的业务不会被迫携带解析器或 HTTP
 
 `PaddleOcrVlDocument` 是框架中的纯解码器，接受 PaddleOCR-VL 页 JSON 和可选 Markdown：页码、块序、坐标以 JSON
 为准，Markdown 仅辅助恢复标题层级。解码时对页面缺失、块数与单块长度超限、标题超限明确报错；合法空白页保留页序。
+`Parsed.structure` 现在保留通用 `DocumentSection`；`Parsed.toSourceDocument(id, sourceUri, metadata)`
+可直接交给索引器。章节内容进入 structure hash，改变层级或页码会改变摄取身份。
+启用结构索引时，正文 Block 和 Chunk 必须完整映射到声明的章节；缺少可靠章节时明确报告不可用。
 业务负责原件、异步 OCR、人工审校、图像持久化与何时发布。框架的 `KnowledgeReindexService` 必须把摄取的失败结果
 传播为重建失败，不能把 Continue 策略下的失败写成成功。Qwen 重排响应有字节上限与完整 Body 超时，分数必须有限且在 `[0, 1]`，非法值不能截断后充当证据。
+
+### PaddleOCR 离线产物的可运行接入
+
+受限目录使用同名文件：
+
+```text
+data/books/医书.pdf          # 可选原件；存在时核验实际页数与 SHA-256
+data/books/医书.paddle.json  # 必需，原始 PaddleOCR 页 JSON 或 layout-parsing 响应
+data/books/医书.md           # 可选，标题层级辅助
+```
+
+目录只为这一组输出一份 `DocumentInput`；PDF 和 Markdown 不再重复摄入。
+稳定 ID 使用逻辑 PDF 路径，所以从数字 PDF 切换到 Paddle 产物保持同一书目。
+JSON 决定原文、页码、阅读顺序和 bbox；Markdown 只校正能与 JSON 对应的标题。
+`page_index` 从 0 起转换为 1 起；数值 `block_id` 保留，HTML table 的行、列、rowspan/colspan 展开为 Markdown。
+缺页、重复/乱序页、与原件页数不符、非法 UTF-8、符号链接 sidecar、超限产物均拒绝；合法空白页保留。
+JSON 可识别格式仍以上述纯解码器契约为准，不用宽松的任意 JSON 当作正文。
+
+手动上传通过 `PaddleOcrArtifact(json, markdown, pageCount, originalSha256)` 的 JSON 信封，
+MIME 为 `application/vnd.zyblw.paddleocr+json`，注册 `new PaddleOcrDocumentLoader`。
+信封中的 originalSha256 只是产物信息；权威原件身份必须由可信 Source 计算并传入
+`DocumentInput.sourceRevision` 或 `DocumentIngestionRequest.source`。目录 Source 在原件存在时自动完成。
+原件不存在时，身份如实退化为产物摘要，不声称校验过 PDF 或 OCR 内容准确性。
+
+`KnowledgeQaHost` 已注册 Paddle 与 Tika Loader，使用同一摄入/结构/检索管线。
+先配置既有 JDBC、ChatModel、1024 维 Embedding 与真实 `EMBEDDING_TOKENIZER`；再运行：
+
+```bash
+export ZYBLW_AGENT_BOOKS_DIR=data/books
+sbt -batch 'examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost migrate'
+sbt -batch 'examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost ingest'
+sbt -batch 'examples/runMain com.zyblw.agent.examples.knowledge.KnowledgeQaHost serve'
+```
+
+使用固定的 `ZYBLW_AGENT_BOOKS_DIR` 保证跨进程重建能回读同一目录；`all <dir>` 也把同一目录传给摄入和持久宿主。
+Host 以空 ingestionPrefix 启用已有完整谱系 HMAC：同产物重复导入复用索引，JSON/Markdown/原件/构建规格变化使用新身份。
+从已有 v3 切到 v4 必须按既有 Profile census、评测与 `activateProfile` CAS 发布；不自动跨越生产发布门禁。
+
+宿主默认 BookGrounded + 确定性导航摘要。按需配置：
+
+| 配置 | 实际行为 |
+| --- | --- |
+| `ZYBLW_AGENT_TREE_MODEL_ENABLED=1` | 启用模型导航器；Reasoned/BookDeep 或 Adaptive 比较类问题才调用 |
+| `ZYBLW_AGENT_STRUCTURE_SUMMARY_MODEL` | 指定精确摘要模型；为空使用 internal/rule-v1 |
+| `ZYBLW_AGENT_STRUCTURE_SUMMARY_PROVIDER` | 多端点路由时必须指定精确 Provider ID，摘要用 RunPinned 固定身份 |
+| `ZYBLW_AGENT_RERANK_MODEL`、`ZYBLW_AGENT_RERANK_API_KEY` | 配置 Qwen 原生重排；缺 model 保留融合顺序，配置 model 缺 key 则启动失败 |
+| `ZYBLW_AGENT_RERANK_BASE_URL` | 对应服务的原生 API 根路径；密钥与区域必须匹配 |
+
+查询可选 `recipe=Classic/BookFast/BookGrounded/BookDeep/LowLatency`，以及
+`strategy=Classic/Structural/Reasoned/Adaptive`。明确指定的检索模式和宿主 ACL 始终生效。
+LowLatency 跳过重排和扩展；模型导航失败会按策略降级并报告，不能用模型摘要冒充原文。
+只按明确书名/别名发现授权文档；目录扫描有 1000 manifest 上限，超限时保留全库检索，
+不把部分扫描结果误当完整书目。大语料应接入有索引的授权目录。
+跨书每份文档有独立原文搜索，所有目标在有界并发下完成，并共享本次查询的相同 query embedding；
+缓存最多 64 个不同 query batch，不跨租户、权限或独立查询存活。
+
+Paddle 产物总信封最多 20 MiB；目录 JSON/Markdown 读取另有字节上限，原件受目录 maxFileBytes 限制。
+图像描述和图注可进入原文块及页/bbox；图片二进制收存、远端 OCR 任务、人工审校仍由宿主负责，框架不自动抓取临时图片 URL。
 
 ## 2. DocumentInput 的契约
 
@@ -57,6 +118,7 @@ HTTP Adapter。不需要文件摄取的业务不会被迫携带解析器或 HTTP
 | `declaredMediaType` | 业务控制面声明的小写 MIME，不允许参数 |
 | `declaredLength` | 上游已知字节数；超限时 Loader 在打开正文流前拒绝 |
 | `metadata` | 可信业务元数据；文档内部 title/author 不能覆盖同名业务值 |
+| `sourceRevision` | 可信 Source 计算的可选原件修订；不能直接相信 OCR 信封中的摘要 |
 | `content` | 一次性、可取消且有背压的 `ZStream[Any, RetrievalError, Byte]` |
 
 背压控制读取速率，不等于限制总字节数。每个 Loader 仍必须读取 `max + 1` 个字节来判断越界，绝不能把截断 PDF/EPUB
@@ -198,7 +260,7 @@ val chunker = DocumentStructureChunker(
 
 `DocumentStructureChunker` 默认使用 `maxTokens=512` 与 `TokenCounter.Cl100k` 装箱，`maxCharacters` 是 Unicode
 硬上限；counter 与预算都会进入 `strategyId`。显式改用 `TokenCounter.CjkApproximate` 或其他 counter 属于新的索引策略，
-必须新建索引版本。没有结构时降级的 `MarkdownStructureChunker` 仍按 Unicode code point 字符预算。
+必须通过完整 Profile 重建与已有评测/CAS 切换协议发布。`DocumentStructureChunker` 的 Markdown fallback 也再经过同一真实 token 和字符上限，不能用 fallback 绕开声明的 tokenizer。独立使用 `MarkdownStructureChunker` 仍只有字符预算。
 
 它直接基于 `DocumentBlock` 工作：合并相邻、同父节点、同标题路径的小 block，只在单个 block 超限时使用
 Unicode-safe overlap 切分。产出的 `ChunkLineage` 保留 `parentId/previousChunkId/nextChunkId/ordinal`、页码、bbox 和

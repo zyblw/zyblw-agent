@@ -14,6 +14,20 @@ object RetrievalContractSpec extends ZIOSpecDefault:
       ZIO.succeed(hits.take(limit))
 
   def spec = suite("Retrieval production contracts")(
+    test("citation excerpts never split a Unicode supplementary character") {
+      val body   = "a".repeat(499) + "𠀀" + "尾文"
+      val chunk  = DocumentChunk("unicode", "book", body, "book://unicode", TenantId("unicode"), Set("read"))
+      val bundle = ContextAssembler.assemble(
+        Chunk(RetrievalHit(chunk, 1.0)),
+        Chunk.empty,
+        RetrievalEvidence(RetrievalEvidenceStatus.Supported, 1, 1),
+        CandidateBudgets()
+      )
+      assertTrue(
+        bundle.citations.head.excerpt == "a".repeat(499) + "𠀀",
+        bundle.citations.head.excerpt.codePointCount(0, bundle.citations.head.excerpt.length) == 500
+      )
+    },
     test("explicit modes survive short query planning; phrase receives original text") {
       for
         calls <- Ref.make(Chunk.empty[(RetrievalMode, String)])

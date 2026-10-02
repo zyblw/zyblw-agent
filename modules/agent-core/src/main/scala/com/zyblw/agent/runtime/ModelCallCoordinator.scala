@@ -23,7 +23,7 @@ final private[agent] class ModelCallCoordinator(
 
   /** 持久化 Intent，再按 CapturePolicy 重建请求并调用 Provider。
     *
-    * `Disabled` 下没有账本可写，保持即时调用；但一旦启用了路由，必须至少升级到 `MetadataOnly`——否则无法解释一次回答 来自哪个候选模型。
+    * `Disabled` 在无路由且无费用上限时保持即时调用；否则至少升级到 `MetadataOnly`，以冻结路由或检查未知费用，正文仍不采集。
     */
   def invoke(
       state: AgentState,
@@ -32,17 +32,19 @@ final private[agent] class ModelCallCoordinator(
       routing: ModelRouterGateway.Routing,
       provider: String,
       modelName: String,
-      startedAt: Long
+      startedAt: Long,
+      prices: ModelPriceBook
   ): IO[AgentError, Dispatched] =
     val effectiveCapture =
-      if routing.routed && capturePolicy == CapturePolicy.Disabled then CapturePolicy.MetadataOnly
+      if (routing.routed || state.budget.limits.maxEstimatedCost.nonEmpty) && capturePolicy == CapturePolicy.Disabled
+      then CapturePolicy.MetadataOnly
       else capturePolicy
     effectiveCapture match
       case CapturePolicy.Disabled =>
         publisher.emit(AgentEvent.ModelCallStarted(state.runId, provider, modelName, startedAt)) *>
           stream(state, routing.request, routing.adapter).map(Dispatched(state, _, None))
       case policy =>
-        persistThenInvoke(state, agent, prepared, routing, provider, modelName, startedAt, policy)
+        persistThenInvoke(state, agent, prepared, routing, provider, modelName, startedAt, policy, prices)
 
   /** 恢复时找出仍未结算的模型账本；`pendingModelCall` 优先，其次扫描账本。
     *
@@ -147,7 +149,8 @@ final private[agent] class ModelCallCoordinator(
       provider: String,
       modelName: String,
       startedAt: Long,
-      policy: CapturePolicy
+      policy: CapturePolicy,
+      prices: ModelPriceBook
   ): IO[AgentError, Dispatched] =
     val request = routing.request
     for
@@ -172,7 +175,10 @@ final private[agent] class ModelCallCoordinator(
         canonicalRequest =
           Option.when(policy == CapturePolicy.Replayable)(CanonicalModelRequest.from(request)),
         updatedAtEpochMilli = now,
-        routeDecision = routing.decision
+        routeDecision = routing.decision,
+        priceSnapshot = prices.price(provider, modelName),
+        priceBookFingerprint = Some(prices.fingerprint),
+        usageReporting = routing.capabilities.usageReporting
       )
       // 路由请求在 Intent 阶段预留一次模型调用；结算时先抵消再写入真实 usage。
       dispatchedUsage =

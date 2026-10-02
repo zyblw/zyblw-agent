@@ -1,10 +1,12 @@
 # Provider 与能力矩阵
 
+`ModelCapabilities.usageReporting` 表示支持报告，`ChatResponse.usageReported` 表示本次确实报告。内建非流式和 SSE 适配器区分真实零与缺失用量；缺失时模型账本 usage 为 None。自定义适配器返回缺失或不完整用量时必须设置 usageReported=false，业务不能按免费处理。缓存读写、推理计数属于输入/输出子集，不能重复相加。
+
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-10-01（补充响应用量完整性与确定性协议验证）
 >
-> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
 >
 > 事实来源：对应模块源码、测试与构建定义

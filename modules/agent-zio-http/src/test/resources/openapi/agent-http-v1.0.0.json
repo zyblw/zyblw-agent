@@ -2,7 +2,7 @@
   "openapi" : "3.1.0",
   "info" : {
     "title" : "zyblw-agent API",
-    "version" : "1.2.0"
+    "version" : "1.0.0"
   },
   "paths" : {
     "/api/v1/agents/{agentId}/runs" : {
@@ -1356,6 +1356,14 @@
       "KnowledgeSearchBody" : {
         "type" : "object",
         "properties" : {
+          "recipe" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
           "query" : {
             "type" : "string"
           },
@@ -1375,6 +1383,14 @@
             },
             "description" : "If not set, this field defaults to the value of the default annotation.",
             "default" : {}
+          },
+          "strategy" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
           },
           "mode" : {
             "type" : [
@@ -1427,14 +1443,38 @@
       "KnowledgeSearchResponse" : {
         "type" : "object",
         "properties" : {
+          "recipe" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "degradedStages" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string"
+            },
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : []
+          },
+          "strategy" : {
+            "type" : [
+              "string",
+              "null"
+            ],
+            "description" : "If not set, this field defaults to the value of the default annotation.",
+            "default" : null
+          },
+          "evidence" : {
+            "$ref" : "#/components/schemas/RetrievalEvidenceView"
+          },
           "citations" : {
             "type" : "array",
             "items" : {
               "$ref" : "#/components/schemas/CitationView"
             }
-          },
-          "evidence" : {
-            "$ref" : "#/components/schemas/RetrievalEvidenceView"
           }
         },
         "required" : [

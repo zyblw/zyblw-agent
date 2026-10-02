@@ -85,8 +85,23 @@ final case class RetrievalDiagnostics(
     knowledgeSpaceId: Option[String] = None,
     degradedStages: Chunk[String] = Chunk.empty,
     selections: Chunk[EvidenceSelection] = Chunk.empty,
-    maxEvidenceTokens: Long = 0L
-)
+    maxEvidenceTokens: Long = 0L,
+    structureSelections: Chunk[StructureSelection] = Chunk.empty,
+    recipe: Option[String] = None,
+    strategy: Option[String] = None
+):
+  def summary: String =
+    val parts = List(
+      recipe.map(r => s"recipe=$r"),
+      strategy.map(s => s"strategy=$s"),
+      profileId.map(p => s"profile=$p"),
+      Option.when(degradedStages.nonEmpty)(s"degraded=[${degradedStages.mkString(",")}]"),
+      Option.when(structureSelections.nonEmpty)(
+        s"structuralNodes=${structureSelections.map(_.nodeId).distinct.mkString(",")}"
+      ),
+      Some(s"evidenceTokens<=$maxEvidenceTokens")
+    ).flatten
+    parts.mkString("; ")
 
 final case class EvidenceBundle(
     items: Chunk[EvidenceItem],
@@ -95,7 +110,10 @@ final case class EvidenceBundle(
     profileId: Option[IndexProfileId] = None,
     knowledgeSpaceId: Option[KnowledgeSpaceId] = None,
     degradedStages: Chunk[String] = Chunk.empty,
-    budgets: CandidateBudgets = CandidateBudgets()
+    budgets: CandidateBudgets = CandidateBudgets(),
+    structureSelections: Chunk[StructureSelection] = Chunk.empty,
+    recipe: Option[String] = None,
+    strategy: Option[String] = None
 ):
   def toRetrievalResult: RetrievalResult =
     val kept = items.filter(item =>
@@ -112,7 +130,10 @@ final case class EvidenceBundle(
         items.map(item =>
           EvidenceSelection(item.chunk.documentId, item.chunk.id, item.seedChunkId, item.decision)
         ),
-        budgets.maxEvidenceTokens
+        budgets.maxEvidenceTokens,
+        structureSelections,
+        recipe,
+        strategy
       )
     )
 
@@ -172,7 +193,7 @@ object ContextAssembler:
       Citation(
         id = s"cite-${index + 1}",
         sourceUri = item.chunk.sourceUri,
-        excerpt = item.displayText.take(500),
+        excerpt = ChunkContext.take(item.displayText, 500),
         score = item.score,
         pageNumbers = origins.map(_.pageNumber).distinct,
         origins = origins,

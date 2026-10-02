@@ -1,8 +1,12 @@
 # PostgreSQL 自动迁移、结构校验与知识库基线
 
 > 状态：0.9.0 单文件全新基线
-> 最后核验：2026-09-17
+> 最后核验：2026-10-01
 > 事实来源：`AgentPostgresMigrations.scala`、migration resource、PostgreSQL 18 集成测试
+
+## 首版结构检索基线
+
+全部当前知识能力合入 `V001__agent_knowledge_0_9_baseline.sql`，不保留未发布的 V002。`agent_knowledge_structures` 以 tenant/space/profile/document/version 复合外键引用原 manifest，并随 retention 删除级联清理。结构产物最多 16 MiB，启动探针检查表、字段和注释。知识共八张表，空库应用 V001 与 R__；重复启动不重复执行。
 
 ## 默认模型
 
@@ -65,10 +69,10 @@ heading/page/bbox/block lineage；`R__agent_knowledge_1024_comments.sql` 幂等�
 迁移完成后框架还会检查：
 
 - 核心 32 张权威表是否存在于当前 schema，避免临时表或其他 schema 的同名对象蒙混通过；
-- 知识库七张 Space/Profile/census/chunk/audit/withdrawn 权威表是否确实位于 `zyblw_agent_knowledge`，且 `parent/ordinal/previous/next/heading/page/origin/block` 列完整；
+- 知识库八张 Space/Profile/census/chunk/audit/withdrawn 权威表是否确实位于 `zyblw_agent_knowledge`，且 `parent/ordinal/previous/next/heading/page/origin/block` 列完整；
 - `vector` 扩展是否位于 `public` 且版本至少为 0.8.0；
 - staging/active 两张表的 embedding 是否真实为 `vector(1024)`。
-- 七张知识表与所有业务字段是否拥有非空、非泛化的中文数据字典说明。
+- 八张知识表与所有业务字段是否拥有非空、非泛化的中文数据字典说明。
 - 核心 32 张权威表的全部字段是否同样拥有专属中文说明（由 `R__zyblw_agent_schema_comments.sql` 每次覆盖写入）。
 
 Flyway checksum 负责发现已执行脚本被修改；结构探针负责发现 history 仍在但关键表/列被人工删除。这不是通用 schema diff，生产仍应禁止手工 DDL并监控

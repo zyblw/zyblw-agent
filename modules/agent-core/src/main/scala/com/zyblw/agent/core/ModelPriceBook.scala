@@ -3,6 +3,23 @@ package com.zyblw.agent.core
 import com.zyblw.agent.composition.CanonicalDigest
 import zio.json.*
 
+/** Frozen external/contract price and foreign-exchange evidence. */
+final case class ModelPriceProvenance(
+    quoteId: String,
+    source: String,
+    sourceModel: String,
+    sourceUri: String,
+    nativeCurrency: String,
+    nativeInputPerMillion: String,
+    nativeOutputPerMillion: String,
+    nativeCachedPerMillion: Option[String],
+    nativeWritePerMillion: Option[String],
+    fxToCny: String,
+    fxDate: String,
+    fxSourceUri: String,
+    observedAt: String
+) derives JsonCodec
+
 /** 单个 Provider+Model 的单价,按每百万 token 计。
   *
   * 用每百万 token 而不是每 token,是因为主流厂商都以这个粒度公布价格,直接照抄能避免运维在录入时自己做一次除法; 用 `BigDecimal` 而不是 `Double`,是因为这个数会累加进
@@ -24,7 +41,8 @@ final case class ModelPrice(
     outputPerMillionTokens: BigDecimal,
     cachedInputPerMillionTokens: Option[BigDecimal] = None,
     currency: String = "USD",
-    cacheWriteInputPerMillionTokens: Option[BigDecimal] = None
+    cacheWriteInputPerMillionTokens: Option[BigDecimal] = None,
+    provenance: Option[ModelPriceProvenance] = None
 ) derives JsonCodec:
   require(inputPerMillionTokens >= 0, "输入单价不能为负数")
   require(outputPerMillionTokens >= 0, "输出单价不能为负数")

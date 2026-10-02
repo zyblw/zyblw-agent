@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-10-01
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -58,25 +58,34 @@ Schema 不再等于外部 wire Schema。首次公开版本不再为这个很小�
 
 ## 结构化 RAG 数据路径
 
+未发布开发能力：[ADR-0030](architecture/0030-structural-retrieval.md) 加入独立结构快照、Value Search、有界 Reasoned 导航/摘要，以及同一证据出口的跨书协调。
+Canonical Section 与 Block 保留原书身份；结构候选必须重新检索原文，再进入下图既有重排/证据出口。
+首版知识 V001 包含不可变结构表；关闭结构配置仍执行经典路径。
+
 ```mermaid
 flowchart LR
-  Source["PDF / Markdown / 受控目录"] --> Loader["DocumentLoader / Docling Adapter"]
-  Loader --> Document["SourceDocument + blocks/page/bbox"]
+  Source["PDF / Paddle JSON + Markdown / 受控目录"] --> Loader["DocumentLoader / Paddle / Docling"]
+  Loader --> Document["SourceDocument + sections/blocks/page/bbox"]
   Document --> Chunker["DocumentStructureChunker / Markdown fallback"]
   Chunker --> Chunks["DocumentChunk + parent/neighbor lineage"]
+  Chunks --> Structure["不可变 StructureSnapshot + 导航摘要"]
+  Structure --> Knowledge
   Chunks -->   Embed["GovernedEmbeddingModel"]
   Embed --> Staging["Profile census / chunks"]
   Staging --> Active["CAS activeProfileId"]
   Active --> Knowledge[("zyblw_agent_knowledge schema")]
   Query["RetrievalScope + query"] --> Hybrid["ACL-first vector + FTS + RRF"]
   Knowledge --> Hybrid
+  Hybrid --> Node["Value Search / bounded Reasoned → 节点内原文"]
+  Knowledge --> Node
+  Node --> Rerank
   Hybrid --> Rerank["可选 Reranker"]
   Rerank --> Expand["ACL-first parent/neighbor expansion"]
   Expand --> Citation["bounded context + page/bbox citation"]
 ```
 
 原始 PDF/完整 Markdown 属于宿主对象存储；知识表只保存稳定 URI、hash、可回答 chunk、向量、ACL 与可追溯谱系。核心表和知识表使用同一
-`DataSource` 时仍有独立 Flyway 生命周期：核心 0.9 V001 管理宿主默认 schema，1024 维知识 0.9 V001 固定管理 `zyblw_agent_knowledge`，运行时 SQL 不依赖
+`DataSource` 时仍有独立 Flyway 生命周期：核心 0.9 V001 管理宿主默认 schema，1024 维知识 V001 固定管理 `zyblw_agent_knowledge`，运行时 SQL 不依赖
 `search_path`。OCR、LLM、Embedding 和对象存储调用全部在数据库事务之外完成。
 
 下图是当前已经落地的主路径。HTTP、CLI 与恢复 worker 都调用同一个 `AgentRuntime`；纯 `AgentKernel` 只归约决定和状态，

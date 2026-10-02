@@ -284,7 +284,7 @@ private[openai] object OpenAIResponsesWire:
             )
           )
       reason = finishReason(dto.status, dto.incomplete_details.flatMap(_.reason), calls.nonEmpty)
-    yield ChatResponse(message, reason, usage, dto.id)
+    yield ChatResponse(message, reason, usage, dto.id, usageReported = dto.usage.nonEmpty)
 
   /** 把一条框架消息扩展为零到多个 Responses input item。 */
   private def encodeMessage(message: AgentMessage): Either[AgentError, Chunk[Json]] = message.role match

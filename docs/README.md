@@ -109,6 +109,8 @@
 
 ## 知识与上下文
 
+- [结构检索与 PageIndex 思想吸收：ADR-0030](architecture/0030-structural-retrieval.md)（未发布 Experimental；实现范围、接入与后续门禁）
+
 - [RAG / Knowledge Retrieval Runtime 目标架构与实施规范](architecture/rag-runtime-target.md)（0.9 基线已实现；后续阶段仍按门禁）
 - [指令、Context 与成本工程](instruction-context-cost.md)
 - [Prompt Runtime、Context Authority 与 Cache](prompt-runtime.md)

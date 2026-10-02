@@ -49,7 +49,7 @@
 10. 每个 super-step 先批量落 `Prepared`，所有账本结果齐备后再用一次 CAS 提交工具消息、步骤、用量和游标。
 11. 主模型调用在 Provider 之前把 Intent 写入 `model_call_executions`（与状态同一 `commit`）。TX1 之后崩溃记为
     `Unknown`，不会自动重放以免重复计费。Settlement 已提交但尚未 `Completed` 时，恢复会收口而不是再调模型。
-    生产 `CapturePolicy` 默认 `MetadataOnly`；`Replayable` 才保存可重建请求；`Disabled` 不写账本。
+    生产 `CapturePolicy` 默认 `MetadataOnly`；`Replayable` 才保存可重建请求；`Disabled` 在无路由且无费用上限时不写账本；路由或费用上限要求最小 MetadataOnly 事实，不保存正文。
 12. 分布式 Worker 通过 `LeaseAwareAgentRuntime.executeLeased` 执行 Start/Recover/ResumeApproval/Cancel/Retry；FiberRef 会把完整
     commandId/token/generation 凭证传播到所有状态提交。
 13. 状态、JSON 事件和耐久 SSE 在返回数据前统一执行 `RunAuthorization.read`，防止只凭 runId 跨租户读取。

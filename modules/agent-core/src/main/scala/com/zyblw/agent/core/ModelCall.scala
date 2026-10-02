@@ -8,7 +8,7 @@ import zio.json.*
 /** 主模型请求进入耐久账本时保存多少正文。
   *
   * 生产默认 [[MetadataOnly]]：只保存指纹、计数与模型标识。[[Replayable]] 额外保存可重建的
-  * `CanonicalModelRequest`，仅用于评测、排障授权和确定性测试。未启用路由时 [[Disabled]] 不写账本；启用路由时保留 MetadataOnly 执行事实。
+  * `CanonicalModelRequest`，仅用于评测、排障授权和确定性测试。未启用路由且无费用上限时 [[Disabled]] 不写账本；否则保留 MetadataOnly 执行事实。
   */
 enum CapturePolicy derives JsonCodec:
   case Disabled, MetadataOnly, Replayable
@@ -97,8 +97,11 @@ final case class ModelCallExecutionRecord(
     finishReason: Option[FinishReason] = None,
     errorCategory: Option[String] = None,
     updatedAtEpochMilli: Long,
-    /** 旧 JSON 缺省为 None；关闭正文采集不影响已启用路由的最小账本。 */
-    routeDecision: Option[com.zyblw.agent.model.RouteDecision] = None
+    /** 可选的路由决定；直连调用也保存模型身份与价格快照。 */
+    routeDecision: Option[com.zyblw.agent.model.RouteDecision] = None,
+    priceSnapshot: Option[ModelPrice] = None,
+    priceBookFingerprint: Option[String] = None,
+    usageReporting: Boolean = false
 ) derives JsonCodec:
   def toChatRequest: Either[String, ChatRequest] =
     for
