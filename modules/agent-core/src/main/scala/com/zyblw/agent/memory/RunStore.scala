@@ -763,7 +763,10 @@ object RunStore:
       existing.model == expected.model &&
       existing.fingerprint == expected.fingerprint &&
       existing.capturePolicy == expected.capturePolicy &&
-      existing.routeDecision == expected.routeDecision
+      existing.routeDecision == expected.routeDecision &&
+      existing.priceSnapshot == expected.priceSnapshot &&
+      existing.priceBookFingerprint == expected.priceBookFingerprint &&
+      existing.usageReporting == expected.usageReporting
 
   private def mergeEvents(
       all: Map[RunId, Vector[PersistedAgentEvent]],

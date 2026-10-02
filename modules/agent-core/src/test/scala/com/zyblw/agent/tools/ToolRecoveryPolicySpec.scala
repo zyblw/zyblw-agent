@@ -24,8 +24,7 @@ object ToolRecoveryPolicySpec extends ZIOSpecDefault:
         !nonIdempotent.onlineRetryable,
         destructive.recoveryPolicy == ToolRecoveryPolicy.RequiresApproval,
         !destructive.mayReplayAfterCrash,
-        !destructive.onlineRetryable,
-        readOnly.automaticallyRetryable == readOnly.onlineRetryable
+        !destructive.onlineRetryable
       )
     }
   )

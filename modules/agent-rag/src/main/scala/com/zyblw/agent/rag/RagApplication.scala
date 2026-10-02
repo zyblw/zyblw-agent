@@ -29,7 +29,9 @@ final case class RagQuery(
     scope: RetrievalScope,
     limit: Option[Int] = None,
     mode: RetrievalMode = RetrievalMode.Hybrid,
-    filter: RetrievalFilter = RetrievalFilter.empty
+    filter: RetrievalFilter = RetrievalFilter.empty,
+    recipe: Option[RetrievalRecipe] = None,
+    strategy: Option[RetrievalStrategy] = None
 )
 
 /** 统一知识摄取和查询的业务门面。
@@ -45,12 +47,20 @@ final class RagApplication(
       *
       * 用 `Option` 而不是给一个静态默认解析器，是为了让"未接入管理面"与"接入后覆盖恰好等于默认值"在代码里 可区分：前者不该受管理台影响，后者应该。
       */
-    policies: Option[RetrievalPolicySource] = None
+    policies: Option[RetrievalPolicySource] = None,
+    catalog: Option[KnowledgeIndexDirectory] = None
 ):
 
   /** 单文档摄取，保留已配置的 FailFast/Continue 语义。 */
   def ingestOne(request: DocumentIngestionRequest): IO[RetrievalError, DocumentIngestionOutcome] =
     ingestion.ingestOne(request)
+
+  /** 多路业务查询共享一次 Profile 快照与短期 Embedding 缓存；调用方必须复用返回的 scope。 */
+  def querySession(scope: RetrievalScope): IO[RetrievalError, (RagApplication, RetrievalScope)] =
+    for
+      pinned  <- retriever.pinScope(scope)
+      session <- retriever.querySession
+    yield (RagApplication(ingestion, session, config, policies, catalog), pinned)
 
   /** 有背压、有界并发的批量摄取。 */
   def ingest(
@@ -71,7 +81,7 @@ final class RagApplication(
           input,
           tenantId,
           permissions,
-          s"$ingestionPrefix-${input.id.take(80)}-$index",
+          if ingestionPrefix.trim.isEmpty then "" else s"$ingestionPrefix-${input.id.take(80)}-$index",
           ActiveVersionExpectation.AnyVersion
         )
       }
@@ -95,7 +105,30 @@ final class RagApplication(
       )
     else if limit <= 0 || limit > config.maxTopK then
       ZIO.fail(AgentError.RetrievalFailed(s"RAG topK 必须位于 1..${config.maxTopK}"))
-    else retriever.retrieve(RetrievalRequest(normalized, query.scope, limit, query.mode, query.filter))
+    else
+      val request = RetrievalRequest(
+        normalized,
+        query.scope,
+        limit,
+        query.mode,
+        query.filter,
+        query.recipe,
+        query.strategy
+      )
+      if query.filter.documentIds.size == 1 && catalog.isEmpty then retriever.retrieve(request)
+      else if query.filter.documentIds.nonEmpty then
+        CrossDocumentCoordinator.coordinate(retriever, request, query.filter.documentIds)
+      else
+        catalog match
+          case None            => retriever.retrieve(request)
+          case Some(directory) =>
+            retriever.pinScope(query.scope).flatMap { scope =>
+              val pinnedRequest = request.copy(scope = scope)
+              AuthorizedDocumentDiscovery.discover(normalized, directory, scope).flatMap { ids =>
+                if ids.nonEmpty then CrossDocumentCoordinator.coordinate(retriever, pinnedRequest, ids)
+                else retriever.retrieve(pinnedRequest)
+              }
+            }
 
   /** 按 chunkId 精确再识别；授权仍由 Retriever / VectorStore 在读取时复核。 */
   def fetch(chunkIds: Set[String], scope: RetrievalScope): IO[RetrievalError, RetrievalResult] =

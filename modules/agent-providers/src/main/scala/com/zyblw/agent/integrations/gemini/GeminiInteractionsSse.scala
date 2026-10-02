@@ -216,7 +216,17 @@ private[gemini] object GeminiInteractionsSse:
           if orderedCalls.nonEmpty || status == "requires_action" then FinishReason.ToolCalls
           else FinishReason.Stop,
           usage,
-          responseId
+          responseId,
+          usageReported = usageJson.exists(u =>
+            GeminiInteractionsWire
+              .longField(u, "total_input_tokens")
+              .orElse(GeminiInteractionsWire.longField(u, "prompt_tokens"))
+              .nonEmpty &&
+              GeminiInteractionsWire
+                .longField(u, "total_output_tokens")
+                .orElse(GeminiInteractionsWire.longField(u, "completion_tokens"))
+                .nonEmpty
+          )
         )
         usageEvent = Option.when(usage.totalTokens > 0L)(ModelStreamEvent.UsageUpdated(usage))
       yield state.copy(

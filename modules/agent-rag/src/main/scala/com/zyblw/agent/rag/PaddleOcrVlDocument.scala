@@ -59,12 +59,40 @@ object PaddleOcrVlDocument:
       sections: Chunk[Section],
       blocks: Chunk[DocumentBlock],
       figures: Chunk[PendingFigure] = Chunk.empty
-  )
+  ):
+    /** 保留解析器已经恢复的真实章节，避免业务重新从标题猜父子关系。 */
+    def structure: DocumentStructure = DocumentStructure(
+      Method,
+      Some("1"),
+      blocks,
+      sections.map(s =>
+        DocumentSection(s.id, s.parentId, s.ordinal, s.level, s.title, s.pageStart, s.pageEnd)
+      )
+    )
 
-  def decode(jsonText: String, markdown: Option[String] = None): Either[String, Parsed] =
+    /** 原件身份与 metadata 只能由宿主传入；图片持久化仍由宿主管理。 */
+    def toSourceDocument(
+        id: String,
+        sourceUri: String,
+        metadata: Map[String, String] = Map.empty
+    ): SourceDocument =
+      SourceDocument(
+        id,
+        blocks.sortBy(_.ordinal).map(_.text).mkString("\n\n"),
+        sourceUri,
+        metadata + ("loaderId" -> Method),
+        structure = Some(structure)
+      )
+
+  def decode(
+      jsonText: String,
+      markdown: Option[String] = None,
+      expectedPageCount: Option[Int] = None
+  ): Either[String, Parsed] =
     val json    = Option(jsonText).map(_.stripPrefix("\uFEFF").trim).getOrElse("")
     val outline = markdown.map(_.stripPrefix("\uFEFF")).filter(_.trim.nonEmpty)
-    if json.isEmpty then Left("需要 PaddleOCR 的 JSON 结果")
+    if expectedPageCount.exists(_ <= 0) then Left("原件页数必须为正数")
+    else if json.isEmpty then Left("需要 PaddleOCR 的 JSON 结果")
     else if json.length > MaxJsonChars then Left("JSON 超过可导入大小")
     else if outline.exists(_.length > MaxMarkdownChars) then Left("Markdown 超过可导入大小")
     else
@@ -76,13 +104,23 @@ object PaddleOcrVlDocument:
           val pages = extractPages(root)
           if pages.isEmpty then Left("JSON 里没有可识别的 PaddleOCR 页面")
           else if declaredPageCount(root).exists(_ != pages.length) then Left("PaddleOCR 页面未完整识别，拒绝导入不完整文档")
+          else if pages.map(_.number).distinct.length != pages.length || pages.map(
+              _.number
+            ) != (1 to pages.length).toVector
+          then Left("PaddleOCR 页码重复或乱序")
+          else if (expectedPageCount.toVector ++ intField(
+              unwrap(root),
+              "page_count"
+            ).toVector ++ pagesDeclaredTotal(root))
+              .exists(n => n != pages.length || pages.map(_.number) != (1 to n).toVector)
+          then Left("PaddleOCR 页码缺失或原件页数不匹配")
           else if pages.iterator.flatMap(_.blocks).count(raw => !NoiseLabels.contains(raw.label)) > MaxBlocks
           then Left(s"PaddleOCR 正文块超过上限 $MaxBlocks")
           else if pages.iterator
               .flatMap(_.blocks)
               .exists(raw => !NoiseLabels.contains(raw.label) && raw.text.length > MaxText)
           then Left(s"PaddleOCR 单块正文超过上限 $MaxText")
-          else Right(assemble(pages, outline))
+          else Try(assemble(pages, outline)).toEither.left.map(_ => "PaddleOCR 结构或表格无效")
         }
         .flatMap { parsed =>
           if parsed.sections.isEmpty && parsed.blocks.isEmpty then Left("没有可导入的正文")
@@ -339,13 +377,20 @@ object PaddleOcrVlDocument:
       val block = blocks(index)
       if block.label == "image" || block.label == "chart" then
         val caption = blocks.lift(index + 1).filter(_.label == "figure_title")
-        val text    = caption.map(item => plainText(item.text)).filter(_.nonEmpty).getOrElse("插图")
+        val text    = caption
+          .map(item => plainText(item.text))
+          .filter(_.nonEmpty)
+          .orElse(Option.when(!ImageOnly.matches(block.text))(plainText(block.text)).filter(_.nonEmpty))
+          .getOrElse("插图")
         result += block.copy(
           label = "image",
           text = text,
           sourceUrl = block.sourceUrl.orElse(httpsUrl(Some(imageSrc(block.text))))
         )
         index += (if caption.isDefined then 2 else 1)
+      else if block.label == "table" && looksHtml(block.text) then
+        result += block.copy(text = htmlTable(block.text))
+        index += 1
       else if looksHtml(block.text) then
         result += block.copy(text = plainText(block.text))
         index += 1
@@ -353,6 +398,60 @@ object PaddleOcrVlDocument:
         result += block
         index += 1
     result.result()
+
+  /** JDK HTML parser: preserve table rows and expand row/column spans; never fetch external resources. */
+  private def htmlTable(html: String): String =
+    import javax.swing.text.MutableAttributeSet
+    import javax.swing.text.html.{HTML, HTMLEditorKit}
+    import javax.swing.text.html.parser.ParserDelegator
+    val cells  = scala.collection.mutable.Map.empty[(Int, Int), String]
+    var row    = -1
+    var column = 0
+    var depth  = 0
+    var cell   = Option.empty[(Int, Int)]
+    val text   = new StringBuilder
+    def span(attrs: MutableAttributeSet, name: HTML.Attribute): Int =
+      val n = Option(attrs.getAttribute(name)).flatMap(_.toString.toIntOption).getOrElse(1)
+      require(n > 0 && n <= 100, "table span limit")
+      n
+    val callback = new HTMLEditorKit.ParserCallback:
+      override def handleStartTag(tag: HTML.Tag, attrs: MutableAttributeSet, pos: Int): Unit =
+        if tag == HTML.Tag.TABLE then
+          depth += 1
+          require(depth == 1, "nested tables unsupported")
+        else if tag == HTML.Tag.TR then
+          row += 1
+          column = 0
+          require(row < 2000, "table row limit")
+        else if tag == HTML.Tag.TD || tag == HTML.Tag.TH then
+          require(row >= 0, "table row missing")
+          while cells.contains(row -> column) do column += 1
+          val rs = span(attrs, HTML.Attribute.ROWSPAN)
+          val cs = span(attrs, HTML.Attribute.COLSPAN)
+          require(column + cs <= 256 && (row + rs) * (column + cs) <= 200000, "table cell limit")
+          cell = Some(rs -> cs)
+          text.clear()
+      override def handleText(data: Array[Char], pos: Int): Unit =
+        if cell.nonEmpty then { text.append(new String(data)).append(' '); () }
+      override def handleEndTag(tag: HTML.Tag, pos: Int): Unit =
+        if tag == HTML.Tag.TD || tag == HTML.Tag.TH then
+          cell.foreach { case (rs, cs) =>
+            val value = text.toString.trim.replace("|", "\\|").replaceAll("\\s+", " ")
+            for r <- row until row + rs; c <- column until column + cs do
+              require(!cells.contains(r -> c), "overlapping table spans")
+              cells.update(r -> c, value)
+            column += cs
+          }
+          cell = None
+        else if tag == HTML.Tag.TABLE then depth -= 1
+    new ParserDelegator().parse(new java.io.StringReader(html), callback, true)
+    require(cells.nonEmpty && depth == 0, "empty or malformed table")
+    val rows                 = cells.keys.map(_._1).max + 1
+    val cols                 = cells.keys.map(_._2).max + 1
+    def line(r: Int): String =
+      (0 until cols).map(c => cells.getOrElse(r -> c, "")).mkString("| ", " | ", " |")
+    (Vector(line(0), Vector.fill(cols)("---").mkString("| ", " | ", " |")) ++ (1 until rows).map(line))
+      .mkString("\n")
 
   private val ImgSrc = """(?s)src\s*=\s*["']([^"']+)["']""".r
 
@@ -434,6 +533,18 @@ object PaddleOcrVlDocument:
           .getOrElse(Vector.empty)
       case _ => Vector.empty
 
+  private def pagesDeclaredTotal(root: Json): Chunk[Int] =
+    val value = unwrap(root)
+    val pages = value match
+      case Json.Arr(values) => values
+      case _                =>
+        arrayField(value, "layoutParsingResults")
+          .orElse(arrayField(value, "layout_parsing_results"))
+          .getOrElse(Chunk.empty)
+    pages.flatMap(p =>
+      intField(p, "page_count").orElse(field(p, "prunedResult").flatMap(intField(_, "page_count")))
+    )
+
   private def declaredPageCount(root: Json): Option[Int] =
     unwrap(root) match
       case Json.Arr(values) => Some(values.length)
@@ -448,7 +559,10 @@ object PaddleOcrVlDocument:
   private def unwrap(json: Json): Json =
     json match
       case obj: Json.Obj =>
-        field(obj, "result").collect { case nested: Json.Obj => nested }.getOrElse(obj)
+        field(obj, "result")
+          .orElse(field(obj, "res"))
+          .filter(value => value.isInstanceOf[Json.Obj] || value.isInstanceOf[Json.Arr])
+          .getOrElse(obj)
       case other => other
 
   private def looksLikeBaiduPages(pages: Chunk[Json]): Boolean =
@@ -467,7 +581,7 @@ object PaddleOcrVlDocument:
     else
       val number = intField(json, "page_index")
         .orElse(intField(pruned, "page_index"))
-        .map(normalizePageNumber(_, index))
+        .map(_ + 1)
         .getOrElse(index + 1)
       val width  = doubleField(json, "width").orElse(doubleField(pruned, "width")).filter(_ > 0)
       val height = doubleField(json, "height").orElse(doubleField(pruned, "height")).filter(_ > 0)
@@ -486,7 +600,9 @@ object PaddleOcrVlDocument:
                 stringField(block, "block_label").getOrElse("text"),
                 content,
                 box4(field(block, "block_bbox")),
-                stringField(block, "block_id").map(id => s"p$number-$id"),
+                stringField(block, "block_id")
+                  .orElse(intField(block, "block_id").map(_.toString))
+                  .map(id => s"p$number-$id"),
                 None,
                 httpsUrl(images.get(src).orElse(Option.when(src.startsWith("https://"))(src)))
               )
@@ -562,7 +678,7 @@ object PaddleOcrVlDocument:
 
   private def box4(json: Option[Json]): Option[(Double, Double, Double, Double)] =
     json.flatMap(numbers).collect {
-      case values if values.length >= 4 && values(2) >= values(0) =>
+      case values if values.length == 4 && values(2) >= values(0) && values(3) >= values(1) =>
         (values(0), values(1), values(2), values(3))
     }
 

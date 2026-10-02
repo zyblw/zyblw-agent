@@ -31,7 +31,9 @@ final case class DocumentInput(
     declaredMediaType: String,
     declaredLength: Option[Long],
     metadata: Map[String, String],
-    content: ZStream[Any, RetrievalError, Byte]
+    content: ZStream[Any, RetrievalError, Byte],
+    /** Optional original identity computed by the trusted Source adapter, never by an OCR payload. */
+    sourceRevision: Option[SourceRevision] = None
 ):
   require(id.trim.nonEmpty && id.length <= 500, "DocumentInput.id 长度必须位于 1..500")
   require(sourceUri.trim.nonEmpty && sourceUri.length <= 4000, "DocumentInput.sourceUri 长度必须位于 1..4000")
@@ -174,6 +176,11 @@ object DocumentLoaderRegistry:
     }
     val structureValid = document.structure.forall { structure =>
       structure.blocks.length <= policy.maxStructuredBlocks &&
+      structure.sections.length <= policy.maxStructuredBlocks &&
+      structure.sections.forall(section =>
+        section.id.length <= 1000 && section.parentId.forall(_.length <= 1000) &&
+          section.title.indexOf('\u0000') < 0
+      ) &&
       structure.blocks.foldLeft(0L)((total, block) =>
         total + block.origins.length
       ) <= policy.maxStructuredOrigins &&
@@ -294,7 +301,11 @@ final class DocumentIngestionService(
           request.expectation,
           request.knowledgeSpaceId,
           request.targetProfileId,
-          IngestionProvenance(request.source, digest.result, Some(request.input.declaredMediaType))
+          IngestionProvenance(
+            request.source.orElse(request.input.sourceRevision),
+            digest.result,
+            Some(request.input.declaredMediaType)
+          )
         )
       yield DocumentIngestionOutcome.Indexed(
         document.id,

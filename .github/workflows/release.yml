@@ -58,16 +58,6 @@ jobs:
           git fetch --no-tags origin main:refs/remotes/origin/main
           bash .github/scripts/verify-release.sh "$RELEASE_TAG" origin/main
 
-      - name: Validate release version
-        shell: bash
-        run: |
-          set -euo pipefail
-          release_version="${RELEASE_TAG#v}"
-          sbt --server --batch --supershell=false \
-            "set ThisBuild / version := \"$release_version\";" \
-            "set ThisBuild / versionPolicyIntention := sbtversionpolicy.Compatibility.None;" \
-            "versionCheck"
-
       - name: Verify process-death and database-restart recovery
         run: |
           timeout 10m ./integration-tests/command-worker-kill-recovery.sh --restart-postgres
@@ -127,13 +117,6 @@ jobs:
           'http/Test/runMain com.zyblw.agent.http.contract.OpenApiSnapshotCli
           ../../target/agent-http-openapi-current.json'
 
-      - name: Check stable OpenAPI compatibility
-        uses: oasdiff/oasdiff-action/breaking@v0.1.17
-        with:
-          base: modules/agent-zio-http/src/test/resources/openapi/agent-http-v1.2.0.json
-          revision: target/agent-http-openapi-current.json
-          fail-on: WARN
-          review: false
 
       - uses: actions/setup-node@v7
         with:

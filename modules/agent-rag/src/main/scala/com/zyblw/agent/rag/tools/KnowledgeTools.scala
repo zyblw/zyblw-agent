@@ -40,7 +40,9 @@ object KnowledgeTools:
       metadataEquals: Option[Map[String, String]] = None,
       limit: Option[Int] = None,
       tenantId: Option[String] = None,
-      permissions: Option[List[String]] = None
+      permissions: Option[List[String]] = None,
+      recipe: Option[String] = None,
+      strategy: Option[String] = None
   ) derives JsonCodec
 
   final case class FetchInput(
@@ -94,7 +96,9 @@ object KnowledgeTools:
       acceptedCount: Int,
       profileId: Option[String] = None,
       knowledgeSpaceId: Option[String] = None,
-      degradedStages: Chunk[String] = Chunk.empty
+      degradedStages: Chunk[String] = Chunk.empty,
+      recipe: Option[String] = None,
+      strategy: Option[String] = None
   ) derives JsonCodec
 
   def layer: ZLayer[RagApplication, AgentError, Chunk[RegisteredTool]] =
@@ -120,8 +124,16 @@ object KnowledgeTools:
         mode      <- parseMode(input.mode)
         hostScope <- hostScope(context, SearchName.value)
         filter    <- parseFilter(input, hostScope)
-        result    <- rag
-          .retrieve(RagQuery(input.query, scope, input.limit, mode, filter))
+        recipe    <- ZIO.foreach(input.recipe)(v =>
+          ZIO.fromEither(RetrievalRecipe.parse(v)).mapError(AgentError.ToolInputInvalid(SearchName.value, _))
+        )
+        strategy <- ZIO.foreach(input.strategy)(v =>
+          ZIO
+            .fromEither(RetrievalRecipe.parseStrategy(v))
+            .mapError(AgentError.ToolInputInvalid(SearchName.value, _))
+        )
+        result <- rag
+          .retrieve(RagQuery(input.query, scope, input.limit, mode, filter, recipe, strategy))
           .mapError(error => AgentError.ToolExecutionFailed(SearchName.value, error.message, error.retryable))
       yield toOutput(result, includeFullChunkText = false)
     }
@@ -244,7 +256,7 @@ object KnowledgeTools:
     }
     val excerpts =
       if includeFullChunkText then result.hits.map(_.chunk.displayText)
-      else result.hits.map(_.chunk.displayText.take(500))
+      else result.hits.map(hit => ChunkContext.take(hit.chunk.displayText, 500))
     val status =
       if result.evidence.supportsGroundedAnswer then "ok" else "insufficient_evidence"
     SearchOutput(
@@ -255,7 +267,9 @@ object KnowledgeTools:
       result.evidence.acceptedCount,
       result.diagnostics.profileId,
       result.diagnostics.knowledgeSpaceId,
-      result.diagnostics.degradedStages
+      result.diagnostics.degradedStages,
+      result.diagnostics.recipe,
+      result.diagnostics.strategy
     )
 
   private def toOutput(result: RetrievalResult, includeFullChunkText: Boolean): SearchOutput =
@@ -274,7 +288,7 @@ object KnowledgeTools:
     CitationOut(
       citation.id,
       citation.sourceUri,
-      citation.excerpt.take(500),
+      ChunkContext.take(citation.excerpt, 500),
       citation.score,
       citation.pageNumbers,
       hit.chunk.id,
@@ -293,6 +307,8 @@ object KnowledgeTools:
     "type"       -> Json.Str("object"),
     "properties" -> Json.Obj(
       "query"          -> Json.Obj("type" -> Json.Str("string")),
+      "recipe"         -> Json.Obj("type" -> Json.Str("string")),
+      "strategy"       -> Json.Obj("type" -> Json.Str("string")),
       "mode"           -> Json.Obj("type" -> Json.Str("string")),
       "documentIds"    -> Json.Obj("type" -> Json.Str("array")),
       "chunkIds"       -> Json.Obj("type" -> Json.Str("array")),

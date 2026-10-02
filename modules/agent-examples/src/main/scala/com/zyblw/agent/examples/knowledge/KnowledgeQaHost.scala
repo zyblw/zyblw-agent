@@ -46,7 +46,7 @@ object KnowledgeQaHost extends ZIOAppDefault:
         case "all"     =>
           migrate(config) *>
             ingest(config, args.lift(1).getOrElse(KnowledgeQaLayers.booksDirectory)) *>
-            serve(config)
+            serve(config, args.lift(1).getOrElse(KnowledgeQaLayers.booksDirectory))
         case "status" => status(config)
         case other    => ZIO.fail(AgentError.InvalidConfiguration(s"未知命令 $other"))
     yield ()
@@ -110,7 +110,7 @@ object KnowledgeQaHost extends ZIOAppDefault:
             source.inputs,
             KnowledgeQaLayers.tenant,
             KnowledgeQaLayers.readerPermissions,
-            "qa-ingest"
+            "" // Indexer derives an idempotency key from the complete source/artifact/spec identity.
           )
           .runCollect
         indexed = outcomes.count {
@@ -124,7 +124,8 @@ object KnowledgeQaHost extends ZIOAppDefault:
         ProductionSupportLayers.dataSource(config),
         Client.default,
         KnowledgeQaLayers.embedding(config),
-        KnowledgeQaLayers.postgresStack
+        modelLayer(config),
+        KnowledgeQaLayers.postgresStackFor(directory)
       )
     else program.provide(KnowledgeQaLayers.inMemoryStack)
 
@@ -143,10 +144,14 @@ object KnowledgeQaHost extends ZIOAppDefault:
         ProductionSupportLayers.dataSource(config),
         Client.default,
         KnowledgeQaLayers.embedding(config),
+        modelLayer(config),
         KnowledgeQaLayers.postgresStack
       )
 
-  private def serve(config: ProductionSupportConfig): ZIO[Any, Any, Nothing] =
+  private def serve(
+      config: ProductionSupportConfig,
+      root: String = KnowledgeQaLayers.booksDirectory
+  ): ZIO[Any, Any, Nothing] =
     AgentDefinitionBuilder(AgentId("knowledge-qa"), "书籍问答")
       .withInstructions("只根据已授权知识回答，并给出可核验引用。资料不足时明确拒绝编造。")
       .allowTools(KnowledgeTools.Allowed)
@@ -154,7 +159,8 @@ object KnowledgeQaHost extends ZIOAppDefault:
       .withMetadata(KnowledgeTools.contextSourceMetadata._1, KnowledgeTools.contextSourceMetadata._2)
       .buildFor(KnowledgeQaLayers.applicationConfig(config).toolPolicy)
       .flatMap { agent =>
-        if config.jdbcUrl.exists(_.nonEmpty) then config.requireDurableDatabase *> serveDurable(config, agent)
+        if config.jdbcUrl.exists(_.nonEmpty) then
+          config.requireDurableDatabase *> serveDurable(config, agent, root)
         else serveInMemory(config, agent)
       }
 
@@ -191,7 +197,8 @@ object KnowledgeQaHost extends ZIOAppDefault:
 
   private def serveDurable(
       config: ProductionSupportConfig,
-      agent: AgentDefinition
+      agent: AgentDefinition,
+      root: String
   ): ZIO[Any, Any, Nothing] =
     Console.printLine(
       s"知识问答宿主监听 http://127.0.0.1:${config.httpPort}；Worker=${config.workerId}。"
@@ -200,7 +207,7 @@ object KnowledgeQaHost extends ZIOAppDefault:
       Client.default,
       modelLayer(config),
       KnowledgeQaLayers.embedding(config),
-      KnowledgeQaLayers.postgresStack,
+      KnowledgeQaLayers.postgresStackFor(root),
       KnowledgeQaLayers.tools,
       ProductionSupportLayers.durableMemory,
       KnowledgeQaLayers.durableApplication(config),

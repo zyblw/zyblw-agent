@@ -136,7 +136,15 @@ private[gemini] object GeminiInteractionsWire:
         else if status == "completed" then FinishReason.Stop
         else if status == "incomplete" || status == "budget_exceeded" then FinishReason.Length
         else FinishReason.Other(status)
-    yield ChatResponse(message, finish, usage, stringField(json, "id"))
+    yield ChatResponse(
+      message,
+      finish,
+      usage,
+      stringField(json, "id"),
+      usageReported = field(json, "usage").exists(u =>
+        longField(u, "total_input_tokens").nonEmpty && longField(u, "total_output_tokens").nonEmpty
+      )
+    )
 
   /** 从 Google 标准错误 envelope 中只提取稳定 status，禁止把可能含敏感数据的 body 写入日志。 */
   def errorStatus(body: String): Option[String] =

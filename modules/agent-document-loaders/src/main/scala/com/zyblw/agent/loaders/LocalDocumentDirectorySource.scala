@@ -6,6 +6,7 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, LinkOption, Path}
 import scala.jdk.CollectionConverters.*
+import zio.json.*
 import zio.*
 import zio.stream.*
 
@@ -86,8 +87,8 @@ final class LocalDocumentDirectorySource(config: LocalDocumentDirectoryConfig):
   private def scan: IO[RetrievalError, Vector[Path]] =
     ZIO
       .attemptBlocking {
-        val root = config.root.toRealPath(LinkOption.NOFOLLOW_LINKS)
-        if !Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) then
+        val root = config.root.toRealPath()
+        if !Files.isDirectory(config.root, LinkOption.NOFOLLOW_LINKS) then
           throw IllegalArgumentException("root 不是普通目录")
         val stream = Files.walk(root, config.maxDepth)
         try
@@ -100,7 +101,15 @@ final class LocalDocumentDirectorySource(config: LocalDocumentDirectoryConfig):
             .toVector
             .sortBy(path => root.relativize(path).toString)
           if paths.length > config.maxFiles then throw IllegalArgumentException("目录文件数超过上限")
-          paths
+          paths.filterNot { path =>
+            val name  = path.getFileName.toString
+            val lower = name.toLowerCase(java.util.Locale.ROOT)
+            (lower.endsWith(".md") || lower.endsWith(".pdf")) &&
+            Files.isRegularFile(
+              path.resolveSibling(name.substring(0, name.lastIndexOf('.')) + ".paddle.json"),
+              LinkOption.NOFOLLOW_LINKS
+            )
+          }
         finally stream.close()
       }
       .mapError(lowSensitiveError("directory scan"))
@@ -108,29 +117,46 @@ final class LocalDocumentDirectorySource(config: LocalDocumentDirectoryConfig):
   private def toInput(path: Path): IO[RetrievalError, DocumentInput] =
     ZIO
       .attemptBlocking {
-        val root     = config.root.toRealPath(LinkOption.NOFOLLOW_LINKS)
+        val root     = config.root.toRealPath()
         val resolved = path.toRealPath(LinkOption.NOFOLLOW_LINKS)
         if !resolved.startsWith(root) || !Files.isRegularFile(resolved, LinkOption.NOFOLLOW_LINKS) then
           throw IllegalArgumentException("文件逃逸根目录或不是普通文件")
         val length = Files.size(resolved)
         if length > config.maxFileBytes then throw IllegalArgumentException("文件超过大小上限")
-        val relative = root.relativize(resolved).iterator().asScala.map(_.toString).mkString("/")
-        val encoded  = relative
+        val relative       = root.relativize(resolved).iterator().asScala.map(_.toString).mkString("/")
+        val sourceRelative =
+          if mediaType(resolved).contains(PaddleOcrDocumentLoader.MediaType) &&
+            Files.isRegularFile(
+              resolved.resolveSibling(
+                resolved.getFileName.toString.dropRight(".paddle.json".length) + ".pdf"
+              ),
+              LinkOption.NOFOLLOW_LINKS
+            )
+          then relative.dropRight(".paddle.json".length) + ".pdf"
+          else relative
+        val encoded = sourceRelative
           .split("/", -1)
           .map(segment => URLEncoder.encode(segment, StandardCharsets.UTF_8))
           .mkString("/")
-        val identity = contentIdentity(relative)
+        val logicalRelative =
+          if mediaType(resolved).contains(PaddleOcrDocumentLoader.MediaType) then
+            relative.dropRight(".paddle.json".length) + ".pdf"
+          else relative
+        val identity = contentIdentity(logicalRelative)
         val media    = mediaType(resolved).getOrElse(throw IllegalArgumentException("文件类型不受支持"))
+        val paddle   = media == PaddleOcrDocumentLoader.MediaType
+        val paired   = if paddle then Some(paddleArtifact(resolved, root, s"local-$identity")) else None
         DocumentInput(
           id = s"local-$identity",
           sourceUri = s"${config.sourceUriPrefix}$encoded",
           fileName = resolved.getFileName.toString,
           declaredMediaType = media,
-          declaredLength = Some(length),
+          declaredLength = paired.map(_._1.length.toLong).orElse(Some(length)),
           metadata = Map("sourceKind" -> "local-directory"),
-          content = ZStream
-            .fromPath(resolved)
-            .mapError(error => lowSensitiveError("directory read")(error))
+          sourceRevision = paired.flatMap(_._2),
+          content = paired.fold(
+            ZStream.fromPath(resolved).mapError(error => lowSensitiveError("directory read")(error))
+          )(pair => ZStream.fromChunk(Chunk.fromArray(pair._1)))
         )
       }
       .mapError {
@@ -138,13 +164,67 @@ final class LocalDocumentDirectorySource(config: LocalDocumentDirectoryConfig):
         case other                 => lowSensitiveError("directory input")(other)
       }
 
+  private def paddleArtifact(
+      path: Path,
+      root: Path,
+      documentId: String
+  ): (Array[Byte], Option[SourceRevision]) =
+    def checkedRead(file: Path, limit: Long): Array[Byte] =
+      val real = file.toRealPath()
+      require(
+        real.startsWith(root) && Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS),
+        "Paddle sidecar escapes root"
+      )
+      val stream = Files.newInputStream(real)
+      try
+        val bytes = stream.readNBytes((limit + 1).min(Int.MaxValue).toInt)
+        require(bytes.length <= limit, "Paddle sidecar size limit")
+        bytes
+      finally stream.close()
+    def utf8(bytes: Array[Byte]): String =
+      StandardCharsets.UTF_8
+        .newDecoder()
+        .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+        .decode(java.nio.ByteBuffer.wrap(bytes))
+        .toString
+    val stem     = path.getFileName.toString.dropRight(".paddle.json".length)
+    val md       = path.resolveSibling(stem + ".md")
+    val pdf      = path.resolveSibling(stem + ".pdf")
+    val markdown = Option.when(Files.exists(md, LinkOption.NOFOLLOW_LINKS))(
+      utf8(checkedRead(md, PaddleOcrVlDocument.MaxMarkdownChars.toLong))
+    )
+    val original =
+      Option.when(Files.exists(pdf, LinkOption.NOFOLLOW_LINKS))(checkedRead(pdf, config.maxFileBytes))
+    val pages = original.map { bytes =>
+      val doc = org.apache.pdfbox.Loader.loadPDF(bytes)
+      try doc.getNumberOfPages
+      finally doc.close()
+    }
+    val digest = original.map(bytes =>
+      java.security.MessageDigest.getInstance("SHA-256").digest(bytes).map(b => f"${b & 0xff}%02x").mkString
+    )
+    val artifact = PaddleOcrArtifact(
+      utf8(checkedRead(path, PaddleOcrVlDocument.MaxJsonChars.toLong)),
+      markdown,
+      pages,
+      digest
+    )
+    val bytes = artifact.toJson.getBytes(StandardCharsets.UTF_8)
+    require(bytes.length <= PaddleOcrDocumentLoader.MaxBytes, "Paddle envelope limit")
+    (bytes, digest.map(hash => SourceRevision(documentId, hash, Some(hash), Some("application/pdf"))))
+
   private def identityOf(path: Path): IO[RetrievalError, String] =
     ZIO
       .attemptBlocking {
-        val root     = config.root.toRealPath(LinkOption.NOFOLLOW_LINKS)
+        val root     = config.root.toRealPath()
         val resolved = path.toRealPath(LinkOption.NOFOLLOW_LINKS)
         val relative = root.relativize(resolved).iterator().asScala.map(_.toString).mkString("/")
-        contentIdentity(relative)
+        contentIdentity(
+          if mediaType(resolved).contains(PaddleOcrDocumentLoader.MediaType) then
+            relative.dropRight(".paddle.json".length) + ".pdf"
+          else relative
+        )
       }
       .mapError(lowSensitiveError("directory identity"))
 
@@ -154,9 +234,11 @@ final class LocalDocumentDirectorySource(config: LocalDocumentDirectoryConfig):
   private def mediaType(path: Path): Option[String] =
     val name  = path.getFileName.toString.toLowerCase(java.util.Locale.ROOT)
     val index = name.lastIndexOf('.')
-    Option
-      .when(index >= 0 && index < name.length - 1)(name.substring(index + 1))
-      .flatMap(config.mediaTypes.get)
+    if name.endsWith(".paddle.json") then Some(PaddleOcrDocumentLoader.MediaType)
+    else
+      Option
+        .when(index >= 0 && index < name.length - 1)(name.substring(index + 1))
+        .flatMap(config.mediaTypes.get)
 
   private def lowSensitiveError(operation: String)(error: Throwable): RetrievalError =
     AgentError.RetrievalFailed(s"$operation 失败: ${error.getClass.getSimpleName}", retryable = false)

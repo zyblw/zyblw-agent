@@ -75,7 +75,8 @@ object AgentPostgresMigrations:
     "agent_knowledge_profile_chunk_staging",
     "agent_knowledge_profile_chunks",
     "agent_knowledge_profile_activation_audit",
-    "agent_knowledge_withdrawn"
+    "agent_knowledge_withdrawn",
+    "agent_knowledge_structures"
   )
 
   /** 校验配置并用独立 Flyway history 表应用框架 migration。
@@ -233,6 +234,11 @@ object AgentPostgresMigrations:
           schema,
           "agent_knowledge_profiles",
           Chunk("build_spec", "build_spec_sha256")
+        ) ++ requiredColumns(
+          connection,
+          schema,
+          "agent_knowledge_structures",
+          Chunk("structure_profile_id", "generation", "chunk_set_sha256", "snapshot")
         )
         Chunk("agent_knowledge_profile_chunk_staging", "agent_knowledge_profile_chunks").foreach { table =>
           val actual = querySingleString(

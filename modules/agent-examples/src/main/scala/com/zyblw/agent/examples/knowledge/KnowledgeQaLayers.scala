@@ -15,11 +15,13 @@ import com.zyblw.agent.http.host.{AgentHttpAdditionalRoutes, AgentHttpHostConfig
 import com.zyblw.agent.loaders.{
   LocalDocumentDirectoryConfig,
   LocalDocumentDirectorySource,
-  TikaDocumentLoader
+  TikaDocumentLoader,
+  PaddleOcrDocumentLoader
 }
 import com.zyblw.agent.memory.{MemoryStore, WorkerId}
 import com.zyblw.agent.persistence.postgres.PostgresAgentPersistence
 import com.zyblw.agent.rag.*
+import com.zyblw.agent.integrations.rerank.{QwenRerankConfig, QwenRerankModel}
 import com.zyblw.agent.rag.tools.{DocumentScope, KnowledgeTools}
 import com.zyblw.agent.testkit.ScriptedChatModel
 import com.zyblw.agent.tools.{RegisteredTool, RegisteredToolRegistry}
@@ -42,51 +44,157 @@ object KnowledgeQaLayers:
   def directorySource(root: String): LocalDocumentDirectorySource =
     LocalDocumentDirectorySource(LocalDocumentDirectoryConfig(java.nio.file.Path.of(root)))
 
-  val directoryResolver: ULayer[KnowledgeSourceResolver] =
+  def directoryResolverFor(root: String): ULayer[KnowledgeSourceResolver] =
     ZLayer.succeed {
-      val source = directorySource(booksDirectory)
+      val source = directorySource(root)
       new KnowledgeSourceResolver:
         def load(tenantId: TenantId, documentId: String): IO[RetrievalError, Option[DocumentInput]] =
           val _ = tenantId
           source.loadById(documentId)
     }
 
-  private val ragAndKnowledge: ZLayer[
-    EmbeddingModel & KnowledgeIndexStore & VectorStore & KnowledgeIndexDirectory,
+  val directoryResolver: ULayer[KnowledgeSourceResolver] = directoryResolverFor(booksDirectory)
+
+  private def ragAndKnowledge(root: String): ZLayer[
+    EmbeddingModel & KnowledgeIndexStore & VectorStore & KnowledgeIndexDirectory & StructureStore &
+      ChatModel & Reranker,
     RetrievalError,
     RagApplication & KnowledgeService & Retriever
   ] =
     ZLayer.makeSome[
-      EmbeddingModel & KnowledgeIndexStore & VectorStore & KnowledgeIndexDirectory,
+      EmbeddingModel & KnowledgeIndexStore & VectorStore & KnowledgeIndexDirectory & StructureStore &
+        ChatModel & Reranker,
       RagApplication & KnowledgeService & Retriever
     ](
-      DocumentLoaderRegistry.layer(Chunk(TikaDocumentLoader())),
+      DocumentLoaderRegistry.layer(Chunk(TikaDocumentLoader(), new PaddleOcrDocumentLoader)),
       DocumentStructureChunker.alignedLayer,
-      KnowledgeIndexer.layer(),
+      ZLayer.fromZIO {
+        for
+          store <- ZIO.service[StructureStore]
+          model <- ZIO.service[ChatModel]
+          modelSummary = sys.env.get("ZYBLW_AGENT_STRUCTURE_SUMMARY_MODEL").map(_.trim).filter(_.nonEmpty)
+          provider     = sys.env
+            .get("ZYBLW_AGENT_STRUCTURE_SUMMARY_PROVIDER")
+            .map(_.trim)
+            .filter(_.nonEmpty)
+            .getOrElse(model.provider)
+          _ <- ZIO
+            .fail(
+              AgentError.RetrievalFailed(
+                "routed summary model requires an exact ZYBLW_AGENT_STRUCTURE_SUMMARY_PROVIDER"
+              )
+            )
+            .when(modelSummary.nonEmpty && provider == "router")
+          summary = modelSummary.fold(NodeSummarySpec("internal", "rule-v1"))(id =>
+            NodeSummarySpec(provider, id)
+          )
+          spec      = StructureBuildSpec(summary = Some(summary))
+          navigator =
+            if sys.env.get("ZYBLW_AGENT_TREE_MODEL_ENABLED").contains("1") then
+              ModelStructureNavigation.navigator(model)
+            else TreeNavigator.deterministic
+        yield StructuralRetrieval(store, spec, navigator = navigator)
+      },
+      ZLayer.fromZIO {
+        for
+          chunker    <- ZIO.service[Chunker]
+          model      <- ZIO.service[EmbeddingModel]
+          store      <- ZIO.service[KnowledgeIndexStore]
+          structural <- ZIO.service[StructuralRetrieval]
+          chat       <- ZIO.service[ChatModel]
+          cache      <- InMemoryNodeSummaryStore.make
+          summary = Option.when(structural.spec.summary.exists(_.provider != "internal"))(
+            NodeSummarizer.cached(ModelStructureNavigation.summarizer(chat), cache)
+          )
+        yield KnowledgeIndexer(
+          chunker,
+          model,
+          store,
+          structureIndexing = Some(
+            StructureIndexing(
+              structural.store,
+              StructurePublicationPolicy.BestEffort,
+              structural.spec,
+              summarizer = summary
+            )
+          )
+        )
+      },
       DocumentIngestionService.layer(failureMode = DocumentIngestionFailureMode.Continue),
-      Reranker.identity,
-      DefaultRetriever.layer,
-      RagApplication.layer,
+      ZLayer.fromFunction(
+        (model: EmbeddingModel, vectors: VectorStore, reranker: Reranker, structural: StructuralRetrieval) =>
+          DefaultRetriever(
+            model,
+            vectors,
+            reranker,
+            structural = Some(structural),
+            defaultRecipe = Some(RetrievalRecipe.BookGrounded)
+          ): Retriever
+      ),
+      ZLayer.fromFunction(
+        (ingestion: DocumentIngestionService, retriever: Retriever, directory: KnowledgeIndexDirectory) =>
+          RagApplication(ingestion, retriever, catalog = Some(directory))
+      ),
       IngestionJobStore.inMemory,
       ZLayer.succeed(RetrievalPolicySource.default),
-      directoryResolver,
+      directoryResolverFor(root),
       KnowledgeReindexService.layer,
-      KnowledgeAdminLive.layer(),
+      KnowledgeAdminLive.structuredLayer,
       KnowledgeServiceLive.layer
     )
 
-  val inMemoryStack: ZLayer[Any, RetrievalError, Stack] =
+  lazy val inMemoryStack: ZLayer[Any, RetrievalError, Stack] =
     ZLayer.make[Stack](
       ZLayer.succeed[EmbeddingModel](HashEmbedding(64)),
       KnowledgeIndexDirectory.inMemoryKnowledge,
-      ragAndKnowledge
+      ZLayer
+        .fromZIO(ZIO.serviceWithZIO[KnowledgeIndexStore](InMemoryStructureStore.make))
+        .map(env => ZEnvironment[StructureStore](env.get[InMemoryStructureStore])),
+      scriptedModel,
+      Reranker.identity,
+      ragAndKnowledge(booksDirectory)
     )
 
-  val postgresStack: ZLayer[DataSource & EmbeddingModel, RetrievalError, Stack] =
-    ZLayer.makeSome[DataSource & EmbeddingModel, Stack](
+  lazy val postgresStack: ZLayer[DataSource & EmbeddingModel & ChatModel & Client, RetrievalError, Stack] =
+    postgresStackFor(booksDirectory)
+
+  def postgresStackFor(
+      root: String
+  ): ZLayer[DataSource & EmbeddingModel & ChatModel & Client, RetrievalError, Stack] =
+    ZLayer.makeSome[DataSource & EmbeddingModel & ChatModel & Client, Stack](
+      configuredReranker,
       PostgresAgentPersistence.knowledge(1024),
-      ragAndKnowledge
+      com.zyblw.agent.persistence.postgres.PostgresStructureStore.layer,
+      ragAndKnowledge(root)
     )
+
+  /** No remote rerank call unless an exact model is configured; credentials stay in the adapter. */
+  val configuredReranker: ZLayer[Client, RetrievalError, Reranker] = ZLayer.fromZIO {
+    sys.env.get("ZYBLW_AGENT_RERANK_MODEL").map(_.trim).filter(_.nonEmpty) match
+      case None =>
+        ZIO.succeed(
+          new Reranker:
+            def rerank(query: String, hits: Chunk[RetrievalHit], limit: Int): UIO[Chunk[RetrievalHit]] =
+              ZIO.succeed(hits.take(limit))
+        )
+      case Some(id) =>
+        for
+          client <- ZIO.service[Client]
+          key    <- ZIO
+            .fromOption(sys.env.get("ZYBLW_AGENT_RERANK_API_KEY").filter(_.trim.nonEmpty))
+            .orElseFail(AgentError.RetrievalFailed("configured reranker requires ZYBLW_AGENT_RERANK_API_KEY"))
+          config <- ZIO
+            .attempt(
+              QwenRerankConfig(
+                key,
+                id,
+                baseUrl =
+                  sys.env.getOrElse("ZYBLW_AGENT_RERANK_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")
+              )
+            )
+            .mapError(_ => AgentError.RetrievalFailed("reranker configuration invalid"))
+        yield ModelReranker(QwenRerankModel(client, config), ModelRerankerPolicy(maxCandidates = 100))
+  }
 
   val contractEmbedding: ULayer[EmbeddingModel] =
     ZLayer.succeed(HashEmbedding(1024))

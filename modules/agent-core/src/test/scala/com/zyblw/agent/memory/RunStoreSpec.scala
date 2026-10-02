@@ -140,7 +140,10 @@ object RunStoreSpec extends ZIOSpecDefault:
           ModelCallContextLineage(1, 0, 0, 0, 0),
           None,
           None,
-          updatedAtEpochMilli = 1L
+          updatedAtEpochMilli = 1L,
+          priceSnapshot = Some(ModelPrice(BigDecimal(1), BigDecimal(2))),
+          priceBookFingerprint = Some("price-v1"),
+          usageReporting = true
         )
         preparedEvent = PersistedAgentEvent(
           preparedId,
@@ -211,6 +214,10 @@ object RunStoreSpec extends ZIOSpecDefault:
         )
       yield assertTrue(
         loaded.contains(record),
+        !RunStore.sameModelCallIdentity(
+          record,
+          record.copy(priceSnapshot = Some(ModelPrice(BigDecimal(99), BigDecimal(2))))
+        ),
         conflict.isFailure,
         current == afterInsert,
         eventsAfterConflict.map(_.sequence) == Chunk(0L, 1L),

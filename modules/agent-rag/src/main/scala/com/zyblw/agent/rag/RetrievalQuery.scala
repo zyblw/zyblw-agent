@@ -56,7 +56,9 @@ final case class RetrievalRequest(
     scope: RetrievalScope,
     limit: Int,
     mode: RetrievalMode = RetrievalMode.Hybrid,
-    filter: RetrievalFilter = RetrievalFilter.empty
+    filter: RetrievalFilter = RetrievalFilter.empty,
+    recipe: Option[RetrievalRecipe] = None,
+    strategy: Option[RetrievalStrategy] = None
 ):
   require(limit >= 0, "RetrievalRequest.limit 不能为负数")
 

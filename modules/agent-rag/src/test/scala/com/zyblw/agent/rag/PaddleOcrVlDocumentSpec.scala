@@ -78,6 +78,8 @@ object PaddleOcrVlDocumentSpec extends ZIOSpecDefault:
       val table  = parsed.blocks.find(_.kind == DocumentBlockKind.Table).get
       assertTrue(
         parsed.pageCount == 2,
+        parsed.structure.sections.map(_.id) == parsed.sections.map(_.id),
+        parsed.toSourceDocument("book", "book://source").structure.contains(parsed.structure),
         titles == zio.Chunk(1 -> "脏腑经络学说", 2 -> "目录", 2 -> "疟与经络"),
         parsed.sections
           .find(_.title == "疟与经络")

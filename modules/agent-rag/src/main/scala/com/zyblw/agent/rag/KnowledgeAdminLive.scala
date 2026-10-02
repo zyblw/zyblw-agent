@@ -30,7 +30,8 @@ final class KnowledgeAdminLive private (
     policies: RetrievalPolicySource,
     expansion: RetrievalExpansionConfig,
     permits: Semaphore,
-    backgroundScope: Scope
+    backgroundScope: Scope,
+    structural: Option[StructuralRetrieval]
 ) extends KnowledgeAdminService:
   import KnowledgeAdminLive.*
 
@@ -67,18 +68,27 @@ final class KnowledgeAdminLive private (
       vectors,
       reranker,
       expansionConfig,
-      RetrievalPolicySource.static(policy.copy(rerankEnabled = rerankApplied))
+      RetrievalPolicySource.static(policy.copy(rerankEnabled = rerankApplied)),
+      structural = structural,
+      defaultRecipe = Option.when(structural.nonEmpty)(RetrievalRecipe.BookGrounded),
+      expansionEnabled = request.expandContext
     )
     val descriptor = embeddings.descriptor
     for
       tenant <- tenantOf(request.tenantId)
       limit = request.limit.max(1).min(KnowledgeAdminService.MaxRetrievalLimit)
+      recipe <- ZIO.foreach(request.recipe)(v =>
+        ZIO.fromEither(RetrievalRecipe.parse(v)).mapError(AgentError.InvalidConfiguration(_))
+      )
+      strategy <- ZIO.foreach(request.strategy)(v =>
+        ZIO.fromEither(RetrievalRecipe.parseStrategy(v)).mapError(AgentError.InvalidConfiguration(_))
+      )
       started <- Clock.nanoTime
-      result  <- sandbox.retrieve(
-        RetrievalRequest(
+      result  <- new RagApplication(ingestion, sandbox, catalog = Some(directory)).retrieve(
+        RagQuery(
           request.query,
           RetrievalScope(tenant, request.permissions),
-          limit,
+          Some(limit),
           parseMode(request.mode),
           RetrievalFilter(
             documentIds = request.documentIds,
@@ -86,7 +96,9 @@ final class KnowledgeAdminLive private (
             pages = request.pages,
             headingPrefix = Chunk.fromIterable(request.headingPrefix),
             metadataEquals = request.metadataEquals
-          )
+          ),
+          recipe,
+          strategy
         )
       )
       finished <- Clock.nanoTime
@@ -97,8 +109,8 @@ final class KnowledgeAdminLive private (
       embeddingProvider = descriptor.provider,
       embeddingModel = descriptor.model,
       embeddingDimension = descriptor.denseDescriptor.dimension,
-      rerankApplied = rerankApplied,
-      contextExpanded = contextExpanded,
+      rerankApplied = rerankApplied && !recipe.contains(RetrievalRecipe.LowLatency),
+      contextExpanded = contextExpanded && !recipe.contains(RetrievalRecipe.LowLatency),
       evidenceStatus = result.evidence.status.toString,
       candidateCount = result.evidence.candidateCount,
       acceptedCount = result.evidence.acceptedCount,
@@ -114,7 +126,12 @@ final class KnowledgeAdminLive private (
           selection.decision.toString
         )
       ),
-      maxEvidenceTokens = result.diagnostics.maxEvidenceTokens
+      maxEvidenceTokens = result.diagnostics.maxEvidenceTokens,
+      recipe = result.diagnostics.recipe,
+      strategy = result.diagnostics.strategy,
+      structureSelections = result.diagnostics.structureSelections.map(s =>
+        KnowledgeStructureSelectionView(s.documentId, s.generation, s.nodeId, s.materializedCount)
+      )
     )
 
   def retire(tenantId: String, documentId: String, expectedActiveVersion: Long): IO[AgentError, Unit] =
@@ -282,7 +299,8 @@ object KnowledgeAdminLive:
       jobs: IngestionJobStore,
       policies: RetrievalPolicySource = RetrievalPolicySource.default,
       expansion: RetrievalExpansionConfig = RetrievalExpansionConfig(),
-      maxConcurrentIngestions: Int = DefaultMaxConcurrentIngestions
+      maxConcurrentIngestions: Int = DefaultMaxConcurrentIngestions,
+      structural: Option[StructuralRetrieval] = None
   ): URIO[Scope, KnowledgeAdminService] =
     for
       _       <- ZIO.dieMessage("maxConcurrentIngestions 必须为正数").when(maxConcurrentIngestions <= 0)
@@ -299,7 +317,8 @@ object KnowledgeAdminLive:
       policies,
       expansion,
       permits,
-      scope
+      scope,
+      structural
     )
 
   /** 标准装配。
@@ -309,7 +328,8 @@ object KnowledgeAdminLive:
     */
   def layer(
       expansion: RetrievalExpansionConfig = RetrievalExpansionConfig(),
-      maxConcurrentIngestions: Int = DefaultMaxConcurrentIngestions
+      maxConcurrentIngestions: Int = DefaultMaxConcurrentIngestions,
+      structural: Option[StructuralRetrieval] = None
   ): URLayer[
     KnowledgeIndexDirectory & KnowledgeIndexStore & EmbeddingModel & VectorStore & Reranker &
       DocumentIngestionService & IngestionJobStore & RetrievalPolicySource,
@@ -334,7 +354,37 @@ object KnowledgeAdminLive:
         jobs,
         policies,
         expansion,
-        maxConcurrentIngestions
+        maxConcurrentIngestions,
+        structural
+      )
+    yield service
+  }
+
+  val structuredLayer: URLayer[
+    KnowledgeIndexDirectory & KnowledgeIndexStore & EmbeddingModel & VectorStore & Reranker &
+      DocumentIngestionService & IngestionJobStore & RetrievalPolicySource & StructuralRetrieval,
+    KnowledgeAdminService
+  ] = ZLayer.scoped {
+    for
+      directory  <- ZIO.service[KnowledgeIndexDirectory]
+      store      <- ZIO.service[KnowledgeIndexStore]
+      embeddings <- ZIO.service[EmbeddingModel]
+      vectors    <- ZIO.service[VectorStore]
+      reranker   <- ZIO.service[Reranker]
+      ingestion  <- ZIO.service[DocumentIngestionService]
+      jobs       <- ZIO.service[IngestionJobStore]
+      policies   <- ZIO.service[RetrievalPolicySource]
+      structural <- ZIO.service[StructuralRetrieval]
+      service    <- make(
+        directory,
+        store,
+        embeddings,
+        vectors,
+        reranker,
+        ingestion,
+        jobs,
+        policies,
+        structural = Some(structural)
       )
     yield service
   }

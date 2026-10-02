@@ -18,7 +18,7 @@ object AgentHttpProtocol:
   val MajorVersion: Int = 1
 
   /** OpenAPI `info.version`，与 URL 主版本分开表达契约修订。 */
-  val ContractVersion: String = "1.2.0"
+  val ContractVersion: String = "1.0.0"
 
   /** 所有 Agent API 响应都携带的低敏版本头。 */
   val ApiVersionHeader: String = "X-Zyblw-Agent-Api-Version"
@@ -302,14 +302,19 @@ final case class KnowledgeSearchBody(
     pages: List[Int] = Nil,
     headingPrefix: List[String] = Nil,
     metadataEquals: Map[String, String] = Map.empty,
-    limit: Option[Int] = None
+    limit: Option[Int] = None,
+    recipe: Option[String] = None,
+    strategy: Option[String] = None
 ) derives JsonCodec
 object KnowledgeSearchBody:
   given Schema[KnowledgeSearchBody] = DeriveSchema.gen[KnowledgeSearchBody]
 
 final case class KnowledgeSearchResponse(
     citations: List[CitationView],
-    evidence: RetrievalEvidenceView
+    evidence: RetrievalEvidenceView,
+    recipe: Option[String] = None,
+    strategy: Option[String] = None,
+    degradedStages: List[String] = Nil
 ) derives JsonCodec
 object KnowledgeSearchResponse:
   given Schema[KnowledgeSearchResponse] = DeriveSchema.gen[KnowledgeSearchResponse]

@@ -216,3 +216,33 @@ CREATE TABLE agent_knowledge_withdrawn (
   withdrawn_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (tenant_id, knowledge_space_id, document_id, source_revision_id)
 );
+
+-- Independent immutable structure generations, bound to an exact chunk publication.
+-- No second active pointer: readers select an explicit structure spec and pinned chunk version.
+CREATE TABLE agent_knowledge_structures (
+  tenant_id TEXT NOT NULL,
+  knowledge_space_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  document_id TEXT NOT NULL,
+  index_version BIGINT NOT NULL,
+  structure_profile_id CHAR(64) NOT NULL CHECK (structure_profile_id ~ '^[0-9a-f]{64}$'),
+  generation CHAR(64) NOT NULL CHECK (generation ~ '^[0-9a-f]{64}$'),
+  chunk_set_sha256 CHAR(64) NOT NULL CHECK (chunk_set_sha256 ~ '^[0-9a-f]{64}$'),
+  snapshot JSONB NOT NULL CHECK (jsonb_typeof(snapshot) = 'object' AND octet_length(snapshot::text) <= 16777216),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (tenant_id, knowledge_space_id, profile_id, document_id, index_version, structure_profile_id),
+  FOREIGN KEY (tenant_id, knowledge_space_id, profile_id, document_id, index_version)
+    REFERENCES agent_knowledge_profile_documents(tenant_id, knowledge_space_id, profile_id, document_id, index_version)
+    ON DELETE CASCADE
+);
+COMMENT ON TABLE agent_knowledge_structures IS '绑定精确知识文档版本的不可变结构产物；权限、发布与撤回由原文档控制';
+COMMENT ON COLUMN agent_knowledge_structures.tenant_id IS '可信租户身份，参与复合外键';
+COMMENT ON COLUMN agent_knowledge_structures.knowledge_space_id IS '结构所属知识空间';
+COMMENT ON COLUMN agent_knowledge_structures.profile_id IS '映射目标 Chunk Profile';
+COMMENT ON COLUMN agent_knowledge_structures.document_id IS '结构所属文档身份';
+COMMENT ON COLUMN agent_knowledge_structures.index_version IS '映射目标文档索引版本';
+COMMENT ON COLUMN agent_knowledge_structures.structure_profile_id IS '独立结构构建规格 SHA-256';
+COMMENT ON COLUMN agent_knowledge_structures.generation IS '完整不可变结构快照 SHA-256';
+COMMENT ON COLUMN agent_knowledge_structures.chunk_set_sha256 IS '必须与已发布原文块集合相等的 SHA-256';
+COMMENT ON COLUMN agent_knowledge_structures.snapshot IS '章节与 Block/Chunk 映射，不包含原文正文或向量';
+COMMENT ON COLUMN agent_knowledge_structures.created_at IS '完整结构产物首次写入时间';

@@ -61,6 +61,18 @@ object AnthropicMessagesWireSpec extends ZIOSpecDefault:
       |""".stripMargin
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("Anthropic Messages wire")(
+    test("缺少响应用量或流式最终输出用量时不能标为准确零") {
+      val stream = streamPayload.replaceAll(",\"usage\":\\{\"output_tokens\":5\\}", "")
+      for
+        response <- AnthropicMessagesWire.decodeResponse(
+          """{"id":"r","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}"""
+        )
+        events <- AnthropicMessagesSse
+          .events(ZStream.fromIterable(stream.getBytes(StandardCharsets.UTF_8)))
+          .runCollect
+        completed = events.collect { case com.zyblw.agent.model.ModelStreamEvent.Completed(value) => value }
+      yield assertTrue(!response.usageReported, completed.size == 1, !completed.head.usageReported)
+    },
     test("原生响应保留 thinking blocks，工具结果按 tool_result 回填") {
       for
         decoded <- AnthropicMessagesWire.decodeResponse(responsePayload)

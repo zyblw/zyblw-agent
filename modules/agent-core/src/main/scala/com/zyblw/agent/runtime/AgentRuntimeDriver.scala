@@ -371,7 +371,7 @@ final class AgentRuntimeDriver(
       )
       definitions <- registry.definitions(agent.allowedTools.map(ToolName(_)))
       // 每个调用捕获一次 live 工作点并与创建时组合比较；同一份值随后用于能力校验、账本和 dispatch，消除检查后再次读取造成的漂移窗口。
-      prices = modelPolicies.prices
+      prices = modelPolicies.pricesFor(contextState.composition.modelPricingFingerprint)
       settings <- guard.effectiveModelSettings(contextState, agent, prices)
       routing  <- router.route(
         contextState,
@@ -394,7 +394,8 @@ final class AgentRuntimeDriver(
         routing,
         resolvedProvider,
         resolvedModel,
-        startedAt
+        startedAt,
+        prices
       )
       response = dispatched.response
       _ <- ZIO
@@ -535,6 +536,7 @@ final class AgentRuntimeDriver(
       grant: ResumeGrant
   ): IO[AgentError, Either[RunOutcome, AgentState]] =
     for
+      _    <- ensureKnownModelCosts(state)
       plan <- ZIO
         .fromOption(state.pendingToolPlan)
         .orElseFail(AgentError.PersistenceFailure("执行工具批次时缺少 DurableToolPlan"))
@@ -822,7 +824,22 @@ final class AgentRuntimeDriver(
 
   /** 在发起下一次外部动作之前检查步骤、模型、工具、失败循环与 token 硬上限。 */
   private def ensureBudget(state: AgentState): IO[AgentError, Unit] =
-    ZIO.fromEither(AgentKernel.validateBeforeAction(state))
+    ZIO.fromEither(AgentKernel.validateBeforeAction(state)) *> ensureKnownModelCosts(state)
+
+  /** 费用上限下不能把缺失用量当零继续调用；读取耐久账本让崩溃恢复走相同门禁。 */
+  private def ensureKnownModelCosts(state: AgentState): IO[AgentError, Unit] =
+    if state.budget.limits.maxEstimatedCost.isEmpty || state.usage.modelCalls == 0 then ZIO.unit
+    else
+      store.getModelCalls(state.runId).flatMap { calls =>
+        val unknown = calls.exists(record =>
+          record.status == ModelCallStatus.Succeeded && (!record.usageReporting || record.usage.isEmpty) &&
+            record.priceSnapshot.forall(p =>
+              p.inputPerMillionTokens > 0 || p.outputPerMillionTokens > 0 ||
+                p.cachedInputPerMillionTokens.exists(_ > 0) || p.cacheWriteInputPerMillionTokens.exists(_ > 0)
+            )
+        )
+        ZIO.fail(AgentError.InvalidModelResponse("费用上限下缺少可核验用量，禁止继续外部动作")).when(unknown).unit
+      }
 
   /** 从可信状态构造工具上下文；模型无法修改其中的租户、用户和 scopes。 */
   private def executionContext(state: AgentState, call: ToolCall): ToolExecutionContext =

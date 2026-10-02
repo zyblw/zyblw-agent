@@ -35,7 +35,12 @@ final private[agent] class CompositionGuard(
       names <- liveToolNames(required)
       _     <- requireCompatible(
         state.runId,
-        RuntimeComposition.compare(state.composition, freeze(state.definition), names, required)
+        RuntimeComposition.compare(
+          state.composition,
+          live.freezeFor(state.definition, state.composition.modelPricingFingerprint),
+          names,
+          required
+        )
       )
     yield ()
 

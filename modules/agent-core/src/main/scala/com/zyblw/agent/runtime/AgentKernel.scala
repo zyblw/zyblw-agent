@@ -224,7 +224,7 @@ private[agent] object AgentKernel:
       val modelSettlement = modelCallRecord.map { record =>
         record.copy(
           status = ModelCallStatus.Succeeded,
-          usage = Some(response.usage),
+          usage = Option.when(response.usageReported)(response.usage),
           finishReason = Some(response.finishReason),
           updatedAtEpochMilli = at.toEpochMilli
         )

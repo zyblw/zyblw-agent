@@ -530,7 +530,7 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
       yield assertTrue(
         before.isEmpty,
         harness.coreReplayMigrations == 0,
-        // V001 结构基线 + R__ 中文数据字典；二次启动仍为零次执行。
+        // 首版 V001（含结构检索）+ R__ 中文数据字典；二次启动仍为零次执行。
         harness.firstMigrations == 2,
         harness.replayMigrations == 0,
         harness.vectorExtensionVersion.exists(_.startsWith("0.8.")),

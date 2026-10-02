@@ -145,7 +145,7 @@ export function ModelGovernance({ capabilities }: { capabilities: AdminCapabilit
           hint={
             view?.priceCurrency
               ? `${formatPercent(pricedRatio, 0)} 的模型有单价（${view.priceCurrency}）；其余按零计费估算`
-              : '部署未声明价格表，所有成本估算恒为零'
+              : '未提供价格表，成本未知；有费用上限的调用会被拒绝'
           }
         />
       </div>
@@ -377,7 +377,7 @@ function ModelCatalogTable({
                             )}
                           </>
                         ) : (
-                          <span className="text-slate-600">未定价 · 费用估算为零</span>
+                          <span className="text-slate-600">未定价 · 成本未知</span>
                         )}
                       </td>
                       <td className="py-2 pr-3">

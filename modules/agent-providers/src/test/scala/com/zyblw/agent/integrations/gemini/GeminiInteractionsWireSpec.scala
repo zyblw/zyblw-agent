@@ -67,6 +67,26 @@ object GeminiInteractionsWireSpec extends ZIOSpecDefault:
       |""".stripMargin
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("Gemini Interactions wire")(
+    test("缺失或不完整 usage 不成为准确零，流式同样保留未知") {
+      val body =
+        """{"id":"r","status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"ok"}]}]}"""
+      val stream = streamPayload.replaceAll(",\"usage\":\\{[^}]+\\}", "")
+      for
+        response <- GeminiInteractionsWire.decodeResponse(body)
+        partial  <- GeminiInteractionsWire.decodeResponse(
+          body.dropRight(1) + """, "usage":{"total_input_tokens":4}}"""
+        )
+        events <- GeminiInteractionsSse
+          .events(ZStream.fromIterable(stream.getBytes(StandardCharsets.UTF_8)))
+          .runCollect
+        completed = events.collect { case ModelStreamEvent.Completed(value) => value }
+      yield assertTrue(
+        !response.usageReported,
+        !partial.usageReported,
+        completed.size == 1,
+        !completed.head.usageReported
+      )
+    },
     test("原生 tool response 保存完整 steps，并以相同 call_id 回填 function_result") {
       for
         decoded <- GeminiInteractionsWire.decodeResponse(toolResponse)

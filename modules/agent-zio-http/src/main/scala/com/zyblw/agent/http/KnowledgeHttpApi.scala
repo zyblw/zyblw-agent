@@ -79,7 +79,9 @@ final class KnowledgeHttpApi(
               chunkIds = body.chunkIds.toSet,
               pages = body.pages.toSet,
               headingPrefix = body.headingPrefix,
-              metadataEquals = body.metadataEquals
+              metadataEquals = body.metadataEquals,
+              recipe = body.recipe,
+              strategy = body.strategy
             )
           )
         yield Response.json(toSearch(result).toJson)
@@ -246,7 +248,10 @@ final class KnowledgeHttpApi(
         result.candidateCount,
         result.acceptedCount,
         result.topAcceptedScore
-      )
+      ),
+      result.recipe,
+      result.strategy,
+      result.degradedStages.toList
     )
 
   private def respond(effect: IO[AgentError, Response]): UIO[Response] =

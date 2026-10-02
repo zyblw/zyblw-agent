@@ -23,6 +23,30 @@ object OpenAISseSpec extends ZIOSpecDefault:
       |""".stripMargin
 
   def spec = suite("OpenAI SSE")(
+    test("缺失 usage 与明确报告零用量保持不同，流式和非流式一致") {
+      val absent =
+        """{"id":"r","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"""
+      val zero   = absent.dropRight(1) + """, "usage":{"prompt_tokens":0,"completion_tokens":0}}"""
+      val stream = """data: {"id":"r","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}
+
+ data: [DONE]
+
+""".replace(" data:", "data:")
+      for
+        missing  <- OpenAIWire.decodeResponse(absent, OpenAICompatibility.openAI)
+        reported <- OpenAIWire.decodeResponse(zero, OpenAICompatibility.openAI)
+        events   <- OpenAISse
+          .events(ZStream.fromIterable(stream.getBytes(StandardCharsets.UTF_8)), OpenAICompatibility.openAI)
+          .runCollect
+        completed = events.collect { case ModelStreamEvent.Completed(value) => value }
+      yield assertTrue(
+        !missing.usageReported,
+        reported.usageReported,
+        reported.usage.totalTokens == 0,
+        completed.size == 1,
+        !completed.head.usageReported
+      )
+    },
     test("任意网络分块和跨 chunk UTF-8 都能组装文本、工具参数与 usage") {
       val bytes = payload.getBytes(StandardCharsets.UTF_8)
       ZIO

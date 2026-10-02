@@ -98,7 +98,7 @@ final case class TokenUsage(
   )
   require(reasoningOutputTokens <= outputTokens, "reasoningOutputTokens 不能大于 outputTokens")
 
-  /** 含义明确的 cache-read 名称；保留 cachedInputTokens 字段以兼容 0.9.x 源码和 JSON。 */
+  /** cache-read 的领域名称；cachedInputTokens 表示输入中已命中缓存的部分。 */
   def cacheReadInputTokens: Long = cachedInputTokens
 
   /** 未从缓存读取或写入缓存的输入 token。 */
@@ -128,5 +128,7 @@ final case class ChatResponse(
     finishReason: FinishReason,
     usage: TokenUsage = TokenUsage(),
     providerRequestId: Option[String] = None,
-    metadata: Map[String, String] = Map.empty
+    metadata: Map[String, String] = Map.empty,
+    /** Adapters must set false when the response omits usage; zero may be a valid reported value. */
+    usageReported: Boolean = true
 ) derives JsonCodec

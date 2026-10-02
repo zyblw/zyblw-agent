@@ -66,14 +66,6 @@ jobs:
           'http/Test/runMain com.zyblw.agent.http.contract.OpenApiSnapshotCli
           ../../target/agent-http-openapi-current.json'
 
-      - name: Check stable OpenAPI compatibility
-        if: github.event_name == 'pull_request'
-        uses: oasdiff/oasdiff-action/breaking@v0.1.17
-        with:
-          base: origin/${{ github.base_ref }}:modules/agent-zio-http/src/test/resources/openapi/agent-http-v1.2.0.json
-          revision: target/agent-http-openapi-current.json
-          fail-on: WARN
-          review: false
 
       - name: Compile independent Maven consumer
         working-directory: integration-tests/maven-consumer

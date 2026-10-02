@@ -10,6 +10,40 @@ object DocumentStructureChunkerSpec extends ZIOSpecDefault:
   private val scope  = Set("knowledge:read")
 
   def spec = suite("DocumentStructureChunker")(
+    test(
+      "dense prefixes and real tokenizer expansion fit hard budgets for structured and Markdown fallback text"
+    ) {
+      val counter = new TokenCounter:
+        val id                  = "four-per-codepoint"
+        def count(text: String) = text.codePointCount(0, text.length) * 4
+      val body       = "𠀀中文abc".repeat(100)
+      val block      = DocumentBlock("block", None, 0, DocumentBlockKind.Paragraph, body)
+      val configured = DocumentStructureChunker(
+        DocumentStructureChunkerConfig(
+          maxCharacters = 256,
+          overlapCharacters = 0,
+          maxTokens = Some(256),
+          tokenCounter = counter
+        )
+      )
+      val plain = SourceDocument("text", body, "book://text")
+      for
+        structured <- configured.split(
+          plain.copy(structure = Some(DocumentStructure("test", None, Chunk(block)))),
+          tenant,
+          scope
+        )
+        fallback <- configured.split(plain, tenant, scope)
+      yield assertTrue(
+        structured.length > 1,
+        structured.map(_.id).distinct.length == structured.length,
+        fallback.length > 1,
+        fallback.map(_.id).distinct.length == fallback.length,
+        (structured ++ fallback).forall(c => counter.count(c.denseText) <= 256),
+        structured.map(_.displayText).mkString == body,
+        fallback.map(_.displayText).mkString == body
+      )
+    },
     test("合并同父级相邻 block，并保留 bbox、页码、block ID 和阅读顺序") {
       val firstOrigin = DocumentOrigin(
         1,
@@ -98,7 +132,7 @@ object DocumentStructureChunkerSpec extends ZIOSpecDefault:
         DocumentStructureChunkerConfig(maxTokens = Some(256), tokenCounter = TokenCounter.CjkApproximate)
       ).strategyId
       assertTrue(
-        defaultId.contains("document-structure-v3"),
+        defaultId.contains("document-structure-v4"),
         defaultId.contains("tokens=512"),
         defaultId.contains("counter=cl100k-base"),
         tokenId.contains("tokens=256"),

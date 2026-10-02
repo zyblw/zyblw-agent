@@ -118,6 +118,17 @@ object DocumentLineage:
       case Some(structure) =>
         field(structure.schemaName)
         field(structure.schemaVersion.getOrElse(""))
+        // 保留无章节的旧摘要；新增章节信息必须影响摄取身份。
+        structure.sections.foreach { section =>
+          field("section")
+          field(section.id)
+          field(section.parentId.getOrElse(""))
+          field(section.ordinal.toString)
+          field(section.level.toString)
+          field(section.title)
+          field(section.pageStart.fold("")(_.toString))
+          field(section.pageEnd.fold("")(_.toString))
+        }
         structure.blocks.foreach { block =>
           field(block.id)
           field(block.parentId.getOrElse(""))

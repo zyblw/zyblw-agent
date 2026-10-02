@@ -6,6 +6,8 @@ import com.zyblw.agent.core.*
 import com.zyblw.agent.inspection.*
 import com.zyblw.agent.memory.*
 import com.zyblw.agent.model.*
+import com.zyblw.agent.tools.*
+import zio.json.ast.Json
 import com.zyblw.agent.testkit.*
 import zio.*
 import zio.json.*
@@ -379,6 +381,166 @@ object ModelCallRuntimeSpec extends ZIOSpecDefault:
           count <- calls.get
         yield (failed, count)).provideLayer(layers(model, CapturePolicy.MetadataOnly, routing = Some(policy)))
       yield assertTrue(result._1.isFailure, result._2 == 0)
+    },
+    test("直连费用预检拒绝缺价、高价与显式输出越界，均不调用 Provider") {
+      ZIO
+        .foreach(Chunk("unknown", "expensive", "output")) { scenario =>
+          for
+            calls <- Ref.make(0)
+            model  = countingModel(calls, finalResponse("never"))
+            prices =
+              if scenario == "unknown" then ModelPriceBook.empty
+              else
+                ModelPriceBook.of(
+                  (
+                    model.provider,
+                    "m",
+                    ModelPrice(
+                      BigDecimal(0),
+                      if scenario == "expensive" then BigDecimal(1000000) else BigDecimal(0)
+                    )
+                  )
+                )
+            settings = ModelSettings(
+              provider = Some(model.provider),
+              model = Some("m"),
+              maxOutputTokens = Option.when(scenario == "output")(11)
+            )
+            result <- (for
+              runtime <- ZIO.service[AgentRuntime]
+              failed  <- runtime
+                .run(
+                  agent.copy(modelSettings = settings),
+                  RunRequest(
+                    ThreadId(s"direct-preflight-$scenario"),
+                    AgentMessage.user("hello"),
+                    limits = RunLimits(maxOutputTokens = 10, maxEstimatedCost = Some(BigDecimal(1)))
+                  )
+                )
+                .exit
+              count <- calls.get
+            yield (failed, count)).provideLayer(
+              TestAgentRuntime.inMemory(
+                model,
+                modelPolicies = ModelPolicySource.static(ModelPolicy.default, prices)
+              )
+            )
+          yield assertTrue(result._1.isFailure, result._2 == 0)
+        }
+        .map(_.reduce(_ && _))
+    },
+    test("直连费用预检把未指定的输出上限写进实际请求，已知免费价允许调用") {
+      for
+        model <- ScriptedChatModel.make(Chunk(finalResponse("bounded")))
+        prices = ModelPriceBook.of((model.provider, "m", ModelPrice(BigDecimal(0), BigDecimal(0))))
+        result <- (for
+          runtime <- ZIO.service[AgentRuntime]
+          outcome <- runtime.run(
+            agent.copy(modelSettings =
+              ModelSettings(
+                provider = Some(model.provider),
+                model = Some("m")
+              )
+            ),
+            RunRequest(
+              ThreadId("direct-bounded"),
+              AgentMessage.user("hello"),
+              limits = RunLimits(maxOutputTokens = 10, maxEstimatedCost = Some(BigDecimal(1)))
+            )
+          )
+          requests <- model.recordedRequests
+        yield (outcome, requests)).provideLayer(
+          TestAgentRuntime.inMemory(
+            model,
+            modelPolicies = ModelPolicySource.static(ModelPolicy.default, prices)
+          )
+        )
+      yield assertTrue(
+        result._1.isInstanceOf[RunOutcome.Completed],
+        result._2.length == 1,
+        result._2.head.settings.maxOutputTokens.contains(10)
+      )
+    },
+    test("有费用上限的直连 Disabled 仍保存最小账本，缺失 usage 阻止工具和恢复后再次调用") {
+      for
+        model <- ScriptedChatModel.make(
+          Chunk(
+            ChatResponse(
+              AgentMessage.assistantToolCalls(
+                Chunk(
+                  ToolCall(
+                    "unknown-call",
+                    "echo",
+                    zio.json.ast.Json.Obj("value" -> zio.json.ast.Json.Str("hello"))
+                  )
+                )
+              ),
+              FinishReason.ToolCalls,
+              TokenUsage(0, 0),
+              usageReported = false
+            ),
+            finalResponse("must not repeat")
+          )
+        )
+        inner      <- ZIO.service[RunStore].provideLayer(RunStore.inMemory)
+        observed   <- InjectingRunStore.make(inner, (_, _) => false)
+        executions <- Ref.make(0)
+        tool       <- RegisteredTool.make(
+          Tool.json[Any, Json, AgentError.ToolExecutionFailed, Json](
+            ToolName("echo"),
+            "echo",
+            Json.Obj("type" -> Json.Str("object")),
+            None,
+            ToolMetadata(ToolRisk.ReadOnly, SideEffect.None)
+          )((input, _) => executions.update(_ + 1).as(input))
+        )
+        prices = ModelPriceBook.of((model.provider, "m", ModelPrice(1, 1)))
+        result <- (for
+          runtime <- ZIO.service[AgentRuntime]
+          failed  <- runtime
+            .run(
+              agent.copy(
+                modelSettings = ModelSettings(provider = Some(model.provider), model = Some("m")),
+                allowedTools = Set("echo")
+              ),
+              RunRequest(
+                ThreadId("direct-unknown-usage"),
+                AgentMessage.user("hello"),
+                limits = RunLimits(maxEstimatedCost = Some(BigDecimal(1)))
+              )
+            )
+            .exit
+          id        <- observed.lastRunId.get.someOrFail(AgentError.Unexpected("missing run"))
+          calls     <- inner.getModelCalls(id)
+          state     <- inner.load(id)
+          recovered <- runtime.recover(id).exit
+          requests  <- model.recordedRequests
+        yield (failed, calls, state, recovered, requests)).provideLayer(
+          TestAgentRuntime.inMemory(
+            model,
+            tools = List(tool),
+            toolPolicy = ToolPolicyConfig.secureDefault.copy(allowedTools = Set(ToolName("echo"))),
+            profile = RuntimeProfile(capturePolicy = CapturePolicy.Disabled),
+            store = ZLayer.succeed(observed),
+            modelPolicies = ModelPolicySource.static(ModelPolicy.default, prices)
+          )
+        )
+        executed <- executions.get
+      yield assertTrue(
+        executed == 0,
+        result._1.causeOption.flatMap(_.failureOption).exists {
+          case AgentError.InvalidModelResponse(message) => message.contains("缺少可核验用量")
+          case _                                        => false
+        },
+        result._2.length == 1,
+        result._2.head.status == ModelCallStatus.Succeeded,
+        result._2.head.usage.isEmpty,
+        result._2.head.canonicalRequest.isEmpty,
+        result._2.head.capturePolicy == CapturePolicy.MetadataOnly,
+        result._3.usage.toolCalls == 0,
+        result._4.isFailure,
+        result._5.length == 1
+      )
     },
     test("Replayable 账本重建的 ChatRequest 与 Fake Model 捕获深比较相等") {
       for

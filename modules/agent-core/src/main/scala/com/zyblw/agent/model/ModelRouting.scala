@@ -126,7 +126,13 @@ object ModelRouter:
       case ContentPart.ImageUrl(_, _) | ContentPart.ImageArtifact(_, _, _) => true
       case _                                                               => false
     })
-    val estimate = price.map(_.estimate(TokenUsage(estimatedInputTokens, output.toLong)))
+    // 缓存读写比例在发送前未知，预算按最高输入单价准入；结算仍按实际分类计费。
+    val estimate = price.map { p =>
+      val input = p.inputPerMillionTokens
+        .max(p.cachedInputPerMillionTokens.getOrElse(p.inputPerMillionTokens))
+        .max(p.cacheWriteInputPerMillionTokens.getOrElse(p.inputPerMillionTokens))
+      p.copy(inputPerMillionTokens = input).estimate(TokenUsage(estimatedInputTokens, output.toLong))
+    }
     Chunk.fromIterable(
       List(
         Option.when(candidate.maxSensitivity.ordinal < requirement.sensitivity.ordinal)("data-policy"),

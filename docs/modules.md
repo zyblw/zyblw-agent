@@ -3,7 +3,7 @@
 > 状态：当前
 > 最后核验：2026-09-23
 >
-> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.2.0`。本页不提升 Experimental 能力的成熟度。
+> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
 > 事实来源：`build.sbt`、各模块 `src/main`、`maturity-and-roadmap.md`
 
@@ -121,11 +121,8 @@ RAG 业务还需加入 `zyblw-agent-rag`；PDF/EPUB 再加入 `zyblw-agent-docum
 
 ## 兼容策略
 
-当前采用 early SemVer：
+当前尚未发布，采用统一的首版 fresh-install 基线：
 
-- `0.x` minor 可包含明确记录的破坏性调整；
-- 同一 minor 的 patch 应保持源码和二进制兼容；
-- wire schema、数据库 migration 与 Scala API 分别维护兼容性；
-- 所有破坏性变化写入 `CHANGELOG.md` 和迁移指南；
-- patch 发布前必须执行独立 Maven consumer 与下游回归；MiMa / sbt-version-policy 审计二进制与源码兼容，但不验证
-  POM、资源、服务装配和真实宿主启动路径。
+- Scala API、OpenAPI 和数据库基线均以当前源码为准；不对未发布候选维护历史兼容分支。
+- 首版发布前必须执行全量测试、真实 PostgreSQL 集成测试和独立 Maven consumer 验证。
+- 首版正式发布后冻结其 versioned migration，再根据实际已发布制品建立兼容策略；发布来源、标签和版本仍由 release provenance 门禁校验。
