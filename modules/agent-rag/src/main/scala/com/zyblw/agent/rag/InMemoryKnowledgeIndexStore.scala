@@ -457,6 +457,23 @@ final class InMemoryKnowledgeIndexStore private (
   ): UIO[Option[IndexProfileId]] =
     state.get.map(_.activeProfile(tenantId, spaceId))
 
+  override def spaceProfileState(
+      tenantId: TenantId,
+      spaceId: KnowledgeSpaceId
+  ): UIO[Option[KnowledgeSpaceProfileState]] =
+    state.get.map(
+      _.spaces
+        .get(tenantId -> spaceId)
+        .map(space => KnowledgeSpaceProfileState(space.activeProfileId, space.revision))
+    )
+
+  override def profileManifests(
+      tenantId: TenantId,
+      spaceId: KnowledgeSpaceId,
+      profileId: IndexProfileId
+  ): UIO[Chunk[KnowledgeIndexManifest]] =
+    state.get.map(_.profileManifests(tenantId, spaceId, profileId))
+
   override def activateProfile(
       tenantId: TenantId,
       spaceId: KnowledgeSpaceId,

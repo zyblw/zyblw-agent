@@ -86,7 +86,7 @@ final class PostgresRunSubmissionStore(dataSource: DataSource) extends RunSubmis
   private def insertRun(connection: Connection, submission: RunStartSubmission): Boolean =
     val state     = submission.state
     val statement = connection.prepareStatement(
-      """INSERT INTO agent_runs
+      """INSERT INTO zyblw_agent_core.agent_runs
         |(run_id, session_id, agent_id, status, version, schema_version, state_json, cancel_requested,
         | start_scope_hash, start_idempotency_key, start_request_hash, created_at, updated_at)
         |VALUES (?::uuid, ?::uuid, ?, ?, ?, ?, ?::jsonb, FALSE, ?, ?, ?, ?, ?)
@@ -112,7 +112,7 @@ final class PostgresRunSubmissionStore(dataSource: DataSource) extends RunSubmis
   /** 写入 sequence=0 的 RunCreated；调用前已经由 SPI 校验事件归属和连续性。 */
   private def insertCreatedEvent(connection: Connection, event: PersistedAgentEvent): Unit =
     val statement = connection.prepareStatement(
-      """INSERT INTO agent_events(event_id, run_id, sequence, event_type, payload, created_at)
+      """INSERT INTO zyblw_agent_core.agent_events(event_id, run_id, sequence, event_type, payload, created_at)
         |VALUES (?::uuid, ?::uuid, ?, ?, ?::jsonb, ?)""".stripMargin
     )
     try
@@ -133,7 +133,7 @@ final class PostgresRunSubmissionStore(dataSource: DataSource) extends RunSubmis
   ): RunCommandRecord =
     val payload   = RunCommandPayload.Start
     val statement = connection.prepareStatement(
-      """INSERT INTO agent_run_commands
+      """INSERT INTO zyblw_agent_core.agent_run_commands
         |(command_id, run_id, command_type, payload, idempotency_key, status, priority, available_at)
         |VALUES (?::uuid, ?::uuid, 'Start', ?::jsonb, 'start', 'Queued', 0, CURRENT_TIMESTAMP)
         |RETURNING command_id, run_id, command_type, payload::text, idempotency_key, status, priority,
@@ -150,7 +150,7 @@ final class PostgresRunSubmissionStore(dataSource: DataSource) extends RunSubmis
   /** 每个 Run 创建唯一 dispatcher，并立即标记 Queued 供 WorkerHost claim。 */
   private def insertDispatch(connection: Connection, runId: RunId): Unit =
     val statement = connection.prepareStatement(
-      "INSERT INTO agent_run_dispatch(run_id, status) VALUES (?::uuid, 'Queued')"
+      "INSERT INTO zyblw_agent_core.agent_run_dispatch(run_id, status) VALUES (?::uuid, 'Queued')"
     )
     try
       statement.setString(1, runId.asString)
@@ -160,7 +160,7 @@ final class PostgresRunSubmissionStore(dataSource: DataSource) extends RunSubmis
   /** 读取唯一索引对应的既有 runId/requestHash；仅在 INSERT 冲突后调用。 */
   private def loadSubmission(connection: Connection, submission: RunStartSubmission): (RunId, String) =
     val statement = connection.prepareStatement(
-      """SELECT run_id, start_request_hash FROM agent_runs
+      """SELECT run_id, start_request_hash FROM zyblw_agent_core.agent_runs
         |WHERE start_scope_hash = ? AND start_idempotency_key = ?""".stripMargin
     )
     try
@@ -180,7 +180,7 @@ final class PostgresRunSubmissionStore(dataSource: DataSource) extends RunSubmis
     val statement = connection.prepareStatement(
       """SELECT command_id, run_id, command_type, payload::text, idempotency_key, status, priority,
         |available_at, attempt, manual_retry_count, last_failure, created_at, updated_at
-        |FROM agent_run_commands WHERE run_id = ?::uuid AND command_type = 'Start'
+        |FROM zyblw_agent_core.agent_run_commands WHERE run_id = ?::uuid AND command_type = 'Start'
         |ORDER BY created_at ASC, command_id ASC LIMIT 1""".stripMargin
     )
     try

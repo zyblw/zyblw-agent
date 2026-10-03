@@ -120,7 +120,7 @@ function Console() {
             {activeTab === 'memory' && <MemoryPanel />}
             {activeTab === 'rag' && <RagInspector />}
             {activeTab === 'queue' && <QueueOps />}
-            {activeTab === 'models' && <ModelGovernance capabilities={capabilities.data} />}
+            {activeTab === 'models' && <ModelGovernance />}
             {activeTab === 'config' && <ConfigStudio />}
             {activeTab === 'security' && <SecurityArtifacts onOpenConfig={() => url.set({ tab: 'config' })} />}
             {activeTab === 'evals' && <EvalAnalytics />}

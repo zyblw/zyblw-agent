@@ -856,7 +856,13 @@ final class AgentRuntimeDriver(
 
 object AgentRuntimeDriver:
   /** 装配入口在 [[AgentRuntimeDriverLayers]]，这里只做转发以保持调用方稳定。 */
-  export AgentRuntimeDriverLayers.{layer, layerWithContextSources, layerWithProfile, layerWithCapture}
+  export AgentRuntimeDriverLayers.{
+    layer,
+    layerWithContextSources,
+    layerWithProfile,
+    layerWithRoleSource,
+    layerWithCapture
+  }
 
   /** 规划阶段对单个模型调用得出的确定性结论。
     *

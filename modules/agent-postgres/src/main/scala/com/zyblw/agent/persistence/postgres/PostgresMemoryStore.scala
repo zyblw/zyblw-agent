@@ -31,7 +31,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
       validateValue(entry) *> withConnection { connection =>
         jdbc("upsert memory") {
           val sql =
-            """INSERT INTO agent_memories
+            """INSERT INTO zyblw_agent_core.agent_memories
               |(scope_kind, scope_key, tenant_id, user_id, session_id, memory_key, value_json, search_text,
               | memory_kind, importance, confidence, sensitivity, evidence, extractor_version, source_run_id,
               | version, status, created_at, updated_at, expires_at, deleted_at)
@@ -160,7 +160,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
   def delete(scope: MemoryScope, key: String): IO[StoreError, Unit] = withConnection { connection =>
     jdbc("delete memory") {
       val statement = connection.prepareStatement(
-        """UPDATE agent_memories
+        """UPDATE zyblw_agent_core.agent_memories
           |SET value_json = NULL, search_text = NULL, status = 'deleted', version = version + 1,
           |    updated_at = CURRENT_TIMESTAMP, deleted_at = CURRENT_TIMESTAMP
           |WHERE scope_kind = ? AND scope_key = ? AND memory_key = ? AND status = 'active'""".stripMargin
@@ -180,7 +180,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
   def deleteScope(scope: MemoryScope): IO[StoreError, Long] = withConnection { connection =>
     jdbc("delete memory scope") {
       val statement = connection.prepareStatement(
-        """UPDATE agent_memories
+        """UPDATE zyblw_agent_core.agent_memories
           |SET value_json = NULL, search_text = NULL, status = 'deleted', version = version + 1,
           |    updated_at = CURRENT_TIMESTAMP, deleted_at = CURRENT_TIMESTAMP
           |WHERE scope_kind = ? AND scope_key = ? AND status = 'active'""".stripMargin
@@ -204,13 +204,13 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
           val statement = connection.prepareStatement(
             """WITH expired AS (
             |  SELECT scope_kind, scope_key, memory_key
-            |  FROM agent_memories
+            |  FROM zyblw_agent_core.agent_memories
             |  WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?
             |  ORDER BY expires_at, scope_kind, scope_key, memory_key
             |  FOR UPDATE SKIP LOCKED
             |  LIMIT ?
             |)
-            |UPDATE agent_memories m
+            |UPDATE zyblw_agent_core.agent_memories m
             |SET value_json = NULL, search_text = NULL, status = 'deleted', version = m.version + 1,
             |    updated_at = ?, deleted_at = ?
             |FROM expired e
@@ -299,7 +299,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
   private def tombstoneOne(connection: Connection, scope: MemoryScope, key: String): IO[StoreError, Long] =
     jdbc("governed delete memory") {
       val statement = connection.prepareStatement(
-        """UPDATE agent_memories
+        """UPDATE zyblw_agent_core.agent_memories
           |SET value_json = NULL, search_text = NULL, status = 'deleted', version = version + 1,
           |    updated_at = CURRENT_TIMESTAMP, deleted_at = CURRENT_TIMESTAMP
           |WHERE scope_kind = ? AND scope_key = ? AND memory_key = ? AND status = 'active'""".stripMargin
@@ -317,7 +317,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
   private def tombstoneScope(connection: Connection, scope: MemoryScope): IO[StoreError, Long] =
     jdbc("governed delete memory scope") {
       val statement = connection.prepareStatement(
-        """UPDATE agent_memories
+        """UPDATE zyblw_agent_core.agent_memories
           |SET value_json = NULL, search_text = NULL, status = 'deleted', version = version + 1,
           |    updated_at = CURRENT_TIMESTAMP, deleted_at = CURRENT_TIMESTAMP
           |WHERE scope_kind = ? AND scope_key = ? AND status = 'active'""".stripMargin
@@ -338,7 +338,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
   private def insertAudit(connection: Connection, record: MemoryAuditRecord): IO[StoreError, Unit] =
     jdbc("insert memory audit") {
       val statement = connection.prepareStatement(
-        """INSERT INTO agent_memory_audit
+        """INSERT INTO zyblw_agent_core.agent_memory_audit
           |(audit_id, action, actor_kind, actor_tenant_id, actor_user_id, actor_system_name,
           | target_scope_kind, target_scope_key, target_tenant_id, target_user_id, target_session_id,
           | memory_key_hash, expected_version, resulting_version, affected_count, reason_code, occurred_at)
@@ -395,7 +395,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
       now: Long
   ): IO[StoreError, Option[MemoryEntry]] = jdbc("insert first memory") {
     val statement = connection.prepareStatement(
-      s"""INSERT INTO agent_memories
+      s"""INSERT INTO zyblw_agent_core.agent_memories
          |(scope_kind, scope_key, tenant_id, user_id, session_id, memory_key, value_json, search_text,
          | memory_kind, importance, confidence, sensitivity, evidence, extractor_version, source_run_id,
          | version, status, created_at, updated_at, expires_at, deleted_at)
@@ -419,7 +419,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
       now: Long
   ): IO[StoreError, Option[MemoryEntry]] = jdbc("compare and set memory") {
     val statement = connection.prepareStatement(
-      s"""UPDATE agent_memories SET
+      s"""UPDATE zyblw_agent_core.agent_memories SET
          |value_json = ?::jsonb, search_text = ?, memory_kind = ?, importance = ?, confidence = ?,
          |sensitivity = ?, evidence = ?, extractor_version = ?, source_run_id = ?, version = version + 1,
          |status = 'active', updated_at = ?, expires_at = ?, deleted_at = NULL
@@ -457,7 +457,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
   private def currentVersion(connection: Connection, scope: MemoryScope, key: String): IO[StoreError, Long] =
     jdbc("read memory version") {
       val statement = connection.prepareStatement(
-        "SELECT version FROM agent_memories WHERE scope_kind = ? AND scope_key = ? AND memory_key = ?"
+        "SELECT version FROM zyblw_agent_core.agent_memories WHERE scope_kind = ? AND scope_key = ? AND memory_key = ?"
       )
       try
         val db = scopeDb(scope)
@@ -668,7 +668,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
   private val returningColumns =
     "memory_key, value_json::text, importance, source_run_id, created_at, expires_at, memory_kind, confidence, sensitivity, evidence, extractor_version, version, updated_at"
 
-  private val entrySelect = s"SELECT $returningColumns FROM agent_memories"
+  private val entrySelect = s"SELECT $returningColumns FROM zyblw_agent_core.agent_memories"
 
 /** JDBC 所需的 canonical scope 与可审计治理列。 */
 final private case class MemoryScopeDb(

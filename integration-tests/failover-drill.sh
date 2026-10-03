@@ -98,9 +98,9 @@ count_table() {
   local role=$1
   local table=$2
   if [[ "$role" == "primary" ]]; then
-    sql_primary "SELECT count(*) FROM ${table};" | tr -d '[:space:]'
+    sql_primary "SELECT count(*) FROM zyblw_agent_core.${table};" | tr -d '[:space:]'
   else
-    sql_standby "SELECT count(*) FROM ${table};" | tr -d '[:space:]'
+    sql_standby "SELECT count(*) FROM zyblw_agent_core.${table};" | tr -d '[:space:]'
   fi
 }
 

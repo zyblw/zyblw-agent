@@ -128,12 +128,12 @@ final class PostgresPgVectorStore(
 
   private def vectorSql(filtered: Boolean): String =
     s"""SELECT $chunkSelectColumns,
-       |       1 - (embedding <=> ?::public.vector) AS score
+       |       1 - (embedding OPERATOR(zyblw_extensions.<=>) ?::zyblw_extensions.vector) AS score
        |FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
        |WHERE tenant_id = ? AND permissions <@ ?::text[]
        |${visibilitySql()}
        |${if filtered then FilterSql else ""}
-       |ORDER BY embedding <=> ?::public.vector
+       |ORDER BY embedding OPERATOR(zyblw_extensions.<=>) ?::zyblw_extensions.vector
        |LIMIT ?""".stripMargin
 
   private def bindVector(
@@ -196,7 +196,7 @@ final class PostgresPgVectorStore(
             |(tenant_id, knowledge_space_id, profile_id, chunk_id, document_id, index_version, chunk_text, search_text, source_uri, permissions, metadata,
             | embedding, parent_id, lineage_ordinal, previous_chunk_id, next_chunk_id, heading_path,
             | page_numbers, origins, block_ids, dense_text, display_sha256, dense_sha256, lexical_sha256, source_revision_id)
-            |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::public.vector, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?)
+            |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::zyblw_extensions.vector, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?)
             |ON CONFLICT (tenant_id, knowledge_space_id, profile_id, document_id, chunk_id) DO UPDATE SET
             |index_version = EXCLUDED.index_version,
             |chunk_text = EXCLUDED.chunk_text,
@@ -616,10 +616,10 @@ final class PostgresPgVectorStore(
     withProfile(scope, Chunk.empty[RetrievalHit], vector = false) { (connection, profile) =>
       val sql =
         s"""SELECT $chunkSelectColumns,
-             |       similarity(search_text, ?) AS score
+             |       zyblw_extensions.similarity(search_text, ?) AS score
              |FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
              |WHERE tenant_id = ? AND permissions <@ ?::text[]
-             |  AND search_text % ?
+             |  AND search_text OPERATOR(zyblw_extensions.%) ?
              |${visibilitySql()}
              |$FilterSql
              |ORDER BY score DESC, document_id, chunk_id
@@ -663,13 +663,13 @@ final class PostgresPgVectorStore(
              |),
              |vector_hits AS MATERIALIZED (
              |  SELECT document_id, chunk_id,
-             |         row_number() OVER (ORDER BY embedding <=> ?::public.vector, document_id, chunk_id) AS vector_rank,
-             |         1 - (embedding <=> ?::public.vector) AS vector_score
+             |         row_number() OVER (ORDER BY embedding OPERATOR(zyblw_extensions.<=>) ?::zyblw_extensions.vector, document_id, chunk_id) AS vector_rank,
+             |         1 - (embedding OPERATOR(zyblw_extensions.<=>) ?::zyblw_extensions.vector) AS vector_score
              |  FROM zyblw_agent_knowledge.agent_knowledge_profile_chunks
              |  WHERE tenant_id = ? AND permissions <@ ?::text[]
              |  ${visibilitySql()}
              |  $filterSql
-             |  ORDER BY embedding <=> ?::public.vector, document_id, chunk_id
+             |  ORDER BY embedding OPERATOR(zyblw_extensions.<=>) ?::zyblw_extensions.vector, document_id, chunk_id
              |  LIMIT ?
              |),
              |text_hits AS MATERIALIZED (

@@ -5,7 +5,7 @@ import com.zyblw.agent.context.ContextSourceResolver
 import com.zyblw.agent.core.*
 import com.zyblw.agent.extension.RuntimeExtensions
 import com.zyblw.agent.memory.*
-import com.zyblw.agent.model.ModelRoleCatalog
+import com.zyblw.agent.model.{ModelRoleCatalog, ModelRoleSource}
 import com.zyblw.agent.tools.ToolPolicySource
 import java.time.Instant
 import zio.*
@@ -85,8 +85,11 @@ final class AgentCommandServiceLive(
     modelPolicies: ModelPolicySource = ModelPolicySource.default,
     contextSources: ContextSourceResolver = ContextSourceResolver.emptyValue,
     extensions: RuntimeExtensions = RuntimeExtensions.empty,
-    roleCatalog: ModelRoleCatalog = ModelRoleCatalog.empty
+    roleCatalog: ModelRoleCatalog = ModelRoleCatalog.empty,
+    roleSource: Option[ModelRoleSource] = None
 ) extends AgentCommandService:
+  private val roles: ModelRoleSource = roleSource.getOrElse(ModelRoleSource.static(roleCatalog))
+
   /** 先在内存中准备不可变初始事实，再由 Adapter 用一个事务落库。 这里不调用 `runs.createWithEvents`，否则会重新引入“状态成功、Start 命令失败”的双写窗口。
     */
   def submitStart(
@@ -94,8 +97,8 @@ final class AgentCommandServiceLive(
       request: RunRequest,
       idempotencyKey: String
   ): IO[AgentError, RunCommandRecord] =
-    roleCatalog
-      .applyTo(agent.modelSettings)
+    roles.current
+      .flatMap(_.applyTo(agent.modelSettings))
       .map(settings => agent.copy(modelSettings = settings))
       .flatMap { resolved =>
         RunInitialization.prepare(
@@ -238,6 +241,16 @@ object AgentCommandServiceLive:
     RunStore & RunCommandStore & RunSubmissionStore & ToolPolicySource & ModelPolicySource &
       ContextSourceResolver & RuntimeExtensions,
     AgentCommandService
+  ] = configuredWithRoles(profile, ModelRoleSource.static(roleCatalog))
+
+  /** 与 `configured` 相同，但角色目录在每次 `submitStart` 时从 `roles` 读取。 */
+  def configuredWithRoles(
+      profile: RuntimeProfile,
+      roles: ModelRoleSource
+  ): URLayer[
+    RunStore & RunCommandStore & RunSubmissionStore & ToolPolicySource & ModelPolicySource &
+      ContextSourceResolver & RuntimeExtensions,
+    AgentCommandService
   ] =
     ZLayer.fromZIO {
       for
@@ -257,6 +270,6 @@ object AgentCommandServiceLive:
         modelPolicies,
         contextSources,
         extensions,
-        roleCatalog
+        roleSource = Some(roles)
       )
     }

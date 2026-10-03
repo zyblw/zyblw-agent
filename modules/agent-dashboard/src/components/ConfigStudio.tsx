@@ -59,9 +59,7 @@ const APPLIES_META: Record<RuntimeSettingApplies, { label: string; tone: string;
 /**
  * 覆盖字段的编辑控件类型；由字段 key 决定，与后端白名单一一对应。
  *
- * `model` 是一个刻意的例外：这四项可以覆盖，但它们的写入口只在模型页。Provider 与模型名必须从已注册目录里
- * 选，一个自由文本框会让一次拼写错误变成"保存成功"后每一次模型调用都 ProviderNotFound；采样参数跟着它们
- * 一起走，是为了让一次模型切换只产生一条审计记录，而不是两处半成品配置。
+ * Provider / 模型名不再接受全局覆盖：问答走管理台角色绑定。采样温度与输出上限仍可在此覆盖。
  */
 type Editor = 'list' | 'number' | 'boolean' | 'approval' | 'readonly' | 'model';
 
@@ -79,8 +77,8 @@ const EDITORS: Record<string, Editor> = {
   rerankEnabled: 'boolean',
   modelProvider: 'model',
   modelName: 'model',
-  modelTemperature: 'model',
-  modelMaxOutputTokens: 'model',
+  modelTemperature: 'number',
+  modelMaxOutputTokens: 'number',
 };
 
 export function ConfigStudio() {
@@ -404,8 +402,8 @@ function ValueEditor({
   if (editor === 'model') {
     return (
       <span className="text-[11px] text-slate-500">
-        {value === undefined ? '沿用各 Agent 定义' : String(value)}
-        <span className="block text-slate-600">在「模型」页切换</span>
+        {value === undefined ? '沿用角色绑定' : String(value)}
+        <span className="block text-slate-600">到宿主 /admin/models 绑定角色</span>
       </span>
     );
   }

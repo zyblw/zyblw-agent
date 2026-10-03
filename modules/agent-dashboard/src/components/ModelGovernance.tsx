@@ -1,49 +1,36 @@
 'use client';
 
 /**
- * 模型治理：已注册目录、运行时切换、连通性探活与 Embedding 的不可变说明。
+ * 模型治理：已注册目录、连通性探活与 Embedding 的不可变说明。
  *
- * 切换**不是**一个独立的写端点，而是向 `PUT /api/v1/admin/config` 提交一份完整的覆盖快照。这样模型工作点
- * 与工具治理共用同一套乐观锁、审计历史和跨副本刷新；为模型再造一条写入路径会产生两份可能互相矛盾的配置事实。
- * 代价是提交时必须带上**其它人已设置的全部覆盖项**，否则一次模型切换会顺手清掉别人配的工具白名单。
- *
- * 界面只让用户从目录里选择组合。后端会拒绝未注册的 provider/model（400 InvalidConfiguration），但把一个
- * 自由输入框摆在这里意味着一次拼写错误就能让每一次模型调用变成 ProviderNotFound——而它会先显示"保存成功"。
+ * 本页只读。连接、模型、角色绑定与价格由宿主管理台维护并热加载到注册表；每次运行按角色（或用户所选模型）
+ * 钉住 provider/model，因此这里不再提供全局模型覆盖的写入口——那会与角色绑定形成两份互相矛盾的事实。
  *
  * 凭据只有"就位与否"和"来自哪个引用"两个事实可用。这里不展示、不请求、也不存储任何 Key 值。
  */
 
-import React, { useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import {
   AlertTriangle,
   Boxes,
   CircleSlash,
-  Eraser,
   KeyRound,
   Radio,
-  Save,
   Sparkles,
 } from 'lucide-react';
-import { AdminApiError } from '@/lib/adminClient';
-import { useModelCatalog, useProbeModel, useRuntimeConfig, useUpdateRuntimeConfig } from '@/lib/queries';
+import { useModelCatalog, useProbeModel } from '@/lib/queries';
 import { useToast } from '@/lib/toast';
 import { useUrlState } from '@/lib/urlState';
-import { hasErrors, validateOverrides } from '@/lib/validation';
 import {
-  MODEL_OVERRIDE_KEYS,
   providersOf,
-  type AdminCapabilitiesView,
   type EmbeddingModelView,
   type ModelCatalogView,
   type ModelOptionView,
-  type RuntimeConfigView,
-  type RuntimeOverrides,
 } from '@/types/admin';
 import { formatCount, formatDuration, formatPercent } from '@/lib/format';
 import {
   Badge,
   Button,
-  ConflictNotice,
   EmptyState,
   ErrorBanner,
   Field,
@@ -51,9 +38,7 @@ import {
   LoadingRows,
   Mono,
   Panel,
-  Select,
   StatCard,
-  TextInput,
 } from '@/components/ui';
 
 /** URL 里承载模型页选择的参数名；与其它页签的租户参数刻意不同名，避免切页签时互相污染。 */
@@ -77,11 +62,8 @@ function probeFailureMessage(code: string | null | undefined): string {
   return PROBE_FAILURE_MESSAGES[code] ?? `未识别的稳定失败分类：${code}`;
 }
 
-export function ModelGovernance({ capabilities }: { capabilities: AdminCapabilitiesView | undefined }) {
+export function ModelGovernance() {
   const catalog = useModelCatalog();
-  // 只装配 models 而不装配 config 是一个有意的组合：模型页可看不可改。此时不请求配置，避免制造一批 404。
-  const canSwitch = capabilities?.runtimeConfig === true;
-  const config = useRuntimeConfig(canSwitch);
 
   const url = useUrlState();
   const view = catalog.data;
@@ -171,39 +153,17 @@ export function ModelGovernance({ capabilities }: { capabilities: AdminCapabilit
           />
 
           <div className="grid gap-4 xl:grid-cols-2">
-            {canSwitch ? (
-              config.isPending ? (
-                <Panel title="切换生效模型">
-                  <LoadingRows rows={4} />
-                </Panel>
-              ) : config.data ? (
-                <ModelSwitchForm
-                  // 覆盖版本变化即丢弃草稿：继续基于旧基线编辑只会撞上乐观锁冲突，因此重建编辑器状态
-                  // 才是正确行为，而不是一个需要额外同步逻辑的边界情况。
-                  key={config.data.overrideVersion}
-                  view={config.data}
-                  providers={providers}
-                  providerOptions={providerOptions}
-                  provider={selectedProvider}
-                  model={selectedModel}
-                  option={selectedOption}
-                  onSelect={selectCombination}
-                  onReload={() => void config.refetch()}
-                  reloading={config.isFetching}
-                />
-              ) : (
-                <Panel title="切换生效模型">
-                  <ErrorBanner error={config.error ?? new Error('未获得配置快照')} context="读取运行时配置" />
-                </Panel>
-              )
-            ) : (
-              <Panel title="切换生效模型" description="后端未装配运行时配置能力">
-                <EmptyState
-                  title="该部署不允许在运行时切换模型"
-                  reason="模型切换走的是配置覆盖写入路径。宿主只装配了模型目录而没有装配 RuntimeSettingsService，因此这个页面是只读的。"
-                />
-              </Panel>
-            )}
+            <Panel title="生效模型" description="由宿主管理台的角色绑定决定；本页只读">
+              <div className="space-y-2 text-xs leading-6 text-slate-400">
+                <p>
+                  连接、模型、角色与价格统一在宿主的「模型」管理页维护：每次运行按角色（或用户所选模型）钉住
+                  provider/model，改绑后下一次调用即生效，全局模型覆盖不再参与路由。
+                </p>
+                <a href="/admin/models" className="inline-flex items-center gap-1 text-sky-300 hover:underline">
+                  前往模型管理页 →
+                </a>
+              </div>
+            </Panel>
 
             <ModelProbePanel provider={selectedProvider} model={selectedModel} option={selectedOption} />
           </div>
@@ -409,229 +369,6 @@ function ModelCatalogTable({
       <p className="mt-3 text-[11px] text-slate-600">
         管理台只能看到凭据是否就位以及它来自哪个引用，看不到也不会请求 Key 值。能力位来自 Provider 的声明，
         用于在切换前发现「这个模型不支持工具调用」这类会让 Agent 循环直接退化的组合。
-      </p>
-    </Panel>
-  );
-}
-
-/** 从一份覆盖里去掉四个模型键；返回新对象，不修改入参。 */
-function withoutModelOverrides(overrides: RuntimeOverrides): RuntimeOverrides {
-  const next: RuntimeOverrides = { ...overrides };
-  for (const key of MODEL_OVERRIDE_KEYS) delete next[key];
-  return next;
-}
-
-/** 解析一个可选数字输入；空串表示"不覆盖"，非法文本返回 NaN 以便校验层给出原因。 */
-function parseOptionalNumber(text: string): number | undefined {
-  if (text.trim() === '') return undefined;
-  return Number(text);
-}
-
-/** 切换表单；其生命周期与一个覆盖版本绑定。 */
-function ModelSwitchForm({
-  view,
-  providers,
-  providerOptions,
-  provider,
-  model,
-  option,
-  onSelect,
-  onReload,
-  reloading,
-}: {
-  view: RuntimeConfigView;
-  providers: string[];
-  providerOptions: ModelOptionView[];
-  provider: string;
-  model: string;
-  option: ModelOptionView | null;
-  onSelect: (provider: string, model: string | null) => void;
-  onReload: () => void;
-  reloading: boolean;
-}) {
-  const update = useUpdateRuntimeConfig();
-  const { notify } = useToast();
-
-  const [temperature, setTemperature] = useState(
-    view.overrides.modelTemperature === undefined ? '' : String(view.overrides.modelTemperature),
-  );
-  const [maxOutputTokens, setMaxOutputTokens] = useState(
-    view.overrides.modelMaxOutputTokens === undefined ? '' : String(view.overrides.modelMaxOutputTokens),
-  );
-  const [reason, setReason] = useState('');
-
-  // 提交的是**完整覆盖快照**而不是补丁：后端用整份对象替换当前覆盖层，因此必须原样带上工具白名单等
-  // 本页面不涉及的项，否则一次模型切换会顺手清掉别人设置的工具治理。
-  const draft: RuntimeOverrides = {
-    ...view.overrides,
-    modelProvider: provider || undefined,
-    modelName: model || undefined,
-    modelTemperature: parseOptionalNumber(temperature),
-    modelMaxOutputTokens: parseOptionalNumber(maxOutputTokens),
-  };
-
-  const errors = validateOverrides(draft);
-  const reasonMissing = reason.trim().length === 0;
-  const conflict = update.error instanceof AdminApiError && update.error.isConflict;
-  const preserved = withoutModelOverrides(view.overrides);
-  const otherOverrides = Object.keys(preserved).length;
-  const hasModelOverride = Object.keys(view.overrides).length > otherOverrides;
-
-  function submit(next: RuntimeOverrides, successMessage: string) {
-    update.mutate(
-      { expectedVersion: view.overrideVersion, overrides: next, reason: reason.trim() },
-      {
-        onSuccess: (result) => notify('success', successMessage, `覆盖版本 v${result.overrideVersion}`),
-        onError: (error) => {
-          if (!(error instanceof AdminApiError && error.isConflict)) {
-            notify('error', '模型切换失败', error instanceof Error ? error.message : String(error));
-          }
-        },
-      },
-    );
-  }
-
-  return (
-    <Panel
-      title="切换生效模型"
-      description="提交一次配置覆盖；对所有 Agent 立即生效，并进入同一份审计历史"
-      actions={<Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">需要 agent:admin:write</Badge>}
-    >
-      {conflict ? (
-        <div className="mb-3">
-          <ConflictNotice
-            onReload={() => {
-              update.reset();
-              onReload();
-            }}
-            reloading={reloading}
-            description={`你提交的覆盖基于 v${view.overrideVersion}，服务端已经更新到更高版本，因此被拒绝。重新加载会取回最新配置，本表单里未保存的温度、输出上限与变更原因将被丢弃。`}
-          />
-        </div>
-      ) : (
-        <div className="mb-3">
-          <ErrorBanner error={update.error} context="切换模型" />
-        </div>
-      )}
-
-      {/* 只能从目录里选：自由输入的 provider 名会被后端拒绝（400），但在此之前它已经让人以为自己配对了。 */}
-      <div className="grid gap-3 md:grid-cols-2">
-        <Select
-          label="Provider"
-          value={provider}
-          onChange={(next) => onSelect(next, null)}
-          options={providers.map((name) => ({ value: name, label: name }))}
-          hint="切换 Provider 会重新选择该 Provider 下的第一个模型"
-        />
-        <Select
-          label="模型"
-          value={model}
-          onChange={(next) => onSelect(provider, next)}
-          options={providerOptions.map((item) => ({
-            value: item.model,
-            label: item.credential.present ? item.model : `${item.model}（缺凭据）`,
-          }))}
-          hint={`该 Provider 下有 ${providerOptions.length} 个已注册模型`}
-        />
-      </div>
-
-      <div className="mt-3 grid gap-3 md:grid-cols-2">
-        <Field label="当前生效覆盖">
-          {view.overrides.modelProvider ? (
-            <Mono className="text-slate-200">
-              {view.overrides.modelProvider}/{view.overrides.modelName ?? '（未指定模型）'}
-            </Mono>
-          ) : (
-            '各 Agent 定义'
-          )}
-        </Field>
-        <Field label="其它覆盖项">
-          {otherOverrides > 0 ? `${otherOverrides} 项将原样保留` : '无'}
-        </Field>
-      </div>
-
-      {option && !option.credential.present && (
-        <div className="mt-3 rounded-lg border border-rose-900/60 bg-rose-950/20 px-3 py-2 text-xs text-rose-200">
-          <div className="flex items-center gap-1.5 font-medium">
-            <AlertTriangle className="h-3.5 w-3.5" /> 目标 Provider 缺少凭据
-          </div>
-          <div className="mt-0.5 text-rose-300/80">
-            切到它之后每一次模型调用都会失败。请先在部署侧配置 <Mono>{option.credential.reference}</Mono>。
-          </div>
-        </div>
-      )}
-
-      {option && !option.capabilities.toolCalls && (
-        <div className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 px-3 py-2 text-xs text-amber-200">
-          该模型不支持工具调用。切换后依赖工具的 Agent 会退化成纯文本问答，而不是报错。
-        </div>
-      )}
-
-      <div className="mt-3 grid gap-3 md:grid-cols-2">
-        <TextInput
-          label="采样温度（留空表示不覆盖）"
-          value={temperature}
-          onChange={setTemperature}
-          placeholder="0.0 – 2.0"
-          inputMode="decimal"
-          error={errors.modelTemperature}
-          hint="沿用各 Agent 自己的 modelSettings"
-        />
-        <TextInput
-          label="单次输出上限（留空表示不覆盖）"
-          value={maxOutputTokens}
-          onChange={setMaxOutputTokens}
-          placeholder="1 – 1000000"
-          inputMode="numeric"
-          error={errors.modelMaxOutputTokens}
-          hint="超过模型自身上限时由 Provider 拒绝"
-        />
-      </div>
-
-      <div className="mt-3">
-        <TextInput
-          label="变更原因（必填，进入审计历史）"
-          value={reason}
-          onChange={setReason}
-          placeholder="例如：DeepSeek 限流，临时切到备用 Provider"
-          error={reasonMissing ? '必须填写变更原因；它是事后复盘唯一能解释这次切换的记录' : undefined}
-        />
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button
-          onClick={() => submit(draft, '模型切换已生效')}
-          disabled={!provider || !model || reasonMissing || hasErrors(errors) || update.isPending}
-          title={
-            hasErrors(errors)
-              ? '存在越界的取值，修正后才能提交'
-              : reasonMissing
-                ? '请先填写变更原因'
-                : undefined
-          }
-        >
-          <Save className="h-3 w-3" /> {update.isPending ? '提交中…' : '切换到该模型'}
-        </Button>
-        <Button
-          variant="secondary"
-          disabled={reasonMissing || update.isPending || !hasModelOverride}
-          onClick={() => submit(preserved, '模型覆盖已清除')}
-          title={
-            !hasModelOverride
-              ? '当前没有模型覆盖，各 Agent 已在使用自己的定义'
-              : reasonMissing
-                ? '请先填写变更原因'
-                : '删除四个模型覆盖项，恢复各 Agent 自己的定义'
-          }
-        >
-          <Eraser className="h-3 w-3" /> 清除模型覆盖
-        </Button>
-        <span className="text-[11px] text-slate-600">当前覆盖版本 v{view.overrideVersion}</span>
-      </div>
-
-      <p className="mt-3 text-[11px] text-slate-600">
-        模型覆盖没有「部署基线」可言：基线就是每个 Agent 自己的 modelSettings。因此清除覆盖等于让各 Agent 恢复
-        自己的定义，而不是把它们统一设成某个默认模型。
       </p>
     </Panel>
   );

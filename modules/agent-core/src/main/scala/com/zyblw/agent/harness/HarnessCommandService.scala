@@ -5,7 +5,7 @@ import com.zyblw.agent.context.ContextSourceResolver
 import com.zyblw.agent.core.*
 import com.zyblw.agent.extension.RuntimeExtensions
 import com.zyblw.agent.memory.{RunCommandRecord, RunSubmissionStore}
-import com.zyblw.agent.model.ModelRoleCatalog
+import com.zyblw.agent.model.{ModelRoleCatalog, ModelRoleSource}
 import com.zyblw.agent.runtime.RunInitialization
 import com.zyblw.agent.tools.ToolPolicySource
 import zio.*
@@ -30,16 +30,19 @@ final class HarnessCommandServiceLive(
     modelPolicies: ModelPolicySource = ModelPolicySource.default,
     contextSources: ContextSourceResolver = ContextSourceResolver.emptyValue,
     extensions: RuntimeExtensions = RuntimeExtensions.empty,
-    roleCatalog: ModelRoleCatalog = ModelRoleCatalog.empty
+    roleCatalog: ModelRoleCatalog = ModelRoleCatalog.empty,
+    roleSource: Option[ModelRoleSource] = None
 ) extends HarnessCommandService:
+  private val roles: ModelRoleSource = roleSource.getOrElse(ModelRoleSource.static(roleCatalog))
+
   def submitStart(
       goalId: GoalId,
       agent: AgentDefinition,
       request: RunRequest,
       idempotencyKey: String
   ): IO[AgentError, RunCommandRecord] =
-    roleCatalog
-      .applyTo(agent.modelSettings)
+    roles.current
+      .flatMap(_.applyTo(agent.modelSettings))
       .map(settings => agent.copy(modelSettings = settings))
       .flatMap { resolved =>
         RunInitialization.prepareForGoal(
@@ -73,6 +76,15 @@ object HarnessCommandServiceLive:
   ): URLayer[
     RunSubmissionStore & ToolPolicySource & ModelPolicySource & ContextSourceResolver & RuntimeExtensions,
     HarnessCommandService
+  ] = configuredWithRoles(profile, ModelRoleSource.static(roleCatalog))
+
+  /** 与 `configured` 相同，但角色目录在每次 `submitStart` 时从 `roles` 读取。 */
+  def configuredWithRoles(
+      profile: RuntimeProfile,
+      roles: ModelRoleSource
+  ): URLayer[
+    RunSubmissionStore & ToolPolicySource & ModelPolicySource & ContextSourceResolver & RuntimeExtensions,
+    HarnessCommandService
   ] =
     ZLayer.fromZIO {
       for
@@ -88,6 +100,6 @@ object HarnessCommandServiceLive:
         modelPolicies,
         context,
         extensions,
-        roleCatalog
+        roleSource = Some(roles)
       )
     }

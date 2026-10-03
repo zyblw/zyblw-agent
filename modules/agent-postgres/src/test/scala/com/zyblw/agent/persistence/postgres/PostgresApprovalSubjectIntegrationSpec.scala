@@ -62,7 +62,9 @@ object PostgresApprovalSubjectIntegrationSpec extends ZIOSpecDefault:
       val connection = dataSource.getConnection
       try
         val statement =
-          connection.prepareStatement("SELECT schema_version FROM agent_runs WHERE run_id = ?::uuid")
+          connection.prepareStatement(
+            "SELECT schema_version FROM zyblw_agent_core.agent_runs WHERE run_id = ?::uuid"
+          )
         try
           statement.setString(1, runId.asString)
           val result = statement.executeQuery()
@@ -197,7 +199,7 @@ object PostgresApprovalSubjectIntegrationSpec extends ZIOSpecDefault:
           // 唯一在用的耐久形状就是 1，因此把它改成别的值必须在数据库层失败，而不是留给应用层解释。
           rejected <- executeSql(
             fixture.dataSource,
-            "UPDATE agent_runs SET schema_version = 5 WHERE run_id = ?::uuid",
+            "UPDATE zyblw_agent_core.agent_runs SET schema_version = 5 WHERE run_id = ?::uuid",
             runId
           ).exit
           schemaColumn <- readSchemaVersion(fixture.dataSource, runId)

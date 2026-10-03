@@ -88,7 +88,7 @@ final class PostgresEmbeddingQuotaStore(dataSource: DataSource) extends Embeddin
       jdbc("read quota usage") {
         val statement = connection.prepareStatement(
           """SELECT requests, texts, characters
-            |FROM agent_embedding_quota_windows
+            |FROM zyblw_agent_core.agent_embedding_quota_windows
             |WHERE tenant_id = ? AND window_millis = ? AND window_start = ?""".stripMargin
         )
         try
@@ -117,13 +117,13 @@ final class PostgresEmbeddingQuotaStore(dataSource: DataSource) extends Embeddin
           val statement = connection.prepareStatement(
             """WITH candidates AS (
             |  SELECT tenant_id, window_millis, window_start
-            |  FROM agent_embedding_quota_windows
+            |  FROM zyblw_agent_core.agent_embedding_quota_windows
             |  WHERE window_start + window_millis * INTERVAL '1 millisecond' <= ?
             |  ORDER BY window_start, window_millis, tenant_id
             |  FOR UPDATE SKIP LOCKED
             |  LIMIT ?
             |)
-            |DELETE FROM agent_embedding_quota_windows quota
+            |DELETE FROM zyblw_agent_core.agent_embedding_quota_windows quota
             |USING candidates candidate
             |WHERE quota.tenant_id = candidate.tenant_id
             |  AND quota.window_millis = candidate.window_millis
@@ -141,7 +141,7 @@ final class PostgresEmbeddingQuotaStore(dataSource: DataSource) extends Embeddin
   private def ensureWindow(connection: Connection, key: WindowKey): IO[RetrievalError, Unit] =
     jdbc("ensure quota window") {
       val statement = connection.prepareStatement(
-        """INSERT INTO agent_embedding_quota_windows(tenant_id, window_millis, window_start)
+        """INSERT INTO zyblw_agent_core.agent_embedding_quota_windows(tenant_id, window_millis, window_start)
           |VALUES (?, ?, ?)
           |ON CONFLICT (tenant_id, window_millis, window_start) DO NOTHING""".stripMargin
       )
@@ -157,7 +157,7 @@ final class PostgresEmbeddingQuotaStore(dataSource: DataSource) extends Embeddin
     jdbc("lock quota window") {
       val statement = connection.prepareStatement(
         """SELECT requests, texts, characters
-          |FROM agent_embedding_quota_windows
+          |FROM zyblw_agent_core.agent_embedding_quota_windows
           |WHERE tenant_id = ? AND window_millis = ? AND window_start = ?
           |FOR UPDATE""".stripMargin
       )
@@ -177,7 +177,7 @@ final class PostgresEmbeddingQuotaStore(dataSource: DataSource) extends Embeddin
   ): IO[RetrievalError, Option[ExistingReservation]] =
     jdbc("read quota reservation") {
       val statement = connection.prepareStatement(
-        "SELECT request_hash FROM agent_embedding_quota_reservations WHERE tenant_id = ? AND request_id = ?"
+        "SELECT request_hash FROM zyblw_agent_core.agent_embedding_quota_reservations WHERE tenant_id = ? AND request_id = ?"
       )
       try
         statement.setString(1, tenantId.value)
@@ -195,7 +195,7 @@ final class PostgresEmbeddingQuotaStore(dataSource: DataSource) extends Embeddin
   ): IO[RetrievalError, Boolean] =
     jdbc("insert quota reservation") {
       val statement = connection.prepareStatement(
-        """INSERT INTO agent_embedding_quota_reservations
+        """INSERT INTO zyblw_agent_core.agent_embedding_quota_reservations
           |(tenant_id, request_id, request_hash, purpose, window_millis, window_start, requests, texts, characters)
           |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           |ON CONFLICT (tenant_id, request_id) DO NOTHING""".stripMargin
@@ -232,7 +232,7 @@ final class PostgresEmbeddingQuotaStore(dataSource: DataSource) extends Embeddin
         )
         jdbc("increment quota usage") {
           val statement = connection.prepareStatement(
-            """UPDATE agent_embedding_quota_windows
+            """UPDATE zyblw_agent_core.agent_embedding_quota_windows
               |SET requests = ?, texts = ?, characters = ?, updated_at = CURRENT_TIMESTAMP
               |WHERE tenant_id = ? AND window_millis = ? AND window_start = ?""".stripMargin
           )

@@ -94,8 +94,8 @@ object PostgresVectorPlanIntegrationSpec extends ZIOSpecDefault:
         value: DataSource
       dataSource <- ZIO.attempt(connect(None))
       forced     <- ZIO.attempt(connect(Some("-c enable_seqscan=off -c enable_sort=off")))
-      _ <- AgentPostgresMigrations.migrate(dataSource, AgentPostgresMigrationConfig.sharedPublicSchema)
-      _ <- AgentPostgresMigrations.migrateKnowledge1024(dataSource)
+      _          <- AgentPostgresMigrations.migrate(dataSource, AgentPostgresMigrationConfig())
+      _          <- AgentPostgresMigrations.migrateKnowledge1024(dataSource)
       index = PostgresKnowledgeIndexStore(dataSource, Dimension)
       rows <- ZIO.foreach(Chunk.range(0, Documents)) { d =>
         val documentId = s"doc-$d"

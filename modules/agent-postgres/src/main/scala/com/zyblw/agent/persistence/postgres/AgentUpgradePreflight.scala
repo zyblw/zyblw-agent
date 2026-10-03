@@ -60,7 +60,7 @@ object AgentUpgradePreflight:
           """SELECT
             |  COUNT(*) FILTER (WHERE status = ANY(?))::bigint,
             |  COUNT(*) FILTER (WHERE status = 'WaitingForApproval')::bigint
-            |FROM agent_runs""".stripMargin,
+            |FROM zyblw_agent_core.agent_runs""".stripMargin,
           ActiveStatuses
         )
         val commands =
@@ -71,7 +71,7 @@ object AgentUpgradePreflight:
               """SELECT
                 |  COUNT(*) FILTER (WHERE status = 'Queued')::bigint,
                 |  COUNT(*) FILTER (WHERE status = 'Leased')::bigint
-                |FROM agent_run_commands""".stripMargin,
+                |FROM zyblw_agent_core.agent_run_commands""".stripMargin,
               Chunk.empty
             )
             counts._1 -> counts._2
@@ -80,7 +80,7 @@ object AgentUpgradePreflight:
 
   private def relationExists(connection: Connection, relation: String): Boolean =
     val statement = connection.prepareStatement(
-      "SELECT to_regclass(quote_ident(current_schema()) || '.' || quote_ident(?))"
+      "SELECT to_regclass('zyblw_agent_core.' || quote_ident(?))"
     )
     try
       statement.setString(1, relation)

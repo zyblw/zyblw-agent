@@ -94,7 +94,7 @@ final class PostgresEvalTrendStore(
           """SELECT evaluation_id, suite_kind, suite_id, dataset_id, dataset_version,
             |       finished_epoch_second, finished_nano, passed, pass_rate,
             |       snapshot_sha256, snapshot_payload
-            |FROM agent_eval_snapshots
+            |FROM zyblw_agent_core.agent_eval_snapshots
             |WHERE suite_kind = ? AND suite_id = ? AND dataset_id = ? AND dataset_version = ? AND passed = TRUE
             |ORDER BY finished_epoch_second DESC, finished_nano DESC, evaluation_id DESC
             |LIMIT 1""".stripMargin,
@@ -130,7 +130,7 @@ final class PostgresEvalTrendStore(
               |  SELECT evaluation_id, suite_kind, suite_id, dataset_id, dataset_version,
               |         finished_epoch_second, finished_nano, passed, pass_rate,
               |         snapshot_sha256, snapshot_payload
-              |  FROM agent_eval_snapshots
+              |  FROM zyblw_agent_core.agent_eval_snapshots
               |  WHERE suite_kind = ? AND suite_id = ? AND dataset_id = ? AND dataset_version = ?
               |  ORDER BY finished_epoch_second DESC, finished_nano DESC, evaluation_id DESC
               |  LIMIT ?
@@ -170,7 +170,7 @@ final class PostgresEvalTrendStore(
     jdbc("append eval snapshot") {
       val metadata  = snapshot.metadata
       val statement = connection.prepareStatement(
-        """INSERT INTO agent_eval_snapshots
+        """INSERT INTO zyblw_agent_core.agent_eval_snapshots
           |(evaluation_id, schema_version, suite_kind, suite_id, dataset_id, dataset_version,
           | harness_version, provider, model, pricing_version, commit_sha,
           | started_at, finished_at, finished_epoch_second, finished_nano,
@@ -213,7 +213,7 @@ final class PostgresEvalTrendStore(
         """SELECT evaluation_id, suite_kind, suite_id, dataset_id, dataset_version,
           |       finished_epoch_second, finished_nano, passed, pass_rate,
           |       snapshot_sha256, snapshot_payload
-          |FROM agent_eval_snapshots
+          |FROM zyblw_agent_core.agent_eval_snapshots
           |WHERE evaluation_id = ?""".stripMargin
       )
       try

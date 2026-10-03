@@ -54,7 +54,7 @@ final class PostgresOutboxStore(dataSource: DataSource) extends OutboxStore:
       withConnection { connection =>
         ZIO.attemptBlocking {
           val statement = connection.prepareStatement(
-            """UPDATE agent_outbox_events
+            """UPDATE zyblw_agent_core.agent_outbox_events
               |SET lease_expires_at = CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond'), heartbeat_at = CURRENT_TIMESTAMP
               |WHERE event_id = ?::uuid AND status = 'Publishing' AND lease_owner = ? AND lease_token = ?::uuid
               |  AND generation = ? AND lease_expires_at > CURRENT_TIMESTAMP
@@ -73,7 +73,7 @@ final class PostgresOutboxStore(dataSource: DataSource) extends OutboxStore:
   def markPublished(lease: OutboxLease): IO[StoreError, Unit] =
     transitionLeased(
       lease,
-      """UPDATE agent_outbox_events
+      """UPDATE zyblw_agent_core.agent_outbox_events
         |SET status = 'Published', published_at = CURRENT_TIMESTAMP, lease_owner = NULL, lease_token = NULL,
         |    lease_expires_at = NULL, heartbeat_at = NULL, last_failure = NULL
         |WHERE event_id = ?::uuid AND status = 'Publishing' AND lease_owner = ? AND lease_token = ?::uuid
@@ -85,7 +85,7 @@ final class PostgresOutboxStore(dataSource: DataSource) extends OutboxStore:
     validateFailure(safeFailure) *> withConnection { connection =>
       ZIO.attemptBlocking {
         val statement = connection.prepareStatement(
-          """UPDATE agent_outbox_events
+          """UPDATE zyblw_agent_core.agent_outbox_events
             |SET status = 'Pending', available_at = ?, last_failure = ?, lease_owner = NULL, lease_token = NULL,
             |    lease_expires_at = NULL, heartbeat_at = NULL
             |WHERE event_id = ?::uuid AND status = 'Publishing' AND lease_owner = ? AND lease_token = ?::uuid
@@ -105,7 +105,7 @@ final class PostgresOutboxStore(dataSource: DataSource) extends OutboxStore:
     validateFailure(safeFailure) *> withConnection { connection =>
       ZIO.attemptBlocking {
         val statement = connection.prepareStatement(
-          """UPDATE agent_outbox_events
+          """UPDATE zyblw_agent_core.agent_outbox_events
             |SET status = 'DeadLetter', last_failure = ?, lease_owner = NULL, lease_token = NULL,
             |    lease_expires_at = NULL, heartbeat_at = NULL
             |WHERE event_id = ?::uuid AND status = 'Publishing' AND lease_owner = ? AND lease_token = ?::uuid
@@ -166,7 +166,7 @@ final class PostgresOutboxStore(dataSource: DataSource) extends OutboxStore:
   /** 将崩溃 worker 的过期 Publishing 事件放回 Pending。 */
   private def reclaimExpired(connection: Connection): Unit =
     val statement = connection.prepareStatement(
-      """UPDATE agent_outbox_events
+      """UPDATE zyblw_agent_core.agent_outbox_events
         |SET status = 'Pending', last_failure = 'lease-expired', lease_owner = NULL, lease_token = NULL,
         |    lease_expires_at = NULL, heartbeat_at = NULL, available_at = CURRENT_TIMESTAMP
         |WHERE status = 'Publishing' AND lease_expires_at <= CURRENT_TIMESTAMP""".stripMargin
@@ -178,7 +178,7 @@ final class PostgresOutboxStore(dataSource: DataSource) extends OutboxStore:
   /** 达到自动尝试上限的待发送事件进入 DeadLetter，不再形成热循环。 */
   private def deadLetterExhausted(connection: Connection, maxAttempts: Int): Unit =
     val statement = connection.prepareStatement(
-      """UPDATE agent_outbox_events SET status = 'DeadLetter', last_failure = 'max-attempts-exceeded'
+      """UPDATE zyblw_agent_core.agent_outbox_events SET status = 'DeadLetter', last_failure = 'max-attempts-exceeded'
         |WHERE status = 'Pending' AND attempt >= ?""".stripMargin
     )
     try
@@ -217,7 +217,7 @@ final class PostgresOutboxStore(dataSource: DataSource) extends OutboxStore:
       leaseDuration: Duration
   ): Unit =
     val statement = connection.prepareStatement(
-      """UPDATE agent_outbox_events
+      """UPDATE zyblw_agent_core.agent_outbox_events
         |SET status = 'Publishing', attempt = attempt + 1, generation = ?, lease_owner = ?, lease_token = ?::uuid,
         |    lease_expires_at = CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond'), heartbeat_at = CURRENT_TIMESTAMP
         |WHERE event_id = ?::uuid AND status = 'Pending'""".stripMargin
@@ -357,7 +357,7 @@ final class PostgresOutboxStore(dataSource: DataSource) extends OutboxStore:
     """SELECT event_id::text, operation_id::text, run_id::text, tool_call_id, scope_key, ordinal,
       |destination, event_type, aggregate_type, aggregate_id, partition_key, payload::text, headers::text,
       |status, attempt, generation, available_at, last_failure, created_at, published_at
-      |FROM agent_outbox_events""".stripMargin
+      |FROM zyblw_agent_core.agent_outbox_events""".stripMargin
 
 object PostgresOutboxStore:
   /** 使用宿主共享 DataSource 提供 OutboxStore。 */

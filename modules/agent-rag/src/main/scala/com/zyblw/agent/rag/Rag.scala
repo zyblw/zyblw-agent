@@ -623,25 +623,30 @@ final class DefaultRetriever(
     telemetry: Option[com.zyblw.agent.observability.AgentOperationTelemetry] = None,
     structural: Option[StructuralRetrieval] = None,
     defaultRecipe: Option[RetrievalRecipe] = None,
-    expansionEnabled: Boolean = true
+    expansionEnabled: Boolean = true,
+    profileEmbeddings: Option[ProfileEmbeddingRouter] = None
 ) extends Retriever:
   override def querySession: UIO[Retriever] =
     for
-      cache  <- Ref.make(Map.empty[EmbeddingRequest, EmbeddingResponse])
+      cache  <- Ref.make(Map.empty[(String, String, EmbeddingRequest), EmbeddingResponse])
       permit <- Semaphore.make(1)
     yield
-      val shared = new EmbeddingModel:
-        val capabilities                                                            = embeddings.capabilities
-        val descriptor                                                              = embeddings.descriptor
+      def share(model: EmbeddingModel): EmbeddingModel = new EmbeddingModel:
+        val capabilities                                                            = model.capabilities
+        val descriptor                                                              = model.descriptor
         def embed(request: EmbeddingRequest): IO[RetrievalError, EmbeddingResponse] =
-          if request.role != EmbeddingInputRole.Query then embeddings.embed(request)
+          if request.role != EmbeddingInputRole.Query then model.embed(request)
           else
             permit.withPermit {
-              val key = request.copy(context = request.context.copy(requestId = "shared-query"))
+              val key = (
+                descriptor.provider,
+                descriptor.model,
+                request.copy(context = request.context.copy(requestId = "shared-query"))
+              )
               cache.get.flatMap(_.get(key) match
                 case Some(value) => ZIO.succeed(value.copy(usage = None, providerRequestId = None))
                 case None        =>
-                  embeddings
+                  model
                     .embed(request)
                     .tap(value =>
                       cache.update { entries =>
@@ -650,8 +655,13 @@ final class DefaultRetriever(
                       }
                     ))
             }
+      val sharedRouter = profileEmbeddings.map(router =>
+        new ProfileEmbeddingRouter:
+          def forProfile(profile: Option[IndexProfileId]): UIO[EmbeddingModel] =
+            router.forProfile(profile).map(share)
+      )
       DefaultRetriever(
-        shared,
+        share(embeddings),
         vectors,
         reranker,
         expansion,
@@ -664,7 +674,8 @@ final class DefaultRetriever(
         telemetry,
         structural,
         defaultRecipe,
-        expansionEnabled
+        expansionEnabled,
+        sharedRouter
       )
 
   override def pinScope(scope: RetrievalScope): IO[RetrievalError, RetrievalScope] =
@@ -724,8 +735,6 @@ final class DefaultRetriever(
         effectiveBudgets.copy(perBranch = math.max(effectiveBudgets.perBranch, rerankLimit)),
         sparseEnabled
       )
-      val wantSparse =
-        plan.includeSparse && embeddings.capabilities.outputs.contains(EmbeddingOutputKind.DenseAndSparse)
       val searchMode =
         request.mode // Explicit caller modes are authoritative; planning never replaces a branch.
       for
@@ -733,6 +742,9 @@ final class DefaultRetriever(
           vectors.resolveActiveProfile(scope.tenantId, scope.spaceId)
         )(id => ZIO.succeed(Some(id)))
         pinnedScope = resolvedProfile.fold(scope)(scope.withPinnedProfile)
+        model <- profileEmbeddings.fold(ZIO.succeed(embeddings))(_.forProfile(pinnedScope.pinnedProfileId))
+        wantSparse =
+          plan.includeSparse && model.capabilities.outputs.contains(EmbeddingOutputKind.DenseAndSparse)
         requestId <- pinnedScope.requestId.fold(Random.nextUUID.map(_.toString))(ZIO.succeed(_))
         rewritten <-
           if assistConfig.enabled then
@@ -749,7 +761,7 @@ final class DefaultRetriever(
         subqueries = rewritten.fold(plan.subqueries)(value => Chunk(value))
         traceRun <- scope.runId.fold(RunId.random)(ZIO.succeed(_))
         detailed <- observe(traceRun, scope, "embed")(
-          embeddings.embed(
+          model.embed(
             EmbeddingRequest(
               subqueries,
               EmbeddingInputRole.Query,
@@ -772,17 +784,17 @@ final class DefaultRetriever(
           )
           .unless(
             detailed.items.length == subqueries.length &&
-              detailed.descriptor.provider == embeddings.descriptor.provider &&
-              detailed.descriptor.model == embeddings.descriptor.model &&
+              detailed.descriptor.provider == model.descriptor.provider &&
+              detailed.descriptor.model == model.descriptor.model &&
               detailed.items
-                .forall(_.dense.exists(_.values.length == embeddings.capabilities.defaultDenseDimension))
+                .forall(_.dense.exists(_.values.length == model.capabilities.defaultDenseDimension))
           )
         queryEmbedding <- ZIO
           .fromOption(detailed.denseEmbeddings.headOption)
           .orElseFail(AgentError.RetrievalFailed("Embedding provider 返回空结果"))
         _ <- vectors.assertEmbeddingIdentity(
           pinnedScope.tenantId,
-          embeddings.descriptor.denseDescriptor,
+          model.descriptor.denseDescriptor,
           pinnedScope.spaceId,
           pinnedScope.pinnedProfileId
         )

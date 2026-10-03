@@ -2,6 +2,7 @@ package com.zyblw.agent.integrations
 
 import com.zyblw.agent.admin.*
 import com.zyblw.agent.core.*
+import com.zyblw.agent.model.ChatModel
 import zio.*
 
 /** 连通性探活的预算。
@@ -27,7 +28,7 @@ final case class ModelProbeConfig(
   * HTTP,HTTP 层也不会因为挂载管理路由而被迫引入全部适配器。
   */
 final class ModelAdminLive private (
-    registry: ProviderRegistry,
+    registry: UIO[Option[ProviderRegistry]],
     catalogService: ModelCatalog,
     policies: ModelPolicySource,
     config: ModelProbeConfig
@@ -63,64 +64,24 @@ final class ModelAdminLive private (
     */
   def probe(request: ModelProbeRequest): IO[AgentError, ModelProbeResult] =
     val provider = request.provider.trim
-    val model    = request.model.map(_.trim).filter(_.nonEmpty).orElse(registry.defaultModelOf(provider))
     for
+      current <- registry
+      model = request.model.map(_.trim).filter(_.nonEmpty).orElse(current.flatMap(_.defaultModelOf(provider)))
       options <- catalogService.options
       // 未注册组合在任何网络请求之前失败。放行会让一次拼写错误变成一次真实计费调用,而它的失败原因还会被 Provider
       // 的错误信息掩盖成"模型不存在",看不出是本地目录里就没有。
       providerRegistered = options.exists(_.provider == provider)
       modelRegistered = model.exists(name => options.exists(o => o.provider == provider && o.model == name))
       result <- (providerRegistered, model, modelRegistered) match
-        case (true, Some(name), true)  => run(provider, name)
+        case (true, Some(name), true) =>
+          current.fold(ZIO.succeed(rejected(provider, name, ProviderNotFound)))(value =>
+            probeWith(value.chatModel, provider, name, config)
+          )
         case (true, Some(name), false) => ZIO.succeed(rejected(provider, name, ModelNotFound))
         case (true, None, _)           => ZIO.succeed(rejected(provider, UnresolvedModel, ModelNotFound))
         case (false, Some(name), _)    => ZIO.succeed(rejected(provider, name, ProviderNotFound))
         case (false, None, _)          => ZIO.succeed(rejected(provider, UnresolvedModel, ProviderNotFound))
     yield result
-
-  /** 执行一次计时调用并只保留低敏观测值。 */
-  private def run(provider: String, model: String): UIO[ModelProbeResult] =
-    for
-      started <- Clock.nanoTime
-      // `.timeout` 会中断底层调用,因此超时不会留下一个继续计费的后台请求。
-      exit     <- registry.chatModel.complete(probeRequest(provider, model)).timeout(config.timeout).exit
-      finished <- Clock.nanoTime
-      latency = ((finished - started) / 1_000_000L).max(0L)
-      result <- exit match
-        // 调用方取消不能被伪装成一次探活失败,否则管理台断开连接后仍会显示一个凭空产生的故障。
-        case Exit.Failure(cause) if cause.isInterrupted => ZIO.interrupt
-        case Exit.Success(Some(response))               =>
-          ZIO.succeed(
-            ModelProbeResult(
-              provider = provider,
-              model = model,
-              succeeded = true,
-              latencyMillis = latency,
-              inputTokens = response.usage.inputTokens.max(0L),
-              outputTokens = response.usage.outputTokens.max(0L),
-              failureCode = None
-            )
-          )
-        case Exit.Success(None)  => ZIO.succeed(failed(provider, model, latency, Timeout))
-        case Exit.Failure(cause) => ZIO.succeed(failed(provider, model, latency, failureCode(cause)))
-    yield result
-
-  /** 固定探活请求。
-    *
-    * 提示词是一个不含任何业务数据的 ASCII 常量,温度为零,不提供工具。`toolChoice = None` 是必需的而不是省钱:声明了 工具调用能力的 Provider 在没有工具定义时收到 `Auto`
-    * 仍然合法,但显式关闭可以让探活对"能力协商"这一步的结论只 取决于 Provider 与模型本身。
-    */
-  private def probeRequest(provider: String, model: String): ChatRequest = ChatRequest(
-    messages = Chunk(AgentMessage.user(ProbePrompt)),
-    settings = ModelSettings(
-      provider = Some(provider),
-      model = Some(model),
-      temperature = Some(0.0),
-      maxOutputTokens = Some(config.maxOutputTokens),
-      toolChoice = ToolChoice.None,
-      metadata = Map("purpose" -> ProbePurpose)
-    )
-  )
 
 object ModelAdminLive:
   /** 目标组合不在目录中的稳定失败码。 */
@@ -159,7 +120,65 @@ object ModelAdminLive:
       catalog: ModelCatalog,
       policies: ModelPolicySource,
       config: ModelProbeConfig = ModelProbeConfig()
+  ): ModelAdminService = new ModelAdminLive(ZIO.some(registry), catalog, policies, config)
+
+  /** 注册表随宿主配置变化;每次探活读取调用时刻的版本。 */
+  def live(
+      registry: UIO[Option[ProviderRegistry]],
+      catalog: ModelCatalog,
+      policies: ModelPolicySource,
+      config: ModelProbeConfig = ModelProbeConfig()
   ): ModelAdminService = new ModelAdminLive(registry, catalog, policies, config)
+
+  /** 执行一次计时调用并只保留低敏观测值。 */
+  def probeWith(
+      chatModel: ChatModel,
+      provider: String,
+      model: String,
+      config: ModelProbeConfig = ModelProbeConfig()
+  ): UIO[ModelProbeResult] =
+    for
+      started <- Clock.nanoTime
+      // `.timeout` 会中断底层调用,因此超时不会留下一个继续计费的后台请求。
+      exit     <- chatModel.complete(probeRequest(provider, model, config.maxOutputTokens)).timeout(config.timeout).exit
+      finished <- Clock.nanoTime
+      latency = ((finished - started) / 1_000_000L).max(0L)
+      result <- exit match
+        // 调用方取消不能被伪装成一次探活失败,否则管理台断开连接后仍会显示一个凭空产生的故障。
+        case Exit.Failure(cause) if cause.isInterrupted => ZIO.interrupt
+        case Exit.Success(Some(response))               =>
+          ZIO.succeed(
+            ModelProbeResult(
+              provider = provider,
+              model = model,
+              succeeded = true,
+              latencyMillis = latency,
+              inputTokens = response.usage.inputTokens.max(0L),
+              outputTokens = response.usage.outputTokens.max(0L),
+              failureCode = None
+            )
+          )
+        case Exit.Success(None)  => ZIO.succeed(failed(provider, model, latency, Timeout))
+        case Exit.Failure(cause) => ZIO.succeed(failed(provider, model, latency, failureCode(cause)))
+    yield result
+
+  /** 固定探活请求。
+    *
+    * 提示词是一个不含任何业务数据的 ASCII 常量,温度为零,不提供工具。`toolChoice = None` 是必需的而不是省钱:声明了 工具调用能力的 Provider 在没有工具定义时收到 `Auto`
+    * 仍然合法,但显式关闭可以让探活对"能力协商"这一步的结论只 取决于 Provider 与模型本身。
+    */
+  private def probeRequest(provider: String, model: String, maxOutputTokens: Int): ChatRequest = ChatRequest(
+    messages = Chunk(AgentMessage.user(ProbePrompt)),
+    settings = ModelSettings(
+      provider = Some(provider),
+      model = Some(model),
+      temperature = Some(0.0),
+      maxOutputTokens = Some(maxOutputTokens),
+      toolChoice = ToolChoice.None,
+      metadata = Map("purpose" -> ProbePurpose)
+    )
+  )
+
 
   /** 标准装配。
     *

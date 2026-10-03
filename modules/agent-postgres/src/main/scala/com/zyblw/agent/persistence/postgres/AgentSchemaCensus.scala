@@ -93,7 +93,7 @@ object AgentSchemaCensus:
   private def relationExists(connection: Connection, relation: String): Boolean =
     val statement =
       connection.prepareStatement(
-        "SELECT to_regclass(quote_ident(current_schema()) || '.' || quote_ident(?))"
+        "SELECT to_regclass('zyblw_agent_core.' || quote_ident(?))"
       )
     try
       statement.setString(1, relation)
@@ -103,7 +103,8 @@ object AgentSchemaCensus:
     finally statement.close()
 
   private def countRows(connection: Connection, relation: String): Long =
-    val statement = connection.prepareStatement("SELECT COUNT(*)::bigint FROM " + quoteIdent(relation))
+    val statement =
+      connection.prepareStatement("SELECT COUNT(*)::bigint FROM zyblw_agent_core." + quoteIdent(relation))
     try
       val result = statement.executeQuery()
       try if result.next() then result.getLong(1) else 0L

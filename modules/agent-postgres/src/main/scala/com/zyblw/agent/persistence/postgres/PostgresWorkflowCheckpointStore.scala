@@ -136,7 +136,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
     validateDuration(leaseDuration) *> withConnection { connection =>
       jdbc("execution-heartbeat") {
         val statement = connection.prepareStatement(
-          """UPDATE agent_workflow_node_executions
+          """UPDATE zyblw_agent_core.agent_workflow_node_executions
             |SET lease_expires_at = CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond'),
             |    heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
             |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
@@ -370,7 +370,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
           |    )) * 1000)
           |  )::BIGINT END AS oldest_dispatchable_age_millis
           |FROM snapshot_clock
-          |LEFT JOIN agent_workflow_waits AS waits
+          |LEFT JOIN zyblw_agent_core.agent_workflow_waits AS waits
           |  ON waits.workflow_id = ? AND waits.definition_version = ?
           |  AND waits.status IN ('Pending', 'Signaled', 'TimedOut')
           |GROUP BY snapshot_clock.captured_at""".stripMargin
@@ -401,7 +401,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
     validateDuration(leaseDuration) *> withConnection { connection =>
       jdbc("wait-wake-heartbeat") {
         val statement = connection.prepareStatement(
-          """UPDATE agent_workflow_waits
+          """UPDATE zyblw_agent_core.agent_workflow_waits
             |SET wake_lease_expires_at = clock_timestamp() + (? * INTERVAL '1 millisecond'),
             |    wake_heartbeat_at = clock_timestamp()
             |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
@@ -428,7 +428,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
     withConnection { connection =>
       jdbc("wait-wake-abandon") {
         val statement = connection.prepareStatement(
-          """UPDATE agent_workflow_waits
+          """UPDATE zyblw_agent_core.agent_workflow_waits
             |SET wake_available_at = GREATEST(?, clock_timestamp()),
             |    wake_owner = NULL, wake_token = NULL, wake_claimed_at = NULL,
             |    wake_lease_expires_at = NULL, wake_heartbeat_at = NULL
@@ -458,7 +458,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
           | condition_kind, signal_name, deadline, status, accepted_signal_id,
           | accepted_signal_payload, accepted_signal_sha256, signal_received_at,
           | created_at, resolved_at, consumed_at, accepted_signal_authorization
-          |FROM agent_workflow_waits
+          |FROM zyblw_agent_core.agent_workflow_waits
           |WHERE workflow_id = ? AND definition_version = ?
           |  AND status IN ('Signaled', 'TimedOut')
           |  AND wake_available_at <= clock_timestamp()
@@ -489,7 +489,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
   ): IO[StoreError, WorkflowWakeupLease] =
     jdbc("wait-wake-claim") {
       val statement = connection.prepareStatement(
-        """UPDATE agent_workflow_waits
+        """UPDATE zyblw_agent_core.agent_workflow_waits
           |SET wake_generation = wake_generation + 1,
           |    wake_owner = ?, wake_token = ?::uuid,
           |    wake_claimed_at = clock_timestamp(),
@@ -533,7 +533,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
            | condition_kind, signal_name, deadline, status, accepted_signal_id,
            | accepted_signal_payload, accepted_signal_sha256, signal_received_at,
            | created_at, resolved_at, consumed_at, accepted_signal_authorization
-           |FROM agent_workflow_waits
+           |FROM zyblw_agent_core.agent_workflow_waits
            |WHERE run_id = ?::uuid AND status <> 'Consumed'
            |ORDER BY step ASC, node_id COLLATE "C" ASC
            |LIMIT 2$lock""".stripMargin
@@ -562,7 +562,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
            | condition_kind, signal_name, deadline, status, accepted_signal_id,
            | accepted_signal_payload, accepted_signal_sha256, signal_received_at,
            | created_at, resolved_at, consumed_at, accepted_signal_authorization
-           |FROM agent_workflow_waits
+           |FROM zyblw_agent_core.agent_workflow_waits
            |WHERE run_id = ?::uuid AND step = ? AND node_id = ?$lock""".stripMargin
       )
       try
@@ -678,7 +678,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
     jdbc("signal-load") {
       val statement = connection.prepareStatement(
         """SELECT signal_name, payload, payload_sha256, disposition, received_at, authorization_fingerprint
-          |FROM agent_workflow_signals
+          |FROM zyblw_agent_core.agent_workflow_signals
           |WHERE run_id = ?::uuid AND wait_step = ? AND wait_node_id = ? AND signal_id = ?""".stripMargin
       )
       try
@@ -744,7 +744,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
   ): IO[StoreError, Unit] =
     jdbc("wait-signal") {
       val statement = connection.prepareStatement(
-        """UPDATE agent_workflow_waits
+        """UPDATE zyblw_agent_core.agent_workflow_waits
           |SET status = 'Signaled', accepted_signal_id = ?, accepted_signal_payload = ?,
           |    accepted_signal_sha256 = ?, accepted_signal_authorization = ?, signal_received_at = ?,
           |    resolved_at = ?, wake_available_at = ?
@@ -772,7 +772,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
   ): IO[StoreError, Unit] =
     jdbc("wait-timeout") {
       val statement = connection.prepareStatement(
-        """UPDATE agent_workflow_waits
+        """UPDATE zyblw_agent_core.agent_workflow_waits
           |SET status = 'TimedOut', resolved_at = ?, wake_available_at = ?
           |WHERE run_id = ?::uuid AND step = ? AND node_id = ? AND status = 'Pending'""".stripMargin
       )
@@ -796,7 +796,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
   ): IO[StoreError, Unit] =
     jdbc("signal-insert") {
       val statement = connection.prepareStatement(
-        """INSERT INTO agent_workflow_signals
+        """INSERT INTO zyblw_agent_core.agent_workflow_signals
           |(run_id, wait_step, wait_node_id, signal_id, signal_name, payload, payload_sha256,
           | authorization_fingerprint, disposition, received_at)
           |VALUES (?::uuid, ?, ?, ?, ?, ?, ?, ?, ?, ?)""".stripMargin
@@ -821,13 +821,13 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
       val statement = connection.prepareStatement(
         """WITH due AS (
           |  SELECT run_id, step, node_id
-          |  FROM agent_workflow_waits
+          |  FROM zyblw_agent_core.agent_workflow_waits
           |  WHERE status = 'Pending' AND deadline <= clock_timestamp()
           |  ORDER BY deadline ASC, run_id ASC, step ASC, node_id COLLATE "C" ASC
           |  FOR UPDATE SKIP LOCKED
           |  LIMIT ?
           |), updated AS (
-          |  UPDATE agent_workflow_waits AS waits
+          |  UPDATE zyblw_agent_core.agent_workflow_waits AS waits
           |  SET status = 'TimedOut', resolved_at = clock_timestamp(),
           |      wake_available_at = clock_timestamp()
           |  FROM due
@@ -870,7 +870,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
   ): IO[StoreError, Boolean] =
     jdbc("execution-claim-insert") {
       val statement = connection.prepareStatement(
-        """INSERT INTO agent_workflow_node_executions
+        """INSERT INTO zyblw_agent_core.agent_workflow_node_executions
           |(run_id, workflow_id, definition_version, session_id, node_id, step, visit, status,
           | generation, lease_owner, lease_token, claimed_at, lease_expires_at, heartbeat_at,
           | created_at, updated_at)
@@ -908,11 +908,11 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
 
       val statement = connection.prepareStatement(
         """SELECT workflow_id, definition_version, session_id::text
-          |FROM agent_workflow_checkpoints
+          |FROM zyblw_agent_core.agent_workflow_checkpoints
           |WHERE run_id = ?::uuid
           |UNION
           |SELECT workflow_id, definition_version, session_id::text
-          |FROM agent_workflow_node_executions
+          |FROM zyblw_agent_core.agent_workflow_node_executions
           |WHERE run_id = ?::uuid AND NOT (step = ? AND node_id = ?)""".stripMargin
       )
       try
@@ -944,7 +944,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
   ): IO[StoreError, Boolean] =
     jdbc("execution-claim-reclaim") {
       val statement = connection.prepareStatement(
-        """UPDATE agent_workflow_node_executions
+        """UPDATE zyblw_agent_core.agent_workflow_node_executions
           |SET generation = generation + 1, lease_owner = ?, lease_token = ?::uuid,
           |    claimed_at = CURRENT_TIMESTAMP,
           |    lease_expires_at = CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond'),
@@ -976,7 +976,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
   ): IO[StoreError, Boolean] =
     jdbc("execution-prepare") {
       val statement = connection.prepareStatement(
-        """UPDATE agent_workflow_node_executions
+        """UPDATE zyblw_agent_core.agent_workflow_node_executions
           |SET status = 'Prepared', outcome_sha256 = ?, outcome_payload = ?,
           |    outcome_json = ?::jsonb, updated_at = CURRENT_TIMESTAMP
           |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
@@ -999,7 +999,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
   ): IO[StoreError, Unit] =
     jdbc("execution-commit") {
       val statement = connection.prepareStatement(
-        """UPDATE agent_workflow_node_executions
+        """UPDATE zyblw_agent_core.agent_workflow_node_executions
           |SET status = 'Committed', lease_expires_at = NULL, heartbeat_at = NULL,
           |    completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
           |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
@@ -1025,7 +1025,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
            | generation, lease_owner, lease_token::text, claimed_at, lease_expires_at,
            | updated_at, completed_at, outcome_sha256, outcome_payload,
            | COALESCE(lease_expires_at > CURRENT_TIMESTAMP, FALSE) AS lease_active
-           |FROM agent_workflow_node_executions
+           |FROM zyblw_agent_core.agent_workflow_node_executions
            |WHERE run_id = ?::uuid AND step = ? AND node_id = ?$lock""".stripMargin
       )
       try
@@ -1058,7 +1058,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
            | generation, lease_owner, lease_token::text, claimed_at, lease_expires_at,
            | updated_at, completed_at, outcome_sha256, outcome_payload,
            | COALESCE(lease_expires_at > CURRENT_TIMESTAMP, FALSE) AS lease_active
-           |FROM agent_workflow_node_executions
+           |FROM zyblw_agent_core.agent_workflow_node_executions
            |WHERE run_id = ?::uuid$cursorClause
            |ORDER BY step ASC, node_id COLLATE "C" ASC
            |LIMIT ?""".stripMargin
@@ -1313,7 +1313,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
   private def consumeWait(connection: Connection, lease: WorkflowWakeupLease): IO[StoreError, Unit] =
     jdbc("wait-consume") {
       val statement = connection.prepareStatement(
-        """UPDATE agent_workflow_waits
+        """UPDATE zyblw_agent_core.agent_workflow_waits
           |SET status = 'Consumed', consumed_at = clock_timestamp(), wake_available_at = NULL,
           |    wake_owner = NULL, wake_token = NULL, wake_claimed_at = NULL,
           |    wake_lease_expires_at = NULL, wake_heartbeat_at = NULL
@@ -1345,7 +1345,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
     jdbc("wait-wake-status") {
       val statement = connection.prepareStatement(
         """SELECT status, wake_generation
-          |FROM agent_workflow_waits
+          |FROM zyblw_agent_core.agent_workflow_waits
           |WHERE run_id = ?::uuid AND step = ? AND node_id = ?
           |FOR UPDATE""".stripMargin
       )
@@ -1376,7 +1376,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         case _ => ZIO.unit
       inserted <- jdbc("wait-register") {
         val statement = connection.prepareStatement(
-          """INSERT INTO agent_workflow_waits
+          """INSERT INTO zyblw_agent_core.agent_workflow_waits
             |(run_id, step, node_id, workflow_id, definition_version, session_id,
             | condition_kind, signal_name, deadline, status, created_at)
             |VALUES (?::uuid, ?, ?, ?, ?, ?::uuid, ?, ?, ?, 'Pending', ?)
@@ -1529,7 +1529,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
   ): IO[StoreError, Boolean] =
     jdbc("save") {
       val statement = connection.prepareStatement(
-        """INSERT INTO agent_workflow_checkpoints
+        """INSERT INTO zyblw_agent_core.agent_workflow_checkpoints
           |(run_id, schema_version, workflow_id, definition_version, session_id,
           | cursor_kind, node_id, step, checkpoint_sha256, checkpoint_payload, checkpoint_json, updated_at)
           |VALUES (?::uuid, ?, ?, ?, ?::uuid, ?, ?, ?, ?, ?, ?::jsonb, CURRENT_TIMESTAMP)
@@ -1577,7 +1577,7 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
       val statement = connection.prepareStatement(
         """SELECT workflow_id, definition_version, session_id::text, cursor_kind, node_id, step,
           |       checkpoint_sha256, checkpoint_payload
-          |FROM agent_workflow_checkpoints
+          |FROM zyblw_agent_core.agent_workflow_checkpoints
           |WHERE run_id = ?::uuid""".stripMargin
       )
       try

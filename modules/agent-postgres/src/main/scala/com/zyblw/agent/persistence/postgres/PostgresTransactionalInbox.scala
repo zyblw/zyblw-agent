@@ -67,7 +67,7 @@ final class PostgresTransactionalInbox(dataSource: DataSource):
       messageHash: String
   ): Boolean =
     val statement = connection.prepareStatement(
-      """INSERT INTO agent_inbox_messages
+      """INSERT INTO zyblw_agent_core.agent_inbox_messages
         |(consumer_name, message_id, event_type, message_hash, status, received_at)
         |VALUES (?, ?::uuid, ?, ?, 'Processing', CURRENT_TIMESTAMP)
         |ON CONFLICT (consumer_name, message_id) DO NOTHING""".stripMargin
@@ -88,7 +88,7 @@ final class PostgresTransactionalInbox(dataSource: DataSource):
   ): StoredInbox =
     val statement = connection.prepareStatement(
       """SELECT message_hash, status, result_json::text
-        |FROM agent_inbox_messages
+        |FROM zyblw_agent_core.agent_inbox_messages
         |WHERE consumer_name = ? AND message_id = ?::uuid
         |FOR UPDATE""".stripMargin
     )
@@ -108,7 +108,7 @@ final class PostgresTransactionalInbox(dataSource: DataSource):
       resultJson: String
   ): Unit =
     val statement = connection.prepareStatement(
-      """UPDATE agent_inbox_messages
+      """UPDATE zyblw_agent_core.agent_inbox_messages
         |SET status = 'Succeeded', result_json = ?::jsonb, processed_at = CURRENT_TIMESTAMP
         |WHERE consumer_name = ? AND message_id = ?::uuid AND status = 'Processing'""".stripMargin
     )

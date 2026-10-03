@@ -1,12 +1,18 @@
 # PostgreSQL 自动迁移、结构校验与知识库基线
 
 > 状态：0.9.0 单文件全新基线
-> 最后核验：2026-10-01
+> 最后核验：2026-10-02
 > 事实来源：`AgentPostgresMigrations.scala`、migration resource、PostgreSQL 18 集成测试
 
 ## 首版结构检索基线
 
 全部当前知识能力合入 `V001__agent_knowledge_0_9_baseline.sql`，不保留未发布的 V002。`agent_knowledge_structures` 以 tenant/space/profile/document/version 复合外键引用原 manifest，并随 retention 删除级联清理。结构产物最多 16 MiB，启动探针检查表、字段和注释。知识共八张表，空库应用 V001 与 R__；重复启动不重复执行。
+
+## 固定命名空间
+
+核心使用 `zyblw_agent_core`，知识使用 `zyblw_agent_knowledge`，共享扩展使用 `zyblw_extensions`。
+所有运行时表、扩展类型/操作符/函数与只读探针均显式定位，不依赖宿主搜索路径，不在 `public` 建应用对象。
+已有旧 public 核心或错误扩展位置会在迁移写入前被拒绝，必须显式重建；可丢弃的开发库直接重建，需要保留的数据先备份。不保留 shared-public baseline 特例。
 
 ## 默认模型
 
@@ -22,7 +28,7 @@ classpath:com/zyblw/agent/persistence/postgres/migration
 核心 location 只包含 `V001__zyblw_agent_0_9_baseline.sql` 与每次覆盖写入的
 `R__zyblw_agent_schema_comments.sql`。知识 location 是 `optional/pgvector_1024/V001__agent_knowledge_0_9_baseline.sql`。
 当前 0.9.0 只提供折叠后的全新基线，不提供历史升级路径。`AgentPostgresMigrations.resetAll`
-会丢弃两个 schema 与两份 Flyway history。框架不会因为 JAR 或 `DataSource` 出现在 classpath 就修改数据库；宿主需要在受控启动阶段选择
+会丢弃 `zyblw_agent_core`、`zyblw_agent_knowledge` 与两份 Flyway history，保留共享扩展。框架不会因为 JAR 或 `DataSource` 出现在 classpath 就修改数据库；宿主需要在受控启动阶段选择
 下面一种模式。
 
 升级预检（只读，不执行 DDL）：
@@ -54,7 +60,7 @@ val rag  = PostgresAgentPersistence.migratedKnowledge1024()
 `migrated*` ZLayer 在构建服务之前执行一次 Flyway migrate/validate 和结构后置探针；失败会阻止 Worker/HTTP 启动，不会回退内存。已经由
 部署平台统一执行 DDL 的生产环境应继续使用普通 `layer/knowledge`，让运行账号只保留 DML 权限。
 
-核心 history table 位于宿主当前 schema，名为 `flyway_zyblw_agent_schema_history`。新库的 1024 维知识库使用独立 location，固定管理
+核心 history table 固定位于 `zyblw_agent_core` schema，名为 `flyway_zyblw_agent_schema_history`。新库的 1024 维知识库使用独立 location，固定管理
 `zyblw_agent_knowledge` schema，并把独立 `flyway_zyblw_agent_knowledge_1024_history` 放在其中；实际 location 只有一份
 `V001__agent_knowledge_0_9_baseline.sql`，已一次性包含 Space/Profile/census/chunks/audit/withdrawn、FTS、HNSW、parent/neighbor、
 heading/page/bbox/block lineage；`R__agent_knowledge_1024_comments.sql` 幂等维护中文表/字段数据字典。核心与知识库都有 V001，绝不能放进同一个 Flyway history，也不能让两个 Flyway 实例共同管理
@@ -64,13 +70,14 @@ heading/page/bbox/block lineage；`R__agent_knowledge_1024_comments.sql` 幂等�
 ## 自动创建和检测的准确语义
 
 当核心目标 schema 为空且数据库账号具备权限时，Flyway 会创建 history 并执行核心表。知识入口会创建/校验专属
-`CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public` 仍取决于托管数据库/DBA 是否允许应用账号安装扩展；权限不足会明确失败。
+`zyblw_agent_knowledge` schema 和 `zyblw_extensions` 扩展命名空间；
+`CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA zyblw_extensions` 仍取决于托管数据库/DBA 是否允许应用账号安装扩展；权限不足会明确失败。
 
 迁移完成后框架还会检查：
 
-- 核心 32 张权威表是否存在于当前 schema，避免临时表或其他 schema 的同名对象蒙混通过；
+- 核心 32 张权威表是否存在于 `zyblw_agent_core`，避免临时表或其他 schema 的同名对象蒙混通过；
 - 知识库八张 Space/Profile/census/chunk/audit/withdrawn 权威表是否确实位于 `zyblw_agent_knowledge`，且 `parent/ordinal/previous/next/heading/page/origin/block` 列完整；
-- `vector` 扩展是否位于 `public` 且版本至少为 0.8.0；
+- `vector` / `pg_trgm` 扩展是否位于 `zyblw_extensions`，vector 版本至少为 0.8.0；
 - staging/active 两张表的 embedding 是否真实为 `vector(1024)`。
 - 八张知识表与所有业务字段是否拥有非空、非泛化的中文数据字典说明。
 - 核心 32 张权威表的全部字段是否同样拥有专属中文说明（由 `R__zyblw_agent_schema_comments.sql` 每次覆盖写入）。
@@ -100,5 +107,5 @@ Flyway/数据库审计。
 
 ## baseline 冻结点
 
-自 `0.9.0` 起，核心与知识各一份 V001 永久冻结。旧候选 migration 已删除，机器门禁会阻止它们重新出现。
+当前 `0.9.0` 尚未首次正式发布；核心与知识各一份 V001，在首版公开发布后冻结。旧候选 migration 已删除，机器门禁会阻止它们重新出现。
 后续已发布线上的 DDL 必须使用新的追加 migration，不能再合并回 V001，也不得用 `repair` 掩盖 checksum 漂移。

@@ -34,7 +34,9 @@ libraryDependencies ++= Seq(
 
 需要一个空 PostgreSQL 18 库；当前发布门禁验证 18.6。框架创建 `flyway_zyblw_agent_schema_history` 和 Agent 基础设施表，不会替你设计业务表。参考宿主的 `support_orders` / `support_refunds` 只属于示例，不进入核心 Flyway history。
 
-已有业务表的 `public` schema 不能直接使用默认 fresh-install 策略。若必须共享非空 `public`，先确认没有旧 zyblw-agent 表，再显式使用 `AgentPostgresMigrationConfig.sharedPublicSchema`。生产更推荐独立 schema/库，并由部署任务执行 migration。
+核心表与 history 固定位于 `zyblw_agent_core`，知识位于 `zyblw_agent_knowledge`，扩展位于 `zyblw_extensions`。
+宿主业务应使用自己的 schema，不需要 shared-public baseline；核心/知识运行时 SQL 不依赖连接搜索路径。
+已有旧 public Agent 核心须备份后显式重建。生产由部署任务执行 migration，runtime 仅授予对应 schema 的 USAGE/DML。
 
 ## 2. 分离 migrate 与 serve
 

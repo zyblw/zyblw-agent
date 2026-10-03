@@ -95,13 +95,13 @@ final class PostgresEmbeddingCacheStore(
           val statement = connection.prepareStatement(
             """WITH candidates AS (
             |  SELECT tenant_id, purpose, provider, model, dimension, key_version, content_hash
-            |  FROM agent_embedding_cache
+            |  FROM zyblw_agent_core.agent_embedding_cache
             |  WHERE expires_at <= ?
             |  ORDER BY expires_at, tenant_id, purpose, provider, model, dimension, key_version, content_hash
             |  FOR UPDATE SKIP LOCKED
             |  LIMIT ?
             |)
-            |DELETE FROM agent_embedding_cache cache
+            |DELETE FROM zyblw_agent_core.agent_embedding_cache cache
             |USING candidates candidate
             |WHERE cache.tenant_id = candidate.tenant_id
             |  AND cache.purpose = candidate.purpose
@@ -122,7 +122,9 @@ final class PostgresEmbeddingCacheStore(
   override def invalidateTenant(tenantId: TenantId): IO[RetrievalError, Unit] =
     withConnection { connection =>
       jdbc("invalidate tenant embedding cache") {
-        val statement = connection.prepareStatement("DELETE FROM agent_embedding_cache WHERE tenant_id = ?")
+        val statement = connection.prepareStatement(
+          "DELETE FROM zyblw_agent_core.agent_embedding_cache WHERE tenant_id = ?"
+        )
         try
           statement.setString(1, tenantId.value)
           statement.executeUpdate()
@@ -145,7 +147,7 @@ final class PostgresEmbeddingCacheStore(
             |SELECT cache.tenant_id, cache.purpose, cache.provider, cache.model, cache.dimension,
             |       cache.key_version, cache.content_hash, cache.embedding
             |FROM requested
-            |JOIN agent_embedding_cache cache USING
+            |JOIN zyblw_agent_core.agent_embedding_cache cache USING
             |  (tenant_id, purpose, provider, model, dimension, key_version, content_hash)
             |WHERE cache.expires_at > ?""".stripMargin
         )
@@ -201,7 +203,7 @@ final class PostgresEmbeddingCacheStore(
   ): IO[RetrievalError, Unit] =
     jdbc("write embedding cache") {
       val statement = connection.prepareStatement(
-        """INSERT INTO agent_embedding_cache
+        """INSERT INTO zyblw_agent_core.agent_embedding_cache
           |(tenant_id, purpose, provider, model, dimension, key_version, content_hash, embedding, expires_at)
           |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           |ON CONFLICT (tenant_id, purpose, provider, model, dimension, key_version, content_hash) DO UPDATE SET

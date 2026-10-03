@@ -5,7 +5,6 @@ import com.zyblw.agent.core.*
 import com.zyblw.agent.evals.*
 import java.time.Instant
 import javax.sql.DataSource
-import org.flywaydb.core.Flyway
 import org.postgresql.ds.PGSimpleDataSource
 import org.testcontainers.utility.DockerImageName
 import zio.*
@@ -54,14 +53,7 @@ object PostgresEvalTrendStoreIntegrationSpec extends ZIOSpecDefault:
         value.setPassword(container.password)
         value: DataSource
       }
-      _ <- ZIO.attemptBlocking {
-        Flyway
-          .configure()
-          .dataSource(dataSource)
-          .locations(AgentPostgresMigrations.DefaultLocation)
-          .load()
-          .migrate()
-      }
+      _ <- AgentPostgresMigrations.migrate(dataSource)
     yield Harness(
       PostgresEvalTrendStore(dataSource),
       PostgresEvalTrendStore(dataSource),
@@ -202,7 +194,8 @@ object PostgresEvalTrendStoreIntegrationSpec extends ZIOSpecDefault:
   private def rowCount(dataSource: DataSource): Task[Int] = ZIO.attemptBlocking {
     val connection = dataSource.getConnection
     try
-      val statement = connection.prepareStatement("SELECT count(*) FROM agent_eval_snapshots")
+      val statement =
+        connection.prepareStatement("SELECT count(*) FROM zyblw_agent_core.agent_eval_snapshots")
       try
         val result = statement.executeQuery()
         result.next()
@@ -216,7 +209,7 @@ object PostgresEvalTrendStoreIntegrationSpec extends ZIOSpecDefault:
     val connection = dataSource.getConnection
     try
       val statement = connection.prepareStatement(
-        "SELECT snapshot_json::text FROM agent_eval_snapshots WHERE evaluation_id = ?"
+        "SELECT snapshot_json::text FROM zyblw_agent_core.agent_eval_snapshots WHERE evaluation_id = ?"
       )
       try
         statement.setString(1, evaluationId)
@@ -232,7 +225,7 @@ object PostgresEvalTrendStoreIntegrationSpec extends ZIOSpecDefault:
     val connection = dataSource.getConnection
     try
       val statement = connection.prepareStatement(
-        "UPDATE agent_eval_snapshots SET snapshot_sha256 = ? WHERE evaluation_id = ?"
+        "UPDATE zyblw_agent_core.agent_eval_snapshots SET snapshot_sha256 = ? WHERE evaluation_id = ?"
       )
       try
         statement.setString(1, "0" * 64)

@@ -84,6 +84,39 @@ object ModelStructureNavigation:
             else ZIO.succeed(choice.ids)
           }
 
+  /** 把整书目录一次交给模型选章，适合目录能放进单次输入的书；放不下时 `StructureOutline` 会折叠深层节点。
+    *
+    * `guidance` 是宿主的业务说明，例如跨章问题要覆盖每个相关章节；它只能收紧选择，返回的节点一定在目录内。
+    */
+  def outlineSelect(
+      model: ChatModel,
+      query: String,
+      snapshot: StructureSnapshot,
+      maxSelect: Int,
+      config: StructureModelConfig = StructureModelConfig(),
+      guidance: String = ""
+  ): IO[RetrievalError, Chunk[String]] =
+    val prefix           = s"{\"query\":${query.toJson},\"outline\":"
+    def build(room: Int) =
+      val outline = StructureOutline.render(snapshot, room.max(1))
+      outline -> (prefix + outline.text.toJson + "}")
+    val room  = config.maxInputChars - prefix.length - 8
+    val first = build(room)
+    // JSON 转义会让换行和引号变长，超出时按超出量收紧一次。
+    val (outline, data) =
+      if first._2.length <= config.maxInputChars then first
+      else build(room - (first._2.length - config.maxInputChars) - 16)
+    val rule =
+      s"""The outline lists one document's sections as "ref title [pages] (+hidden subsections) — hint", indented by depth.
+         |Reason about which sections a careful reader would open to answer the query, including sections whose titles use different words for the same idea.
+         |Select at most $maxSelect refs, most useful first. Return only JSON {"sections":["s1"]}; return {"sections":[]} if none is relevant.
+         |${guidance.trim}""".stripMargin.trim
+    call(model, config, rule, data).flatMap(text =>
+      ZIO
+        .fromEither(StructureOutline.parseSelection(text, outline, maxSelect))
+        .mapError(AgentError.RetrievalFailed(_))
+    )
+
   def summarizer(model: ChatModel, config: StructureModelConfig = StructureModelConfig()): NodeSummarizer =
     new NodeSummarizer:
       def summarize(

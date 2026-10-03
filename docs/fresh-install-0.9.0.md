@@ -13,7 +13,7 @@
 1. 创建空 PostgreSQL 数据库并安装 `pg_trgm` 与 `vector`。
 2. 调用 `AgentPostgresMigrations.migrateCoreAndKnowledge1024`。
 3. 确认核心 history 只有 `V001__zyblw_agent_0_9_baseline.sql`，知识 history 只有 `V001__agent_knowledge_0_9_baseline.sql`。
-4. 知识 schema 固定 1024 维；更换 Embedding 模型、维度或 strategyId 时创建新索引版本。
+4. 核心使用 `zyblw_agent_core`，知识使用 `zyblw_agent_knowledge`，vector/pg_trgm 使用 `zyblw_extensions`，不使用 `public`。知识 schema 固定 1024 维；更换 Embedding 模型、维度或 strategyId 时创建新索引版本。
 5. 结构探针失败时修正目标数据库或重新创建空库，不执行 Flyway repair/baseline。
 
 ## 检索与引用

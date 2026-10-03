@@ -190,7 +190,7 @@ PostgresAgentPersistence.migratedKnowledge1024()
 
 `migrated*` 在 ZLayer 构建时执行 Flyway migrate/validate 和结构探针；缺表、版本不匹配、pgvector 低于 0.8.0 或
 `vector(1024)` 不一致都会阻止应用启动。核心控制面位于宿主默认 schema；知识表及其独立 history 固定在
-`zyblw_agent_knowledge`，vector 类型来自 `public`。不能把两个 V001 放入同一 Flyway 实例或让两套 history 管理同一 schema。
+`zyblw_agent_knowledge`，vector 类型来自 `zyblw_extensions`。不能把两个 V001 放入同一 Flyway 实例或让两套 history 管理同一 schema。
 正式生产通常推荐独立 migration Job 和最小权限运行账号，详细说明见[数据库迁移](database-migrations.md)。
 
 ### 6.1 长任务按 Goal 约束多个 Run

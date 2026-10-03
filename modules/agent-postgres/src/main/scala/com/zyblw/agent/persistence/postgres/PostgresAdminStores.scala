@@ -119,7 +119,7 @@ final class PostgresRunDirectory(protected val dataSource: DataSource)
     // 同时取出排序列本身：游标必须精确等于排序列的值，用 state_json 里的时间戳重建游标会因为
     // 两者精度不同而丢行。
     val sql =
-      s"""SELECT state_json::text, updated_at FROM agent_runs$whereSql
+      s"""SELECT state_json::text, updated_at FROM zyblw_agent_core.agent_runs$whereSql
          |ORDER BY updated_at DESC, run_id DESC
          |LIMIT ?""".stripMargin
 
@@ -167,7 +167,7 @@ final class PostgresRunDirectory(protected val dataSource: DataSource)
             s"""SELECT status, COUNT(*) AS total,
              |       COUNT(*) FILTER (WHERE awaiting_approval) AS approving,
              |       COUNT(*) FILTER (WHERE awaiting_signal) AS signaling
-             |FROM agent_runs$filter GROUP BY status""".stripMargin
+             |FROM zyblw_agent_core.agent_runs$filter GROUP BY status""".stripMargin
           )
           try
             tenantId.foreach(statement.setString(1, _))
@@ -221,9 +221,9 @@ final class PostgresRuntimeOverrideStore(protected val dataSource: DataSource)
       .attemptBlocking {
         val next      = expectedVersion + 1L
         val statement = connection.prepareStatement(
-          """INSERT INTO agent_runtime_overrides(version, overrides, updated_by, reason, updated_at)
+          """INSERT INTO zyblw_agent_core.agent_runtime_overrides(version, overrides, updated_by, reason, updated_at)
             |SELECT ?, ?::jsonb, ?, ?, CURRENT_TIMESTAMP
-            |WHERE COALESCE((SELECT MAX(version) FROM agent_runtime_overrides), 0) = ?
+            |WHERE COALESCE((SELECT MAX(version) FROM zyblw_agent_core.agent_runtime_overrides), 0) = ?
             |RETURNING version, overrides::text, updated_by, reason, updated_at""".stripMargin
         )
         try
@@ -256,7 +256,7 @@ final class PostgresRuntimeOverrideStore(protected val dataSource: DataSource)
       .attemptBlocking {
         val statement = connection.prepareStatement(
           """SELECT version, overrides::text, updated_by, reason, updated_at
-            |FROM agent_runtime_overrides ORDER BY version DESC LIMIT ?""".stripMargin
+            |FROM zyblw_agent_core.agent_runtime_overrides ORDER BY version DESC LIMIT ?""".stripMargin
         )
         try
           statement.setInt(1, limit.max(1).min(RuntimeOverrideStore.MaxHistoryLimit))
@@ -273,7 +273,7 @@ final class PostgresRuntimeOverrideStore(protected val dataSource: DataSource)
   private def readLatest(connection: Connection): Option[RuntimeOverrideRecord] =
     val statement = connection.prepareStatement(
       """SELECT version, overrides::text, updated_by, reason, updated_at
-        |FROM agent_runtime_overrides ORDER BY version DESC LIMIT 1""".stripMargin
+        |FROM zyblw_agent_core.agent_runtime_overrides ORDER BY version DESC LIMIT 1""".stripMargin
     )
     try
       val result = statement.executeQuery()
@@ -310,7 +310,7 @@ final class PostgresIngestionJobStore(protected val dataSource: DataSource)
     ZIO
       .attemptBlocking {
         val statement = connection.prepareStatement(
-          """INSERT INTO agent_ingestion_jobs
+          """INSERT INTO zyblw_agent_core.agent_ingestion_jobs
             |(job_id, tenant_id, source_uri, file_name, media_type, status, progress_percent,
             | document_id, index_version, chunk_count, failure_code, submitted_by, created_at, updated_at)
             |VALUES (?::uuid, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""".stripMargin
@@ -352,7 +352,7 @@ final class PostgresIngestionJobStore(protected val dataSource: DataSource)
     ZIO
       .attemptBlocking {
         val statement = connection.prepareStatement(
-          """UPDATE agent_ingestion_jobs SET
+          """UPDATE zyblw_agent_core.agent_ingestion_jobs SET
             |  status = ?, progress_percent = ?,
             |  document_id = COALESCE(?, document_id),
             |  index_version = COALESCE(?, index_version),
@@ -385,7 +385,9 @@ final class PostgresIngestionJobStore(protected val dataSource: DataSource)
     ZIO
       .attemptBlocking {
         val statement =
-          connection.prepareStatement(s"SELECT $Columns FROM agent_ingestion_jobs WHERE job_id = ?::uuid")
+          connection.prepareStatement(
+            s"SELECT $Columns FROM zyblw_agent_core.agent_ingestion_jobs WHERE job_id = ?::uuid"
+          )
         try
           statement.setString(1, jobId)
           val result = statement.executeQuery()
@@ -403,7 +405,7 @@ final class PostgresIngestionJobStore(protected val dataSource: DataSource)
         .attemptBlocking {
           val filter    = tenantId.fold("")(_ => " WHERE tenant_id = ?")
           val statement = connection.prepareStatement(
-            s"""SELECT $Columns FROM agent_ingestion_jobs$filter
+            s"""SELECT $Columns FROM zyblw_agent_core.agent_ingestion_jobs$filter
                |ORDER BY created_at DESC, job_id DESC LIMIT ?""".stripMargin
           )
           try
@@ -477,7 +479,7 @@ final class PostgresOpsAdmin(protected val dataSource: DataSource, commands: Run
           val statement = connection.prepareStatement(
             """SELECT command_id, run_id, command_type, attempt, manual_retry_count,
               |  last_failure, created_at, updated_at
-              |FROM agent_run_commands WHERE status = 'DeadLetter'
+              |FROM zyblw_agent_core.agent_run_commands WHERE status = 'DeadLetter'
               |ORDER BY updated_at DESC, command_id DESC LIMIT ?""".stripMargin
           )
           try

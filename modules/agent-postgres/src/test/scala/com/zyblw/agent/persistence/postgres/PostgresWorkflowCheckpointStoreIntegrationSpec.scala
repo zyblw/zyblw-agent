@@ -5,7 +5,6 @@ import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.WorkerId
 import com.zyblw.agent.workflow.*
 import javax.sql.DataSource
-import org.flywaydb.core.Flyway
 import org.postgresql.ds.PGSimpleDataSource
 import org.testcontainers.utility.DockerImageName
 import zio.*
@@ -52,14 +51,7 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
         value.setPassword(container.password)
         value: DataSource
       }
-      _ <- ZIO.attemptBlocking {
-        Flyway
-          .configure()
-          .dataSource(dataSource)
-          .locations(AgentPostgresMigrations.DefaultLocation)
-          .load()
-          .migrate()
-      }
+      _ <- AgentPostgresMigrations.migrate(dataSource)
     yield Harness(
       PostgresWorkflowCheckpointStore[WorkflowState](dataSource),
       PostgresWorkflowCheckpointStore[WorkflowState](dataSource),
@@ -647,7 +639,8 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
   private def rowCount(dataSource: DataSource): Task[Int] = ZIO.attemptBlocking {
     val connection = dataSource.getConnection
     try
-      val statement = connection.prepareStatement("SELECT count(*) FROM agent_workflow_checkpoints")
+      val statement =
+        connection.prepareStatement("SELECT count(*) FROM zyblw_agent_core.agent_workflow_checkpoints")
       try
         val result = statement.executeQuery()
         result.next()
@@ -660,7 +653,7 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
     val connection = dataSource.getConnection
     try
       val statement = connection.prepareStatement(
-        "SELECT count(*) FROM agent_workflow_node_executions WHERE run_id = ?::uuid"
+        "SELECT count(*) FROM zyblw_agent_core.agent_workflow_node_executions WHERE run_id = ?::uuid"
       )
       try
         statement.setString(1, runId.asString)
@@ -684,7 +677,7 @@ object PostgresWorkflowCheckpointStoreIntegrationSpec extends ZIOSpecDefault:
     val connection = dataSource.getConnection
     try
       val statement = connection.prepareStatement(
-        "UPDATE agent_workflow_checkpoints SET checkpoint_sha256 = ? WHERE run_id = ?::uuid"
+        "UPDATE zyblw_agent_core.agent_workflow_checkpoints SET checkpoint_sha256 = ? WHERE run_id = ?::uuid"
       )
       try
         statement.setString(1, "0" * 64)

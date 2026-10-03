@@ -28,7 +28,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
           connection.setAutoCommit(false)
           try
             val insertRun = connection.prepareStatement(
-              """INSERT INTO agent_runs
+              """INSERT INTO zyblw_agent_core.agent_runs
               |(run_id, session_id, agent_id, status, version, schema_version, state_json, created_at, updated_at)
               |VALUES (?::uuid, ?::uuid, ?, ?, ?, ?, ?::jsonb, ?, ?)""".stripMargin
             )
@@ -46,7 +46,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
             finally insertRun.close()
 
             val insertEvent = connection.prepareStatement(
-              """INSERT INTO agent_events(event_id, run_id, sequence, event_type, payload, created_at)
+              """INSERT INTO zyblw_agent_core.agent_events(event_id, run_id, sequence, event_type, payload, created_at)
               |VALUES (?::uuid, ?::uuid, ?, ?, ?::jsonb, ?)""".stripMargin
             )
             try
@@ -82,7 +82,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
       .attemptBlocking {
         val statement = connection.prepareStatement(
           """SELECT run_id::text, session_id::text, agent_id, status, version, schema_version, state_json::text
-            |FROM agent_runs WHERE run_id = ?::uuid""".stripMargin
+            |FROM zyblw_agent_core.agent_runs WHERE run_id = ?::uuid""".stripMargin
         )
         try
           statement.setString(1, runId.asString)
@@ -110,7 +110,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
           connection.setAutoCommit(false)
           try
             val statement = connection.prepareStatement(
-              """UPDATE agent_runs SET status = ?, version = ?, schema_version = ?, state_json = ?::jsonb, updated_at = ?
+              """UPDATE zyblw_agent_core.agent_runs SET status = ?, version = ?, schema_version = ?, state_json = ?::jsonb, updated_at = ?
           |WHERE run_id = ?::uuid AND version = ?
           |  AND COALESCE(state_json ->> 'lastEventSequence', '-1')::bigint = ?""".stripMargin
             )
@@ -129,7 +129,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
             if changed != 1 then
               val query = connection.prepareStatement(
                 """SELECT version, COALESCE(state_json ->> 'lastEventSequence', '-1')::bigint
-                  |FROM agent_runs WHERE run_id = ?::uuid""".stripMargin
+                  |FROM zyblw_agent_core.agent_runs WHERE run_id = ?::uuid""".stripMargin
               )
               try
                 query.setString(1, state.runId.asString)
@@ -218,7 +218,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
           try
             lease.foreach(value => lockActiveLease(connection, value))
             val update = connection.prepareStatement(
-              """UPDATE agent_runs SET status = ?, version = ?, schema_version = ?, state_json = ?::jsonb, updated_at = ?
+              """UPDATE zyblw_agent_core.agent_runs SET status = ?, version = ?, schema_version = ?, state_json = ?::jsonb, updated_at = ?
             |WHERE run_id = ?::uuid AND version = ?
             |  AND COALESCE(state_json ->> 'lastEventSequence', '-1')::bigint = ?""".stripMargin
             )
@@ -238,7 +238,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
             if changed != 1 then
               val query = connection.prepareStatement(
                 """SELECT version, COALESCE(state_json ->> 'lastEventSequence', '-1')::bigint
-                  |FROM agent_runs WHERE run_id = ?::uuid""".stripMargin
+                  |FROM zyblw_agent_core.agent_runs WHERE run_id = ?::uuid""".stripMargin
               )
               try
                 query.setString(1, state.runId.asString)
@@ -252,7 +252,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
               finally query.close()
 
             val insert = connection.prepareStatement(
-              """INSERT INTO agent_events(event_id, run_id, sequence, event_type, payload, created_at)
+              """INSERT INTO zyblw_agent_core.agent_events(event_id, run_id, sequence, event_type, payload, created_at)
             |VALUES (?::uuid, ?::uuid, ?, ?, ?::jsonb, ?)
             |ON CONFLICT (event_id) DO NOTHING""".stripMargin
             )
@@ -312,7 +312,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
           try
             lockEventAppendBoundary(connection, runId, events.map(_.sequence).max)
             val statement = connection.prepareStatement(
-              """INSERT INTO agent_events(event_id, run_id, sequence, event_type, payload, created_at)
+              """INSERT INTO zyblw_agent_core.agent_events(event_id, run_id, sequence, event_type, payload, created_at)
                 |VALUES (?::uuid, ?::uuid, ?, ?, ?::jsonb, ?)
                 |ON CONFLICT (event_id) DO NOTHING""".stripMargin
             )
@@ -355,7 +355,9 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
       events: NonEmptyChunk[PersistedAgentEvent]
   ): Unit =
     val verify =
-      connection.prepareStatement("SELECT payload::text FROM agent_events WHERE event_id = ?::uuid")
+      connection.prepareStatement(
+        "SELECT payload::text FROM zyblw_agent_core.agent_events WHERE event_id = ?::uuid"
+      )
     try
       events.foreach { expected =>
         verify.setString(1, expected.eventId.asString)
@@ -375,7 +377,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
   private def lockEventAppendBoundary(connection: Connection, runId: RunId, incomingMax: Long): Unit =
     val statement = connection.prepareStatement(
       """SELECT COALESCE(state_json ->> 'lastEventSequence', '-1')::bigint
-        |FROM agent_runs WHERE run_id = ?::uuid FOR SHARE""".stripMargin
+        |FROM zyblw_agent_core.agent_runs WHERE run_id = ?::uuid FOR SHARE""".stripMargin
     )
     try
       statement.setString(1, runId.asString)
@@ -392,7 +394,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
         ZIO.attemptBlocking {
           val statement = connection.prepareStatement(
             """SELECT event_id::text, run_id::text, sequence, event_type, payload::text
-              |FROM agent_events
+              |FROM zyblw_agent_core.agent_events
               |WHERE run_id = ?::uuid AND sequence > ?
               |ORDER BY sequence LIMIT ?""".stripMargin
           )
@@ -469,7 +471,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
   def requestCancellation(runId: RunId): IO[StoreError, Unit] = withConnection { connection =>
     executeUpdate(
       connection,
-      "UPDATE agent_runs SET cancel_requested = TRUE WHERE run_id = ?::uuid",
+      "UPDATE zyblw_agent_core.agent_runs SET cancel_requested = TRUE WHERE run_id = ?::uuid",
       runId.asString
     )
       .flatMap(count => if count == 1 then ZIO.unit else ZIO.fail(AgentError.RunNotFound(runId)))
@@ -480,7 +482,9 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
     ZIO
       .attemptBlocking {
         val statement =
-          connection.prepareStatement("SELECT cancel_requested FROM agent_runs WHERE run_id = ?::uuid")
+          connection.prepareStatement(
+            "SELECT cancel_requested FROM zyblw_agent_core.agent_runs WHERE run_id = ?::uuid"
+          )
         try
           statement.setString(1, runId.asString)
           val result = statement.executeQuery()
@@ -503,7 +507,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
         .attemptBlocking {
           connection.setAutoCommit(false)
           val statement = connection.prepareStatement(
-            """INSERT INTO tool_executions
+            """INSERT INTO zyblw_agent_core.tool_executions
           |(run_id, batch_id, ordinal, call_id, tool_name, idempotency_key, status, attempt, record_json, updated_at)
           |VALUES (?::uuid, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
           |ON CONFLICT (run_id, call_id) DO NOTHING""".stripMargin
@@ -528,7 +532,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
             val verify = connection.prepareStatement(
               """SELECT run_id::text, batch_id, ordinal, call_id, tool_name, idempotency_key,
                 | status, attempt, record_json::text
-                |FROM tool_executions WHERE run_id = ?::uuid AND call_id = ?""".stripMargin
+                |FROM zyblw_agent_core.tool_executions WHERE run_id = ?::uuid AND call_id = ?""".stripMargin
             )
             try
               records.foreach { expected =>
@@ -569,7 +573,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
     ZIO
       .attemptBlocking {
         val statement = connection.prepareStatement(
-          """UPDATE tool_executions SET status = ?, attempt = ?, record_json = ?::jsonb, updated_at = ?
+          """UPDATE zyblw_agent_core.tool_executions SET status = ?, attempt = ?, record_json = ?::jsonb, updated_at = ?
           |WHERE run_id = ?::uuid AND call_id = ? AND status = ? AND attempt = ?
           |  AND batch_id = ? AND ordinal = ? AND tool_name = ?
           |  AND idempotency_key IS NOT DISTINCT FROM ?""".stripMargin
@@ -605,7 +609,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
         val statement = connection.prepareStatement(
           """SELECT run_id::text, batch_id, ordinal, call_id, tool_name, idempotency_key,
             | status, attempt, record_json::text
-            |FROM tool_executions WHERE run_id = ?::uuid AND call_id = ?""".stripMargin
+            |FROM zyblw_agent_core.tool_executions WHERE run_id = ?::uuid AND call_id = ?""".stripMargin
         )
         try
           statement.setString(1, runId.asString)
@@ -623,7 +627,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
         val statement = connection.prepareStatement(
           """SELECT run_id::text, batch_id, ordinal, call_id, tool_name, idempotency_key,
             | status, attempt, record_json::text
-            |FROM tool_executions WHERE run_id = ?::uuid AND batch_id = ? ORDER BY ordinal""".stripMargin
+            |FROM zyblw_agent_core.tool_executions WHERE run_id = ?::uuid AND batch_id = ? ORDER BY ordinal""".stripMargin
         )
         try
           statement.setString(1, runId.asString)
@@ -642,7 +646,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
         val statement = connection.prepareStatement(
           """SELECT run_id::text, batch_id, ordinal, call_id, tool_name, idempotency_key,
             | status, attempt, record_json::text
-            |FROM tool_executions WHERE run_id = ?::uuid ORDER BY batch_id, ordinal""".stripMargin
+            |FROM zyblw_agent_core.tool_executions WHERE run_id = ?::uuid ORDER BY batch_id, ordinal""".stripMargin
         )
         try
           statement.setString(1, runId.asString)
@@ -663,7 +667,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
         val statement = connection.prepareStatement(
           """SELECT run_id::text, request_id::text, attempt, status, provider, model, capture_policy,
             | fingerprint, message_count, tool_count, record_json::text
-            |FROM model_call_executions WHERE run_id = ?::uuid AND request_id = ?::uuid""".stripMargin
+            |FROM zyblw_agent_core.model_call_executions WHERE run_id = ?::uuid AND request_id = ?::uuid""".stripMargin
         )
         try
           statement.setString(1, runId.asString)
@@ -680,7 +684,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
         val statement = connection.prepareStatement(
           """SELECT run_id::text, request_id::text, attempt, status, provider, model, capture_policy,
             | fingerprint, message_count, tool_count, record_json::text
-            |FROM model_call_executions WHERE run_id = ?::uuid ORDER BY updated_at""".stripMargin
+            |FROM zyblw_agent_core.model_call_executions WHERE run_id = ?::uuid ORDER BY updated_at""".stripMargin
         )
         try
           statement.setString(1, runId.asString)
@@ -696,7 +700,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
     write.foreach {
       case ModelCallWrite.Insert(record) =>
         val insert = connection.prepareStatement(
-          """INSERT INTO model_call_executions
+          """INSERT INTO zyblw_agent_core.model_call_executions
             |(run_id, request_id, attempt, status, provider, model, capture_policy, fingerprint,
             | message_count, tool_count, record_json, updated_at)
             |VALUES (?::uuid, ?::uuid, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
@@ -709,7 +713,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
         val verify = connection.prepareStatement(
           """SELECT run_id::text, request_id::text, attempt, status, provider, model, capture_policy,
             | fingerprint, message_count, tool_count, record_json::text
-            |FROM model_call_executions WHERE run_id = ?::uuid AND request_id = ?::uuid""".stripMargin
+            |FROM zyblw_agent_core.model_call_executions WHERE run_id = ?::uuid AND request_id = ?::uuid""".stripMargin
         )
         try
           verify.setString(1, record.runId.asString)
@@ -723,7 +727,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
         finally verify.close()
       case ModelCallWrite.Transition(expectedStatus, expectedAttempt, next) =>
         val update = connection.prepareStatement(
-          """UPDATE model_call_executions
+          """UPDATE zyblw_agent_core.model_call_executions
             |SET status = ?, attempt = ?, record_json = ?::jsonb, updated_at = ?
             |WHERE run_id = ?::uuid AND request_id = ?::uuid AND status = ? AND attempt = ?
             |  AND provider = ? AND model = ? AND fingerprint = ? AND capture_policy = ?
@@ -851,7 +855,11 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
 
   /** 外键均配置 `ON DELETE CASCADE`，因此删除主 Run 即可原子清理事件、步骤和审批记录。 */
   def delete(runId: RunId): IO[StoreError, Unit] = withConnection { connection =>
-    executeUpdate(connection, "DELETE FROM agent_runs WHERE run_id = ?::uuid", runId.asString)
+    executeUpdate(
+      connection,
+      "DELETE FROM zyblw_agent_core.agent_runs WHERE run_id = ?::uuid",
+      runId.asString
+    )
       .flatMap(count => if count == 1 then ZIO.unit else ZIO.fail(AgentError.RunNotFound(runId)))
   }
 
@@ -862,7 +870,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
     */
   private def lockActiveLease(connection: Connection, lease: RunCommandLease): Unit =
     val statement = connection.prepareStatement(
-      """SELECT 1 FROM agent_run_dispatch
+      """SELECT 1 FROM zyblw_agent_core.agent_run_dispatch
         |WHERE run_id = ?::uuid AND status = 'Leased' AND current_command_id = ?::uuid
         |  AND lease_owner = ? AND lease_token = ?::uuid AND generation = ?
         |  AND lease_expires_at > CURRENT_TIMESTAMP
@@ -934,13 +942,13 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
         val statement = connection.prepareStatement(
           """WITH due AS (
             |  SELECT run_id
-            |  FROM agent_suspensions
+            |  FROM zyblw_agent_core.agent_suspensions
             |  WHERE status = 'Pending' AND deadline IS NOT NULL AND deadline <= clock_timestamp()
             |  ORDER BY deadline ASC, run_id ASC
             |  FOR UPDATE SKIP LOCKED
             |  LIMIT ?
             |), updated AS (
-            |  UPDATE agent_suspensions AS suspensions
+            |  UPDATE zyblw_agent_core.agent_suspensions AS suspensions
             |  SET status = 'Expired', resolved_at = clock_timestamp()
             |  FROM due
             |  WHERE suspensions.run_id = due.run_id
@@ -974,7 +982,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
           try
             val select = connection.prepareStatement(
               """SELECT run_id::text
-                |FROM agent_suspensions
+                |FROM zyblw_agent_core.agent_suspensions
                 |WHERE status = 'Expired'
                 |  AND (expiry_token IS NULL OR expiry_lease_expires_at <= clock_timestamp())
                 |ORDER BY deadline ASC NULLS LAST, run_id ASC
@@ -990,7 +998,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
                 builder.result()
               finally select.close()
             val update = connection.prepareStatement(
-              """UPDATE agent_suspensions
+              """UPDATE zyblw_agent_core.agent_suspensions
                 |SET expiry_generation = expiry_generation + 1,
                 |    expiry_owner = ?, expiry_token = ?::uuid,
                 |    expiry_claimed_at = clock_timestamp(),
@@ -1040,7 +1048,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
       ZIO
         .attemptBlocking {
           val statement = connection.prepareStatement(
-            """UPDATE agent_suspensions
+            """UPDATE zyblw_agent_core.agent_suspensions
               |SET expiry_lease_expires_at = clock_timestamp() + (? * INTERVAL '1 millisecond'),
               |    expiry_heartbeat_at = clock_timestamp()
               |WHERE run_id = ?::uuid AND status = 'Expired'
@@ -1072,7 +1080,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
       ZIO
         .attemptBlocking {
           val statement = connection.prepareStatement(
-            """UPDATE agent_suspensions
+            """UPDATE zyblw_agent_core.agent_suspensions
             |SET expiry_owner = NULL, expiry_token = NULL, expiry_claimed_at = NULL,
             |    expiry_lease_expires_at = NULL, expiry_heartbeat_at = NULL
             |WHERE run_id = ?::uuid AND status = 'Expired'
@@ -1099,7 +1107,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
     ZIO
       .attemptBlocking {
         val statement = connection.prepareStatement(
-          """UPDATE agent_suspensions
+          """UPDATE zyblw_agent_core.agent_suspensions
             |SET status = 'Resolved',
             |    resolved_at = COALESCE(resolved_at, clock_timestamp()),
             |    expiry_owner = NULL, expiry_token = NULL, expiry_claimed_at = NULL,
@@ -1123,14 +1131,15 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
   private def syncSuspensionIndex(connection: Connection, state: AgentState): Unit =
     state.suspension match
       case None =>
-        val statement = connection.prepareStatement("DELETE FROM agent_suspensions WHERE run_id = ?::uuid")
+        val statement =
+          connection.prepareStatement("DELETE FROM zyblw_agent_core.agent_suspensions WHERE run_id = ?::uuid")
         try
           statement.setString(1, state.runId.asString)
           statement.executeUpdate(): Unit
         finally statement.close()
       case Some(record) =>
         val statement = connection.prepareStatement(
-          """INSERT INTO agent_suspensions (
+          """INSERT INTO zyblw_agent_core.agent_suspensions (
             |  run_id, kind, deadline, expiry_outcome, status, created_at
             |) VALUES (?::uuid, ?, ?, ?, 'Pending', ?)
             |ON CONFLICT (run_id) DO UPDATE SET

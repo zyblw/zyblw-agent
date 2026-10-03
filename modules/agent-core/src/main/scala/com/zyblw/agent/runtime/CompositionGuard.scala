@@ -15,12 +15,12 @@ import zio.*
 final private[agent] class CompositionGuard(
     registry: RegisteredToolRegistry,
     live: LiveComposition,
-    roleCatalog: ModelRoleCatalog,
+    roles: ModelRoleSource,
     publisher: RunEventPublisher
 ):
   /** 在 Run 创建前解析 ModelRole，使 provider/model 进入冻结定义与组合指纹。 */
   def resolveRole(agent: AgentDefinition): IO[AgentError, AgentDefinition] =
-    roleCatalog.applyTo(agent.modelSettings).map(settings => agent.copy(modelSettings = settings))
+    roles.current.flatMap(_.applyTo(agent.modelSettings)).map(settings => agent.copy(modelSettings = settings))
 
   /** 创建与恢复使用同一套冻结规则，避免两个入口算出两份指纹。 */
   def freeze(agent: AgentDefinition): RuntimeCompositionFingerprint = live.freeze(agent)

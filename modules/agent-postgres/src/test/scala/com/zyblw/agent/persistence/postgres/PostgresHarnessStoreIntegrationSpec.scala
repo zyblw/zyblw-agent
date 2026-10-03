@@ -379,7 +379,7 @@ object PostgresHarnessStoreIntegrationSpec extends ZIOSpecDefault:
       val connection = dataSource.getConnection
       try
         val statement = connection.prepareStatement(
-          "UPDATE harness_goals SET artifacts_json = '[{}]'::jsonb WHERE goal_id = ?::uuid"
+          "UPDATE zyblw_agent_core.harness_goals SET artifacts_json = '[{}]'::jsonb WHERE goal_id = ?::uuid"
         )
         try
           statement.setObject(1, java.util.UUID.fromString(goalId.asString))
@@ -393,7 +393,7 @@ object PostgresHarnessStoreIntegrationSpec extends ZIOSpecDefault:
       val connection = dataSource.getConnection
       try
         val statement = connection.prepareStatement(
-          "UPDATE harness_budget_reservations SET limits_json = '{}'::jsonb WHERE run_id = ?::uuid"
+          "UPDATE zyblw_agent_core.harness_budget_reservations SET limits_json = '{}'::jsonb WHERE run_id = ?::uuid"
         )
         try
           statement.setObject(1, java.util.UUID.fromString(runId.asString))

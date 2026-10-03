@@ -91,8 +91,8 @@ final class PostgresArtifactStore(
           val statement   = connection.prepareStatement(
             """SELECT v.scope_kind, v.scope_key, v.name, v.version, v.media_type, v.byte_size,
               |       v.sha256, v.metadata_json::text, v.created_at
-              |FROM agent_artifact_versions v
-              |JOIN agent_artifacts a
+              |FROM zyblw_agent_core.agent_artifact_versions v
+              |JOIN zyblw_agent_core.agent_artifacts a
               |  ON a.scope_kind = v.scope_kind AND a.scope_key = v.scope_key AND a.name = v.name
               | AND a.latest_version = v.version
               |WHERE v.scope_kind = ? AND v.scope_key = ?
@@ -147,8 +147,8 @@ final class PostgresArtifactStore(
           jdbc("purge expired artifacts") {
             val statement = connection.prepareStatement(
               """SELECT v.scope_kind, v.scope_key, v.name, v.version
-                |FROM agent_artifact_versions v
-                |JOIN agent_artifacts a
+                |FROM zyblw_agent_core.agent_artifact_versions v
+                |JOIN zyblw_agent_core.agent_artifacts a
                 |  ON a.scope_kind = v.scope_kind AND a.scope_key = v.scope_key AND a.name = v.name
                 |WHERE v.version <> a.latest_version AND v.created_at <= ?
                 |ORDER BY v.created_at, v.scope_kind, v.scope_key, v.name, v.version
@@ -199,7 +199,7 @@ final class PostgresArtifactStore(
         jdbc("list artifact audits") {
           val statement = connection.prepareStatement(
             """SELECT action, scope_kind, scope_key, name_hash, version, reason_code, occurred_at
-              |FROM agent_artifact_audit
+              |FROM zyblw_agent_core.agent_artifact_audit
               |ORDER BY occurred_at DESC, audit_id DESC
               |LIMIT ?""".stripMargin
           )
@@ -238,9 +238,9 @@ final class PostgresArtifactStore(
   ): Unit =
     val sql =
       if insert then
-        """INSERT INTO agent_artifacts(scope_kind, scope_key, name, latest_version, created_at, updated_at)
+        """INSERT INTO zyblw_agent_core.agent_artifacts(scope_kind, scope_key, name, latest_version, created_at, updated_at)
           |VALUES (?, ?, ?, ?, ?, ?)""".stripMargin
-      else """UPDATE agent_artifacts SET latest_version = ?, updated_at = ?
+      else """UPDATE zyblw_agent_core.agent_artifacts SET latest_version = ?, updated_at = ?
           |WHERE scope_kind = ? AND scope_key = ? AND name = ?""".stripMargin
     val statement = connection.prepareStatement(sql)
     try
@@ -266,7 +266,7 @@ final class PostgresArtifactStore(
       bytes: Chunk[Byte]
   ): Unit =
     val statement = connection.prepareStatement(
-      """INSERT INTO agent_artifact_versions(
+      """INSERT INTO zyblw_agent_core.agent_artifact_versions(
         |  scope_kind, scope_key, name, version, media_type, byte_size, sha256, metadata_json, bytes, created_at
         |) VALUES (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?)""".stripMargin
     )
@@ -296,7 +296,7 @@ final class PostgresArtifactStore(
       now: Instant
   ): Unit =
     val statement = connection.prepareStatement(
-      """INSERT INTO agent_artifact_audit(
+      """INSERT INTO zyblw_agent_core.agent_artifact_audit(
         |  audit_id, action, scope_kind, scope_key, name_hash, version, reason_code, occurred_at
         |) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""".stripMargin
     )
@@ -317,7 +317,7 @@ final class PostgresArtifactStore(
 
   private def latestVersion(connection: Connection, kind: String, key: String, name: String): Option[Long] =
     val statement = connection.prepareStatement(
-      "SELECT latest_version FROM agent_artifacts WHERE scope_kind = ? AND scope_key = ? AND name = ?"
+      "SELECT latest_version FROM zyblw_agent_core.agent_artifacts WHERE scope_kind = ? AND scope_key = ? AND name = ?"
     )
     try
       statement.setString(1, kind)
@@ -330,7 +330,7 @@ final class PostgresArtifactStore(
 
   private def countNames(connection: Connection, kind: String, key: String): Int =
     val statement = connection.prepareStatement(
-      "SELECT count(*) FROM agent_artifacts WHERE scope_kind = ? AND scope_key = ?"
+      "SELECT count(*) FROM zyblw_agent_core.agent_artifacts WHERE scope_kind = ? AND scope_key = ?"
     )
     try
       statement.setString(1, kind)
@@ -351,13 +351,13 @@ final class PostgresArtifactStore(
       case Some(_) =>
         """SELECT scope_kind, scope_key, name, version, media_type, byte_size, sha256,
           |       metadata_json::text, bytes, created_at
-          |FROM agent_artifact_versions
+          |FROM zyblw_agent_core.agent_artifact_versions
           |WHERE scope_kind = ? AND scope_key = ? AND name = ? AND version = ?""".stripMargin
       case None =>
         """SELECT v.scope_kind, v.scope_key, v.name, v.version, v.media_type, v.byte_size, v.sha256,
           |       v.metadata_json::text, v.bytes, v.created_at
-          |FROM agent_artifact_versions v
-          |JOIN agent_artifacts a
+          |FROM zyblw_agent_core.agent_artifact_versions v
+          |JOIN zyblw_agent_core.agent_artifacts a
           |  ON a.scope_kind = v.scope_kind AND a.scope_key = v.scope_key AND a.name = v.name
           | AND a.latest_version = v.version
           |WHERE v.scope_kind = ? AND v.scope_key = ? AND v.name = ?""".stripMargin
@@ -384,7 +384,7 @@ final class PostgresArtifactStore(
       version: Long
   ): Int =
     val statement = connection.prepareStatement(
-      "DELETE FROM agent_artifact_versions WHERE scope_kind = ? AND scope_key = ? AND name = ? AND version = ?"
+      "DELETE FROM zyblw_agent_core.agent_artifact_versions WHERE scope_kind = ? AND scope_key = ? AND name = ? AND version = ?"
     )
     try
       statement.setString(1, kind)

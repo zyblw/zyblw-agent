@@ -24,6 +24,7 @@ object SchemaFreshInstallIntegrationSpec extends ZIOSpecDefault:
     yield
       val value = PGSimpleDataSource()
       value.setURL(container.jdbcUrl)
+      value.setCurrentSchema("pg_catalog")
       value.setUser(container.username)
       value.setPassword(container.password)
       value
@@ -35,7 +36,7 @@ object SchemaFreshInstallIntegrationSpec extends ZIOSpecDefault:
       try
         val statement = connection.prepareStatement("SELECT to_regclass(?) IS NOT NULL")
         try
-          statement.setString(1, name)
+          statement.setString(1, s"zyblw_agent_core.$name")
           val result = statement.executeQuery()
           result.next() && result.getBoolean(1)
         finally statement.close()
@@ -49,7 +50,7 @@ object SchemaFreshInstallIntegrationSpec extends ZIOSpecDefault:
         val statement = connection.prepareStatement(
           """SELECT is_nullable
             |FROM information_schema.columns
-            |WHERE table_schema = current_schema()
+            |WHERE table_schema = 'zyblw_agent_core'
             |  AND table_name = 'agent_artifact_versions'
             |  AND column_name = 'bytes'""".stripMargin
         )
@@ -62,6 +63,21 @@ object SchemaFreshInstallIntegrationSpec extends ZIOSpecDefault:
 
   def spec: Spec[TestEnvironment & Scope, Any] =
     suite("SchemaFreshInstall")(
+      test("旧 public 核心被拒绝，专属 schema 不发生迁移写入") {
+        (for
+          dataSource <- ZIO.service[DataSource]
+          _          <- ZIO.attemptBlocking {
+            val connection = dataSource.getConnection
+            try
+              val statement = connection.createStatement()
+              try statement.execute("CREATE TABLE public.agent_runs (run_id uuid PRIMARY KEY)")
+              finally statement.close()
+            finally connection.close()
+          }
+          result  <- AgentPostgresMigrations.migrate(dataSource).exit
+          created <- tableExists(dataSource, AgentPostgresMigrations.DefaultHistoryTable)
+        yield assertTrue(result.isFailure, !created)).provideLayer(dataSourceLayer)
+      },
       test("fresh migrate 后权威表在、死投影表不在、bytes 可外置") {
         (for
           dataSource <- ZIO.service[DataSource]
@@ -105,7 +121,7 @@ object SchemaFreshInstallIntegrationSpec extends ZIOSpecDefault:
                 val connection = dataSource.getConnection
                 try
                   val statement = connection.prepareStatement(
-                    "SELECT bytes IS NULL FROM agent_artifact_versions WHERE name = ? AND version = ?"
+                    "SELECT bytes IS NULL FROM zyblw_agent_core.agent_artifact_versions WHERE name = ? AND version = ?"
                   )
                   try
                     statement.setString(1, name.value)
@@ -135,7 +151,7 @@ object SchemaFreshInstallIntegrationSpec extends ZIOSpecDefault:
               val session   = UUID.randomUUID()
               val commandA  = UUID.randomUUID()
               val insertRun = connection.prepareStatement(
-                """INSERT INTO agent_runs
+                """INSERT INTO zyblw_agent_core.agent_runs
                   |(run_id, session_id, agent_id, status, version, schema_version, state_json, created_at, updated_at)
                   |VALUES (?::uuid, ?::uuid, 'schema', 'Created', 0, 1, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""".stripMargin
               )
@@ -147,7 +163,7 @@ object SchemaFreshInstallIntegrationSpec extends ZIOSpecDefault:
                 insertRun.executeUpdate()
               finally insertRun.close()
               val insertCommand = connection.prepareStatement(
-                """INSERT INTO agent_run_commands
+                """INSERT INTO zyblw_agent_core.agent_run_commands
                   |(command_id, run_id, command_type, payload, idempotency_key, status)
                   |VALUES (?::uuid, ?::uuid, 'Cancel', '{}'::jsonb, 'same-run', 'Queued')""".stripMargin
               )
@@ -157,7 +173,7 @@ object SchemaFreshInstallIntegrationSpec extends ZIOSpecDefault:
                 insertCommand.executeUpdate()
               finally insertCommand.close()
               val sameRun = connection.prepareStatement(
-                """INSERT INTO agent_run_dispatch
+                """INSERT INTO zyblw_agent_core.agent_run_dispatch
                   |(run_id, status, current_command_id, lease_owner, lease_token, claimed_at, lease_expires_at)
                   |VALUES (?::uuid, 'Leased', ?::uuid, 'owner', gen_random_uuid(), CURRENT_TIMESTAMP,
                   |        CURRENT_TIMESTAMP + INTERVAL '30 seconds')""".stripMargin
@@ -168,7 +184,7 @@ object SchemaFreshInstallIntegrationSpec extends ZIOSpecDefault:
                 sameRun.executeUpdate()
               finally sameRun.close()
               val crossRun = connection.prepareStatement(
-                """INSERT INTO agent_run_dispatch
+                """INSERT INTO zyblw_agent_core.agent_run_dispatch
                   |(run_id, status, current_command_id, lease_owner, lease_token, claimed_at, lease_expires_at)
                   |VALUES (?::uuid, 'Leased', ?::uuid, 'owner', gen_random_uuid(), CURRENT_TIMESTAMP,
                   |        CURRENT_TIMESTAMP + INTERVAL '30 seconds')""".stripMargin
@@ -183,7 +199,7 @@ object SchemaFreshInstallIntegrationSpec extends ZIOSpecDefault:
                 finally crossRun.close()
               val indexes = connection.prepareStatement(
                 """SELECT indexname FROM pg_indexes
-                  |WHERE schemaname = current_schema() AND tablename = 'agent_events'""".stripMargin
+                  |WHERE schemaname = 'zyblw_agent_core' AND tablename = 'agent_events'""".stripMargin
               )
               val names =
                 try

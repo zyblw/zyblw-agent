@@ -76,7 +76,7 @@ required_tables=$(
     --dbname zyblw_restore \
     --tuples-only \
     --no-align \
-    --command "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('agent_runs','agent_run_commands','model_call_executions','agent_workflow_checkpoints');"
+    --command "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'zyblw_agent_core' AND table_name IN ('agent_runs','agent_run_commands','model_call_executions','agent_workflow_checkpoints');"
 )
 if [[ "$required_tables" != "4" ]]; then
   echo "restored database is missing required durable tables: found $required_tables/4" >&2

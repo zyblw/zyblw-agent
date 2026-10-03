@@ -341,25 +341,25 @@ object PostgresRunStoreIntegrationSpec extends ZIOSpecDefault:
           )
           _ <- executeSql(
             fixture.dataSource,
-            "UPDATE agent_runs SET status = 'Completed' WHERE run_id = ?::uuid",
+            "UPDATE zyblw_agent_core.agent_runs SET status = 'Completed' WHERE run_id = ?::uuid",
             runId
           )
           stateResult <- fixture.store.load(runId).either
           _           <- executeSql(
             fixture.dataSource,
-            "UPDATE agent_events SET sequence = 99 WHERE run_id = ?::uuid AND sequence = 0",
+            "UPDATE zyblw_agent_core.agent_events SET sequence = 99 WHERE run_id = ?::uuid AND sequence = 0",
             runId
           )
           eventResult <- fixture.store.events(runId).either
           _           <- executeSql(
             fixture.dataSource,
-            "UPDATE tool_executions SET status = 'Succeeded' WHERE run_id = ?::uuid",
+            "UPDATE zyblw_agent_core.tool_executions SET status = 'Succeeded' WHERE run_id = ?::uuid",
             runId
           )
           toolResult <- fixture.store.getToolExecution(runId, toolRecord.callId).either
           _          <- executeSql(
             fixture.dataSource,
-            "UPDATE model_call_executions SET status = 'Succeeded' WHERE run_id = ?::uuid",
+            "UPDATE zyblw_agent_core.model_call_executions SET status = 'Succeeded' WHERE run_id = ?::uuid",
             runId
           )
           modelResult <- fixture.store.getModelCall(runId, requestId).either
