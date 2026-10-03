@@ -9,6 +9,12 @@
 >
 > 事实来源：对应模块源码、测试与构建定义
 
+## Schema 所有权
+
+`zyblw_agent_core` 保存核心基础设施事实（32 张表），`zyblw_agent_knowledge` 保存知识索引（8 张表），
+`zyblw_extensions` 保存 vector/pg_trgm 扩展对象。两组表各有独立 Flyway history；扩展不保存业务事实。
+所有 Adapter SQL 显式限定 schema 与扩展对象，不依赖宿主当前 schema，也不使用 `public`。
+
 ## 设计边界
 
 框架表只保存 Agent 基础设施事实，不保存网站的文章、用户画像、中医问诊或其他业务主数据。业务系统通过
@@ -80,9 +86,9 @@ migration 下进行。
 原子删除该文档在空间内全部 Profile 的正式块并写 Retired；`purgeInactive` 通过部分索引和 `SKIP LOCKED` 只清理截止时间前的非活动终态，绝不删除
 Building 或 Ready/active。
 
-0.6 的 1024 optional pgvector location 固定管理 `zyblw_agent_knowledge` schema 及其中独立的
+0.9 的 1024 optional pgvector location 固定管理 `zyblw_agent_knowledge` schema 及其中独立的
 `flyway_zyblw_agent_knowledge_1024_history`，且只有一份 fresh-install V001：一次建立 1024 维 manifest、staging、active
-read model、FTS/HNSW 与 parent/ordinal/previous/next/heading/page/origin/block 谱系。vector extension/type 固定从 `public`
+read model、FTS/HNSW 与 parent/ordinal/previous/next/heading/page/origin/block 谱系。vector extension/type 固定从 `zyblw_extensions`
 解析。运行时只装配 1024 location 与其 schema/history。
 
 通用 `agent_checkpoints` 不存在于全新基线。Agent Runtime 直接保存 `AgentState`。生产异步创建通过
@@ -318,7 +324,7 @@ AgentState 提交也使用相同 fencing。`PostgresRunStore.commitFenced` 在�
 
 ```sql
 SELECT 1
-FROM agent_run_dispatch
+FROM zyblw_agent_core.agent_run_dispatch
 WHERE run_id = :run_id
   AND status = 'Leased'
   AND current_command_id = :command_id

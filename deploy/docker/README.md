@@ -58,6 +58,10 @@ chmod 600 .env
 | `ZYBLW_AGENT_MIGRATION_USER` / `PASSWORD` | business 可选，external 必填 | 只由一次性 `migrate` 使用。未分账号时 business 回退到运行账号。 |
 | `ZYBLW_AGENT_PSQL_URL` | 可选 | `preflight.sh` 的连接探针地址；不含密码，密码仍从 Secret 读取。 |
 
+核心使用 `zyblw_agent_core`；知识使用 `zyblw_agent_knowledge`，vector/pg_trgm 使用 `zyblw_extensions`。
+客服示例的订单/退款使用宿主所有的 `support_app`，不进入框架核心迁移；staging init 为 runtime 授予这些命名空间的 USAGE/DML。
+应用 SQL 均显式限定，不依赖 `public` 或当前搜索路径。
+
 0.9.0 只支持空库执行当前 V001。旧 schema、旧 state 或旧向量维度不在原地升级范围；不要用 Flyway repair、baseline 或手工改 history 绕过探针。
 
 ### 3.3 模型：单端点

@@ -40,6 +40,9 @@ trait NodeSummarizer:
   ): IO[RetrievalError, Option[String]]
 
 object NodeSummarizer:
+  /** 规则摘要里正文开头的引导词；`StructureOutline` 据此只取正文部分做导航提示。 */
+  val DeterministicLeadMarker: String = "主要涵盖："
+
   def cached(underlying: NodeSummarizer, cache: NodeSummaryStore): NodeSummarizer =
     new NodeSummarizer:
       def summarize(
@@ -90,10 +93,10 @@ object NodeSummarizer:
                 case Some(cached) => ZIO.succeed(Some(cached))
                 case None         =>
                   val excerpt   = blocks.headOption.map(_.text.take(60)).getOrElse("")
-                  val generated = s"${section.title}：包含 ${blocks.length} 处论述。主要涵盖：$excerpt"
+                  val generated = s"${section.title}：包含 ${blocks.length} 处论述。$DeterministicLeadMarker$excerpt"
                   store.put(cacheKey, generated).as(Some(generated))
               }
             case None =>
               val excerpt   = blocks.headOption.map(_.text.take(60)).getOrElse("")
-              val generated = s"${section.title}：包含 ${blocks.length} 处论述。主要涵盖：$excerpt"
+              val generated = s"${section.title}：包含 ${blocks.length} 处论述。$DeterministicLeadMarker$excerpt"
               ZIO.succeed(Some(generated))

@@ -20,7 +20,7 @@ final class PostgresCompensationStore(dataSource: DataSource) extends Compensati
           current.status match
             case CompensationStatus.Registered =>
               val statement = connection.prepareStatement(
-                """UPDATE agent_compensations SET status = 'Pending', available_at = ?
+                """UPDATE zyblw_agent_core.agent_compensations SET status = 'Pending', available_at = ?
                   |WHERE compensation_id = ?::uuid AND status = 'Registered'""".stripMargin
               )
               try
@@ -46,7 +46,7 @@ final class PostgresCompensationStore(dataSource: DataSource) extends Compensati
             case CompensationStatus.Cancelled                               => current
             case CompensationStatus.Registered | CompensationStatus.Pending =>
               val statement = connection.prepareStatement(
-                """UPDATE agent_compensations SET status = 'Cancelled', completed_at = CURRENT_TIMESTAMP
+                """UPDATE zyblw_agent_core.agent_compensations SET status = 'Cancelled', completed_at = CURRENT_TIMESTAMP
                 |WHERE compensation_id = ?::uuid AND status IN ('Registered', 'Pending')""".stripMargin
               )
               try
@@ -105,7 +105,7 @@ final class PostgresCompensationStore(dataSource: DataSource) extends Compensati
       withConnection { connection =>
         ZIO.attemptBlocking {
           val statement = connection.prepareStatement(
-            """UPDATE agent_compensations
+            """UPDATE zyblw_agent_core.agent_compensations
               |SET lease_expires_at = CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond'), heartbeat_at = CURRENT_TIMESTAMP
               |WHERE compensation_id = ?::uuid AND status = 'Running' AND lease_owner = ? AND lease_token = ?::uuid
               |  AND generation = ? AND lease_expires_at > CURRENT_TIMESTAMP
@@ -124,7 +124,7 @@ final class PostgresCompensationStore(dataSource: DataSource) extends Compensati
   def complete(lease: CompensationLease): IO[StoreError, Unit] =
     transition(
       lease,
-      """UPDATE agent_compensations
+      """UPDATE zyblw_agent_core.agent_compensations
         |SET status = 'Succeeded', completed_at = CURRENT_TIMESTAMP, last_failure = NULL,
         |    lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL
         |WHERE compensation_id = ?::uuid AND status = 'Running' AND lease_owner = ? AND lease_token = ?::uuid
@@ -136,7 +136,7 @@ final class PostgresCompensationStore(dataSource: DataSource) extends Compensati
     validateFailure(safeFailure) *> withConnection { connection =>
       ZIO.attemptBlocking {
         val statement = connection.prepareStatement(
-          """UPDATE agent_compensations
+          """UPDATE zyblw_agent_core.agent_compensations
             |SET status = 'Pending', available_at = ?, last_failure = ?, lease_owner = NULL, lease_token = NULL,
             |    lease_expires_at = NULL, heartbeat_at = NULL
             |WHERE compensation_id = ?::uuid AND status = 'Running' AND lease_owner = ? AND lease_token = ?::uuid
@@ -156,7 +156,7 @@ final class PostgresCompensationStore(dataSource: DataSource) extends Compensati
     validateFailure(safeFailure) *> withConnection { connection =>
       ZIO.attemptBlocking {
         val statement = connection.prepareStatement(
-          """UPDATE agent_compensations
+          """UPDATE zyblw_agent_core.agent_compensations
             |SET status = 'DeadLetter', last_failure = ?, lease_owner = NULL, lease_token = NULL,
             |    lease_expires_at = NULL, heartbeat_at = NULL
             |WHERE compensation_id = ?::uuid AND status = 'Running' AND lease_owner = ? AND lease_token = ?::uuid
@@ -195,7 +195,7 @@ final class PostgresCompensationStore(dataSource: DataSource) extends Compensati
   /** 回收过期 worker。补偿 handler 必须幂等，因崩溃窗口可能重放。 */
   private def reclaimExpired(connection: Connection): Unit =
     val statement = connection.prepareStatement(
-      """UPDATE agent_compensations
+      """UPDATE zyblw_agent_core.agent_compensations
         |SET status = 'Pending', last_failure = 'lease-expired', available_at = CURRENT_TIMESTAMP,
         |    lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL
         |WHERE status = 'Running' AND lease_expires_at <= CURRENT_TIMESTAMP""".stripMargin
@@ -207,7 +207,7 @@ final class PostgresCompensationStore(dataSource: DataSource) extends Compensati
   /** 自动尝试耗尽后转 DeadLetter。 */
   private def deadLetterExhausted(connection: Connection, maxAttempts: Int): Unit =
     val statement = connection.prepareStatement(
-      "UPDATE agent_compensations SET status = 'DeadLetter', last_failure = 'max-attempts-exceeded' WHERE status = 'Pending' AND attempt >= ?"
+      "UPDATE zyblw_agent_core.agent_compensations SET status = 'DeadLetter', last_failure = 'max-attempts-exceeded' WHERE status = 'Pending' AND attempt >= ?"
     )
     try
       statement.setInt(1, maxAttempts)
@@ -245,7 +245,7 @@ final class PostgresCompensationStore(dataSource: DataSource) extends Compensati
       duration: Duration
   ): Unit =
     val statement = connection.prepareStatement(
-      """UPDATE agent_compensations
+      """UPDATE zyblw_agent_core.agent_compensations
         |SET status = 'Running', attempt = attempt + 1, generation = ?, lease_owner = ?, lease_token = ?::uuid,
         |    lease_expires_at = CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond'), heartbeat_at = CURRENT_TIMESTAMP
         |WHERE compensation_id = ?::uuid AND status = 'Pending'""".stripMargin
@@ -384,7 +384,7 @@ final class PostgresCompensationStore(dataSource: DataSource) extends Compensati
   private val selectColumns =
     """SELECT compensation_id::text, operation_id::text, run_id::text, scope_key, handler_name, payload::text,
       |status, attempt, generation, available_at, last_failure, created_at, completed_at
-      |FROM agent_compensations""".stripMargin
+      |FROM zyblw_agent_core.agent_compensations""".stripMargin
 
 object PostgresCompensationStore:
   /** 使用宿主共享 DataSource 提供 CompensationStore。 */

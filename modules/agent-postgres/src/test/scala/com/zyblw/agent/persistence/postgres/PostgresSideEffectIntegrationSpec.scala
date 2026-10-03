@@ -7,7 +7,6 @@ import com.zyblw.agent.memory.RunStore
 import com.zyblw.agent.sideeffects.*
 import java.sql.Connection
 import javax.sql.DataSource
-import org.flywaydb.core.Flyway
 import org.postgresql.ds.PGSimpleDataSource
 import org.testcontainers.utility.DockerImageName
 import zio.*
@@ -53,14 +52,7 @@ object PostgresSideEffectIntegrationSpec extends ZIOSpecDefault:
         value.setPassword(container.password)
         value: DataSource
       }
-      _ <- ZIO.attemptBlocking(
-        Flyway
-          .configure()
-          .dataSource(dataSource)
-          .locations(AgentPostgresMigrations.DefaultLocation)
-          .load()
-          .migrate()
-      )
+      _ <- AgentPostgresMigrations.migrate(dataSource)
       _ <- ZIO.attemptBlocking {
         val connection = dataSource.getConnection
         try
@@ -400,16 +392,20 @@ object PostgresSideEffectIntegrationSpec extends ZIOSpecDefault:
           count(connection, "SELECT count(*) FROM test_business_records WHERE record_id = ?", recordId)
         val operation = count(
           connection,
-          "SELECT count(*) FROM agent_business_operations WHERE idempotency_key IN (?, ?)",
+          "SELECT count(*) FROM zyblw_agent_core.agent_business_operations WHERE idempotency_key IN (?, ?)",
           s"record:$recordId",
           s"fail:$recordId"
         )
         val outbox =
-          count(connection, "SELECT count(*) FROM agent_outbox_events WHERE aggregate_id = ?", recordId)
+          count(
+            connection,
+            "SELECT count(*) FROM zyblw_agent_core.agent_outbox_events WHERE aggregate_id = ?",
+            recordId
+          )
         val compensation = count(
           connection,
-          """SELECT count(*) FROM agent_compensations c
-          |JOIN agent_business_operations o ON o.operation_id = c.operation_id
+          """SELECT count(*) FROM zyblw_agent_core.agent_compensations c
+          |JOIN zyblw_agent_core.agent_business_operations o ON o.operation_id = c.operation_id
           |WHERE o.idempotency_key IN (?, ?)""".stripMargin,
           s"record:$recordId",
           s"fail:$recordId"
@@ -437,7 +433,7 @@ object PostgresSideEffectIntegrationSpec extends ZIOSpecDefault:
     val connection = dataSource.getConnection
     try
       val statement = connection.prepareStatement(
-        "SELECT operation_id::text FROM agent_business_operations WHERE operation_name = ? AND idempotency_key = ?"
+        "SELECT operation_id::text FROM zyblw_agent_core.agent_business_operations WHERE operation_name = ? AND idempotency_key = ?"
       )
       try
         statement.setString(1, operationName)
@@ -461,7 +457,7 @@ object PostgresSideEffectIntegrationSpec extends ZIOSpecDefault:
         val connection = dataSource.getConnection
         try
           val statement = connection.prepareStatement(
-            "SELECT compensation_id::text FROM agent_compensations WHERE operation_id = ?::uuid"
+            "SELECT compensation_id::text FROM zyblw_agent_core.agent_compensations WHERE operation_id = ?::uuid"
           )
           try
             statement.setString(1, operationId.asString)

@@ -27,7 +27,7 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
       knowledgeVersion: Option[String]
   )
 
-  /** 启动 `pgvector/pgvector:0.8.6-pg18-bookworm`，依次执行 public 核心基线和专属 schema 中的知识库基线。 */
+  /** 在不含业务 schema 的搜索路径下验证核心、知识与扩展的专属命名空间。 */
   private val harnessLayer: ZLayer[Any, Throwable, Harness] = ZLayer.scoped {
     for
       container <- ZIO.acquireRelease(
@@ -43,24 +43,26 @@ object PostgresKnowledgeIndexIntegrationSpec extends ZIOSpecDefault:
       dataSource <- ZIO.attempt {
         val value = PGSimpleDataSource()
         value.setURL(container.jdbcUrl)
+        value.setCurrentSchema("pg_catalog")
         value.setUser(container.username)
         value.setPassword(container.password)
         value: DataSource
       }
-      // 模拟独立宿主已经在 public schema 中创建业务对象；agent 只能以受限 version 0 baseline 接入，
-      // 不能因此跳过 V001+ 或接管已有 agent core 表。
+      // 宿主已有业务对象不会阻止框架安装；不需要 baseline 特例，也不接管宿主 schema。
       _ <- ZIO.attemptBlocking {
         val connection = dataSource.getConnection
         try
           val statement = connection.createStatement()
-          try statement.execute("CREATE TABLE host_shared_schema_marker (id bigint PRIMARY KEY)")
+          try
+            statement.execute("CREATE SCHEMA host_business")
+            statement.execute("CREATE TABLE host_business.marker (id bigint PRIMARY KEY)")
           finally statement.close()
         finally connection.close()
       }
-      _ <- AgentPostgresMigrations.migrate(dataSource, AgentPostgresMigrationConfig.sharedPublicSchema)
+      _          <- AgentPostgresMigrations.migrate(dataSource, AgentPostgresMigrationConfig())
       coreReplay <- AgentPostgresMigrations.migrate(
         dataSource,
-        AgentPostgresMigrationConfig.sharedPublicSchema
+        AgentPostgresMigrationConfig()
       )
       firstMigration  <- AgentPostgresMigrations.migrateKnowledge1024(dataSource)
       replayMigration <- AgentPostgresMigrations.migrateKnowledge1024(dataSource)

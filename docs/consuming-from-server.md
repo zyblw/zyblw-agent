@@ -14,8 +14,8 @@
 
 当前平台已按最新框架契约接入：
 
-- `QaProviderConfigLoader` 从同一次装配生成 `ChatModel`、`ProviderRegistry`、默认 provider/model 身份和计价声明；
-- 命名档案支持 DeepSeek、Qwen、GLM、Kimi、OpenAI、Anthropic 和 Gemini；`ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON` 支持多个 OpenAI-compatible 官方端点或中转站；
+- 平台通过 `LiveModelRegistry` + 管理台 `ModelRegistryService` 热加载连接与模型；角色绑定决定问答/理解/导航/向量化等用途，价格来自已发布的人民币价目；
+- 框架仍保留命名档案与 `ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON` 供示例与独立消费者使用，平台运行时不再读取这些环境变量；
 - 平台消费必填 `AgentState.threadId`、冻结 `definition` / `composition`、`suspension`、citations 与 retrieval evidence，不保留旧状态形状的兼容分支；
 - 命名档案的 additional provider 仅是显式路由目标，不得宣称为自动 failover。
 - 业务在提交前用自己的允许列表校验用户选择后，对该次定义调用 `ModelSettings.pinModel`。`RunPinned` 只锁住本次 Run 的 provider/model；部署级策略仍可调整温度与输出上限。选择本身保存在业务提交事实里，恢复时从该事实重建，框架不把客户端字符串直接当成可路由端点。

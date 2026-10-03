@@ -11,6 +11,8 @@ object AgentPostgresMigrationsSpec extends ZIOSpecDefault:
       val knowledge = AgentPostgresMigrationConfig.knowledge1024
       assertTrue(
         knowledge.locations == List(AgentPostgresMigrations.OptionalPgVector1024Location),
+        AgentPostgresMigrations.CoreSchema == "zyblw_agent_core",
+        AgentPostgresMigrations.ExtensionsSchema == "zyblw_extensions",
         AgentPostgresMigrations.Knowledge1024Schema == "zyblw_agent_knowledge",
         knowledge.historyTable == AgentPostgresMigrations.Knowledge1024HistoryTable,
         knowledge.historyTable != AgentPostgresMigrations.DefaultHistoryTable
@@ -39,12 +41,11 @@ object AgentPostgresMigrationsSpec extends ZIOSpecDefault:
       val invalid = AgentPostgresMigrationConfig(baselineOnMigrate = true)
       assertTrue(invalid.validated.isLeft)
     },
-    test("宿主共享 public schema 只能使用受限的 version 0 baseline") {
-      val shared = AgentPostgresMigrationConfig.sharedPublicSchema
+    test("专属 schema 拒绝旧 shared-public version 0 baseline") {
+      val shared = AgentPostgresMigrationConfig(baselineOnMigrate = true, baselineVersion = Some("0"))
       assertTrue(
-        shared.validated.isRight,
-        shared.isSharedPublicSchemaBaseline,
-        shared.baselineVersion.contains("0")
+        shared.validated.isLeft,
+        AgentPostgresMigrationConfig(baselineVersion = Some("0")).validated.isLeft
       )
     },
     test("0.9 核心与知识库各只有一个版本化 baseline") {

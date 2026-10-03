@@ -28,7 +28,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
           connection.prepareStatement(
             """SELECT goal_id, thread_id, objective, status, run_id, revision, updated_at,
               |       artifacts_json::text
-              |FROM harness_goals WHERE goal_id = ?::uuid""".stripMargin
+              |FROM zyblw_agent_core.harness_goals WHERE goal_id = ?::uuid""".stripMargin
           )
         try
           statement.setObject(1, UUID.fromString(id.asString))
@@ -54,7 +54,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
           connection.prepareStatement(
             """SELECT plan_id, goal_id, summary, todos_json::text, revision, updated_at,
               |       artifacts_json::text
-              |FROM harness_plans WHERE plan_id = ?::uuid""".stripMargin
+              |FROM zyblw_agent_core.harness_plans WHERE plan_id = ?::uuid""".stripMargin
           )
         try
           statement.setObject(1, UUID.fromString(id.asString))
@@ -116,12 +116,12 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
         val sql = beforeSequence match
           case Some(_) =>
             """SELECT interaction_id, goal_id, run_id, kind, body, sequence, created_at
-              |FROM harness_interactions
+              |FROM zyblw_agent_core.harness_interactions
               |WHERE goal_id = ?::uuid AND sequence < ?
               |ORDER BY sequence DESC LIMIT ?""".stripMargin
           case None =>
             """SELECT interaction_id, goal_id, run_id, kind, body, sequence, created_at
-              |FROM harness_interactions
+              |FROM zyblw_agent_core.harness_interactions
               |WHERE goal_id = ?::uuid
               |ORDER BY sequence DESC LIMIT ?""".stripMargin
         val statement = connection.prepareStatement(sql)
@@ -322,7 +322,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
         val cursorFilter = after.fold("")(_ => " AND (created_at, run_id) > (?, ?::uuid)")
         val statement    = connection.prepareStatement(
           s"""SELECT run_id, goal_id, limits_json::text, status, usage_json::text, created_at, updated_at
-             |FROM harness_budget_reservations
+             |FROM zyblw_agent_core.harness_budget_reservations
              |WHERE status = ?$cursorFilter
              |ORDER BY created_at, run_id LIMIT ?""".stripMargin
         )
@@ -348,7 +348,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
     val written = goal.copy(revision = 1L, updatedAtEpochMilli = now.toEpochMilli)
     jdbc("insert harness goal") {
       val statement = connection.prepareStatement(
-        """INSERT INTO harness_goals
+        """INSERT INTO zyblw_agent_core.harness_goals
           |(goal_id, thread_id, objective, status, run_id, revision, updated_at, artifacts_json)
           |VALUES (?::uuid, ?, ?, ?, ?::uuid, ?, ?, ?::jsonb)""".stripMargin
       )
@@ -371,7 +371,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
   ): IO[StoreError, Unit] =
     jdbc("insert harness goal budget") {
       val statement = connection.prepareStatement(
-        """INSERT INTO harness_goal_budgets
+        """INSERT INTO zyblw_agent_core.harness_goal_budgets
           |(goal_id, max_runs, max_model_calls, max_tool_calls, max_input_tokens,
           | max_output_tokens, max_total_tokens, max_estimated_cost, created_at, updated_at)
           |VALUES (?::uuid, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -403,7 +403,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
     jdbc("get harness goal budget") {
       val suffix    = if forUpdate then " FOR UPDATE" else ""
       val statement = connection.prepareStatement(
-        s"SELECT $budgetColumns FROM harness_goal_budgets WHERE goal_id = ?::uuid$suffix"
+        s"SELECT $budgetColumns FROM zyblw_agent_core.harness_goal_budgets WHERE goal_id = ?::uuid$suffix"
       )
       try
         statement.setObject(1, UUID.fromString(goalId.asString))
@@ -433,7 +433,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
   ): IO[StoreError, Unit] =
     jdbc("update harness goal budget") {
       val statement = connection.prepareStatement(
-        """UPDATE harness_goal_budgets SET
+        """UPDATE zyblw_agent_core.harness_goal_budgets SET
           |reserved_runs = ?, reserved_model_calls = ?, reserved_tool_calls = ?,
           |reserved_input_tokens = ?, reserved_output_tokens = ?, reserved_total_tokens = ?,
           |reserved_estimated_cost = ?, consumed_runs = ?, consumed_model_calls = ?,
@@ -456,7 +456,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
   ): IO[StoreError, Boolean] =
     jdbc("insert harness budget reservation") {
       val statement = connection.prepareStatement(
-        """INSERT INTO harness_budget_reservations
+        """INSERT INTO zyblw_agent_core.harness_budget_reservations
           |(run_id, goal_id, limits_json, status, usage_json, created_at, updated_at)
           |VALUES (?::uuid, ?::uuid, ?::jsonb, ?, NULL, ?, ?)
           |ON CONFLICT (run_id) DO NOTHING""".stripMargin
@@ -481,7 +481,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
       val suffix    = if forUpdate then " FOR UPDATE" else ""
       val statement = connection.prepareStatement(
         s"""SELECT run_id, goal_id, limits_json::text, status, usage_json::text, created_at, updated_at
-           |FROM harness_budget_reservations WHERE run_id = ?::uuid$suffix""".stripMargin
+           |FROM zyblw_agent_core.harness_budget_reservations WHERE run_id = ?::uuid$suffix""".stripMargin
       )
       try
         statement.setObject(1, UUID.fromString(runId.asString))
@@ -509,7 +509,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
   ): IO[StoreError, Unit] =
     jdbc("update harness budget reservation") {
       val statement = connection.prepareStatement(
-        """UPDATE harness_budget_reservations
+        """UPDATE zyblw_agent_core.harness_budget_reservations
           |SET status = ?, usage_json = ?::jsonb, updated_at = ?
           |WHERE run_id = ?::uuid AND status = 'Reserved'""".stripMargin
       )
@@ -548,7 +548,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
     val written = goal.copy(revision = expectedRevision + 1L, updatedAtEpochMilli = now.toEpochMilli)
     jdbc("update harness goal") {
       val statement = connection.prepareStatement(
-        """UPDATE harness_goals
+        """UPDATE zyblw_agent_core.harness_goals
           |SET thread_id = ?, objective = ?, status = ?, run_id = ?::uuid,
           |    revision = ?, updated_at = ?, artifacts_json = ?::jsonb
           |WHERE goal_id = ?::uuid AND revision = ?""".stripMargin
@@ -580,7 +580,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
     val written = plan.copy(revision = 1L, updatedAtEpochMilli = now.toEpochMilli)
     jdbc("insert harness plan") {
       val statement = connection.prepareStatement(
-        """INSERT INTO harness_plans
+        """INSERT INTO zyblw_agent_core.harness_plans
           |(plan_id, goal_id, summary, todos_json, revision, updated_at, artifacts_json)
           |VALUES (?::uuid, ?::uuid, ?, ?::jsonb, ?, ?, ?::jsonb)""".stripMargin
       )
@@ -613,7 +613,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
     val written = plan.copy(revision = expectedRevision + 1L, updatedAtEpochMilli = now.toEpochMilli)
     jdbc("update harness plan") {
       val statement = connection.prepareStatement(
-        """UPDATE harness_plans
+        """UPDATE zyblw_agent_core.harness_plans
           |SET goal_id = ?::uuid, summary = ?, todos_json = ?::jsonb, revision = ?,
           |    updated_at = ?, artifacts_json = ?::jsonb
           |WHERE plan_id = ?::uuid AND revision = ?""".stripMargin
@@ -641,7 +641,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
   private def insertSkill(connection: Connection, skill: SkillDescriptor): IO[StoreError, Boolean] =
     jdbc("insert harness skill") {
       val statement = connection.prepareStatement(
-        """INSERT INTO harness_skills
+        """INSERT INTO zyblw_agent_core.harness_skills
           |(skill_id, skill_version, source, trust, body, fingerprint)
           |VALUES (?, ?, ?, ?, ?, ?)
           |ON CONFLICT (skill_id, skill_version) DO NOTHING""".stripMargin
@@ -665,7 +665,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
     jdbc("get harness skill") {
       val statement = connection.prepareStatement(
         """SELECT skill_id, skill_version, source, trust, body, fingerprint
-          |FROM harness_skills WHERE skill_id = ? AND skill_version = ?""".stripMargin
+          |FROM zyblw_agent_core.harness_skills WHERE skill_id = ? AND skill_version = ?""".stripMargin
       )
       try
         statement.setString(1, id)
@@ -679,7 +679,9 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
   private def lockGoal(connection: Connection, id: GoalId): IO[StoreError, Boolean] =
     jdbc("lock harness goal") {
       val statement =
-        connection.prepareStatement("SELECT 1 FROM harness_goals WHERE goal_id = ?::uuid FOR UPDATE")
+        connection.prepareStatement(
+          "SELECT 1 FROM zyblw_agent_core.harness_goals WHERE goal_id = ?::uuid FOR UPDATE"
+        )
       try
         statement.setObject(1, UUID.fromString(id.asString))
         val result = statement.executeQuery()
@@ -691,7 +693,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
   private def nextInteractionSequence(connection: Connection, goalId: GoalId): IO[StoreError, Long] =
     jdbc("next harness interaction sequence") {
       val statement = connection.prepareStatement(
-        "SELECT COALESCE(MAX(sequence), 0) FROM harness_interactions WHERE goal_id = ?::uuid"
+        "SELECT COALESCE(MAX(sequence), 0) FROM zyblw_agent_core.harness_interactions WHERE goal_id = ?::uuid"
       )
       try
         statement.setObject(1, UUID.fromString(goalId.asString))
@@ -712,7 +714,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
     val written = input.copy(sequence = sequence, createdAtEpochMilli = now.toEpochMilli)
     jdbc("insert harness interaction") {
       val statement = connection.prepareStatement(
-        """INSERT INTO harness_interactions
+        """INSERT INTO zyblw_agent_core.harness_interactions
           |(interaction_id, goal_id, run_id, kind, body, sequence, created_at)
           |VALUES (?::uuid, ?::uuid, ?::uuid, ?, ?, ?, ?)""".stripMargin
       )
@@ -746,7 +748,7 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
   private def getGoalExists(connection: Connection, id: GoalId): IO[StoreError, Boolean] =
     jdbc("exists harness goal") {
       val statement =
-        connection.prepareStatement("SELECT 1 FROM harness_goals WHERE goal_id = ?::uuid")
+        connection.prepareStatement("SELECT 1 FROM zyblw_agent_core.harness_goals WHERE goal_id = ?::uuid")
       try
         statement.setObject(1, UUID.fromString(id.asString))
         val result = statement.executeQuery()
@@ -758,7 +760,9 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
   private def currentGoalRevision(connection: Connection, id: GoalId): IO[StoreError, Long] =
     jdbc("current harness goal revision") {
       val statement =
-        connection.prepareStatement("SELECT revision FROM harness_goals WHERE goal_id = ?::uuid")
+        connection.prepareStatement(
+          "SELECT revision FROM zyblw_agent_core.harness_goals WHERE goal_id = ?::uuid"
+        )
       try
         statement.setObject(1, UUID.fromString(id.asString))
         val result = statement.executeQuery()
@@ -770,7 +774,9 @@ final class PostgresHarnessStore(dataSource: DataSource) extends HarnessStore:
   private def currentPlanRevision(connection: Connection, id: PlanId): IO[StoreError, Long] =
     jdbc("current harness plan revision") {
       val statement =
-        connection.prepareStatement("SELECT revision FROM harness_plans WHERE plan_id = ?::uuid")
+        connection.prepareStatement(
+          "SELECT revision FROM zyblw_agent_core.harness_plans WHERE plan_id = ?::uuid"
+        )
       try
         statement.setObject(1, UUID.fromString(id.asString))
         val result = statement.executeQuery()

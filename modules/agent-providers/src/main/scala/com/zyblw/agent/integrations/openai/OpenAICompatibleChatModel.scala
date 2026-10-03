@@ -28,9 +28,9 @@ final class OpenAICompatibleChatModel(client: Client, config: OpenAICompatibleCo
         .post(config.chatCompletionsUrl, Body.fromString(json.toJson))
         .addHeader(Header.Authorization.Bearer(config.apiKey))
         .addHeader(Header.ContentType(MediaType.application.json))
-      withOrganization = config.organization.fold(httpRequest)(value =>
-        httpRequest.addHeader("OpenAI-Organization", value)
-      )
+      withOrganization = config.extraHeaders.foldLeft(
+        config.organization.fold(httpRequest)(value => httpRequest.addHeader("OpenAI-Organization", value))
+      ) { case (req, (name, value)) => req.addHeader(name, value) }
       response <- client
         .batched(withOrganization)
         .timeoutFail(AgentError.ModelFailure(provider, "request timed out", retryable = true))(
@@ -81,9 +81,9 @@ final class OpenAICompatibleChatModel(client: Client, config: OpenAICompatibleCo
             .addHeader(Header.Authorization.Bearer(config.apiKey))
             .addHeader(Header.ContentType(MediaType.application.json))
             .addHeader(Header.Accept(MediaType.text.`event-stream`))
-          withOrganization = config.organization.fold(httpRequest)(value =>
-            httpRequest.addHeader("OpenAI-Organization", value)
-          )
+          withOrganization = config.extraHeaders.foldLeft(
+            config.organization.fold(httpRequest)(value => httpRequest.addHeader("OpenAI-Organization", value))
+          ) { case (req, (name, value)) => req.addHeader(name, value) }
           stream = client
             .stream(withOrganization) { response =>
               if response.status.code >= 200 && response.status.code < 300 then

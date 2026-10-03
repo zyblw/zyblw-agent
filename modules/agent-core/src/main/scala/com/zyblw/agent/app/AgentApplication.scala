@@ -265,6 +265,26 @@ object AgentApplication:
       live
     )
 
+  /** 与 [[durableGoverned]] 相同，但每次创建 Run 时从 `roles` 读取角色目录。
+    *
+    * 管理台改绑只影响**新** Run：解析结果仍冻结进定义与组合指纹。进行中的 Run 继续使用创建时的 provider/model。
+    */
+  def durableGovernedWithRoles(
+      owner: WorkerId,
+      config: AgentApplicationConfig,
+      roles: ModelRoleSource
+  ): URLayer[DurableGovernedDependencies, Services] =
+    ZLayer.makeSome[DurableGovernedDependencies, Services](
+      TokenCounter.approximate,
+      ContextCompressor.deterministic,
+      DefaultContextManager.layer,
+      RuntimeExtensions.emptyLayer,
+      AgentRuntimeDriver.layerWithRoleSource(config.profile, roles),
+      AgentCommandServiceLive.configuredWithRoles(config.profile, roles),
+      WorkerHost.layer(owner, config.worker),
+      live
+    )
+
   /** 可启用真实模型辅助 Context 压缩的生产耐久装配。
     *
     * 与 [[durable]] 唯一的装配差异是：压缩器必须由业务 ZLayer 显式提供。推荐使用 `LlmContextCompressor.configured`，并让其复用已经通过

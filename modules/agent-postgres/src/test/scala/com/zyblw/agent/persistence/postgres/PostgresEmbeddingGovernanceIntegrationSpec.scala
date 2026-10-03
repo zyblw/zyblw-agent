@@ -6,7 +6,6 @@ import com.zyblw.agent.rag.*
 import java.security.MessageDigest
 import java.time.Instant
 import javax.sql.DataSource
-import org.flywaydb.core.Flyway
 import org.postgresql.ds.PGSimpleDataSource
 import org.testcontainers.utility.DockerImageName
 import zio.*
@@ -46,14 +45,7 @@ object PostgresEmbeddingGovernanceIntegrationSpec extends ZIOSpecDefault:
         value.setPassword(container.password)
         value: DataSource
       }
-      _ <- ZIO.attemptBlocking {
-        Flyway
-          .configure()
-          .dataSource(dataSource)
-          .locations(AgentPostgresMigrations.DefaultLocation)
-          .load()
-          .migrate()
-      }
+      _ <- AgentPostgresMigrations.migrate(dataSource)
     yield Harness(
       PostgresEmbeddingCacheStore(
         dataSource,

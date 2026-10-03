@@ -45,6 +45,24 @@ object ModelCatalogLive:
       embedding
     )
 
+  /** 随注册表版本变化的目录;每次读取都从调用时刻的注册表与价格表重新投影。
+    *
+    * 管理台驱动的部署里,连接、模型与价格都可以在运行中改变,静态快照会让目录与真实路由分叉。投影是纯计算,
+    * 代价只与已登记模型数成正比。
+    */
+  def live(
+      registry: UIO[Option[ProviderRegistry]],
+      priceBook: UIO[ModelPriceBook],
+      embeddingModel: UIO[Option[EmbeddingModelView]] = ZIO.none
+  ): ModelCatalog =
+    new ModelCatalog:
+      def options: UIO[Chunk[ModelOptionView]] =
+        registry.zipWith(priceBook)((current, prices) => current.fold(Chunk.empty)(optionsOf(_, prices)))
+
+      def defaultProvider: UIO[String] = registry.map(_.fold("")(_.defaultProvider))
+
+      override def embedding: UIO[Option[EmbeddingModelView]] = embeddingModel
+
   /** 标准装配。 */
   def layer(
       priceBook: ModelPriceBook = ModelPriceBook.empty,

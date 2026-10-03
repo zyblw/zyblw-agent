@@ -1,4 +1,6 @@
--- 0.3 V001 已随 Maven Central 制品发布，Flyway checksum 必须永久保持不变。
+COMMENT ON SCHEMA zyblw_agent_core IS 'Agent 核心事实：运行、调度、记忆、执行账本、评测、工作流与产物';
+
+-- zyblw-agent 0.9 全新基线的数据字典；已发布基线的 checksum 不得修改。
 -- 本 repeatable migration 只维护数据库目录中的中文领域说明，不改变表、约束或运行语义。
 -- COMMENT ON 每次幂等覆盖；说明文字变化时 Flyway 会安全重放，而不会伪造新的结构版本。
 -- 未映射的控制面字段会让本 migration 失败，避免泛化兜底长期残留。

@@ -36,8 +36,8 @@ Pull request 和发布工作流都会先执行同一 Scalafmt 门禁。格式基
 
 ### 0.9.x 发布候选必须重新通过的门禁
 
-核心与知识 migration 必须验证生产中的“先核心、后知识”顺序。两套 history 若共同管理非空 `public` schema，
-Flyway 会正确拒绝启动。当前实现把知识表和专属 history 固定到 `zyblw_agent_knowledge`，真实知识 Testcontainer
+核心与知识 migration 必须验证生产中的“先核心、后知识”顺序。核心与知识分别固定到 `zyblw_agent_core` / `zyblw_agent_knowledge`，共享扩展固定到 `zyblw_extensions`。
+真实知识 Testcontainer 使用仅包含 `pg_catalog` 的搜索路径，
 先执行核心 migration、再执行知识 migration、最后重复执行知识 migration。`0.9.0` 以 core 与 1024
 Space/Profile knowledge 两条唯一 V001 绿场基线验证该约束。
 
@@ -51,7 +51,7 @@ Space/Profile knowledge 两条唯一 V001 绿场基线验证该约束。
 - `workflow-wake-worker-soak.sh` 通过多个独立 PostgreSQL Store/`WorkflowWakeWorker` 执行 durable signal 多轮负载；CI 以独立 15 分钟 job、脚本 10 分钟硬上限运行相同 smoke；
 - `integration-tests/eval-release-gate-smoke.sh` 跑 72 条公开 fixture 双审门禁、`TestAgentRuntime` 闭环与文件后端 `EvalReleaseGateCli`；不调用真实模型，也不把宿主领域校准写成已完成；
 - `integration-tests/failover-drill.sh` 在本地 Docker 主备上输出 RPO/RTO JSON。这是 `verified_local` 机制证据，生产 failover/SLO 仍是 `deferred`；
-- 组合顺序首次知识迁移执行 1 项、重复启动执行 0 项，并验证专属 schema/history、`public.vector >= 0.8.0`、
+- 组合顺序首次知识迁移执行 1 项、重复启动执行 0 项，并验证专属 schema/history、`zyblw_extensions.vector >= 0.8.0`、
   `vector(1024)`、关键列和完整 lineage；
 - staging 不可见、原子发布/回滚/退役、ACL、hybrid retrieval、父级/相邻扩展和复合 document/chunk 身份通过；
 - 管理面授权边界通过：缺少 scope 在触达适配器之前被拒、write 蕴含 read、debug **不**被 write 蕴含、未装配能力返回 404

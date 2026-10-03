@@ -13,8 +13,17 @@ final case class OpenAICompatibleConfig(
     organization: Option[String] = None,
     requestTimeout: Duration = 90.seconds,
     compatibility: OpenAICompatibility = OpenAICompatibility.openAI,
-    defaultOptions: Map[String, zio.json.ast.Json] = Map.empty
+    defaultOptions: Map[String, zio.json.ast.Json] = Map.empty,
+    /** Non-secret request headers such as OpenRouter's `HTTP-Referer`/`X-Title`; never `Authorization`. */
+    extraHeaders: Map[String, String] = Map.empty
 ):
+  require(
+    extraHeaders.forall((name, value) =>
+      name.matches("[A-Za-z0-9-]{1,64}") && !OpenAICompatibleConfig.ReservedHeaders.contains(name.toLowerCase) &&
+        value.length <= 500 && !value.exists(_.isControl)
+    ),
+    "extraHeaders must be short, printable and must not override authorization or content headers"
+  )
   // 构造阶段快速失败，避免带着空 URL、模型或密钥启动服务。
   require(
     ProviderEndpointUrl.isAllowed(baseUrl),
@@ -31,6 +40,10 @@ final case class OpenAICompatibleConfig(
       s"provider=${compatibility.descriptor.id}, requestTimeout=$requestTimeout)"
 
 object OpenAICompatibleConfig:
+  /** Headers owned by the adapter; a connection cannot replace credentials or the wire content type. */
+  val ReservedHeaders: Set[String] =
+    Set("authorization", "content-type", "accept", "content-length", "host", "openai-organization", "cookie")
+
   /** 本 loader 读取 API Key 的环境变量名。
     *
     * 单独声明而不是让管理面按 Provider ID 猜测：同一个 `OpenAICompatibleConfig` 类型被多个兼容 Provider 复用， 猜测会在"运维明明配了

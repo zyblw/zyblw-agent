@@ -215,6 +215,30 @@ Adapter，不能假定中转层会无损翻译。
 
 管理台如何呈现这些约束、目录如何充当写入校验依据，见 [管理 API 与运维控制台](admin-console.md#16-模型治理)。
 
+### 宿主管理的注册表（热增连接）
+
+上面的边界针对"凭据来自 ZIO Config"的静态装配。需要在管理台增删连接、换 Key 的宿主改用 `LiveModelRegistry`：
+
+```scala
+val source: ModelRegistrySource = ModelRegistrySource.fromRef(snapshotRef) // 宿主从自己的存储刷新
+for
+  live    <- LiveModelRegistry.make(client, source)
+  catalog  = ModelCatalogLive.live(live.registry, priceBookEffect)
+  admin    = ModelAdminLive.live(live.registry, catalog, policies)
+yield live.chatModel // 作为顶层 ChatModel 装配
+```
+
+- `ModelConnectionSpec` 用值描述一个连接：路由名、wire 协议（`openai-compatible`/`openai-responses`/
+  `anthropic-messages`/`gemini-interactions`）、根 URL、Key、默认模型、模型能力清单与非机密请求头。
+  OpenRouter、One API 等聚合平台是 `openai-compatible` + `compatibilityProfile = generic` 的一个连接。
+- 快照 `revision` 变化时注册表只重建缓存键变化的连接；进行中的调用继续使用旧版本路由，不被打断。
+- 没有任何连接时服务照常启动，调用以 `InvalidConfiguration` 失败并提示去管理台配置。
+- Key 的保管、展示与审计由宿主负责；框架只保证 `toString` 与目录视图不含 Key，`credentialReference`
+  只是低基数标签（如 `db:connection/deepseek`）。
+- `LiveModelRegistry.probeSpec` 在保存前探测一个连接；`ModelDiscovery` 从 OpenRouter 或网关 `/models`
+  拉取候选模型、能力与每百万 token USD 单价，供宿主登记前确认。
+- 角色目录同样可以由宿主驱动：`ModelRoleSource` 在每次创建 Run 时读取，结果冻结进组合指纹。生产宿主用 `AgentApplication.durableGovernedWithRoles` 接入。生产宿主用 `AgentApplication.durableGovernedWithRoles` 接入。
+
 ## 成本估算
 
 `UsageSummary.estimatedCost` 只有在部署声明了 `ModelPriceBook` 时才非零：
@@ -265,10 +289,12 @@ val layer = OpenAICompatibleEmbeddingService.configured(config)
 DeepSeek、GLM 或其他国内厂商只有在其部署明确提供兼容 `/embeddings` 协议时才能复用该 Adapter；聊天兼容不等于
 Embedding 兼容。切换模型、维度或向量归一化语义必须创建新知识索引版本，不能对旧向量表混写。
 
-**Embedding 模型与 Chat 模型不同，不能在运行时切换。** 维度由 Flyway 迁移固定（当前为 1024），而一份索引里的向量
-只能与生成它的模型比较——换模型等于让整个知识库的既有向量失去意义。因此控制台以只读方式展示它，并不提供切换入口：
-一个能保存成功却悄悄让 RAG 召回质量崩塌的开关，比没有这个开关危险得多。真正需要更换模型的部署必须执行新维度迁移
-并全量重新摄入。
+**Embedding 模型与 Chat 模型不同，不能逐次调用热切换。** 维度由 Flyway 迁移固定（当前为 1024），而一份索引里的向量
+只能与生成它的模型比较。同维度换模型走 Profile 蓝绿：新模型得到新的 `IndexBuildSpec` 与 Profile id，
+`KnowledgeProfileMigration` 把 active 语料重建进目标 Profile，验收通过后才 CAS 切换指针。切换完成前，
+`DefaultRetriever(profileEmbeddings = Some(ProfileEmbeddingRouter.make(build, buildSpec, previousModels)))`
+在解析 pinned/active Profile **之后**选择查询模型：active 仍是旧 Profile 时用旧模型查询，目标 Profile 的验收探测用
+新模型。换维度仍需新迁移并全量重新摄入。
 
 `PostgresKnowledgeIndexStore` 与 `PostgresPgVectorStore` 会在写入前拒绝维度不匹配的请求，因此错配会以明确失败出现，
 而不是写入一批无法正确检索的向量。

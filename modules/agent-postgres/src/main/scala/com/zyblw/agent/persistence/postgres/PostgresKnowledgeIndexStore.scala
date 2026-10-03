@@ -266,6 +266,24 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
       readSpace(connection, tenantId, spaceId, forUpdate = false).map(_.flatMap(_._1))
     )
 
+  override def spaceProfileState(
+      tenantId: TenantId,
+      spaceId: KnowledgeSpaceId
+  ): IO[RetrievalError, Option[KnowledgeSpaceProfileState]] =
+    withConnection(connection =>
+      readSpace(connection, tenantId, spaceId, forUpdate = false)
+        .map(_.map((active, revision) => KnowledgeSpaceProfileState(active, revision)))
+    )
+
+  override def profileManifests(
+      tenantId: TenantId,
+      spaceId: KnowledgeSpaceId,
+      profileId: IndexProfileId
+  ): IO[RetrievalError, Chunk[KnowledgeIndexManifest]] =
+    withConnection(connection =>
+      profileManifests(connection, tenantId, spaceId, profileId, forUpdate = false)
+    )
+
   override def activateProfile(
       tenantId: TenantId,
       spaceId: KnowledgeSpaceId,
@@ -752,7 +770,7 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
              | source_uri, permissions, metadata, embedding, sparse_embedding, parent_id, lineage_ordinal,
              | previous_chunk_id, next_chunk_id, heading_path, page_numbers, origins, block_ids,
              | dense_text, display_sha256, dense_sha256, lexical_sha256)
-             |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::public.vector, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?)
+             |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::zyblw_extensions.vector, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?)
              |ON CONFLICT (tenant_id, knowledge_space_id, document_id, index_version, chunk_id) DO UPDATE SET
              |chunk_text = EXCLUDED.chunk_text,
              |search_text = EXCLUDED.search_text,

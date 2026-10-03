@@ -40,7 +40,7 @@ Phase 1 已新增的主调用路由、最小账本、准入检查，以及 Qwen/
 | `agent-postgres` | `model_call_executions` 与 Run / Event / Tool 同事务 | Beta |
 | `agent-opentelemetry` | GenAI semconv、禁 Prompt；无 `model.route` span | Beta |
 | `agent-evals` | 轨迹回放、资源预算；无 RouterEval | Experimental |
-| `zyblw-platform` | `QaProviderConfigLoader` + `tcm-learning-assistant`；命名档案或 `ProviderEndpoints` 多端点装配，不接 `FallbackChatModel` | 业务宿主 |
+| `zyblw-platform` | `LiveModelRegistry` + 管理台角色绑定 + `tcm-learning-assistant`；不接 `FallbackChatModel` | 业务宿主 |
 
 依赖方向未变：providers / postgres / http / otel → core。Model Runtime 必须落在这条边上，不能平行长出第二套执行内核。
 
@@ -52,7 +52,7 @@ Phase 1 已新增的主调用路由、最小账本、准入检查，以及 Qwen/
 
 ```text
 Host assembly
-  ProviderRouter / ProviderEndpoints / QaProviderConfigLoader
+  LiveModelRegistry / ModelRegistrySource
     → ZLayer[ChatModel]
 
 AgentApplication / AgentCommandService.submitStart

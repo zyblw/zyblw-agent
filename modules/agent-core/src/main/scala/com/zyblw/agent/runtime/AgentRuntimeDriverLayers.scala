@@ -45,8 +45,20 @@ object AgentRuntimeDriverLayers:
   ] = ZLayer.scoped {
     for
       resolver <- ZIO.service[ContextSourceResolver]
-      runtime  <- build(resolver, profile, roleCatalog)
+      runtime  <- build(resolver, profile, ModelRoleSource.static(roleCatalog))
     yield runtime
+  }
+
+  /** 与 `layerWithProfile` 相同，但角色目录在每次创建 Run 时从 `roles` 读取。 */
+  def layerWithRoleSource(
+      profile: RuntimeProfile,
+      roles: ModelRoleSource
+  ): URLayer[
+    ChatModel & RegisteredToolRegistry & RunStore & ContextManager & ContextSourceResolver & GuardrailEngine &
+      ToolPolicySource & ModelPolicySource & RunObserver & RuntimeExtensions & ArtifactStore,
+    AgentRuntime & LeaseAwareAgentRuntime
+  ] = ZLayer.scoped {
+    ZIO.serviceWithZIO[ContextSourceResolver](build(_, profile, roles))
   }
 
   /** 测试与评测使用 Replayable，以便从账本重建 ChatRequest。 */
@@ -67,7 +79,7 @@ object AgentRuntimeDriverLayers:
     ChatModel & RegisteredToolRegistry & RunStore & ContextManager & GuardrailEngine & ToolPolicySource &
       ModelPolicySource & RunObserver & ArtifactStore & RuntimeExtensions,
     AgentRuntime & LeaseAwareAgentRuntime
-  ] = ZLayer.scoped(build(resolver, profile, roleCatalog))
+  ] = ZLayer.scoped(build(resolver, profile, ModelRoleSource.static(roleCatalog)))
 
   /** 构造全部协作者。
     *
@@ -76,7 +88,7 @@ object AgentRuntimeDriverLayers:
   private def build(
       resolver: ContextSourceResolver,
       profile: RuntimeProfile,
-      roleCatalog: ModelRoleCatalog
+      roles: ModelRoleSource
   ): ZIO[
     ChatModel & RegisteredToolRegistry & RunStore & ContextManager & GuardrailEngine & ToolPolicySource &
       ModelPolicySource & RunObserver & ArtifactStore & RuntimeExtensions & Scope,
@@ -108,7 +120,7 @@ object AgentRuntimeDriverLayers:
         extensions.environment.id.value,
         extensions.environment.permissions.fingerprint
       )
-      guard = CompositionGuard(registry, live, roleCatalog, publisher)
+      guard = CompositionGuard(registry, live, roles, publisher)
     yield new AgentRuntimeDriver(
       model,
       registry,

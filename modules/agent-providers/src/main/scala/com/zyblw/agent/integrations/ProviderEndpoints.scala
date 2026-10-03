@@ -15,6 +15,9 @@ import zio.json.*
 
 /** OpenAI-compatible 根端点的共享信任边界。 */
 private[integrations] object ProviderEndpointUrl:
+  /** Exact loopback names; hosts must match whole, so `127.0.0.1.evil.example` stays rejected. */
+  val LocalHttpHosts: Set[String] = Set("127.0.0.1", "localhost", "host.docker.internal")
+
   def isAllowed(value: String): Boolean =
     Try(URI(value)).toOption.exists { uri =>
       val scheme = Option(uri.getScheme).map(_.toLowerCase)
@@ -23,7 +26,7 @@ private[integrations] object ProviderEndpointUrl:
       value == value.trim &&
       uri.isAbsolute &&
       host.exists(_.nonEmpty) &&
-      (scheme.contains("https") || (scheme.contains("http") && host.contains("127.0.0.1"))) &&
+      (scheme.contains("https") || (scheme.contains("http") && host.exists(LocalHttpHosts.contains))) &&
       uri.getRawUserInfo == null &&
       uri.getRawQuery == null &&
       uri.getRawFragment == null &&

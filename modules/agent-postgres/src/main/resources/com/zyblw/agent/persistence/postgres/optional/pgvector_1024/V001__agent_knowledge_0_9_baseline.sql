@@ -6,8 +6,11 @@
 --   * a document build must carry the exact build-spec digest of its profile (composite FK);
 --   * ready builds carry the chunk-set digest that activation verified;
 --   * no identity column has a DEFAULT, so a caller that forgets space/profile fails loudly.
-CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
-CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
+CREATE SCHEMA IF NOT EXISTS zyblw_extensions;
+COMMENT ON SCHEMA zyblw_extensions IS '数据库扩展对象：向量类型、距离操作符与文本检索索引支持；不保存业务事实';
+
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA zyblw_extensions;
+CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA zyblw_extensions;
 
 CREATE TABLE agent_knowledge_spaces (
   tenant_id TEXT NOT NULL CHECK (length(btrim(tenant_id)) BETWEEN 1 AND 1000),
@@ -125,7 +128,7 @@ CREATE TABLE agent_knowledge_profile_chunk_staging (
   source_uri TEXT NOT NULL CHECK (length(btrim(source_uri)) BETWEEN 1 AND 8192),
   permissions TEXT[] NOT NULL CHECK (cardinality(permissions) BETWEEN 1 AND 256 AND array_position(permissions, NULL) IS NULL),
   metadata JSONB NOT NULL CHECK (jsonb_typeof(metadata) = 'object'),
-  embedding public.vector(1024) NOT NULL,
+  embedding zyblw_extensions.vector(1024) NOT NULL,
   sparse_embedding TEXT,
   parent_id TEXT, lineage_ordinal INTEGER CHECK (lineage_ordinal >= 0), previous_chunk_id TEXT, next_chunk_id TEXT,
   heading_path TEXT[] NOT NULL, page_numbers INTEGER[] NOT NULL,
@@ -159,7 +162,7 @@ CREATE TABLE agent_knowledge_profile_chunks (
   source_uri TEXT NOT NULL CHECK (length(btrim(source_uri)) BETWEEN 1 AND 8192),
   permissions TEXT[] NOT NULL CHECK (cardinality(permissions) BETWEEN 1 AND 256 AND array_position(permissions, NULL) IS NULL),
   metadata JSONB NOT NULL CHECK (jsonb_typeof(metadata) = 'object'),
-  embedding public.vector(1024) NOT NULL,
+  embedding zyblw_extensions.vector(1024) NOT NULL,
   sparse_embedding TEXT,
   parent_id TEXT, lineage_ordinal INTEGER CHECK (lineage_ordinal >= 0), previous_chunk_id TEXT, next_chunk_id TEXT,
   heading_path TEXT[] NOT NULL, page_numbers INTEGER[] NOT NULL,
@@ -184,13 +187,13 @@ CREATE UNIQUE INDEX agent_knowledge_profile_chunks_lineage_order_idx
 CREATE INDEX agent_knowledge_profile_chunks_pages_idx
   ON agent_knowledge_profile_chunks USING GIN(page_numbers) WHERE cardinality(page_numbers) > 0;
 CREATE INDEX agent_knowledge_profile_chunks_embedding_hnsw_idx
-  ON agent_knowledge_profile_chunks USING hnsw(embedding public.vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+  ON agent_knowledge_profile_chunks USING hnsw(embedding zyblw_extensions.vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 CREATE INDEX agent_knowledge_profile_chunks_metadata_idx
   ON agent_knowledge_profile_chunks USING GIN (metadata jsonb_path_ops);
 CREATE INDEX agent_knowledge_profile_chunks_heading_path_idx
   ON agent_knowledge_profile_chunks USING GIN (heading_path);
 CREATE INDEX agent_knowledge_profile_chunks_search_text_trgm_idx
-  ON agent_knowledge_profile_chunks USING GIN (search_text public.gin_trgm_ops);
+  ON agent_knowledge_profile_chunks USING GIN (search_text zyblw_extensions.gin_trgm_ops);
 
 CREATE TABLE agent_knowledge_profile_activation_audit (
   audit_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

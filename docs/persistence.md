@@ -58,7 +58,7 @@ modules/agent-postgres/src/main/resources/com/zyblw/agent/persistence/postgres/m
 `PostgresAgentPersistence.migratedLayer` 在服务构建前自动 migrate/validate/verify；两者都使用独立历史表
 `flyway_zyblw_agent_schema_history`，失败时阻止启动而不是回退内存。1024 维知识库另用
 `migrateKnowledge1024`/`migratedKnowledge1024`，固定管理 `zyblw_agent_knowledge` schema 及其中的独立 history，避免与
-`public` 核心 V001 冲突。运行时知识 SQL 使用完整 schema 名，不依赖连接 `search_path`。
+`zyblw_agent_core` 核心 V001 冲突。运行时核心与知识 SQL 均使用完整 schema 名，扩展对象位于 `zyblw_extensions`，不依赖连接 `search_path`。
 
 `PostgresRunStore`、`PostgresRunCommandStore` 与 `PostgresRunSubmissionStore` 使用同一个宿主 JDBC DataSource。
 `PostgresRunStore` 使用 blocking executor、连接 Scope、JSONB 状态和
@@ -135,7 +135,7 @@ deadline 竞态只有一个胜者。Signaled/TimedOut wait 行本身同时是 du
 过期 wake lease 与最早可领取年龄。该查询不调用 `expireDue`、不领取、不回收，也不返回 Run/Session/payload/owner/token；
 内存与 PostgreSQL Adapter 共享相同契约，第三方 Adapter 未实现时明确 typed-fail。
 
-删除使用 `DELETE FROM agent_runs`，所有子表依赖 migration 中的 `ON DELETE CASCADE` 由 PostgreSQL 原子清理。
+删除使用 `DELETE FROM zyblw_agent_core.agent_runs`，所有子表依赖 migration 中的 `ON DELETE CASCADE` 由 PostgreSQL 原子清理。
 
 `PostgresTransactionalWriteExecutor` 在同一 transaction 中提交业务 mutation、producer 业务幂等结果、outbox 和补偿
 计划；`PostgresTransactionalInbox` 在消费端同一 transaction 中提交 inbox 去重与 consumer 业务 mutation。外部网络确认

@@ -75,8 +75,8 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
             val select = connection.prepareStatement(
               """SELECT c.command_id, c.run_id, c.command_type, c.payload::text, c.idempotency_key, c.status,
               |c.priority, c.available_at, c.attempt, c.manual_retry_count, c.last_failure, c.created_at, c.updated_at
-              |FROM agent_run_commands c
-              |JOIN agent_run_dispatch d ON d.run_id = c.run_id
+              |FROM zyblw_agent_core.agent_run_commands c
+              |JOIN zyblw_agent_core.agent_run_dispatch d ON d.run_id = c.run_id
               |WHERE c.status = 'Queued' AND c.available_at <= CURRENT_TIMESTAMP
               |  AND d.status IN ('Idle', 'Queued')
               |ORDER BY c.priority DESC, c.available_at ASC, c.created_at ASC, c.command_id ASC
@@ -91,7 +91,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
 
             selected.map { record =>
               val updateCommand = connection.prepareStatement(
-                """UPDATE agent_run_commands SET status = 'Leased', attempt = attempt + 1, updated_at = CURRENT_TIMESTAMP
+                """UPDATE zyblw_agent_core.agent_run_commands SET status = 'Leased', attempt = attempt + 1, updated_at = CURRENT_TIMESTAMP
                 |WHERE command_id = ?::uuid
                 |RETURNING command_id, run_id, command_type, payload::text, idempotency_key, status, priority,
                 |available_at, attempt, manual_retry_count, last_failure, created_at, updated_at""".stripMargin
@@ -104,7 +104,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
                 finally updateCommand.close()
 
               val updateDispatch = connection.prepareStatement(
-                """UPDATE agent_run_dispatch SET status = 'Leased', current_command_id = ?::uuid,
+                """UPDATE zyblw_agent_core.agent_run_dispatch SET status = 'Leased', current_command_id = ?::uuid,
                 |lease_owner = ?, lease_token = ?::uuid, generation = generation + 1,
                 |claimed_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP,
                 |lease_expires_at = CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond'), updated_at = CURRENT_TIMESTAMP
@@ -140,7 +140,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
       ZIO
         .attemptBlocking {
           val statement = connection.prepareStatement(
-            """UPDATE agent_run_dispatch SET heartbeat_at = CURRENT_TIMESTAMP,
+            """UPDATE zyblw_agent_core.agent_run_dispatch SET heartbeat_at = CURRENT_TIMESTAMP,
             |lease_expires_at = CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond'), updated_at = CURRENT_TIMESTAMP
             |WHERE run_id = ?::uuid AND status = 'Leased' AND current_command_id = ?::uuid
             |  AND lease_owner = ? AND lease_token = ?::uuid AND generation = ?
@@ -171,7 +171,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
         lease.command.payload match
           case RunCommandPayload.Cancel(_) =>
             val supersede = connection.prepareStatement(
-              """UPDATE agent_run_commands SET status = 'Superseded', updated_at = CURRENT_TIMESTAMP
+              """UPDATE zyblw_agent_core.agent_run_commands SET status = 'Superseded', updated_at = CURRENT_TIMESTAMP
               |WHERE run_id = ?::uuid AND command_id <> ?::uuid AND status = 'Queued'""".stripMargin
             )
             try
@@ -207,7 +207,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
           val select = connection.prepareStatement(
             """SELECT command_id, run_id, command_type, payload::text, idempotency_key, status, priority,
           |available_at, attempt, manual_retry_count, last_failure, created_at, updated_at
-          |FROM agent_run_commands WHERE command_id = ?::uuid FOR UPDATE""".stripMargin
+          |FROM zyblw_agent_core.agent_run_commands WHERE command_id = ?::uuid FOR UPDATE""".stripMargin
           )
           val existing =
             try
@@ -218,7 +218,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
           if existing.status != RunCommandStatus.DeadLetter then throw InvalidRetry(existing)
 
           val update = connection.prepareStatement(
-            """UPDATE agent_run_commands SET status = 'Queued', available_at = CASE WHEN ? = 0 THEN CURRENT_TIMESTAMP ELSE ? END,
+            """UPDATE zyblw_agent_core.agent_run_commands SET status = 'Queued', available_at = CASE WHEN ? = 0 THEN CURRENT_TIMESTAMP ELSE ? END,
           |attempt = 0, manual_retry_count = manual_retry_count + 1, last_failure = NULL, updated_at = CURRENT_TIMESTAMP
           |WHERE command_id = ?::uuid
           |RETURNING command_id, run_id, command_type, payload::text, idempotency_key, status, priority,
@@ -259,7 +259,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
         val statement = connection.prepareStatement(
           """SELECT command_id, run_id, command_type, payload::text, idempotency_key, status, priority,
           |available_at, attempt, manual_retry_count, last_failure, created_at, updated_at
-          |FROM agent_run_commands WHERE run_id = ?::uuid ORDER BY created_at ASC, command_id ASC""".stripMargin
+          |FROM zyblw_agent_core.agent_run_commands WHERE run_id = ?::uuid ORDER BY created_at ASC, command_id ASC""".stripMargin
         )
         try
           statement.setString(1, runId.asString)
@@ -281,20 +281,20 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
             |  SELECT
             |    COUNT(*) FILTER (WHERE status = 'Queued') AS queued_commands,
             |    COUNT(*) FILTER (WHERE status = 'DeadLetter') AS dead_letter_commands
-            |  FROM agent_run_commands
+            |  FROM zyblw_agent_core.agent_run_commands
             |), dispatch_counts AS (
             |  SELECT
             |    COUNT(*) FILTER (WHERE status = 'Leased') AS leased_runs,
             |    COUNT(*) FILTER (
             |      WHERE status = 'Leased' AND lease_expires_at <= CURRENT_TIMESTAMP
             |    ) AS expired_leases
-            |  FROM agent_run_dispatch
+            |  FROM zyblw_agent_core.agent_run_dispatch
             |), dispatchable AS (
             |  SELECT
             |    COUNT(DISTINCT d.run_id) AS dispatchable_runs,
             |    MIN(c.available_at) AS oldest_available_at
-            |  FROM agent_run_dispatch d
-            |  JOIN agent_run_commands c ON c.run_id = d.run_id
+            |  FROM zyblw_agent_core.agent_run_dispatch d
+            |  JOIN zyblw_agent_core.agent_run_commands c ON c.run_id = d.run_id
             |  WHERE d.status IN ('Idle', 'Queued')
             |    AND c.status = 'Queued'
             |    AND c.available_at <= CURRENT_TIMESTAMP
@@ -342,7 +342,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
       availableAt: Instant
   ): Option[(RunCommandRecord, Boolean)] =
     val statement = connection.prepareStatement(
-      """INSERT INTO agent_run_commands
+      """INSERT INTO zyblw_agent_core.agent_run_commands
         |(command_id, run_id, command_type, payload, idempotency_key, status, priority, available_at)
         |VALUES (?::uuid, ?::uuid, ?, ?::jsonb, ?, 'Queued', ?, CASE WHEN ? = 0 THEN CURRENT_TIMESTAMP ELSE ? END)
         |ON CONFLICT (run_id, idempotency_key) DO NOTHING
@@ -365,7 +365,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
   /** 保证每个 Run 都有且只有一个 dispatcher。 */
   private def ensureDispatch(connection: Connection, runId: RunId): Unit =
     val statement = connection.prepareStatement(
-      "INSERT INTO agent_run_dispatch(run_id, status) VALUES (?::uuid, 'Queued') ON CONFLICT (run_id) DO NOTHING"
+      "INSERT INTO zyblw_agent_core.agent_run_dispatch(run_id, status) VALUES (?::uuid, 'Queued') ON CONFLICT (run_id) DO NOTHING"
     )
     try
       statement.setString(1, runId.asString)
@@ -375,7 +375,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
   /** 非抢占命令只唤醒空闲 dispatcher，不能覆盖当前租约。 */
   private def wakeDispatch(connection: Connection, runId: RunId): Unit =
     val statement = connection.prepareStatement(
-      """UPDATE agent_run_dispatch SET status = CASE WHEN status = 'Leased' THEN 'Leased' ELSE 'Queued' END,
+      """UPDATE zyblw_agent_core.agent_run_dispatch SET status = CASE WHEN status = 'Leased' THEN 'Leased' ELSE 'Queued' END,
         |updated_at = CURRENT_TIMESTAMP WHERE run_id = ?::uuid""".stripMargin
     )
     try
@@ -386,7 +386,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
   /** Cancel 原子撤销旧租约，并把被抢占命令放回队列。 */
   private def preemptForCancel(connection: Connection, runId: RunId): Unit =
     val lock = connection.prepareStatement(
-      "SELECT current_command_id, status FROM agent_run_dispatch WHERE run_id = ?::uuid FOR UPDATE"
+      "SELECT current_command_id, status FROM zyblw_agent_core.agent_run_dispatch WHERE run_id = ?::uuid FOR UPDATE"
     )
     val current =
       try
@@ -398,7 +398,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
       finally lock.close()
     current.foreach { commandId =>
       val requeue = connection.prepareStatement(
-        """UPDATE agent_run_commands SET status = 'Queued', last_failure = 'preempted-by-cancel', updated_at = CURRENT_TIMESTAMP
+        """UPDATE zyblw_agent_core.agent_run_commands SET status = 'Queued', last_failure = 'preempted-by-cancel', updated_at = CURRENT_TIMESTAMP
           |WHERE command_id = ?::uuid AND status = 'Leased'""".stripMargin
       )
       try
@@ -407,7 +407,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
       finally requeue.close()
     }
     val revoke = connection.prepareStatement(
-      """UPDATE agent_run_dispatch SET status = 'Queued', current_command_id = NULL, lease_owner = NULL,
+      """UPDATE zyblw_agent_core.agent_run_dispatch SET status = 'Queued', current_command_id = NULL, lease_owner = NULL,
         |lease_token = NULL, claimed_at = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
         |updated_at = CURRENT_TIMESTAMP WHERE run_id = ?::uuid""".stripMargin
     )
@@ -419,15 +419,15 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
   /** 回收全部已过期 dispatcher；只涉及数据库短事务。 */
   private def reclaimExpired(connection: Connection): Unit =
     val commands = connection.prepareStatement(
-      """UPDATE agent_run_commands c SET status = 'Queued', last_failure = 'lease-expired-and-reclaimed',
-        |updated_at = CURRENT_TIMESTAMP FROM agent_run_dispatch d
+      """UPDATE zyblw_agent_core.agent_run_commands c SET status = 'Queued', last_failure = 'lease-expired-and-reclaimed',
+        |updated_at = CURRENT_TIMESTAMP FROM zyblw_agent_core.agent_run_dispatch d
         |WHERE d.current_command_id = c.command_id AND d.status = 'Leased'
         |  AND d.lease_expires_at <= CURRENT_TIMESTAMP AND c.status = 'Leased'""".stripMargin
     )
     try commands.executeUpdate()
     finally commands.close()
     val dispatch = connection.prepareStatement(
-      """UPDATE agent_run_dispatch SET status = 'Queued', current_command_id = NULL, lease_owner = NULL,
+      """UPDATE zyblw_agent_core.agent_run_dispatch SET status = 'Queued', current_command_id = NULL, lease_owner = NULL,
         |lease_token = NULL, claimed_at = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
         |updated_at = CURRENT_TIMESTAMP WHERE status = 'Leased' AND lease_expires_at <= CURRENT_TIMESTAMP""".stripMargin
     )
@@ -438,7 +438,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
   /** 将本轮自动尝试耗尽的命令转入 DeadLetter。 */
   private def deadLetterExhausted(connection: Connection, maxAttempts: Int): Unit =
     val statement = connection.prepareStatement(
-      """UPDATE agent_run_commands SET status = 'DeadLetter', last_failure = 'max-attempts-exceeded',
+      """UPDATE zyblw_agent_core.agent_run_commands SET status = 'DeadLetter', last_failure = 'max-attempts-exceeded',
         |updated_at = CURRENT_TIMESTAMP WHERE status = 'Queued' AND available_at <= CURRENT_TIMESTAMP AND attempt >= ?""".stripMargin
     )
     try
@@ -451,18 +451,18 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
     val statement = connection.prepareStatement(
       """WITH candidates AS (
         |  SELECT d.run_id, CASE WHEN EXISTS (
-        |    SELECT 1 FROM agent_run_commands c WHERE c.run_id = d.run_id AND c.status = 'Queued'
+        |    SELECT 1 FROM zyblw_agent_core.agent_run_commands c WHERE c.run_id = d.run_id AND c.status = 'Queued'
         |  ) THEN 'Queued' ELSE 'Idle' END AS target_status
-        |  FROM agent_run_dispatch d
+        |  FROM zyblw_agent_core.agent_run_dispatch d
         |  WHERE d.status <> 'Leased'
         |    AND d.status IS DISTINCT FROM CASE WHEN EXISTS (
-        |      SELECT 1 FROM agent_run_commands c WHERE c.run_id = d.run_id AND c.status = 'Queued'
+        |      SELECT 1 FROM zyblw_agent_core.agent_run_commands c WHERE c.run_id = d.run_id AND c.status = 'Queued'
         |    ) THEN 'Queued' ELSE 'Idle' END
         |  ORDER BY d.run_id
         |  FOR UPDATE OF d SKIP LOCKED
         |  LIMIT 256
         |)
-        |UPDATE agent_run_dispatch d SET status = candidates.target_status, updated_at = CURRENT_TIMESTAMP
+        |UPDATE zyblw_agent_core.agent_run_dispatch d SET status = candidates.target_status, updated_at = CURRENT_TIMESTAMP
         |FROM candidates WHERE d.run_id = candidates.run_id""".stripMargin
     )
     try
@@ -472,7 +472,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
   /** 在事务内锁定并验证 dispatcher fencing。 */
   private def lockFence(connection: Connection, lease: RunCommandLease): Unit =
     val statement = connection.prepareStatement(
-      """SELECT 1 FROM agent_run_dispatch WHERE run_id = ?::uuid AND status = 'Leased'
+      """SELECT 1 FROM zyblw_agent_core.agent_run_dispatch WHERE run_id = ?::uuid AND status = 'Leased'
         |AND current_command_id = ?::uuid AND lease_owner = ? AND lease_token = ?::uuid
         |AND generation = ? AND lease_expires_at > CURRENT_TIMESTAMP FOR UPDATE""".stripMargin
     )
@@ -510,7 +510,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
       reason: Option[String]
   ): Unit =
     val statement = connection.prepareStatement(
-      """UPDATE agent_run_commands SET status = ?, available_at = COALESCE(?, available_at),
+      """UPDATE zyblw_agent_core.agent_run_commands SET status = ?, available_at = COALESCE(?, available_at),
         |last_failure = ?, updated_at = CURRENT_TIMESTAMP WHERE command_id = ?::uuid""".stripMargin
     )
     try
@@ -526,8 +526,8 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
   /** 根据是否仍有 Queued 命令把 dispatcher 释放为 Queued 或 Idle。 */
   private def releaseDispatch(connection: Connection, runId: RunId): Unit =
     val statement = connection.prepareStatement(
-      """UPDATE agent_run_dispatch d SET status = CASE WHEN EXISTS (
-        |  SELECT 1 FROM agent_run_commands c WHERE c.run_id = d.run_id AND c.status = 'Queued'
+      """UPDATE zyblw_agent_core.agent_run_dispatch d SET status = CASE WHEN EXISTS (
+        |  SELECT 1 FROM zyblw_agent_core.agent_run_commands c WHERE c.run_id = d.run_id AND c.status = 'Queued'
         |) THEN 'Queued' ELSE 'Idle' END, current_command_id = NULL, lease_owner = NULL,
         |lease_token = NULL, claimed_at = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
         |updated_at = CURRENT_TIMESTAMP WHERE run_id = ?::uuid""".stripMargin
@@ -576,7 +576,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
     val statement = connection.prepareStatement(
       """SELECT command_id, run_id, command_type, payload::text, idempotency_key, status, priority,
         |available_at, attempt, manual_retry_count, last_failure, created_at, updated_at
-        |FROM agent_run_commands WHERE run_id = ?::uuid AND idempotency_key = ?""".stripMargin
+        |FROM zyblw_agent_core.agent_run_commands WHERE run_id = ?::uuid AND idempotency_key = ?""".stripMargin
     )
     try
       statement.setString(1, runId.asString)
@@ -590,7 +590,7 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
     val statement = connection.prepareStatement(
       """SELECT command_id, run_id, command_type, payload::text, idempotency_key, status, priority,
         |available_at, attempt, manual_retry_count, last_failure, created_at, updated_at
-        |FROM agent_run_commands WHERE command_id = ?::uuid""".stripMargin
+        |FROM zyblw_agent_core.agent_run_commands WHERE command_id = ?::uuid""".stripMargin
     )
     try
       statement.setString(1, commandId.asString)

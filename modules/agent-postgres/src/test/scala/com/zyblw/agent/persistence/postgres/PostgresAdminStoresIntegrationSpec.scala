@@ -8,7 +8,6 @@ import com.zyblw.agent.memory.*
 import java.time.Instant
 import java.util.UUID
 import javax.sql.DataSource
-import org.flywaydb.core.Flyway
 import org.postgresql.ds.PGSimpleDataSource
 import org.testcontainers.utility.DockerImageName
 import zio.*
@@ -44,14 +43,7 @@ object PostgresAdminStoresIntegrationSpec extends ZIOSpecDefault:
         value.setPassword(container.password)
         value: DataSource
       }
-      _ <- ZIO.attemptBlocking(
-        Flyway
-          .configure()
-          .dataSource(dataSource)
-          .locations(AgentPostgresMigrations.DefaultLocation)
-          .load()
-          .migrate()
-      )
+      _ <- AgentPostgresMigrations.migrate(dataSource)
     yield Stores(
       PostgresRunStore(dataSource),
       PostgresRunDirectory(dataSource),

@@ -57,7 +57,7 @@ object ProductionSupportTools:
           try
             val statement = connection.prepareStatement(
               """SELECT order_id, status, amount_cents
-              |FROM support_orders
+              |FROM support_app.support_orders
               |WHERE order_id = ? AND tenant_id = ?""".stripMargin
             )
             try
@@ -110,21 +110,22 @@ object ProductionSupportTools:
   /** 框架核心迁移之外的业务表；由参考宿主的 migrate 命令创建，不进入 Flyway 核心 history。 */
   val businessSchemaSql: String =
     """
-      |CREATE TABLE IF NOT EXISTS support_orders (
+      |CREATE SCHEMA IF NOT EXISTS support_app;
+      |CREATE TABLE IF NOT EXISTS support_app.support_orders (
       |  tenant_id TEXT NOT NULL,
       |  order_id TEXT NOT NULL,
       |  status TEXT NOT NULL,
       |  amount_cents BIGINT NOT NULL CHECK (amount_cents >= 0),
       |  PRIMARY KEY (tenant_id, order_id)
       |);
-      |CREATE TABLE IF NOT EXISTS support_refunds (
+      |CREATE TABLE IF NOT EXISTS support_app.support_refunds (
       |  tenant_id TEXT NOT NULL,
       |  refund_id TEXT NOT NULL,
       |  order_id TEXT NOT NULL,
       |  amount_cents BIGINT NOT NULL CHECK (amount_cents >= 0),
       |  PRIMARY KEY (tenant_id, refund_id)
       |);
-      |INSERT INTO support_orders(tenant_id, order_id, status, amount_cents)
+      |INSERT INTO support_app.support_orders(tenant_id, order_id, status, amount_cents)
       |VALUES ('tenant-demo', 'A-100', 'paid', 2599)
       |ON CONFLICT DO NOTHING;
       |""".stripMargin
@@ -155,7 +156,7 @@ object IssueRefundMutation
       case None         => Left(AgentError.PermissionDenied(operationName, "退款必须绑定可信租户"))
       case Some(tenant) =>
         val statement = connection.prepareStatement(
-          """INSERT INTO support_refunds(tenant_id, refund_id, order_id, amount_cents)
+          """INSERT INTO support_app.support_refunds(tenant_id, refund_id, order_id, amount_cents)
             |VALUES (?, ?, ?, ?)
             |ON CONFLICT (tenant_id, refund_id) DO NOTHING""".stripMargin
         )

@@ -99,7 +99,7 @@ object PostgresAgentPersistence:
 
   /** 版本化知识摄取与 hybrid retrieval 的推荐同源组合层。
     *
-    * 三个 Adapter 共享同一个 DataSource、固定向量维度和 `zyblw_agent_knowledge.agent_knowledge_chunks` 正式快照：
+    * 三个 Adapter 共享同一个 DataSource、固定向量维度和 `zyblw_agent_knowledge.agent_knowledge_profile_chunks` 正式快照：
     * `KnowledgeIndexStore` 负责 Building→stage→activate，`VectorStore` 只查询 active 发布结果，
     * `KnowledgeIndexDirectory` 是管理台的只读清单投影。业务仍需显式执行对应维度的 optional pgvector migration。
     *

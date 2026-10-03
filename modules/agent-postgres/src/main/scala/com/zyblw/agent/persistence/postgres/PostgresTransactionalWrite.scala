@@ -184,7 +184,7 @@ final class PostgresTransactionalWriteExecutor(
       operationName: String
   ): Boolean =
     val statement = connection.prepareStatement(
-      """INSERT INTO agent_business_operations
+      """INSERT INTO zyblw_agent_core.agent_business_operations
         |(operation_id, scope_key, operation_name, idempotency_key, request_hash, status, run_id, tool_call_id, created_at)
         |VALUES (?::uuid, ?, ?, ?, ?, 'Executing', ?::uuid, ?, CURRENT_TIMESTAMP)
         |ON CONFLICT (scope_key, operation_name, idempotency_key) DO NOTHING""".stripMargin
@@ -209,7 +209,7 @@ final class PostgresTransactionalWriteExecutor(
   ): StoredOperation =
     val statement = connection.prepareStatement(
       """SELECT operation_id::text, request_hash, status, result_json::text
-        |FROM agent_business_operations
+        |FROM zyblw_agent_core.agent_business_operations
         |WHERE scope_key = ? AND operation_name = ? AND idempotency_key = ?
         |FOR UPDATE""".stripMargin
     )
@@ -243,7 +243,7 @@ final class PostgresTransactionalWriteExecutor(
       events: Chunk[OutboxEventDraft]
   ): Unit =
     val statement = connection.prepareStatement(
-      """INSERT INTO agent_outbox_events
+      """INSERT INTO zyblw_agent_core.agent_outbox_events
         |(event_id, operation_id, run_id, tool_call_id, scope_key, ordinal, destination, event_type,
         | aggregate_type, aggregate_id, partition_key, payload, headers, status, available_at, created_at)
         |VALUES (?::uuid, ?::uuid, ?::uuid, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, 'Pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -280,7 +280,7 @@ final class PostgresTransactionalWriteExecutor(
       draft: CompensationDraft
   ): Unit =
     val statement = connection.prepareStatement(
-      """INSERT INTO agent_compensations
+      """INSERT INTO zyblw_agent_core.agent_compensations
         |(compensation_id, operation_id, run_id, scope_key, handler_name, payload, status, available_at, created_at)
         |VALUES (?::uuid, ?::uuid, ?::uuid, ?, ?, ?::jsonb, 'Registered', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         |ON CONFLICT (operation_id) DO NOTHING""".stripMargin
@@ -302,7 +302,7 @@ final class PostgresTransactionalWriteExecutor(
       resultJson: String
   ): Unit =
     val statement = connection.prepareStatement(
-      """UPDATE agent_business_operations
+      """UPDATE zyblw_agent_core.agent_business_operations
         |SET status = 'Succeeded', result_json = ?::jsonb, completed_at = CURRENT_TIMESTAMP
         |WHERE operation_id = ?::uuid AND status = 'Executing'""".stripMargin
     )

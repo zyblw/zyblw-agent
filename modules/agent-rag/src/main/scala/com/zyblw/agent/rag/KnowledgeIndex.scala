@@ -179,6 +179,23 @@ trait KnowledgeIndexStore:
     val _ = (tenantId, spaceId)
     ZIO.succeed(None)
 
+  /** 空间的 active 指针与 CAS revision；空间尚未建立时为 None。`activateProfile` 的 `expectedRevision` 取自这里。 */
+  def spaceProfileState(
+      tenantId: TenantId,
+      spaceId: KnowledgeSpaceId
+  ): IO[RetrievalError, Option[KnowledgeSpaceProfileState]] =
+    val _ = (tenantId, spaceId)
+    ZIO.fail(AgentError.RetrievalFailed("KnowledgeIndexStore 未实现 spaceProfileState"))
+
+  /** 一个 Profile 内全部文档 manifest（含历史版本）；用于构造 `ProfilePublication` 普查。 */
+  def profileManifests(
+      tenantId: TenantId,
+      spaceId: KnowledgeSpaceId,
+      profileId: IndexProfileId
+  ): IO[RetrievalError, Chunk[KnowledgeIndexManifest]] =
+    val _ = (tenantId, spaceId, profileId)
+    ZIO.fail(AgentError.RetrievalFailed("KnowledgeIndexStore 未实现 profileManifests"))
+
   /** 空间级 CAS 切换 active Profile；`expectedRevision` 必须匹配当前 revision。 */
   def activateProfile(
       tenantId: TenantId,
@@ -207,6 +224,9 @@ trait KnowledgeIndexStore:
   def withdraw(key: KnowledgeDocumentKey, sourceRevisionId: String): IO[RetrievalError, Unit] =
     val _ = (key, sourceRevisionId)
     ZIO.fail(AgentError.RetrievalFailed("KnowledgeIndexStore 未实现 withdraw"))
+
+/** 知识空间的 active Profile 指针快照。 */
+final case class KnowledgeSpaceProfileState(activeProfileId: Option[IndexProfileId], revision: Long)
 
 /** 一次索引发布的结果。
   *

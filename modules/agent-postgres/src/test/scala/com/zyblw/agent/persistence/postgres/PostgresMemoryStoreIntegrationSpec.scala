@@ -5,7 +5,6 @@ import com.zyblw.agent.core.*
 import com.zyblw.agent.memory.*
 import java.time.Instant
 import javax.sql.DataSource
-import org.flywaydb.core.Flyway
 import org.postgresql.ds.PGSimpleDataSource
 import org.testcontainers.utility.DockerImageName
 import zio.*
@@ -36,14 +35,7 @@ object PostgresMemoryStoreIntegrationSpec extends ZIOSpecDefault:
         value.setPassword(container.password)
         value: DataSource
       }
-      _ <- ZIO.attemptBlocking {
-        Flyway
-          .configure()
-          .dataSource(dataSource)
-          .locations(AgentPostgresMigrations.DefaultLocation)
-          .load()
-          .migrate()
-      }
+      _ <- AgentPostgresMigrations.migrate(dataSource)
     yield Harness(PostgresMemoryStore(dataSource), dataSource)
   }
 
@@ -69,7 +61,7 @@ object PostgresMemoryStoreIntegrationSpec extends ZIOSpecDefault:
       try
         val statement = connection.prepareStatement(
           """SELECT status, value_json IS NULL, search_text IS NULL
-          |FROM agent_memories WHERE scope_kind = 'user' AND scope_key = ? AND memory_key = ?""".stripMargin
+          |FROM zyblw_agent_core.agent_memories WHERE scope_kind = 'user' AND scope_key = ? AND memory_key = ?""".stripMargin
         )
         try
           statement.setString(1, scopeKey)
@@ -87,7 +79,7 @@ object PostgresMemoryStoreIntegrationSpec extends ZIOSpecDefault:
       try
         val statement = connection.prepareStatement(
           """SELECT count(*) OVER (), action, memory_key_hash, affected_count, actor_tenant_id, actor_user_id
-          |FROM agent_memory_audit ORDER BY occurred_at, audit_id LIMIT 1""".stripMargin
+          |FROM zyblw_agent_core.agent_memory_audit ORDER BY occurred_at, audit_id LIMIT 1""".stripMargin
         )
         try
           val result = statement.executeQuery()
