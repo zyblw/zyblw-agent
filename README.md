@@ -30,7 +30,7 @@ Harness 不是第二套模型循环；Workflow 也不替代普通函数。多 Ag
 
 - JDK 21
 - Scala 3.9.0 LTS
-- sbt 2.0.1
+- sbt 2.0.10
 - ZIO 2.1.26
 - PostgreSQL 18（当前验证版本 18.6）+ pgvector 0.8.6
 - OpenAI Responses、Anthropic Messages、Gemini Interactions，以及可配置的 OpenAI-compatible Provider/中转站

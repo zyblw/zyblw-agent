@@ -3,6 +3,7 @@ package com.zyblw.agent.integrations
 import zio.*
 import zio.json.*
 import zio.test.*
+import com.zyblw.agent.core.ReasoningEffort
 import com.zyblw.agent.integrations.openai.OpenAICompatibility
 
 /** 中转站多端点声明的静态契约：URL、密钥引用和唯一 id。 */
@@ -113,6 +114,17 @@ object ProviderEndpointsSpec extends ZIOSpecDefault:
         qwen.toolCalls,
         !qwen.strictToolSchema,
         !qwen.developerRole
+      )
+    },
+    test("未声明推理档位时沿用兼容档案，显式档位才覆盖") {
+      val base = OpenAICompatibility.deepSeek.descriptor.capabilities
+      val inherited = ProviderEndpointCapabilities().applyTo(base)
+      val restricted = ProviderEndpointCapabilities(
+        reasoningEfforts = Set(ReasoningEffort.Low)
+      ).applyTo(base)
+      assertTrue(
+        inherited.reasoningEfforts.contains(ReasoningEffort.None),
+        restricted.reasoningEfforts == Set(ReasoningEffort.Low)
       )
     },
     test("拒绝重复模型、缺失默认模型和未知兼容档案") {

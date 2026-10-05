@@ -23,5 +23,6 @@
 - `ModelDiscovery` 读取 OpenRouter `/models`（能力、上下文、每百万 token USD 单价）与任意 OpenAI-compatible `/models`。
 - `ModelRoleSource`：`AgentCommandServiceLive.configuredWithRoles`、`HarnessCommandServiceLive.configuredWithRoles`、`AgentRuntimeDriver.layerWithRoleSource`、`AgentApplication.durableGovernedWithRoles` 在每次创建 Run 时读取角色目录，结果仍冻结进组合指纹。
 - `ProfileEmbeddingRouter`：`DefaultRetriever(profileEmbeddings = …)` 在解析 pinned/active Profile 之后选择查询向量模型，换 Embedding 的蓝绿切换期间旧 Profile 继续可查，目标 Profile 验收探测使用新模型。
+- 工具链对齐 2026-10-05 已验证最新稳定线：sbt 2.0.10、Flyway 13.9.0、Tika 4.1.0、示例模块 HikariCP 7.1.0。ZIO 2.1.26、ZIO HTTP 3.11.6、zio-schema 1.8.7 与 zio-json 1.0.0 已是这条 HTTP 官方依赖线的最新组合；Scala 留在 3.9.0 LTS。Loader 身份改为 `apache-tika-4.1.0`。
 
 能力成熟度依 canonical roadmap。首次空库构建通过不代表真实领域模型、容量、soak 或生产发布已经验收。首版公开发布后才冻结 V001 与兼容基线。

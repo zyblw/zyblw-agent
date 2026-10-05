@@ -398,9 +398,8 @@ final class AgentRuntimeDriver(
         prices
       )
       response = dispatched.response
-      _ <- ZIO
-        .fail(AgentError.BudgetExceeded("toolCallsPerStep", toolPolicies.current().maxCallsPerStep.toLong))
-        .when(response.message.toolCalls.length > toolPolicies.current().maxCallsPerStep)
+      // 模型这一步发出的工具调用全部进入执行器。同时在飞的数量由 ToolExecutor 信号量限制，
+      // 累计次数、步数和时长仍由 RunLimits 熔断，避免一次正常的并行检索把整轮判死。
       estimatedCost = prices.estimate(resolvedProvider, resolvedModel, response.usage)
       _ <- ZIO.fromEither(
         AgentKernel.validateToolCallBudget(

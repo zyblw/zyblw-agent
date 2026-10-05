@@ -1,7 +1,7 @@
 # 当前兼容性与版本边界
 
 > 状态：0.9.0 全新安装基线
-> 最后核验：2026-10-01；未发布结构检索变更见下文
+> 最后核验：2026-10-05；未发布结构检索变更见下文
 >
 > 2026-09-24 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。知识文档以来源谱系和构建规格为身份，向量查询绑定 Profile 并使用 HNSW 迭代扫描，不按 Profile 分区。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -12,13 +12,13 @@
 |---|---:|---|
 | JDK | 21 LTS | 生产字节码与运行时基线；开发机更高 JDK 不改变目标版本 |
 | Scala | 3.9.0 LTS | 当前 Scala 3 LTS 线 |
-| sbt | 2.0.1 | 仓库 wrapper/构建基线 |
+| sbt | 2.0.10 | 仓库 wrapper/构建基线；2.1 仍是里程碑，不进入基线 |
 | ZIO | 2.1.26 | 当前稳定线 |
 | ZIO HTTP | 3.11.6 | 当前稳定线，与 ZIO 2.1.26 对齐 |
 | zio-schema / zio-json | 1.8.7 / 1.0.0 | schema-json 1.8.7 按 zio-json 1.0.0 编译；不可覆盖到 1.1.0，否则 Endpoint 解码会 NoSuchMethodError |
 | PostgreSQL / pgvector | 18.6 / 0.8.6 | 真实 Testcontainers 与本地 Compose 基线 |
-| JDBC / Flyway | 42.7.13 / 13.7.0 | 当前数据库门禁组合 |
-| Apache Tika | 4.0.0 | 文档 Loader 已迁移到 Tika 4 API |
+| JDBC / Flyway | 42.7.13 / 13.9.0 | 当前数据库门禁组合 |
+| Apache Tika | 4.1.0 | 文档 Loader 使用 Tika 4 API；PDFBox 与 Tika 父 POM 同为 3.0.8 |
 | OpenTelemetry | 1.66.0 | SDK/Exporter 统一版本 |
 | Dashboard | Node 26.8.1 / npm 11.19.1 / Next 16.3.5 / React 19.3.0 / TypeScript 6.0.3 | 独立运维控制台；完整依赖树、类型、lint 与生产构建验证 |
 

@@ -70,8 +70,17 @@ const EDITORS: Record<string, Editor> = {
   toolMaxResultBytes: 'number',
   toolApprovalPolicy: 'approval',
   toolMaxCallsPerRun: 'number',
-  toolMaxCallsPerStep: 'number',
+  toolMaxCallsPerStep: 'readonly',
   toolMaxParallelism: 'readonly',
+  explorationMaxSteps: 'number',
+  explorationMaxModelCalls: 'number',
+  explorationMaxRepeatedActions: 'number',
+  explorationMaxInputTokens: 'number',
+  explorationMaxOutputTokens: 'number',
+  explorationMaxTotalTokens: 'number',
+  explorationMaxDurationSeconds: 'number',
+  askMetering: 'readonly',
+  costMetering: 'readonly',
   retrievalTopK: 'number',
   retrievalMinimumScore: 'number',
   rerankEnabled: 'boolean',
@@ -79,6 +88,12 @@ const EDITORS: Record<string, Editor> = {
   modelName: 'model',
   modelTemperature: 'number',
   modelMaxOutputTokens: 'number',
+};
+
+const FIELD_NOTES: Record<string, string> = {
+  toolMaxCallsPerRun: '问答 Run 不会超过 128。',
+  explorationMaxRepeatedActions: '计的是连续工具失败，成功的检索不计入。',
+  explorationMaxTotalTokens: '只调低累计时，输入和输出会一起收到不超过这个数。',
 };
 
 export function ConfigStudio() {
@@ -330,12 +345,22 @@ function ConfigRow({
   return (
     <tr className="border-b border-slate-900 align-top">
       <td className="py-2 pr-3">
-        <div className="flex items-center gap-1.5">
-          <Mono className="text-slate-200">{field.key}</Mono>
-          {field.sensitive && (
-            <span title="安全敏感项：改动会直接影响工具治理或审批强度">
-              <ShieldAlert className="h-3 w-3 text-amber-400" />
-            </span>
+        <div>
+          <div className="flex items-center gap-1.5">
+            <Mono className="text-slate-200">{field.key}</Mono>
+            {(field.key === 'askMetering' || field.key === 'costMetering') && (
+              <a href="/admin/operations" className="block text-[11px] text-sky-400 underline">
+                网站运营数据
+              </a>
+            )}
+            {field.sensitive && (
+              <span title="安全敏感项：改动会直接影响工具治理或审批强度">
+                <ShieldAlert className="h-3 w-3 text-amber-400" />
+              </span>
+            )}
+          </div>
+          {FIELD_NOTES[field.key] && (
+            <span className="mt-1 block max-w-56 text-[10px] text-slate-500">{FIELD_NOTES[field.key]}</span>
           )}
         </div>
       </td>

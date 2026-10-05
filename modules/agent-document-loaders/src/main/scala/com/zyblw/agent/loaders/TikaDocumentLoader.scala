@@ -8,7 +8,8 @@ import org.apache.tika.io.TikaInputStream
 import org.apache.tika.metadata.Metadata
 import org.apache.tika.parser.{AutoDetectParser, ParseContext}
 import org.apache.tika.parser.ocr.TesseractOCRConfig
-import org.apache.tika.parser.pdf.{OcrConfig, PDFParserConfig}
+import org.apache.tika.parser.pages.TextPolicy
+import org.apache.tika.parser.pdf.PDFParserConfig
 import org.apache.tika.sax.BodyContentHandler
 import zio.*
 
@@ -58,7 +59,7 @@ final case class TikaDocumentLoaderConfig(
   */
 final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLoaderConfig())
     extends DocumentLoader:
-  override val id: String = "apache-tika-4.0.0"
+  override val id: String = "apache-tika-4.1.0"
 
   override val supportedMediaTypes: Set[String] = config.enabledMediaTypes
 
@@ -129,7 +130,8 @@ final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLo
     context.set(classOf[TesseractOCRConfig], ocr)
     if !config.allowOcr then
       val pdf = PDFParserConfig()
-      pdf.getOcr.setStrategy(OcrConfig.Strategy.NO_OCR)
+      // Tika 4.1 用 pages.text 取代已废弃的 ocr.strategy。EXTRACT 对应原来的 NO_OCR：只读嵌入文字。
+      pdf.pages().setText(TextPolicy.EXTRACT)
       context.set(classOf[PDFParserConfig], pdf)
     val handler = BodyContentHandler(config.maxExtractedCodePoints + 1)
     val stream  = TikaInputStream.get(bytes)

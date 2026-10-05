@@ -74,13 +74,23 @@ object StructureOutline:
 
   /** 模型回复 `{"sections":["s3","s12"]}`（也接受 `ids`）。目录外的引用直接丢弃，空列表表示目录里没有相关章节。 */
   def parseSelection(raw: String, outline: StructureOutline, maxSelect: Int): Either[String, Chunk[String]] =
-    val text  = Option(raw).getOrElse("").trim
-    val start = text.indexOf('{')
-    val end   = text.lastIndexOf('}')
-    if start < 0 || end <= start then Left("outline selection JSON missing")
+    val objects = jsonObjects(Option(raw).getOrElse(""))
+    if objects.isEmpty then Left("outline selection JSON missing")
     else
-      text
-        .substring(start, end + 1)
+      objects.reverseIterator
+        .map(decodeSelection(_, outline, maxSelect))
+        .collectFirst { case Right(refs) => refs }
+        .toRight(
+          decodeSelection(objects.last, outline, maxSelect).swap
+            .getOrElse("outline selection JSON invalid")
+        )
+
+  private def decodeSelection(
+      json: String,
+      outline: StructureOutline,
+      maxSelect: Int
+  ): Either[String, Chunk[String]] =
+    json
         .fromJson[Selection]
         .left
         .map(_ => "outline selection JSON invalid")
@@ -107,6 +117,48 @@ object StructureOutline:
       }
       .map(clean)
       .filter(_.nonEmpty)
+
+  /** 思考标签和说明文字里的花括号不并进正式 JSON；从后往前取能单独解码的对象。 */
+  private def jsonObjects(raw: String): List[String] =
+    val closed = "(?s)<think>.*?</think>".r.replaceAllIn(raw, "")
+    val open = closed.indexOf("<think>")
+    val text = (if open >= 0 then closed.substring(0, open) else closed)
+      .replace("```json", "")
+      .replace("```", "")
+    val found = scala.collection.mutable.ListBuffer.empty[String]
+    var index = 0
+    while index < text.length do
+      if text.charAt(index) == '{' then
+        val end = endOfObject(text, index)
+        if end > index then
+          found += text.substring(index, end)
+          index = end
+        else index += 1
+      else index += 1
+    found.toList
+
+  private def endOfObject(text: String, start: Int): Int =
+    var depth = 0
+    var index = start
+    var inString = false
+    var escape = false
+    var end = -1
+    while index < text.length && end < 0 do
+      val char = text.charAt(index)
+      if inString then
+        if escape then escape = false
+        else if char == '\\' then escape = true
+        else if char == '"' then inString = false
+      else
+        char match
+          case '"' => inString = true
+          case '{' => depth += 1
+          case '}' =>
+            depth -= 1
+            if depth == 0 then end = index + 1
+          case _ => ()
+      index += 1
+    end
 
   private def descendants(snapshot: StructureSnapshot, nodeId: String): Int =
     snapshot

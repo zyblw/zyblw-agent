@@ -42,8 +42,8 @@ object AgentApplicationConfigLoaderSpec extends ZIOSpecDefault:
         assertTrue(
           config.toolPolicy.allowedTools == Set(ToolName("knowledge_search"), ToolName("article_draft")),
           config.toolPolicy.deniedTools == Set(ToolName("admin_delete")),
-          config.toolPolicy.maxCallsPerRun == 40,
-          config.toolPolicy.maxCallsPerStep == 6,
+          config.toolPolicy.maxCallsPerRun == 128,
+          config.toolPolicy.maxCallsPerStep == 8,
           config.toolPolicy.maxParallelism == 3,
           config.toolPolicy.defaultTimeout == 12.seconds,
           config.toolPolicy.maxResultBytes == 8192L,
@@ -64,6 +64,8 @@ object AgentApplicationConfigLoaderSpec extends ZIOSpecDefault:
       AgentApplicationConfigLoader.load().provide(configProvider(Map.empty)).map { config =>
         assertTrue(
           config.toolPolicy.allowedTools.isEmpty,
+          config.toolPolicy.maxCallsPerRun == 128,
+          config.toolPolicy.maxParallelism == 4,
           config.toolPolicy.approvalPolicy == ApprovalPolicy.RiskBased,
           config.toolPolicy.retryPolicy == ToolRetryPolicy.Never,
           config.worker.maxAttempts == 8,

@@ -3,6 +3,7 @@ package com.zyblw.agent.admin
 import com.zyblw.agent.core.*
 import com.zyblw.agent.tools.{ApprovalPolicy, ToolPolicyConfig}
 import zio.*
+import zio.json.*
 import zio.test.*
 
 object RuntimeSettingsSpec extends ZIOSpecDefault:
@@ -38,10 +39,16 @@ object RuntimeSettingsSpec extends ZIOSpecDefault:
     test("稀疏补丁只改写被设置的字段，其余保持基线") {
       (for
         settings <- service()
-        _        <- settings.update(0L, RuntimeOverrides(toolMaxCallsPerStep = Some(1)), "ops", "收紧单步并发")
-        current  <- settings.effective
+        _ <- settings.update(
+          0L,
+          RuntimeOverrides(toolMaxCallsPerStep = Some(1), toolDefaultTimeoutMillis = Some(5_000L)),
+          "ops",
+          "单步覆盖不再进入策略"
+        )
+        current <- settings.effective
       yield assertTrue(
-        current.toolPolicy.maxCallsPerStep == 1,
+        current.toolPolicy.maxCallsPerStep == baseline.maxCallsPerStep,
+        current.toolPolicy.defaultTimeout.toMillis == 5_000L,
         current.toolPolicy.maxCallsPerRun == baseline.maxCallsPerRun,
         current.toolPolicy.allowedTools == baseline.allowedTools,
         current.toolPolicy.approvalPolicy == baseline.approvalPolicy
@@ -62,12 +69,12 @@ object RuntimeSettingsSpec extends ZIOSpecDefault:
     test("陈旧 expectedVersion 返回乐观锁冲突且不改变生效配置") {
       (for
         settings <- service()
-        _        <- settings.update(0L, RuntimeOverrides(toolMaxCallsPerStep = Some(2)), "first", "先提交")
-        conflict <- settings.update(0L, RuntimeOverrides(toolMaxCallsPerStep = Some(9)), "second", "后提交").exit
+        _        <- settings.update(0L, RuntimeOverrides(toolMaxCallsPerRun = Some(2)), "first", "先提交")
+        conflict <- settings.update(0L, RuntimeOverrides(toolMaxCallsPerRun = Some(9)), "second", "后提交").exit
         current  <- settings.effective
       yield assertTrue(
         conflict.isFailure,
-        current.toolPolicy.maxCallsPerStep == 2
+        current.toolPolicy.maxCallsPerRun == 2
       )).provide(RuntimeOverrideStore.inMemory)
     },
     test("非法覆盖在写入存储之前被拒绝，版本不前进") {
@@ -126,7 +133,7 @@ object RuntimeSettingsSpec extends ZIOSpecDefault:
         )
       yield assertTrue(
         beforeTopK == 5,
-        tools.current().maxCallsPerStep == 1,
+        tools.current().maxCallsPerStep == baseline.maxCallsPerStep,
         retrieval.current().topK == 20,
         retrieval.current().rerankEnabled
       )).provide(RuntimeOverrideStore.inMemory)
@@ -217,5 +224,84 @@ object RuntimeSettingsSpec extends ZIOSpecDefault:
         RuntimeOverrides.parseApprovalPolicy(" ALWAYS ").contains(ApprovalPolicy.Always),
         RuntimeOverrides.parseApprovalPolicy("maybe").isLeft
       )
+    },
+    test("缺字段的旧覆盖 JSON 仍能解码") {
+      val empty  = "{}".fromJson[RuntimeOverrides]
+      val legacy = """{"toolMaxCallsPerStep":3}""".fromJson[RuntimeOverrides]
+      assertTrue(
+        empty == Right(RuntimeOverrides.none),
+        legacy.toOption.flatMap(_.toolMaxCallsPerStep).contains(3),
+        legacy.toOption.exists(_.explorationMaxSteps.isEmpty)
+      )
+    },
+    test("问答熔断基线来自代码，收紧后费用仍不是门禁") {
+      val open = RunLimits(
+        maxSteps = 64,
+        maxModelCalls = 64,
+        maxToolCalls = 128,
+        maxRepeatedActions = 16,
+        maxInputTokens = 1_000_000L,
+        maxOutputTokens = 200_000L,
+        maxTotalTokens = 1_200_000L,
+        maxEstimatedCost = None,
+        maxDuration = 1800.seconds
+      )
+      (for
+        settings <- RuntimeSettingsService.make(baseline, baselineExploration = open)
+        before   <- settings.view
+        _        <- settings.update(0L, RuntimeOverrides(explorationMaxSteps = Some(4)), "ops", "收紧步数")
+        after    <- settings.effective
+        view     <- settings.view
+        tightened <- settings.update(
+          view.overrideVersion,
+          RuntimeOverrides(explorationMaxTotalTokens = Some(100_000L)),
+          "ops",
+          "只收紧累计"
+        )
+        tight <- settings.effective
+        rejected <- settings
+          .update(
+            tightened.overrideVersion,
+            RuntimeOverrides(
+              explorationMaxInputTokens = Some(50_000L),
+              explorationMaxTotalTokens = Some(100L)
+            ),
+            "ops",
+            "累计小于输入"
+          )
+          .exit
+        over <- settings
+          .update(
+            tightened.overrideVersion,
+            RuntimeOverrides(toolMaxCallsPerRun = Some(129)),
+            "ops",
+            "超过问答熔断"
+          )
+          .exit
+        store <- ZIO.service[RuntimeOverrideStore]
+        _ <- store.put(
+          tightened.overrideVersion,
+          RuntimeOverrides(toolMaxCallsPerRun = Some(1000)),
+          "ops",
+          "旧数据"
+        )
+        _ <- settings.refresh
+        capped <- settings.effective
+      yield assertTrue(
+        before.fields.find(_.key == "explorationMaxSteps").exists(_.baselineValue == "64"),
+        before.fields.find(_.key == "explorationMaxSteps").exists(_.effectiveValue == "64"),
+        before.fields.find(_.key == "askMetering").exists(_.effectiveValue == "只计量、不拒绝"),
+        before.fields.find(_.key == "costMetering").exists(_.effectiveValue == "只计量、不拒绝"),
+        before.fields.find(_.key == "toolMaxCallsPerStep").exists(_.effectiveValue == "一步内的调用全部执行"),
+        after.exploration.maxSteps == 4,
+        after.exploration.maxEstimatedCost.isEmpty,
+        view.fields.find(_.key == "explorationMaxSteps").exists(_.applies == RuntimeSettingApplies.NextRun),
+        tight.exploration.maxTotalTokens == 100_000L,
+        tight.exploration.maxInputTokens == 100_000L,
+        tight.exploration.maxOutputTokens == 100_000L,
+        rejected.isFailure,
+        capped.toolPolicy.maxCallsPerRun == 128,
+        over.isFailure
+      )).provide(RuntimeOverrideStore.inMemory)
     }
   )

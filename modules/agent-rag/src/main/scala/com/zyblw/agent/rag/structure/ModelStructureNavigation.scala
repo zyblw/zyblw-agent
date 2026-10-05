@@ -18,6 +18,18 @@ final case class StructureModelConfig(
   )
 
 object ModelStructureNavigation:
+  private val ScanLimit = 32_000
+
+  /** 正文含 JSON 时用正文；否则用推理通道。结束原因不是 stop 时仍把文本交给解析。 */
+  private def plannerText(message: AgentMessage): String =
+    val content = message.text
+    val reasoning = message.metadata.get("reasoning_content").getOrElse("")
+    val chosen =
+      if content.contains('{') then content
+      else if reasoning.contains('{') then reasoning
+      else content
+    if chosen.length <= ScanLimit then chosen else chosen.takeRight(ScanLimit)
+
   private case class Choice(ids: Chunk[String]) derives JsonCodec
   private case class Entry(id: String, title: String, parentId: Option[String], summary: Option[String])
       derives JsonCodec
@@ -45,12 +57,20 @@ object ModelStructureNavigation:
             )
           )
         )
-        .mapError(_ => AgentError.RetrievalFailed("structure model call failed"))
+        .mapError(error =>
+          AgentError.RetrievalFailed(s"structure model call failed: ${error.message.take(160)}")
+        )
         .timeoutFail(AgentError.RetrievalFailed("structure model timeout"))(config.timeout)
         .flatMap { response =>
-          val text = response.message.text.trim
-          if response.message.role != MessageRole.Assistant || response.message.toolCalls.nonEmpty || response.finishReason != FinishReason.Stop || text.isEmpty || text.length > config.maxOutputChars
-          then ZIO.fail(AgentError.RetrievalFailed("structure model output invalid"))
+          val text = plannerText(response.message)
+          if response.message.role != MessageRole.Assistant || response.message.toolCalls.nonEmpty || text.trim.isEmpty
+          then
+            val reasoning = response.message.metadata.get("reasoning_content").getOrElse("")
+            ZIO.fail(
+              AgentError.RetrievalFailed(
+                s"structure model output invalid；正文${response.message.text.length}字，推理${reasoning.length}字，工具${response.message.toolCalls.length}"
+              )
+            )
           else ZIO.succeed(text)
         }
 

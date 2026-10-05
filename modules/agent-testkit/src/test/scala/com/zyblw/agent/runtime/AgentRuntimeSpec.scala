@@ -737,6 +737,38 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
         count == 0
       )
     },
+    test("一步里的四个只读工具调用会全部执行并继续回答") {
+      for
+        executions <- Ref.make(0)
+        tool       <- registeredEcho(ToolRisk.ReadOnly, SideEffect.None, executions)
+        calls = Chunk("step-1", "step-2", "step-3", "step-4").map(id =>
+          ToolCall(id, "echo", Json.Obj("value" -> Json.Str(id)))
+        )
+        model <- ScriptedChatModel.make(
+          Chunk(
+            ChatResponse(AgentMessage.assistantToolCalls(calls), FinishReason.ToolCalls, TokenUsage(8, 4)),
+            finalResponse("四次检索之后的回答")
+          )
+        )
+        result <- (for
+          runtime <- ZIO.service[AgentRuntime]
+          outcome <- runtime.run(
+            echoAgent,
+            RunRequest(ThreadId("four-readonly-tools"), AgentMessage.user("有哪些"))
+          )
+          count <- executions.get
+        yield (outcome, count)).provideLayer(
+          layers(
+            model,
+            List(tool),
+            toolPolicy = ToolPolicyConfig.secureDefault.copy(maxCallsPerStep = 3, maxCallsPerRun = 128)
+          )
+        )
+      yield assertTrue(
+        result._1.isInstanceOf[RunOutcome.Completed],
+        result._2 == 4
+      )
+    },
     test("runEvents 输出统一 AgentEvent 文本增量和耐久完成状态") {
       for
         model  <- ScriptedChatModel.make(Chunk(finalResponse("流式完成")))

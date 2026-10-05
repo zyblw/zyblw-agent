@@ -139,7 +139,7 @@ Paddle 产物总信封最多 20 MiB；目录 JSON/Markdown 读取另有字节上
 
 ## 4. Apache Tika 实现
 
-`TikaDocumentLoader` 当前使用 Apache Tika 4.0.0，支持：
+`TikaDocumentLoader` 当前使用 Apache Tika 4.1.0，支持：
 
 - `text/plain`
 - `text/markdown`
