@@ -49,7 +49,11 @@ final case class ProviderEndpointCapabilities(
   require(maxInputTokens.forall(_ > 0L), "maxInputTokens 必须大于 0")
   require(maxOutputTokens.forall(_ > 0L), "maxOutputTokens 必须大于 0")
 
-  /** 只覆盖端点 JSON 可配置的字段；strict schema、tool choice 等协议能力继承 Adapter 档案。 */
+  /** 只覆盖端点 JSON 可配置的字段；strict schema、tool choice 等协议能力继承 Adapter 档案。
+    *
+    * 推理档位空集表示端点未声明，沿用兼容档案。注册表里常见的 `[]` 因此不会抹掉
+    * DeepSeek 档案里的 None，辅助规划才能关闭思考并在正文里输出 JSON。
+    */
   def applyTo(base: ModelCapabilities): ModelCapabilities =
     base.copy(
       toolCalls = toolCalls,
@@ -61,7 +65,7 @@ final case class ProviderEndpointCapabilities(
       reasoningTokens = reasoningTokens,
       maxInputTokens = maxInputTokens,
       maxOutputTokens = maxOutputTokens,
-      reasoningEfforts = reasoningEfforts
+      reasoningEfforts = if reasoningEfforts.isEmpty then base.reasoningEfforts else reasoningEfforts
     )
 
 /** 配置声明的单个模型能力与可选计价标签。价格数字不进日志。 */

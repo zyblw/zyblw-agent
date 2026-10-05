@@ -8,7 +8,7 @@
 > 事实来源：`build.sbt`、`project/build.properties`、`.vscode/` 与 Metals 官方文档
 
 在独立的 `zyblw-agent/` checkout 根目录打开 VS Code；不要把它作为 `zyblw-platform` 的嵌套文件夹打开。这样
-Metals 的 workspace、Bloop build target、sbt 2.0.1 和框架的公开依赖边界都保持独立。
+Metals 的 workspace、Bloop build target、sbt 2.0.10 和框架的公开依赖边界都保持独立。
 
 ## 首次配置
 

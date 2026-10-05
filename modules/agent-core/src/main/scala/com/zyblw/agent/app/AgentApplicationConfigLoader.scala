@@ -71,9 +71,7 @@ object AgentApplicationConfigLoader:
       ).map(ToolNames.apply)
     val limits =
       (
-        Config.int("max_calls_per_run").withDefault(32) ++
-          Config.int("max_calls_per_step").withDefault(8) ++
-          Config.int("max_parallelism").withDefault(4) ++
+        Config.int("max_parallelism").withDefault(4) ++
           Config.duration("default_timeout").withDefault(30.seconds) ++
           Config.long("max_result_bytes").withDefault(256L * 1024L) ++
           Config.long("externalize_above_bytes").withDefault(32L * 1024L)
@@ -89,8 +87,10 @@ object AgentApplicationConfigLoader:
         ToolPolicyConfig(
           allowedTools = allowed,
           deniedTools = denied,
-          maxCallsPerRun = limits.maxCallsPerRun,
-          maxCallsPerStep = limits.maxCallsPerStep,
+          // 单轮累计与单步数量不从环境变量读取，避免部署文件把熔断盖回旧配额。
+          // 单步数量不再终止 Run；这里保留正数只为满足配置不变量。
+          maxCallsPerRun = OpenToolCallsPerRun,
+          maxCallsPerStep = 8,
           maxParallelism = limits.maxParallelism,
           defaultTimeout = limits.defaultTimeout,
           maxResultBytes = limits.maxResultBytes,
@@ -226,10 +226,11 @@ object AgentApplicationConfigLoader:
   /** 仅用于保持大型 Config 组合的静态类型，不会进入公开 API 或运行状态。 */
   final private case class ToolNames(allowed: String, denied: String)
 
-  /** 工具资源硬限制的中间配置产品。 */
+  /** 单轮工具调用的代码基线。环境变量不能把它压回旧配额。 */
+  private val OpenToolCallsPerRun = 128
+
+  /** 工具资源硬限制的中间配置产品。并发度仍可在进程启动时配置，次数配额不在其中。 */
   final private case class ToolLimits(
-      maxCallsPerRun: Int,
-      maxCallsPerStep: Int,
       maxParallelism: Int,
       defaultTimeout: Duration,
       maxResultBytes: Long,

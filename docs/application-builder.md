@@ -94,7 +94,6 @@ val configuredLayer: Layer[AgentError.InvalidConfiguration, AgentApplicationConf
 ```bash
 ZYBLW_AGENT_TOOL_ALLOWED_TOOLS=knowledge_search,article_draft
 ZYBLW_AGENT_TOOL_DENIED_TOOLS=admin_delete
-ZYBLW_AGENT_TOOL_MAX_CALLS_PER_RUN=32
 ZYBLW_AGENT_TOOL_MAX_PARALLELISM=4
 ZYBLW_AGENT_TOOL_DEFAULT_TIMEOUT=30s
 ZYBLW_AGENT_TOOL_APPROVAL_POLICY=risk-based

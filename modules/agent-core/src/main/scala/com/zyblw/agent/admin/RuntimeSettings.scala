@@ -38,9 +38,9 @@ enum RuntimeSettingApplies derives JsonCodec:
   * @param toolApprovalPolicy
   *   审批策略；取值 `never` / `risk-based` / `always`
   * @param toolMaxCallsPerRun
-  *   单个 Run 的工具调用总数上限；只影响新建 Run
+  *   单个 Run 的工具调用总数上限，最高 128，与问答请求里的熔断相同；只影响新建 Run
   * @param toolMaxCallsPerStep
-  *   单步工具调用数上限
+  *   旧覆盖里的单步数量。解码后不再进入执行策略，一步内的调用全部执行
   * @param retrievalTopK
   *   RAG 检索默认返回条数
   * @param retrievalMinimumScore
@@ -70,7 +70,14 @@ final case class RuntimeOverrides(
     modelProvider: Option[String] = None,
     modelName: Option[String] = None,
     modelTemperature: Option[Double] = None,
-    modelMaxOutputTokens: Option[Int] = None
+    modelMaxOutputTokens: Option[Int] = None,
+    explorationMaxSteps: Option[Int] = None,
+    explorationMaxModelCalls: Option[Int] = None,
+    explorationMaxRepeatedActions: Option[Int] = None,
+    explorationMaxInputTokens: Option[Long] = None,
+    explorationMaxOutputTokens: Option[Long] = None,
+    explorationMaxTotalTokens: Option[Long] = None,
+    explorationMaxDurationSeconds: Option[Long] = None
 ) derives JsonCodec:
   /** 当前设置了多少项覆盖；管理台用它提示“基线之外有 N 项改动”。 */
   def activeCount: Int = productIterator.count {
@@ -79,6 +86,9 @@ final case class RuntimeOverrides(
   }
 
 object RuntimeOverrides:
+  /** 与问答 Run 提交的工具次数熔断相同。管理台只能在这个数以内收紧。 */
+  val MaxToolCallsPerRun: Int = 128
+
   /** 不覆盖任何字段的空补丁。 */
   val none: RuntimeOverrides = RuntimeOverrides()
 
@@ -114,8 +124,8 @@ object RuntimeOverrides:
         .map(_ => "工具结果上限必须在 1KiB 到 16MiB 之间"),
       overrides.toolApprovalPolicy.flatMap(value => parseApprovalPolicy(value).left.toOption),
       overrides.toolMaxCallsPerRun
-        .filterNot(value => value >= 1 && value <= 1000)
-        .map(_ => "单 Run 工具调用上限必须在 1 到 1000 之间"),
+        .filterNot(value => value >= 1 && value <= MaxToolCallsPerRun)
+        .map(_ => s"单 Run 工具调用上限必须在 1 到 $MaxToolCallsPerRun 之间"),
       overrides.toolMaxCallsPerStep
         .filterNot(value => value >= 1 && value <= 100)
         .map(_ => "单步工具调用上限必须在 1 到 100 之间"),
@@ -132,7 +142,32 @@ object RuntimeOverrides:
         .map(_ => "模型温度必须在 0.0 到 2.0 之间"),
       overrides.modelMaxOutputTokens
         .filterNot(value => value >= 1 && value <= 1_000_000)
-        .map(_ => "模型输出上限必须在 1 到 1000000 之间")
+        .map(_ => "模型输出上限必须在 1 到 1000000 之间"),
+      overrides.explorationMaxSteps
+        .filterNot(value => value >= 1 && value <= 64)
+        .map(_ => "问答步数熔断必须在 1 到 64 之间"),
+      overrides.explorationMaxModelCalls
+        .filterNot(value => value >= 1 && value <= 64)
+        .map(_ => "问答模型调用熔断必须在 1 到 64 之间"),
+      overrides.explorationMaxRepeatedActions
+        .filterNot(value => value >= 1 && value <= 16)
+        .map(_ => "问答重复动作熔断必须在 1 到 16 之间"),
+      overrides.explorationMaxInputTokens
+        .filterNot(value => value >= 1L && value <= 1_000_000L)
+        .map(_ => "问答输入 token 熔断必须在 1 到 1000000 之间"),
+      overrides.explorationMaxOutputTokens
+        .filterNot(value => value >= 1L && value <= 200_000L)
+        .map(_ => "问答输出 token 熔断必须在 1 到 200000 之间"),
+      overrides.explorationMaxTotalTokens
+        .filterNot(value => value >= 1L && value <= 1_200_000L)
+        .map(_ => "问答累计 token 熔断必须在 1 到 1200000 之间"),
+      overrides.explorationMaxDurationSeconds
+        .filterNot(value => value >= 1L && value <= 1800L)
+        .map(_ => "问答单次时长熔断必须在 1 到 1800 秒之间"),
+      overrides.explorationMaxTotalTokens.filter { total =>
+        total < overrides.explorationMaxInputTokens.getOrElse(0L) ||
+        total < overrides.explorationMaxOutputTokens.getOrElse(0L)
+      }.map(_ => "问答累计 token 上限不能小于已设置的输入或输出上限")
     )
     val consistency =
       for
@@ -262,7 +297,8 @@ final case class RuntimeSettings(
     retrievalMinimumScore: Double,
     rerankEnabled: Boolean,
     modelPolicy: ModelPolicy,
-    overrideVersion: Long
+    overrideVersion: Long,
+    exploration: RunLimits = RunLimits()
 ):
   /** 投影成检索路径消费的工作点。
     *
@@ -386,7 +422,8 @@ object RuntimeSettingsService:
       baselineRetrievalMinimumScore: Double = 0.0,
       baselineRerankEnabled: Boolean = false,
       catalog: ModelCatalog = ModelCatalog.empty,
-      priceBook: ModelPriceBook = ModelPriceBook.empty
+      priceBook: ModelPriceBook = ModelPriceBook.empty,
+      baselineExploration: RunLimits = RunLimits()
   ): ZIO[RuntimeOverrideStore, StoreError, RuntimeSettingsService] =
     for
       store   <- ZIO.service[RuntimeOverrideStore]
@@ -396,6 +433,7 @@ object RuntimeSettingsService:
         baselineRetrievalTopK,
         baselineRetrievalMinimumScore,
         baselineRerankEnabled,
+        baselineExploration,
         initial
       )
       cache <- ZIO.succeed(new AtomicReference(merged))
@@ -406,6 +444,7 @@ object RuntimeSettingsService:
       baselineRetrievalTopK,
       baselineRetrievalMinimumScore,
       baselineRerankEnabled,
+      baselineExploration,
       catalog,
       priceBook
     )
@@ -416,7 +455,8 @@ object RuntimeSettingsService:
       baselineRetrievalTopK: Int = 5,
       baselineRetrievalMinimumScore: Double = 0.0,
       baselineRerankEnabled: Boolean = false,
-      priceBook: ModelPriceBook = ModelPriceBook.empty
+      priceBook: ModelPriceBook = ModelPriceBook.empty,
+      baselineExploration: RunLimits = RunLimits()
   ): ZLayer[RuntimeOverrideStore & ModelCatalog, StoreError, RuntimeSettingsService] =
     ZLayer.fromZIO(
       ZIO.serviceWithZIO[ModelCatalog](catalog =>
@@ -426,7 +466,8 @@ object RuntimeSettingsService:
           baselineRetrievalMinimumScore,
           baselineRerankEnabled,
           catalog,
-          priceBook
+          priceBook,
+          baselineExploration
         )
       )
     )
@@ -458,14 +499,18 @@ object RuntimeSettingsService:
       baselineTopK: Int,
       baselineMinimumScore: Double,
       baselineRerank: Boolean,
+      baselineExploration: RunLimits,
       record: RuntimeOverrideRecord
   ): RuntimeSettings =
     val overrides = record.overrides
     val policy    = baseline.copy(
       allowedTools = overrides.toolAllowedTools.fold(baseline.allowedTools)(_.map(ToolName(_))),
       deniedTools = overrides.toolDeniedTools.fold(baseline.deniedTools)(_.map(ToolName(_))),
-      maxCallsPerRun = overrides.toolMaxCallsPerRun.getOrElse(baseline.maxCallsPerRun),
-      maxCallsPerStep = overrides.toolMaxCallsPerStep.getOrElse(baseline.maxCallsPerStep),
+      maxCallsPerRun = overrides.toolMaxCallsPerRun.fold(baseline.maxCallsPerRun)(value =>
+        value.max(1).min(RuntimeOverrides.MaxToolCallsPerRun)
+      ),
+      // 单步数量不再终止 Run。旧 JSON 里的 toolMaxCallsPerStep 只保留解码，不进入执行策略。
+      maxCallsPerStep = baseline.maxCallsPerStep,
       defaultTimeout = overrides.toolDefaultTimeoutMillis.fold(baseline.defaultTimeout)(Duration.fromMillis),
       maxResultBytes = overrides.toolMaxResultBytes.getOrElse(baseline.maxResultBytes),
       approvalPolicy = overrides.toolApprovalPolicy
@@ -491,7 +536,36 @@ object RuntimeSettingsService:
         temperature = overrides.modelTemperature.filter(_.isFinite).map(_.max(0.0).min(2.0)),
         maxOutputTokens = overrides.modelMaxOutputTokens.map(_.max(1).min(1_000_000))
       ),
-      overrideVersion = record.version
+      overrideVersion = record.version,
+      exploration = explorationLimits(baselineExploration, overrides)
+    )
+
+  /** 把代码基线上的问答熔断收紧到覆盖值。费用不是门禁，因此生效预算里不带费用上限。 */
+  private def explorationLimits(baseline: RunLimits, overrides: RuntimeOverrides): RunLimits =
+    def boundedInt(value: Option[Int], fallback: Int, maximum: Int): Int =
+      value.getOrElse(fallback).max(1).min(maximum)
+    def boundedLong(value: Option[Long], fallback: Long, maximum: Long): Long =
+      value.getOrElse(fallback).max(1L).min(maximum)
+    val requestedTotal =
+      boundedLong(overrides.explorationMaxTotalTokens, baseline.maxTotalTokens, 1_200_000L).min(1_200_000L)
+    // 只调低累计时，输入和输出跟着收到不超过累计的值，避免保存成功但下一轮仍用基线。
+    val input = boundedLong(overrides.explorationMaxInputTokens, baseline.maxInputTokens, 1_000_000L)
+      .min(requestedTotal)
+    val output = boundedLong(overrides.explorationMaxOutputTokens, baseline.maxOutputTokens, 200_000L)
+      .min(requestedTotal)
+    baseline.copy(
+      maxSteps = boundedInt(overrides.explorationMaxSteps, baseline.maxSteps, 64),
+      maxModelCalls = boundedInt(overrides.explorationMaxModelCalls, baseline.maxModelCalls, 64),
+      maxRepeatedActions = boundedInt(overrides.explorationMaxRepeatedActions, baseline.maxRepeatedActions, 16),
+      maxInputTokens = input,
+      maxOutputTokens = output,
+      maxTotalTokens = requestedTotal,
+      maxEstimatedCost = None,
+      maxDuration = boundedLong(
+        overrides.explorationMaxDurationSeconds,
+        baseline.maxDuration.toSeconds,
+        1800L
+      ).seconds
     )
 
   /** 缓存有效设置并集中执行校验的实现。 */
@@ -502,6 +576,7 @@ object RuntimeSettingsService:
       baselineTopK: Int,
       baselineMinimumScore: Double,
       baselineRerank: Boolean,
+      baselineExploration: RunLimits,
       catalog: ModelCatalog,
       priceBook: ModelPriceBook
   ) extends RuntimeSettingsService:
@@ -519,7 +594,7 @@ object RuntimeSettingsService:
 
     def refresh: IO[StoreError, RuntimeSettings] =
       store.current
-        .map(merge(baseline, baselineTopK, baselineMinimumScore, baselineRerank, _))
+        .map(merge(baseline, baselineTopK, baselineMinimumScore, baselineRerank, baselineExploration, _))
         .tap(settings => ZIO.succeed(cache.set(settings)))
 
     def view: IO[StoreError, RuntimeConfigView] = store.current.map(toView)
@@ -542,7 +617,7 @@ object RuntimeSettingsService:
           .when(problems.nonEmpty)
         record <- store.put(expectedVersion, overrides, updatedBy, reason)
         _      <- ZIO.succeed(
-          cache.set(merge(baseline, baselineTopK, baselineMinimumScore, baselineRerank, record))
+          cache.set(merge(baseline, baselineTopK, baselineMinimumScore, baselineRerank, baselineExploration, record))
         )
       yield toView(record)
 
@@ -551,7 +626,7 @@ object RuntimeSettingsService:
     /** 把基线、覆盖与生效值渲染成管理台字段列表。 */
     private def toView(record: RuntimeOverrideRecord): RuntimeConfigView =
       val overrides = record.overrides
-      val effective = merge(baseline, baselineTopK, baselineMinimumScore, baselineRerank, record)
+      val effective = merge(baseline, baselineTopK, baselineMinimumScore, baselineRerank, baselineExploration, record)
       val fields    = Chunk(
         RuntimeSettingField(
           "toolAllowedTools",
@@ -603,10 +678,10 @@ object RuntimeSettingsService:
         ),
         RuntimeSettingField(
           "toolMaxCallsPerStep",
-          baseline.maxCallsPerStep.toString,
-          overrides.toolMaxCallsPerStep.map(_.toString),
-          effective.toolPolicy.maxCallsPerStep.toString,
-          RuntimeSettingApplies.NextRun,
+          "一步内的调用全部执行",
+          None,
+          "一步内的调用全部执行",
+          RuntimeSettingApplies.Immediate,
           sensitive = false
         ),
         RuntimeSettingField(
@@ -615,6 +690,78 @@ object RuntimeSettingsService:
           None,
           baseline.maxParallelism.toString,
           RuntimeSettingApplies.Restart,
+          sensitive = false
+        ),
+        RuntimeSettingField(
+          "explorationMaxSteps",
+          baselineExploration.maxSteps.toString,
+          overrides.explorationMaxSteps.map(_.toString),
+          effective.exploration.maxSteps.toString,
+          RuntimeSettingApplies.NextRun,
+          sensitive = false
+        ),
+        RuntimeSettingField(
+          "explorationMaxModelCalls",
+          baselineExploration.maxModelCalls.toString,
+          overrides.explorationMaxModelCalls.map(_.toString),
+          effective.exploration.maxModelCalls.toString,
+          RuntimeSettingApplies.NextRun,
+          sensitive = false
+        ),
+        RuntimeSettingField(
+          "explorationMaxRepeatedActions",
+          baselineExploration.maxRepeatedActions.toString,
+          overrides.explorationMaxRepeatedActions.map(_.toString),
+          effective.exploration.maxRepeatedActions.toString,
+          RuntimeSettingApplies.NextRun,
+          sensitive = false
+        ),
+        RuntimeSettingField(
+          "explorationMaxInputTokens",
+          baselineExploration.maxInputTokens.toString,
+          overrides.explorationMaxInputTokens.map(_.toString),
+          effective.exploration.maxInputTokens.toString,
+          RuntimeSettingApplies.NextRun,
+          sensitive = false
+        ),
+        RuntimeSettingField(
+          "explorationMaxOutputTokens",
+          baselineExploration.maxOutputTokens.toString,
+          overrides.explorationMaxOutputTokens.map(_.toString),
+          effective.exploration.maxOutputTokens.toString,
+          RuntimeSettingApplies.NextRun,
+          sensitive = false
+        ),
+        RuntimeSettingField(
+          "explorationMaxTotalTokens",
+          baselineExploration.maxTotalTokens.toString,
+          overrides.explorationMaxTotalTokens.map(_.toString),
+          effective.exploration.maxTotalTokens.toString,
+          RuntimeSettingApplies.NextRun,
+          sensitive = false
+        ),
+        RuntimeSettingField(
+          "explorationMaxDurationSeconds",
+          baselineExploration.maxDuration.toSeconds.toString,
+          overrides.explorationMaxDurationSeconds.map(_.toString),
+          effective.exploration.maxDuration.toSeconds.toString,
+          RuntimeSettingApplies.NextRun,
+          sensitive = false
+        ),
+        RuntimeSettingField(
+          "askMetering",
+          "只计量、不拒绝",
+          None,
+          "只计量、不拒绝",
+          RuntimeSettingApplies.Immediate,
+          sensitive = false
+        ),
+        RuntimeSettingField(
+          "costMetering",
+          "只计量、不拒绝",
+          None,
+          "只计量、不拒绝",
+          RuntimeSettingApplies.Immediate,
           sensitive = false
         ),
         RuntimeSettingField(

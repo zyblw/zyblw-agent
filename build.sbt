@@ -56,8 +56,8 @@ lazy val zioHttpVersion        = "3.11.6"
 lazy val postgresVersion       = "42.7.13"
 lazy val openTelemetryVersion  = "1.66.0"
 lazy val testContainersVersion = "0.44.1"
-lazy val flywayVersion         = "13.7.0"
-lazy val tikaVersion           = "4.0.0"
+lazy val flywayVersion         = "13.9.0"
+lazy val tikaVersion           = "4.1.0"
 lazy val commonSettings        = Seq(
   description := s"Provider-neutral Scala 3 and ZIO 2 agent framework module: ${name.value}",
   Compile / packageBin / packageOptions ++= Seq(
@@ -275,7 +275,7 @@ lazy val examples = project
     name                               := "zyblw-agent-examples",
     publish / skip                     := true,
     Compile / run / mainClass          := Some("com.zyblw.agent.examples.production.ProductionSupportHost"),
-    libraryDependencies += "com.zaxxer" % "HikariCP" % "6.3.2"
+    libraryDependencies += "com.zaxxer" % "HikariCP" % "7.1.0"
   )
 
 lazy val root = project

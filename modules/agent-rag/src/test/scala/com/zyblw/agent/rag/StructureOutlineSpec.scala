@@ -33,10 +33,17 @@ object StructureOutlineSpec extends ZIOSpecDefault:
       node("ch2", Some("book"), 4, 2, "第二章 人体系统的构成")
     )
   )
-  private def reply(text: String): ChatModel = new ChatModel:
-    val provider                       = "test"
+  private def reply(
+      text: String,
+      finish: FinishReason = FinishReason.Stop,
+      reasoning: Option[String] = None
+  ): ChatModel = new ChatModel:
+    val provider = "test"
     def complete(request: ChatRequest) =
-      ZIO.succeed(ChatResponse(AgentMessage.assistant(text), FinishReason.Stop, TokenUsage(1, 1)))
+      val message = reasoning.fold(AgentMessage.assistant(text))(value =>
+        AgentMessage.assistant(text).copy(metadata = Map("reasoning_content" -> value))
+      )
+      ZIO.succeed(ChatResponse(message, finish, TokenUsage(1, 1)))
 
   def spec = suite("StructureOutline")(
     test("完整目录按原书顺序编号，带页码和规则摘要的正文提示") {
@@ -69,7 +76,12 @@ object StructureOutlineSpec extends ZIOSpecDefault:
         StructureOutline.parseSelection("""{"ids":["s5"]}""", outline, 3) == Right(Chunk("ch2")),
         StructureOutline.parseSelection("""{"sections":[]}""", outline, 3) == Right(Chunk.empty),
         StructureOutline.parseSelection("""{"sections":["s99"]}""", outline, 3).isLeft,
-        StructureOutline.parseSelection("没有 JSON", outline, 3).isLeft
+        StructureOutline.parseSelection("没有 JSON", outline, 3).isLeft,
+        StructureOutline.parseSelection(
+          """<think>{"sections":["s99"]}</think>{"sections":["s5"]}""",
+          outline,
+          3
+        ) == Right(Chunk("ch2"))
       )
     },
     test("模型一次读目录选章，返回原书节点 ID") {
@@ -77,6 +89,25 @@ object StructureOutlineSpec extends ZIOSpecDefault:
         chosen <- ModelStructureNavigation
           .outlineSelect(reply("""{"sections":["s3","s4"]}"""), "光能和蒸汽能的关系", snapshot, 2)
         bad <- ModelStructureNavigation.outlineSelect(reply("""{"sections":["x"]}"""), "光能", snapshot, 2).exit
-      yield assertTrue(chosen == Chunk("light", "steam"), bad.isFailure)
+        longReply = ("说明" * 800) + """{"sections":["s5"]}"""
+        fromLength <- ModelStructureNavigation.outlineSelect(
+          reply(longReply, FinishReason.Length),
+          "蒸汽",
+          snapshot,
+          2,
+          StructureModelConfig(maxOutputChars = 1000)
+        )
+        fromReasoning <- ModelStructureNavigation.outlineSelect(
+          reply("", reasoning = Some("""{"sections":["s3"]}""")),
+          "光能",
+          snapshot,
+          2
+        )
+      yield assertTrue(
+        chosen == Chunk("light", "steam"),
+        bad.isFailure,
+        fromLength == Chunk("ch2"),
+        fromReasoning == Chunk("light")
+      )
     }
   )

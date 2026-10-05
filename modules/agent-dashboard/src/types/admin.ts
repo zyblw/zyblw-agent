@@ -300,6 +300,13 @@ export interface RuntimeOverrides {
   toolApprovalPolicy?: 'never' | 'risk-based' | 'always';
   toolMaxCallsPerRun?: number;
   toolMaxCallsPerStep?: number;
+  explorationMaxSteps?: number;
+  explorationMaxModelCalls?: number;
+  explorationMaxRepeatedActions?: number;
+  explorationMaxInputTokens?: number;
+  explorationMaxOutputTokens?: number;
+  explorationMaxTotalTokens?: number;
+  explorationMaxDurationSeconds?: number;
   retrievalTopK?: number;
   retrievalMinimumScore?: number;
   rerankEnabled?: boolean;

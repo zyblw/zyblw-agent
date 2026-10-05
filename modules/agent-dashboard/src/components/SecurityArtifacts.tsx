@@ -152,7 +152,7 @@ export function SecurityArtifacts({ onOpenConfig }: { onOpenConfig: () => void }
 
               <div className="mt-4 divide-y divide-slate-900">
                 <Field label="单 Run 工具调用上限">{effective(fields, 'toolMaxCallsPerRun')}</Field>
-                <Field label="单步工具调用上限">{effective(fields, 'toolMaxCallsPerStep')}</Field>
+                <Field label="单步工具调用">{effective(fields, 'toolMaxCallsPerStep')}</Field>
                 <Field label="并行度">{effective(fields, 'toolMaxParallelism')}</Field>
                 <Field label="单次执行超时">{effective(fields, 'toolDefaultTimeoutMillis')} ms</Field>
                 <Field label="结果字节上限">{effective(fields, 'toolMaxResultBytes')}</Field>

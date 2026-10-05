@@ -98,7 +98,11 @@ object ModelRouter:
         case None => AgentError.InvalidConfiguration("没有满足模型路由硬约束的候选")
     }
 
-  /** 使用现有 RoutedChatModel 的注册表，不能嵌套 FallbackChatModel 绕过路由与账本。 */
+  /** 使用现有 RoutedChatModel 的注册表，不能嵌套 FallbackChatModel 绕过路由与账本。
+    *
+    * `provider = "router"` 的外壳不是 [[RoutedChatModel]]，但 `complete` 会按请求里的 provider/model 转发。
+    * 问题理解和目录导航走这条外壳，调用方再把选中的模型写进请求。
+    */
   def adapter(model: ChatModel, ref: ModelRef): Either[AgentError, ChatModel] = model match
     case routed: RoutedChatModel =>
       routed.providers
@@ -106,8 +110,8 @@ object ModelRouter:
         .toRight(AgentError.ProviderNotFound(ref.provider))
         .flatMap(adapter(_, ref))
     case _: FallbackChatModel => Left(AgentError.InvalidConfiguration("耐久路由不能嵌套 FallbackChatModel"))
-    case leaf if leaf.provider == ref.provider => Right(leaf)
-    case _                                     => Left(AgentError.ProviderNotFound(ref.provider))
+    case leaf if leaf.provider == ref.provider || leaf.provider == "router" => Right(leaf)
+    case _                                                                  => Left(AgentError.ProviderNotFound(ref.provider))
 
   /** 请求内容与显式要求共同过滤；能力声明仍以 ModelCapabilities 为权威。 */
   def rejectionCodes(

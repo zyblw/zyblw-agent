@@ -49,8 +49,8 @@ export function validateOverrides(overrides: RuntimeOverrides): OverrideErrors {
   errors.toolMaxCallsPerRun = integerInRange(
     overrides.toolMaxCallsPerRun,
     1,
-    1000,
-    '单 Run 工具调用上限必须在 1 到 1000 之间',
+    128,
+    '单 Run 工具调用上限必须在 1 到 128 之间',
   );
   errors.toolMaxCallsPerStep = integerInRange(
     overrides.toolMaxCallsPerStep,
@@ -58,6 +58,57 @@ export function validateOverrides(overrides: RuntimeOverrides): OverrideErrors {
     100,
     '单步工具调用上限必须在 1 到 100 之间',
   );
+  errors.explorationMaxSteps = integerInRange(
+    overrides.explorationMaxSteps,
+    1,
+    64,
+    '问答步数熔断必须在 1 到 64 之间',
+  );
+  errors.explorationMaxModelCalls = integerInRange(
+    overrides.explorationMaxModelCalls,
+    1,
+    64,
+    '问答模型调用熔断必须在 1 到 64 之间',
+  );
+  errors.explorationMaxRepeatedActions = integerInRange(
+    overrides.explorationMaxRepeatedActions,
+    1,
+    16,
+    '问答重复动作熔断必须在 1 到 16 之间',
+  );
+  errors.explorationMaxInputTokens = integerInRange(
+    overrides.explorationMaxInputTokens,
+    1,
+    1_000_000,
+    '问答输入 token 熔断必须在 1 到 1000000 之间',
+  );
+  errors.explorationMaxOutputTokens = integerInRange(
+    overrides.explorationMaxOutputTokens,
+    1,
+    200_000,
+    '问答输出 token 熔断必须在 1 到 200000 之间',
+  );
+  errors.explorationMaxTotalTokens = integerInRange(
+    overrides.explorationMaxTotalTokens,
+    1,
+    1_200_000,
+    '问答累计 token 熔断必须在 1 到 1200000 之间',
+  );
+  errors.explorationMaxDurationSeconds = integerInRange(
+    overrides.explorationMaxDurationSeconds,
+    1,
+    1800,
+    '问答单次时长熔断必须在 1 到 1800 秒之间',
+  );
+  if (
+    overrides.explorationMaxTotalTokens !== undefined &&
+    ((overrides.explorationMaxInputTokens !== undefined &&
+      overrides.explorationMaxTotalTokens < overrides.explorationMaxInputTokens) ||
+      (overrides.explorationMaxOutputTokens !== undefined &&
+        overrides.explorationMaxTotalTokens < overrides.explorationMaxOutputTokens))
+  ) {
+    errors.explorationMaxTotalTokens = '问答累计 token 上限不能小于已设置的输入或输出上限';
+  }
   errors.retrievalTopK = integerInRange(overrides.retrievalTopK, 1, 100, '检索 topK 必须在 1 到 100 之间');
   errors.retrievalMinimumScore = numberInRange(
     overrides.retrievalMinimumScore,
