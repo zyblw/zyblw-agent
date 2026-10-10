@@ -61,6 +61,33 @@ export function QueueOps() {
 
       <ErrorBanner error={queue.error} context="读取队列快照" />
 
+      {/* 调度流水线全景图 */}
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-xs">
+        <div className="text-xs font-semibold text-slate-900 mb-2.5">分布式调度流转拓扑 (Worker Lease & Fencing)</div>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-2 text-xs">
+          <div className="rounded-lg bg-slate-50 p-3 border border-slate-200">
+            <div className="text-slate-500 text-[11px] font-medium">1. 待派发池 (Inbound)</div>
+            <div className="mt-1 font-semibold text-slate-900 text-sm">{formatCount(snapshot?.queuedCommands ?? 0)} 条排队</div>
+            <div className="text-[10px] text-slate-500 mt-0.5">PostgreSQL SKIP LOCKED 排他锁</div>
+          </div>
+          <div className="rounded-lg bg-emerald-50/60 p-3 border border-emerald-200">
+            <div className="text-emerald-700 text-[11px] font-medium">2. 活跃执行 (In-Flight)</div>
+            <div className="mt-1 font-semibold text-emerald-900 text-sm">{formatCount(snapshot?.leasedRuns ?? 0)} 个运行中</div>
+            <div className="text-[10px] text-emerald-600 mt-0.5">心跳与有界并发 Lane 驱动</div>
+          </div>
+          <div className="rounded-lg bg-amber-50/60 p-3 border border-amber-200">
+            <div className="text-amber-700 text-[11px] font-medium">3. 租约回收 (Recovery)</div>
+            <div className="mt-1 font-semibold text-amber-900 text-sm">{formatCount(snapshot?.expiredLeases ?? 0)} 个过期</div>
+            <div className="text-[10px] text-amber-600 mt-0.5">崩溃代际自愈与重领机制</div>
+          </div>
+          <div className="rounded-lg bg-rose-50/60 p-3 border border-rose-200">
+            <div className="text-rose-700 text-[11px] font-medium">4. 死信隔离 (Dead Letter)</div>
+            <div className="mt-1 font-semibold text-rose-900 text-sm">{formatCount(snapshot?.deadLetterCommands ?? 0)} 个需干预</div>
+            <div className="text-[10px] text-rose-600 mt-0.5">耗尽预算后等待人工诊断</div>
+          </div>
+        </div>
+      </div>
+
       {snapshot && (
         <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
           <Clock className="h-3 w-3" />
@@ -93,21 +120,21 @@ export function QueueOps() {
             {deadLetters.data?.map((command) => (
               <div
                 key={command.commandId}
-                className="rounded-lg border border-rose-900/40 bg-rose-950/10 px-3 py-2"
+                className="rounded-lg border border-rose-200 bg-rose-50/40 p-3"
               >
                 <div className="flex items-center gap-2 text-xs">
-                  <AlertOctagon className="h-3.5 w-3.5 shrink-0 text-rose-400" />
-                  <Badge className="text-rose-300 bg-rose-500/10 ring-rose-500/30">
+                  <AlertOctagon className="h-3.5 w-3.5 shrink-0 text-rose-600" />
+                  <Badge className="text-rose-700 bg-rose-50 ring-rose-600/20">
                     {command.commandType}
                   </Badge>
                   <CopyableId
                     value={command.commandId}
                     label="命令 ID"
                     truncate={8}
-                    className="text-slate-400"
+                    className="text-slate-700"
                   />
                   <span className="text-slate-500">Run</span>
-                  <CopyableId value={command.runId} label="Run ID" truncate={8} className="text-slate-400" />
+                  <CopyableId value={command.runId} label="Run ID" truncate={8} className="text-slate-700" />
                   <span className="ml-auto text-[11px] text-slate-500">
                     {formatRelative(command.updatedAtEpochMilli)}
                   </span>
@@ -118,7 +145,7 @@ export function QueueOps() {
                   <span>创建于 {formatInstant(command.createdAtEpochMilli)}</span>
                 </div>
                 {command.lastFailure && (
-                  <div className="mt-1.5 rounded bg-slate-950/60 px-2 py-1 text-[11px] text-rose-300/80">
+                  <div className="mt-1.5 rounded border border-rose-200/80 bg-rose-100/50 px-2.5 py-1 text-[11px] text-rose-800 font-mono">
                     {command.lastFailure}
                   </div>
                 )}

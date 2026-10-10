@@ -1,10 +1,10 @@
 'use client';
 
 /**
- * 管理台共用的展示原语。
+ * 管理台共用的展示原语 (Enterprise Clean Light Palette)。
  *
- * 抽出来的目的不是"减少代码量"，而是让加载、空、错误三种状态在六个面板里表现一致。一个面板用骨架屏、
- * 另一个用空白、第三个静默失败，会让运维无法判断"看不到数据"到底意味着什么。
+ * 采用整洁、清晰、现代的企业级浅色/白色体系（对齐 Stripe / GitHub / Linear）。
+ * 加载、空态、错误三态在所有工作台面板中保持一致规范。
  */
 
 import React, { useCallback, useEffect, useId, useState } from 'react';
@@ -14,12 +14,9 @@ import { useToast } from '@/lib/toast';
 
 /**
  * 统一的可见焦点环。
- *
- * 集中成一个常量而不是让每个控件各写一遍：暗色主题下焦点环很容易被写成与背景对比不足的颜色，只有一处定义
- * 才能保证键盘用户在所有面板里都能看清自己在哪。
  */
 export const FOCUS_RING =
-  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-1 focus-visible:ring-offset-slate-950';
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 focus-visible:ring-offset-1 focus-visible:ring-offset-white';
 
 /** 面板容器。 */
 export function Panel({
@@ -36,18 +33,34 @@ export function Panel({
   className?: string;
 }) {
   return (
-    <section className={`rounded-xl border border-slate-800 bg-slate-900/40 ${className}`}>
+    <section className={`rounded-xl border border-slate-200 bg-white shadow-xs transition-all duration-200 ${className}`}>
       {(title || actions) && (
-        <header className="flex items-start justify-between gap-4 border-b border-slate-800 px-4 py-3">
+        <header className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4 bg-slate-50/60 rounded-t-xl">
           <div>
-            {title && <h2 className="text-sm font-semibold text-slate-100">{title}</h2>}
-            {description && <p className="mt-0.5 text-xs text-slate-400">{description}</p>}
+            {title && <h2 className="text-sm font-semibold tracking-tight text-slate-900 flex items-center gap-2">{title}</h2>}
+            {description && <p className="mt-0.5 text-xs text-slate-500">{description}</p>}
           </div>
           {actions && <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">{actions}</div>}
         </header>
       )}
-      <div className="p-4">{children}</div>
+      <div className="p-5">{children}</div>
     </section>
+  );
+}
+
+/** 状态指示灯 */
+export function StatusDot({ status }: { status: 'running' | 'success' | 'warn' | 'danger' | 'idle' }) {
+  const styles = {
+    running: 'bg-emerald-500 ring-emerald-500/30 animate-pulse',
+    success: 'bg-emerald-500 ring-emerald-500/30',
+    warn: 'bg-amber-500 ring-amber-500/30 animate-pulse',
+    danger: 'bg-rose-500 ring-rose-500/30',
+    idle: 'bg-slate-400 ring-slate-400/20',
+  };
+  return (
+    <span className="relative flex h-2 w-2 items-center justify-center">
+      <span className={`inline-block h-2 w-2 rounded-full ring-2 ${styles[status]}`} />
+    </span>
   );
 }
 
@@ -57,25 +70,66 @@ export function StatCard({
   value,
   hint,
   tone = 'neutral',
+  icon,
 }: {
   label: string;
   value: React.ReactNode;
   hint?: string;
-  tone?: 'neutral' | 'warn' | 'danger' | 'good';
+  tone?: 'neutral' | 'warn' | 'danger' | 'good' | 'indigo';
+  icon?: React.ReactNode;
 }) {
-  const toneClass =
-    tone === 'warn'
-      ? 'text-amber-300'
-      : tone === 'danger'
-        ? 'text-rose-300'
-        : tone === 'good'
-          ? 'text-emerald-300'
-          : 'text-slate-100';
+  const toneClasses = {
+    warn: 'text-slate-900 border-amber-200 bg-amber-50/40 hover:border-amber-300',
+    danger: 'text-slate-900 border-rose-200 bg-rose-50/40 hover:border-rose-300',
+    good: 'text-slate-900 border-emerald-200 bg-emerald-50/40 hover:border-emerald-300',
+    indigo: 'text-slate-900 border-indigo-200 bg-indigo-50/40 hover:border-indigo-300',
+    neutral: 'text-slate-900 border-slate-200 bg-white hover:border-slate-300',
+  };
+
   return (
-    <div className="rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3">
-      <div className="text-xs text-slate-400">{label}</div>
-      <div className={`mt-1 text-2xl font-semibold tabular-nums ${toneClass}`}>{value}</div>
-      {hint && <div className="mt-1 text-xs text-slate-500">{hint}</div>}
+    <div className={`relative overflow-hidden rounded-xl border p-4 shadow-xs transition-all duration-200 ${toneClasses[tone]}`}>
+      <div className="flex items-center justify-between text-xs text-slate-500 font-medium">
+        <span>{label}</span>
+        {icon && <span className="opacity-70">{icon}</span>}
+      </div>
+      <div className="mt-2 text-2xl font-bold tracking-tight text-slate-900 tabular-nums">{value}</div>
+      {hint && <div className="mt-1 text-[11px] text-slate-500 leading-relaxed">{hint}</div>}
+    </div>
+  );
+}
+
+/** 分数对比条 (用于 RAG 检索 Dense / Sparse / Rerank) */
+export function ScoreBar({
+  label,
+  score,
+  max = 1,
+  color = 'indigo',
+}: {
+  label: string;
+  score: number;
+  max?: number;
+  color?: 'indigo' | 'emerald' | 'amber' | 'sky';
+}) {
+  const pct = Math.min(100, Math.max(0, (score / max) * 100));
+  const colorMap = {
+    indigo: 'bg-indigo-600',
+    emerald: 'bg-emerald-600',
+    amber: 'bg-amber-500',
+    sky: 'bg-sky-600',
+  };
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="text-slate-600 font-medium">{label}</span>
+        <span className="font-mono text-slate-900 font-semibold tabular-nums">{score.toFixed(4)}</span>
+      </div>
+      <div className="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all duration-300 ${colorMap[color]}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
     </div>
   );
 }
@@ -83,7 +137,7 @@ export function StatCard({
 /** 语义标签。 */
 export function Badge({
   children,
-  className = 'text-slate-300 bg-slate-500/10 ring-slate-500/30',
+  className = 'text-slate-700 bg-slate-100 ring-slate-200',
 }: {
   children: React.ReactNode;
   className?: string;
@@ -117,9 +171,9 @@ export function Button({
 }) {
   const base = `inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${FOCUS_RING}`;
   const variants = {
-    primary: 'bg-indigo-500 text-white hover:bg-indigo-400',
-    secondary: 'border border-slate-700 bg-slate-800/60 text-slate-200 hover:bg-slate-800',
-    danger: 'border border-rose-800 bg-rose-950/50 text-rose-200 hover:bg-rose-900/50',
+    primary: 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-xs active:bg-indigo-800',
+    secondary: 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:text-slate-900 shadow-xs',
+    danger: 'border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 shadow-xs',
   };
   return (
     <button
@@ -136,13 +190,10 @@ export function Button({
 }
 
 /** 输入控件共用的外观；集中一处以免各面板的边框与内距逐渐分叉。 */
-const CONTROL_CLASS = `w-full rounded-md border bg-slate-950/60 px-2.5 py-1.5 text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none ${FOCUS_RING}`;
+const CONTROL_CLASS = `w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-indigo-600 shadow-xs ${FOCUS_RING}`;
 
 /**
  * 文本输入。
- *
- * `label` 用包裹式关联而不是 `htmlFor`+`id`：包裹关联对屏幕阅读器等价，且不需要调用方为每个控件想一个
- * 全局唯一 id。`error` 同时驱动 `aria-invalid` 与描述文本，让校验失败对键盘和读屏用户同样可感知。
  */
 export function TextInput({
   value,
@@ -171,7 +222,7 @@ export function TextInput({
   const message = error ?? hint;
   return (
     <label className={`block ${className}`}>
-      {label && <span className="mb-1 block text-xs text-slate-400">{label}</span>}
+      {label && <span className="mb-1 block text-xs font-medium text-slate-700">{label}</span>}
       <input
         type={type}
         value={value}
@@ -181,10 +232,10 @@ export function TextInput({
         aria-invalid={error ? true : undefined}
         aria-describedby={message ? describedBy : undefined}
         onChange={(event) => onChange(event.target.value)}
-        className={`${CONTROL_CLASS} ${error ? 'border-rose-700' : 'border-slate-700'} disabled:opacity-50`}
+        className={`${CONTROL_CLASS} ${error ? 'border-rose-400 ring-rose-200' : ''} disabled:opacity-50 disabled:bg-slate-50`}
       />
       {message && (
-        <span id={describedBy} className={`mt-1 block text-[10px] ${error ? 'text-rose-400' : 'text-slate-500'}`}>
+        <span id={describedBy} className={`mt-1 block text-[10px] ${error ? 'text-rose-600 font-medium' : 'text-slate-500'}`}>
           {message}
         </span>
       )}
@@ -192,7 +243,7 @@ export function TextInput({
   );
 }
 
-/** 下拉选择；选项集合由调用方给出，空值项用于表达"沿用基线 / 不覆盖"。 */
+/** 下拉选择。 */
 export function Select({
   value,
   onChange,
@@ -216,14 +267,14 @@ export function Select({
   const message = error ?? hint;
   return (
     <label className={`block ${className}`}>
-      {label && <span className="mb-1 block text-xs text-slate-400">{label}</span>}
+      {label && <span className="mb-1 block text-xs font-medium text-slate-700">{label}</span>}
       <select
         value={value}
         disabled={disabled}
         aria-invalid={error ? true : undefined}
         aria-describedby={message ? describedBy : undefined}
         onChange={(event) => onChange(event.target.value)}
-        className={`${CONTROL_CLASS} ${error ? 'border-rose-700' : 'border-slate-700'} disabled:opacity-50`}
+        className={`${CONTROL_CLASS} ${error ? 'border-rose-400 ring-rose-200' : ''} disabled:opacity-50 disabled:bg-slate-50`}
       >
         {options.map((option) => (
           <option key={option.value} value={option.value} disabled={option.disabled}>
@@ -232,7 +283,7 @@ export function Select({
         ))}
       </select>
       {message && (
-        <span id={describedBy} className={`mt-1 block text-[10px] ${error ? 'text-rose-400' : 'text-slate-500'}`}>
+        <span id={describedBy} className={`mt-1 block text-[10px] ${error ? 'text-rose-600 font-medium' : 'text-slate-500'}`}>
           {message}
         </span>
       )}
@@ -242,9 +293,6 @@ export function Select({
 
 /**
  * 错误提示。
- *
- * 按 HTTP 语义分流处置建议：授权不足要补 scope，版本冲突要重新加载，能力缺失要在后端装配对应适配器。
- * 三者都显示成"请求失败"会让运维在错误的方向上排查。
  */
 export function ErrorBanner({ error, context }: { error: unknown; context?: string }) {
   if (!error) return null;
@@ -260,23 +308,23 @@ export function ErrorBanner({ error, context }: { error: unknown; context?: stri
           : undefined;
   const message = error instanceof Error ? error.message : String(error);
   return (
-    <div className="rounded-lg border border-rose-900/60 bg-rose-950/30 px-3 py-2 text-xs text-rose-200">
-      <div className="font-medium">
+    <div className="rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800 shadow-xs">
+      <div className="font-semibold text-rose-900">
         {context ? `${context}失败` : '请求失败'}
         {api ? `（${api.category}${api.status ? ` / HTTP ${api.status}` : ''}）` : ''}
       </div>
-      <div className="mt-0.5 text-rose-300/80">{message}</div>
-      {advice && <div className="mt-1 text-rose-300/60">{advice}</div>}
+      <div className="mt-0.5 text-rose-700">{message}</div>
+      {advice && <div className="mt-1 text-rose-600 font-medium">{advice}</div>}
     </div>
   );
 }
 
-/** 空状态；`reason` 用于说明"为什么是空的"，这通常比"暂无数据"有用得多。 */
+/** 空状态。 */
 export function EmptyState({ title, reason }: { title: string; reason?: string }) {
   return (
-    <div className="rounded-lg border border-dashed border-slate-800 px-4 py-8 text-center">
-      <div className="text-sm text-slate-400">{title}</div>
-      {reason && <div className="mx-auto mt-1 max-w-lg text-xs text-slate-600">{reason}</div>}
+    <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/50 px-4 py-8 text-center">
+      <div className="text-sm font-medium text-slate-700">{title}</div>
+      {reason && <div className="mx-auto mt-1 max-w-lg text-xs text-slate-500">{reason}</div>}
     </div>
   );
 }
@@ -286,7 +334,7 @@ export function LoadingRows({ rows = 3 }: { rows?: number }) {
   return (
     <div className="space-y-2">
       {Array.from({ length: rows }).map((_, index) => (
-        <div key={index} className="h-8 animate-pulse rounded-md bg-slate-800/50" />
+        <div key={index} className="h-8 animate-pulse rounded-md bg-slate-100" />
       ))}
     </div>
   );
@@ -295,9 +343,9 @@ export function LoadingRows({ rows = 3 }: { rows?: number }) {
 /** 键值对展示行。 */
 export function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex items-baseline justify-between gap-4 py-1">
+    <div className="flex items-baseline justify-between gap-4 py-1.5 border-b border-slate-100 last:border-b-0">
       <span className="text-xs text-slate-500">{label}</span>
-      <span className="text-right text-xs font-medium tabular-nums text-slate-200">{children}</span>
+      <span className="text-right text-xs font-medium tabular-nums text-slate-900">{children}</span>
     </div>
   );
 }
@@ -321,10 +369,6 @@ export function Mono({
 
 /**
  * 把一个标识写入剪贴板。
- *
- * `navigator.clipboard` 只在安全上下文可用，而管理台在内网常以裸 HTTP 访问，因此必须有降级路径：先试
- * 异步剪贴板 API，失败再退回一次性 textarea + `execCommand`，两者都不可用时给出明确回执，而不是静默失败
- * 让人以为已经复制成功。
  */
 async function writeClipboard(value: string): Promise<boolean> {
   try {
@@ -333,7 +377,7 @@ async function writeClipboard(value: string): Promise<boolean> {
       return true;
     }
   } catch {
-    // 落到下面的降级路径；权限被拒和不安全上下文都会走到这里。
+    // 降级
   }
   try {
     const holder = document.createElement('textarea');
@@ -351,7 +395,7 @@ async function writeClipboard(value: string): Promise<boolean> {
   }
 }
 
-/** 复制按钮；`label` 只用于无障碍名称，界面上是一个图标。 */
+/** 复制按钮。 */
 export function CopyButton({ value, label }: { value: string; label: string }) {
   const { notify } = useToast();
   const [copied, setCopied] = useState(false);
@@ -364,7 +408,6 @@ export function CopyButton({ value, label }: { value: string; label: string }) {
 
   const copy = useCallback(
     (event: React.MouseEvent) => {
-      // 复制按钮常常嵌在可点击的行里；不拦住冒泡的话，一次复制会顺带改变选中项。
       event.stopPropagation();
       void writeClipboard(value).then((ok) => {
         if (ok) setCopied(true);
@@ -380,24 +423,21 @@ export function CopyButton({ value, label }: { value: string; label: string }) {
       onClick={copy}
       aria-label={`复制${label}`}
       title={`复制${label}：${value}`}
-      className={`inline-flex shrink-0 items-center rounded p-0.5 text-slate-500 transition hover:bg-slate-800 hover:text-slate-200 ${FOCUS_RING}`}
+      className={`inline-flex shrink-0 items-center rounded p-0.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 ${FOCUS_RING}`}
     >
-      {copied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+      {copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
     </button>
   );
 }
 
 /**
  * 可复制的标识。
- *
- * 表格里展示截断值以免一列 UUID 把其它列挤没，但 `title` 与复制按钮拿到的都是完整值：运维需要的是把它粘进
- * 日志查询，而不是抄一个前 8 位。
  */
 export function CopyableId({
   value,
   label,
   truncate,
-  className = 'text-slate-300',
+  className = 'text-slate-800',
 }: {
   value: string;
   label: string;
@@ -417,9 +457,6 @@ export function CopyableId({
 
 /**
  * 乐观锁冲突的恢复入口。
- *
- * 409 之后重试同一份请求只会再次失败，因此这里给的不是"重试"而是"重新加载"：把服务端最新值取回来，并明确
- * 告知未保存的编辑已被丢弃。让运维在不知情的情况下把自己的旧快照再提交一次，会悄悄回滚别人刚做的改动。
  */
 export function ConflictNotice({
   onReload,
@@ -431,10 +468,10 @@ export function ConflictNotice({
   description?: string;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-900/60 bg-amber-950/20 px-3 py-2 text-xs text-amber-200">
+    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 shadow-xs">
       <div className="min-w-0 flex-1">
-        <div className="font-medium">配置已被其他管理员修改</div>
-        <div className="mt-0.5 text-amber-300/80">
+        <div className="font-semibold text-amber-950">配置已被其他管理员修改</div>
+        <div className="mt-0.5 text-amber-800">
           {description ?? '你的提交基于一个已过期的版本，因此被拒绝。重新加载会取回服务端最新值，你尚未保存的编辑将被丢弃。'}
         </div>
       </div>

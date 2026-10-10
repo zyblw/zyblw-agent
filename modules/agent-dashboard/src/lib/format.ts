@@ -61,6 +61,16 @@ export function formatPercent(ratio: number | null | undefined, digits = 1): str
   return `${(ratio * 100).toFixed(digits)}%`;
 }
 
+/** 费用渲染，避免直接展示原始高精度 BigDecimal 字符串如 0.0432940162248 */
+export function formatCost(raw: string | number | null | undefined, currency = '¥'): string {
+  if (raw === null || raw === undefined || raw === '') return '—';
+  const num = typeof raw === 'number' ? raw : parseFloat(raw);
+  if (isNaN(num)) return String(raw);
+  if (num === 0) return `${currency}0.00`;
+  if (num < 0.0001) return `<${currency}0.0001`;
+  return `${currency}${num.toFixed(4)}`;
+}
+
 /**
  * 把逗号或换行分隔的输入解析成去重列表。
  *
@@ -82,28 +92,28 @@ export function parseList(input: string): string[] {
 export function runStatusTone(status: string): string {
   switch (status) {
     case 'Completed':
-      return 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30';
+      return 'text-emerald-700 bg-emerald-50 ring-emerald-600/20';
     case 'Failed':
     case 'TimedOut':
     case 'BudgetExceeded':
-      return 'text-rose-300 bg-rose-500/10 ring-rose-500/30';
+      return 'text-rose-700 bg-rose-50 ring-rose-600/20';
     case 'Cancelled':
     case 'Created':
-      return 'text-slate-300 bg-slate-500/10 ring-slate-500/30';
+      return 'text-slate-600 bg-slate-100 ring-slate-500/20';
     case 'WaitingForApproval':
-      return 'text-amber-300 bg-amber-500/10 ring-amber-500/30';
+      return 'text-amber-800 bg-amber-50 ring-amber-600/25';
     case 'Suspended':
-      return 'text-violet-300 bg-violet-500/10 ring-violet-500/30';
+      return 'text-violet-700 bg-violet-50 ring-violet-600/20';
     case 'Running':
-      return 'text-sky-300 bg-sky-500/10 ring-sky-500/30';
+      return 'text-blue-700 bg-blue-50 ring-blue-600/20';
     default:
-      return 'text-slate-300 bg-slate-500/10 ring-slate-500/30';
+      return 'text-slate-600 bg-slate-100 ring-slate-500/20';
   }
 }
 
 /** 摄入任务状态到语义色的映射。 */
 export function ingestionStatusTone(status: string): string {
-  if (status === 'Completed') return 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30';
-  if (status === 'Failed') return 'text-rose-300 bg-rose-500/10 ring-rose-500/30';
-  return 'text-sky-300 bg-sky-500/10 ring-sky-500/30';
+  if (status === 'Completed') return 'text-emerald-700 bg-emerald-50 ring-emerald-600/20';
+  if (status === 'Failed') return 'text-rose-700 bg-rose-50 ring-rose-600/20';
+  return 'text-blue-700 bg-blue-50 ring-blue-600/20';
 }

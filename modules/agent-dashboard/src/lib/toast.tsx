@@ -67,10 +67,19 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
-const TONE_CLASS: Record<ToastTone, string> = {
-  success: 'border-emerald-800/70 bg-emerald-950/80 text-emerald-100',
-  error: 'border-rose-800/70 bg-rose-950/80 text-rose-100',
-  info: 'border-slate-700 bg-slate-900/90 text-slate-100',
+const TONE_CLASS: Record<ToastTone, { card: string; icon: string }> = {
+  success: {
+    card: 'border-emerald-200 bg-white text-slate-900 shadow-lg ring-1 ring-emerald-500/10',
+    icon: 'text-emerald-600',
+  },
+  error: {
+    card: 'border-rose-200 bg-white text-slate-900 shadow-lg ring-1 ring-rose-500/10',
+    icon: 'text-rose-600',
+  },
+  info: {
+    card: 'border-slate-200 bg-white text-slate-900 shadow-lg ring-1 ring-slate-900/5',
+    icon: 'text-indigo-600',
+  },
 };
 
 const TONE_ICON: Record<ToastTone, React.ComponentType<{ className?: string }>> = {
@@ -86,22 +95,23 @@ function ToastCard({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number)
   }, [toast.id, toast.tone, onDismiss]);
 
   const Icon = TONE_ICON[toast.tone];
+  const tone = TONE_CLASS[toast.tone];
   return (
     <div
-      className={`pointer-events-auto flex items-start gap-2 rounded-lg border px-3 py-2 text-xs shadow-lg backdrop-blur ${TONE_CLASS[toast.tone]}`}
+      className={`pointer-events-auto flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-xs shadow-md ${tone.card}`}
     >
-      <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+      <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${tone.icon}`} />
       <div className="min-w-0 flex-1">
-        <div className="font-medium">{toast.title}</div>
-        {toast.detail && <div className="mt-0.5 break-words opacity-80">{toast.detail}</div>}
+        <div className="font-semibold text-slate-900">{toast.title}</div>
+        {toast.detail && <div className="mt-0.5 break-words text-slate-600 text-[11px] leading-relaxed">{toast.detail}</div>}
       </div>
       <button
         type="button"
         onClick={() => onDismiss(toast.id)}
         aria-label="关闭通知"
-        className="shrink-0 rounded opacity-60 transition hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+        className="shrink-0 rounded p-0.5 text-slate-400 opacity-70 transition hover:opacity-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
       >
-        <X className="h-3 w-3" />
+        <X className="h-3.5 w-3.5" />
       </button>
     </div>
   );

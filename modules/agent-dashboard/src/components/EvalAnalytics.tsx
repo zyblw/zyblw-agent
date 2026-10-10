@@ -79,14 +79,14 @@ export function EvalAnalytics() {
                   type="button"
                   aria-pressed={active}
                   onClick={() => url.set({ suite: key })}
-                  className={`rounded-md border px-2.5 py-1.5 text-left text-xs transition ${FOCUS_RING} ${
+                  className={`rounded-lg border px-3 py-2 text-left text-xs transition ${FOCUS_RING} ${
                     active
-                      ? 'border-indigo-600 bg-indigo-950/30 text-slate-100'
-                      : 'border-slate-800 text-slate-400 hover:bg-slate-900'
+                      ? 'border-indigo-500 bg-indigo-50 text-indigo-900 shadow-xs ring-1 ring-indigo-200'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:text-slate-900'
                   }`}
                 >
-                  <div className="font-medium">{suite.suiteId}</div>
-                  <div className="text-[10px] text-slate-500">
+                  <div className="font-semibold">{suite.suiteId}</div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">
                     {suite.kind} · {suite.datasetId}@{suite.datasetVersion}
                   </div>
                 </button>
@@ -156,11 +156,11 @@ export function EvalAnalytics() {
                     <div className="overflow-x-auto">
                       <table className="w-full text-left text-xs">
                         <thead className="text-slate-500">
-                          <tr className="border-b border-slate-800">
-                            <th className="py-2 pr-3 font-medium">维度</th>
-                            <th className="py-2 pr-3 font-medium">最近分数</th>
-                            <th className="py-2 pr-3 font-medium">上次分数</th>
-                            <th className="py-2 pr-3 font-medium">门禁</th>
+                          <tr className="border-b border-slate-200">
+                            <th className="py-2.5 pr-3 font-semibold text-slate-700">维度</th>
+                            <th className="py-2.5 pr-3 font-semibold text-slate-700">最近分数</th>
+                            <th className="py-2.5 pr-3 font-semibold text-slate-700">上次分数</th>
+                            <th className="py-2.5 pr-3 font-semibold text-slate-700">门禁</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -171,14 +171,14 @@ export function EvalAnalytics() {
                             const delta =
                               current !== undefined && before !== undefined ? current - before : undefined;
                             return (
-                              <tr key={name} className="border-b border-slate-900">
-                                <td className="py-2 pr-3 text-slate-300">{name}</td>
-                                <td className="py-2 pr-3 tabular-nums text-slate-200">
+                              <tr key={name} className="border-b border-slate-100">
+                                <td className="py-2.5 pr-3 font-medium text-slate-900">{name}</td>
+                                <td className="py-2.5 pr-3 tabular-nums font-semibold text-slate-900">
                                   {formatScore(current)}
                                   {delta !== undefined && Math.abs(delta) > 1e-9 && (
                                     <span
-                                      className={`ml-1.5 inline-flex items-center text-[10px] ${
-                                        delta > 0 ? 'text-emerald-400' : 'text-rose-400'
+                                      className={`ml-1.5 inline-flex items-center text-[10px] font-medium ${
+                                        delta > 0 ? 'text-emerald-600' : 'text-rose-600'
                                       }`}
                                     >
                                       {delta > 0 ? (
@@ -190,18 +190,18 @@ export function EvalAnalytics() {
                                     </span>
                                   )}
                                 </td>
-                                <td className="py-2 pr-3 tabular-nums text-slate-500">
+                                <td className="py-2.5 pr-3 tabular-nums text-slate-500">
                                   {formatScore(before)}
                                 </td>
-                                <td className="py-2 pr-3">
+                                <td className="py-2.5 pr-3">
                                   {gate === undefined ? (
-                                    <span className="text-slate-600">未设门禁</span>
+                                    <span className="text-slate-400">未设门禁</span>
                                   ) : (
                                     <Badge
                                       className={
                                         gate
-                                          ? 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30'
-                                          : 'text-rose-300 bg-rose-500/10 ring-rose-500/30'
+                                          ? 'text-emerald-700 bg-emerald-50 ring-emerald-600/20'
+                                          : 'text-rose-700 bg-rose-50 ring-rose-600/20'
                                       }
                                     >
                                       {gate ? '通过' : '未通过'}
@@ -221,25 +221,25 @@ export function EvalAnalytics() {
                   {latest === undefined ? (
                     <EmptyState title="没有数据点" />
                   ) : (
-                    <div className="divide-y divide-slate-900">
+                    <div className="divide-y divide-slate-100">
                       <Field label="评测 ID">
                         <CopyableId
                           value={latest.evaluationId}
                           label="评测 ID"
                           truncate={24}
-                          className="text-slate-200"
+                          className="text-slate-900 font-semibold"
                         />
                       </Field>
                       <Field label="Harness 版本">{latest.harnessVersion}</Field>
                       <Field label="提交">
                         {latest.commitSha ? (
                           <span className="inline-flex items-center gap-1">
-                            <GitCommitHorizontal className="h-3 w-3" />
+                            <GitCommitHorizontal className="h-3.5 w-3.5 text-slate-500" />
                             <CopyableId
                               value={latest.commitSha}
                               label="提交 SHA"
                               truncate={12}
-                              className="text-slate-200"
+                              className="text-slate-900"
                             />
                           </span>
                         ) : (
@@ -294,24 +294,25 @@ function PassRateChart({ points }: { points: EvalTrendPointView[] }) {
               y1={y(tick)}
               y2={y(tick)}
               stroke="currentColor"
-              className="text-slate-800"
+              className="text-slate-200"
               strokeWidth={1}
             />
-            <text x={4} y={y(tick) + 3} className="fill-slate-600 text-[9px]">
+            <text x={4} y={y(tick) + 3} className="fill-slate-400 text-[9px] font-mono">
               {(tick * 100).toFixed(0)}%
             </text>
           </g>
         ))}
 
-        <path d={path} fill="none" stroke="currentColor" className="text-indigo-400" strokeWidth={1.5} />
+        <path d={path} fill="none" stroke="currentColor" className="text-indigo-600" strokeWidth={2} />
 
         {points.map((point, index) => (
           <circle
             key={point.evaluationId}
             cx={x(index)}
             cy={y(point.passRate)}
-            r={3}
-            className={point.passed ? 'fill-emerald-400' : 'fill-rose-400'}
+            r={3.5}
+            className={point.passed ? 'fill-emerald-600 stroke-white' : 'fill-rose-500 stroke-white'}
+            strokeWidth={1.5}
           >
             <title>
               {`${formatInstant(point.finishedAtEpochMilli)}\n通过率 ${formatPercent(point.passRate)}\n门禁 ${
@@ -323,14 +324,14 @@ function PassRateChart({ points }: { points: EvalTrendPointView[] }) {
 
         {points.length > 1 && (
           <>
-            <text x={padding.left} y={height - 6} className="fill-slate-600 text-[9px]">
+            <text x={padding.left} y={height - 6} className="fill-slate-400 text-[9px]">
               {formatInstant(points[0].finishedAtEpochMilli)}
             </text>
             <text
               x={width - padding.right}
               y={height - 6}
               textAnchor="end"
-              className="fill-slate-600 text-[9px]"
+              className="fill-slate-400 text-[9px]"
             >
               {formatInstant(points[points.length - 1].finishedAtEpochMilli)}
             </text>

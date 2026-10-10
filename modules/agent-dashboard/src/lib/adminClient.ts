@@ -432,4 +432,17 @@ export const adminApi = {
   ): Promise<EvalTrendSeries> {
     return request(config, `${ADMIN_BASE}/evals/trend${queryString({ ...identity, limit })}`);
   },
+
+  /** 对处于 WaitingForApproval 的 Run 提交审批决定（Approve/Reject）。 */
+  approveRun(
+    config: AdminClientConfig,
+    runId: string,
+    decision: 'approve' | 'reject',
+    reason?: string,
+  ): Promise<void> {
+    return request(config, `${ADMIN_BASE}/runs/${encodeURIComponent(runId)}/approval`, {
+      method: 'POST',
+      json: { decision, reason: reason ?? null },
+    });
+  },
 };

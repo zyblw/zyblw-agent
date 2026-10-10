@@ -4,6 +4,7 @@ import com.zyblw.agent.admin.*
 import com.zyblw.agent.composition.{CompositionComparisonView, RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.http.contract.AgentHttpProtocol
+import com.zyblw.agent.memory.{RunCommandPayload, RunCommandRecord, RunCommandStatus}
 import com.zyblw.agent.tools.{ApprovalPolicy, ToolPolicyConfig}
 import zio.*
 import zio.http.*
@@ -267,6 +268,34 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
     def plan(planId: com.zyblw.agent.harness.PlanId): IO[StoreError, Option[AdminHarnessView]] =
       calls.update(_ :+ s"harness-plan:${planId.asString}").as(None)
 
+  final private class RecordingCommands(val calls: Ref[Chunk[String]])
+      extends com.zyblw.agent.runtime.AgentCommandService:
+    private def unexpected[A](name: String): IO[AgentError, A] = ZIO.fail(AgentError.Unexpected(s"测试不应调用 $name"))
+    def submitStart(agent: AgentDefinition, request: RunRequest, idempotencyKey: String) = unexpected("submitStart")
+    def submitApproval(id: RunId, decision: ApprovalDecision, actor: RunContext) =
+      calls.update(_ :+ s"approval:${id.asString}:$decision").as(
+        RunCommandRecord(
+          commandId = CommandId(UUID.fromString("11111111-1111-1111-1111-111111111111")),
+          runId = id,
+          payload = RunCommandPayload.ResumeApproval("approval-1", decision),
+          idempotencyKey = "approval-key",
+          status = RunCommandStatus.Queued,
+          priority = 0,
+          availableAt = Instant.EPOCH,
+          attempt = 0,
+          manualRetryCount = 0,
+          lastFailure = None,
+          createdAt = Instant.EPOCH,
+          updatedAt = Instant.EPOCH
+        )
+      )
+    def submitCancel(id: RunId, reason: Option[String], actor: RunContext) = unexpected("submitCancel")
+    def submitRecover(id: RunId, actor: RunContext)                        = unexpected("submitRecover")
+    def submitRetry(id: RunId, requestId: String, reason: String, actor: RunContext) = unexpected("submitRetry")
+    def retryDeadLetter(id: CommandId, actor: RunContext, availableAt: Instant)       = unexpected("retryDeadLetter")
+    def inspect(id: CommandId, actor: RunContext) = unexpected("inspect")
+    def list(id: RunId, actor: RunContext)        = unexpected("list")
+
   /** 全部能力都装配的 API，附带知识与模型适配器的调用记录。 */
   private def fullApi: UIO[(AdminHttpApi, Ref[Chunk[String]])] =
     for
@@ -289,6 +318,7 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
           inspection = Some(new RecordingInspection(calls)),
           harness = Some(new RecordingHarness(calls)),
           memoryGovernance = true,
+          commands = Some(new RecordingCommands(calls)),
           observability = ObservabilityLinks(langfuseBaseUrl = Some("https://langfuse.example.com"))
         ),
         contexts
@@ -586,6 +616,7 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
           view.runInspection,
           view.harness,
           view.memoryGovernance,
+          view.runControl,
           !view.queueOps,
           !view.evalTrends,
           view.observability.langfuseBaseUrl.contains("https://langfuse.example.com")
@@ -637,7 +668,8 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
           !view.models,
           !view.runInspection,
           !view.harness,
-          !view.memoryGovernance
+          !view.memoryGovernance,
+          !view.runControl
         )
       },
       test("所有管理响应都带上 API 版本响应头") {
@@ -871,6 +903,81 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
           body.contains("FailRun"),
           !body.contains(streamSecret),
           recorded.exists(_.startsWith("suspension:"))
+        )
+      }
+    ),
+    suite("审批控制与人机干预")(
+      test("缺少写权限时提交审批返回 403") {
+        for
+          tuple <- fullApi
+          (api, _) = tuple
+          unauthorized <- api.routes.runZIO(
+            Request.post(
+              admin / "runs" / streamRunId.asString / "approval",
+              Body.fromString("""{"decision":"approve"}""")
+            )
+          )
+          readOnlyDenied <- api.routes.runZIO(
+            withScopes(
+              Request.post(
+                admin / "runs" / streamRunId.asString / "approval",
+                Body.fromString("""{"decision":"approve"}""")
+              ),
+              AdminAuthorization.ReadScope
+            )
+          )
+        yield assertTrue(
+          unauthorized.status == Status.Forbidden,
+          readOnlyDenied.status == Status.Forbidden
+        )
+      },
+      test("未知审批决定 fail-closed 返回 400") {
+        for
+          tuple <- fullApi
+          (api, _) = tuple
+          response <- api.routes.runZIO(
+            withScopes(
+              Request.post(
+                admin / "runs" / streamRunId.asString / "approval",
+                Body.fromString("""{"decision":"maybe"}""")
+              ),
+              AdminAuthorization.WriteScope
+            )
+          )
+        yield assertTrue(response.status == Status.BadRequest)
+      },
+      test("持有写权限且装配命令服务时，批准与驳回均正常提交并返回 202 回执") {
+        for
+          tuple <- fullApi
+          (api, calls) = tuple
+          approveResp <- api.routes.runZIO(
+            withScopes(
+              Request.post(
+                admin / "runs" / streamRunId.asString / "approval",
+                Body.fromString("""{"decision":"approve"}""")
+              ),
+              AdminAuthorization.WriteScope
+            )
+          )
+          rejectResp <- api.routes.runZIO(
+            withScopes(
+              Request.post(
+                admin / "runs" / streamRunId.asString / "approval",
+                Body.fromString("""{"decision":"reject","reason":"高危操作拦截"}""")
+              ),
+              AdminAuthorization.WriteScope
+            )
+          )
+          approveBody <- approveResp.body.asString
+          rejectBody  <- rejectResp.body.asString
+          recorded    <- calls.get
+        yield assertTrue(
+          approveResp.status == Status.Accepted,
+          rejectResp.status == Status.Accepted,
+          approveBody.contains("Queued"),
+          rejectBody.contains("Queued"),
+          recorded.exists(_.startsWith(s"approval:${streamRunId.asString}:Approve")),
+          recorded.exists(_.startsWith(s"approval:${streamRunId.asString}:Reject"))
         )
       }
     )

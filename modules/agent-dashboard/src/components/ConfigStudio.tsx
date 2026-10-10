@@ -41,17 +41,17 @@ import {
 const APPLIES_META: Record<RuntimeSettingApplies, { label: string; tone: string; hint: string }> = {
   Immediate: {
     label: '立即生效',
-    tone: 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30',
+    tone: 'text-emerald-700 bg-emerald-50 ring-emerald-600/20 font-medium',
     hint: '下一次工具执行或检索即生效，无需重启或新建 Run。',
   },
   NextRun: {
     label: '下个 Run',
-    tone: 'text-sky-300 bg-sky-500/10 ring-sky-500/30',
+    tone: 'text-blue-700 bg-blue-50 ring-blue-600/20 font-medium',
     hint: '既有 Run 在创建时已把该值冻结进状态，改动它只影响此后新建的 Run。',
   },
   Restart: {
     label: '需重启',
-    tone: 'text-slate-400 bg-slate-500/10 ring-slate-500/30',
+    tone: 'text-slate-600 bg-slate-100 ring-slate-400/20 font-medium',
     hint: '该值在装配依赖图时被固化为不可变资源，因此不接受运行时覆盖。',
   },
 };
@@ -186,8 +186,100 @@ function ConfigEditor({
     );
   }
 
+  const diffCount = dirty
+    ? Object.keys(draft).filter(
+        (k) =>
+          JSON.stringify((draft as Record<string, unknown>)[k]) !==
+          JSON.stringify((view.overrides as Record<string, unknown>)[k]),
+      ).length
+    : 0;
+
+  const [category, setCategory] = useState<'all' | 'tools' | 'exploration' | 'rag' | 'model'>('all');
+
+  function applyPreset(name: string) {
+    if (name === 'strict') {
+      setDraft({
+        ...draft,
+        toolApprovalPolicy: 'risk-based',
+        toolMaxCallsPerRun: 32,
+        explorationMaxSteps: 16,
+        explorationMaxRepeatedActions: 5,
+        explorationMaxDurationSeconds: 60,
+      });
+      setReason('套用预设：严格安全生产模式');
+      notify('info', '已载入严格生产预设', '包含基于风险审批、步数收敛限制，请审核后保存');
+    } else if (name === 'fast') {
+      setDraft({
+        ...draft,
+        toolApprovalPolicy: 'never',
+        toolMaxCallsPerRun: 16,
+        explorationMaxSteps: 12,
+        retrievalTopK: 3,
+        rerankEnabled: false,
+      });
+      setReason('套用预设：极速低延迟模式');
+      notify('info', '已载入极速响应预设', '关闭重排、减少召回条数，请审核后保存');
+    } else if (name === 'explore') {
+      setDraft({
+        ...draft,
+        toolApprovalPolicy: 'never',
+        toolMaxCallsPerRun: 64,
+        explorationMaxSteps: 48,
+        explorationMaxRepeatedActions: 10,
+        explorationMaxTotalTokens: 2000000,
+        retrievalTopK: 8,
+        rerankEnabled: true,
+      });
+      setReason('套用预设：深度探索与规划模式');
+      notify('info', '已载入深度探索预设', '提升步数上限与 Token 预算，适合复杂任务');
+    }
+  }
+
+  const filteredFields = view.fields.filter((field) => {
+    if (category === 'all') return true;
+    if (category === 'tools') return field.key.startsWith('tool');
+    if (category === 'exploration') return field.key.startsWith('exploration');
+    if (category === 'rag') return field.key.startsWith('retrieval') || field.key.startsWith('rerank');
+    if (category === 'model') return field.key.startsWith('model');
+    return true;
+  });
+
   return (
     <div className="space-y-4 p-4">
+      {/* 预设场景快捷工具条 */}
+      <div className="rounded-xl border border-indigo-100 bg-gradient-to-r from-indigo-50/80 via-white to-slate-50 p-3.5 shadow-xs">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Zap className="h-4 w-4 text-indigo-600" />
+            <span className="text-xs font-semibold text-slate-900">场景化配置预设</span>
+            <span className="text-[11px] text-slate-500">一键按行业最佳实践调整运行工作点</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => applyPreset('strict')}
+              className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 hover:bg-amber-100 transition shadow-xs"
+            >
+              🛡️ 严格生产模式 (安全第一)
+            </button>
+            <button
+              type="button"
+              onClick={() => applyPreset('fast')}
+              className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100 transition shadow-xs"
+            >
+              ⚡ 极速低延迟模式 (精简召回)
+            </button>
+            <button
+              type="button"
+              onClick={() => applyPreset('explore')}
+              className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-medium text-blue-800 hover:bg-blue-100 transition shadow-xs"
+            >
+              🔬 深度探索模式 (放宽预算)
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard label="覆盖版本" value={view.overrideVersion} hint="乐观锁令牌" />
         <StatCard
@@ -209,6 +301,11 @@ function ConfigEditor({
         description="基线来自部署配置，覆盖持久化在数据库并在多副本间以秒级延迟传播"
         actions={
           <>
+            {diffCount > 0 && (
+              <span className="inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800 ring-1 ring-inset ring-amber-600/20">
+                {diffCount} 项待保存改动
+              </span>
+            )}
             <TextInput value={reason} onChange={setReason} placeholder="变更原因（进入审计）" className="w-56" />
             <Button
               variant="secondary"
@@ -230,6 +327,33 @@ function ConfigEditor({
           </>
         }
       >
+        {/* 分类过滤器 */}
+        <div className="mb-3 flex flex-wrap items-center gap-1.5 border-b border-slate-200 pb-2.5">
+          <span className="text-xs text-slate-500 mr-1 font-medium">分类视角:</span>
+          {(
+            [
+              { id: 'all', label: '全部配置' },
+              { id: 'tools', label: '🛡️ 工具与安全' },
+              { id: 'exploration', label: '🧭 探索与发散限制' },
+              { id: 'rag', label: '🔍 检索与重排' },
+              { id: 'model', label: '🧠 模型参数' },
+            ] as const
+          ).map((cat) => (
+            <button
+              key={cat.id}
+              type="button"
+              onClick={() => setCategory(cat.id)}
+              className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${
+                category === cat.id
+                  ? 'bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200'
+                  : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+              }`}
+            >
+              {cat.label}
+            </button>
+          ))}
+        </div>
+
         {conflict ? (
           <ConflictNotice
             onReload={() => {
@@ -244,7 +368,7 @@ function ConfigEditor({
         )}
 
         {errors.toolSetOverlap && (
-          <div className="mt-2 rounded-lg border border-rose-900/60 bg-rose-950/30 px-3 py-2 text-xs text-rose-200">
+          <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
             {errors.toolSetOverlap}
           </div>
         )}
@@ -252,16 +376,16 @@ function ConfigEditor({
         <div className="mt-1 overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="text-slate-500">
-              <tr className="border-b border-slate-800">
-                <th className="py-2 pr-3 font-medium">配置项</th>
-                <th className="py-2 pr-3 font-medium">部署基线</th>
-                <th className="py-2 pr-3 font-medium">覆盖值</th>
-                <th className="py-2 pr-3 font-medium">当前生效</th>
-                <th className="py-2 pr-3 font-medium">生效边界</th>
+              <tr className="border-b border-slate-200">
+                <th className="py-2.5 pr-3 font-semibold text-slate-700">配置项</th>
+                <th className="py-2.5 pr-3 font-semibold text-slate-700">部署基线</th>
+                <th className="py-2.5 pr-3 font-semibold text-slate-700">覆盖值</th>
+                <th className="py-2.5 pr-3 font-semibold text-slate-700">当前生效</th>
+                <th className="py-2.5 pr-3 font-semibold text-slate-700">生效边界</th>
               </tr>
             </thead>
             <tbody>
-              {view.fields.map((field) => (
+              {filteredFields.map((field) => (
                 <ConfigRow
                   key={field.key}
                   field={field}
@@ -274,7 +398,7 @@ function ConfigEditor({
           </table>
         </div>
 
-        <p className="mt-3 text-[11px] text-slate-600">
+        <p className="mt-3 text-[11px] text-slate-500 leading-relaxed">
           覆盖层是基线之上的稀疏补丁：清空一项等于恢复基线，而不是把它设成默认值。收紧策略会让后续工具调用
           被拒绝或要求审批；放宽策略只影响尚未规划的批次，已冻结进运行状态的预算不受影响。
         </p>
@@ -295,11 +419,11 @@ function ConfigEditor({
             {history.data?.map((record) => (
               <div
                 key={record.version}
-                className="flex items-start gap-3 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs"
+                className="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50/50 hover:bg-slate-50 px-3 py-2.5 text-xs transition"
               >
                 <Badge>v{record.version}</Badge>
                 <div className="min-w-0 flex-1">
-                  <div className="text-slate-300">{record.reason || '（未填写原因）'}</div>
+                  <div className="text-slate-900 font-medium">{record.reason || '（未填写原因）'}</div>
                   <div className="mt-0.5 text-[11px] text-slate-500">
                     {record.updatedBy} · {formatInstant(record.updatedAtEpochMilli)} ·{' '}
                     {Object.values(record.overrides).filter((value) => value !== undefined).length} 项覆盖
@@ -343,19 +467,19 @@ function ConfigRow({
   const error = errors[key];
 
   return (
-    <tr className="border-b border-slate-900 align-top">
-      <td className="py-2 pr-3">
+    <tr className="border-b border-slate-100 align-top hover:bg-slate-50/50 transition">
+      <td className="py-2.5 pr-3">
         <div>
           <div className="flex items-center gap-1.5">
-            <Mono className="text-slate-200">{field.key}</Mono>
+            <Mono className="text-slate-900 font-semibold">{field.key}</Mono>
             {(field.key === 'askMetering' || field.key === 'costMetering') && (
-              <a href="/admin/operations" className="block text-[11px] text-sky-400 underline">
+              <a href="/admin/operations" className="block text-[11px] text-blue-600 underline hover:text-blue-800">
                 网站运营数据
               </a>
             )}
             {field.sensitive && (
               <span title="安全敏感项：改动会直接影响工具治理或审批强度">
-                <ShieldAlert className="h-3 w-3 text-amber-400" />
+                <ShieldAlert className="h-3.5 w-3.5 text-amber-500" />
               </span>
             )}
           </div>
@@ -364,8 +488,8 @@ function ConfigRow({
           )}
         </div>
       </td>
-      <td className="py-2 pr-3 text-slate-500">{field.baselineValue}</td>
-      <td className="py-2 pr-3">
+      <td className="py-2.5 pr-3 text-slate-500 font-mono text-[11px]">{field.baselineValue}</td>
+      <td className="py-2.5 pr-3">
         <ValueEditor
           editor={editor}
           value={current}
@@ -373,23 +497,23 @@ function ConfigRow({
           invalid={error !== undefined}
           onChange={(value) => onChange(key, value)}
         />
-        {error && <div className="mt-1 max-w-56 text-[10px] text-rose-400">{error}</div>}
+        {error && <div className="mt-1 max-w-56 text-[10px] text-rose-600 font-medium">{error}</div>}
         {overridden && editor !== 'readonly' && editor !== 'model' && (
           <button
             type="button"
             onClick={() => onChange(key, undefined)}
-            className={`mt-1 rounded text-[10px] text-slate-500 underline hover:text-slate-300 ${FOCUS_RING}`}
+            className={`mt-1 rounded text-[10px] text-slate-500 underline hover:text-slate-800 ${FOCUS_RING}`}
           >
             清除覆盖，恢复基线
           </button>
         )}
       </td>
-      <td className="py-2 pr-3">
-        <span className={overridden ? 'font-medium text-amber-200' : 'text-slate-300'}>
+      <td className="py-2.5 pr-3">
+        <span className={overridden ? 'font-semibold text-amber-700 font-mono text-[11px]' : 'text-slate-700 font-mono text-[11px]'}>
           {field.effectiveValue}
         </span>
       </td>
-      <td className="py-2 pr-3">
+      <td className="py-2.5 pr-3">
         <span title={meta.hint}>
           <Badge className={meta.tone}>
             {field.applies === 'Immediate' && <Zap className="mr-1 h-2.5 w-2.5" />}
@@ -421,20 +545,20 @@ function ValueEditor({
   onChange: (value: unknown) => void;
 }) {
   if (editor === 'readonly') {
-    return <span className="text-[11px] text-slate-600">不可覆盖</span>;
+    return <span className="text-[11px] text-slate-400">不可覆盖</span>;
   }
 
   if (editor === 'model') {
     return (
       <span className="text-[11px] text-slate-500">
         {value === undefined ? '沿用角色绑定' : String(value)}
-        <span className="block text-slate-600">到宿主 /admin/models 绑定角色</span>
+        <span className="block text-slate-400">到宿主 /admin/models 绑定角色</span>
       </span>
     );
   }
 
-  const control = `rounded border bg-slate-950/60 px-1.5 py-1 text-xs text-slate-100 ${FOCUS_RING} ${
-    invalid ? 'border-rose-700' : 'border-slate-700'
+  const control = `rounded border bg-white px-2 py-1 text-xs text-slate-900 shadow-xs ${FOCUS_RING} ${
+    invalid ? 'border-rose-400 focus:border-rose-500' : 'border-slate-300 focus:border-indigo-600'
   }`;
 
   if (editor === 'boolean') {

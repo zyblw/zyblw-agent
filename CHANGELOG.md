@@ -24,5 +24,9 @@
 - `ModelRoleSource`：`AgentCommandServiceLive.configuredWithRoles`、`HarnessCommandServiceLive.configuredWithRoles`、`AgentRuntimeDriver.layerWithRoleSource`、`AgentApplication.durableGovernedWithRoles` 在每次创建 Run 时读取角色目录，结果仍冻结进组合指纹。
 - `ProfileEmbeddingRouter`：`DefaultRetriever(profileEmbeddings = …)` 在解析 pinned/active Profile 之后选择查询向量模型，换 Embedding 的蓝绿切换期间旧 Profile 继续可查，目标 Profile 验收探测使用新模型。
 - 工具链对齐 2026-10-05 已验证最新稳定线：sbt 2.0.10、Flyway 13.9.0、Tika 4.1.0、示例模块 HikariCP 7.1.0。ZIO 2.1.26、ZIO HTTP 3.11.6、zio-schema 1.8.7 与 zio-json 1.0.0 已是这条 HTTP 官方依赖线的最新组合；Scala 留在 3.9.0 LTS。Loader 身份改为 `apache-tika-4.1.0`。
+- `ModelCallExecutionRecord.providerRequestId` 保存通过长度与控制字符检查的供应商请求号。旧账本缺该字段时为空，不用本地 requestId 代替。
+- 管理面在装配 `AdminCapabilities.commands` 后暴露 `capabilities.runControl`，以及 `POST /api/v1/admin/runs/{runId}/approval`（`agent:admin:write`）。请求体是 `approve` 或 `reject`，驳回可带原因；成功返回 `202` 与命令回执。未装配时路由不存在。
+- 控制台改为左侧栏加工作区。页签仍由 capabilities 决定。运行检查页只在 `runControl` 为真时提交审批。
+- `AgentTransition`、`AgentHandoffEnvelope` 与 `HandoffPolicy` 是核心里的交接类型。内核步进仍走现有 `Transition`，宿主不能把该枚举当成已经执行的多智能体交接。
 
 能力成熟度依 canonical roadmap。首次空库构建通过不代表真实领域模型、容量、soak 或生产发布已经验收。首版公开发布后才冻结 V001 与兼容基线。

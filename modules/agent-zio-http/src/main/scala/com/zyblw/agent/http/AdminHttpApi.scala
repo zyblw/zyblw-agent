@@ -103,6 +103,7 @@ final case class AdminCapabilitiesView(
     runInspection: Boolean = false,
     harness: Boolean = false,
     memoryGovernance: Boolean = false,
+    runControl: Boolean = false,
     observability: ObservabilityLinks
 ) derives JsonCodec
 
@@ -127,6 +128,8 @@ final case class AdminCapabilitiesView(
   * @param models
   *   已注册模型目录与连通性探活。模型的**切换**不在这里，而是通过 `config` 的覆盖写入完成，因此只装配 `models` 而不装配 `config`
   *   会得到一个只能看不能改的模型页——这是有意的组合，适合不希望运维改动模型的部署
+  * @param commands
+  *   控制面交互执行服务；注入后可在管理端提交审批通过/驳回决定
   * @param observability
   *   外部观测系统深链配置
   */
@@ -141,6 +144,7 @@ final case class AdminCapabilities(
     inspection: Option[RunInspectionAdmin] = None,
     harness: Option[HarnessInspectionAdmin] = None,
     memoryGovernance: Boolean = false,
+    commands: Option[com.zyblw.agent.runtime.AgentCommandService] = None,
     observability: ObservabilityLinks = ObservabilityLinks()
 )
 
@@ -165,7 +169,7 @@ final class AdminHttpApi(
 
   /** 可与 `AgentHttpApi.routes` 使用 `++` 合并的管理面路由。 */
   val routes: Routes[Any, Nothing] =
-    (metaRoutes ++ runRoutes ++ runEventRoutes ++ inspectionRoutes ++ harnessRoutes ++ configRoutes ++ opsRoutes ++ evalRoutes ++
+    (metaRoutes ++ runRoutes ++ runEventRoutes ++ runControlRoutes ++ inspectionRoutes ++ harnessRoutes ++ configRoutes ++ opsRoutes ++ evalRoutes ++
       modelRoutes ++ knowledgeDebugRoutes) @@
       HandlerAspect.addHeader(AgentHttpProtocol.ApiVersionHeader, AgentHttpProtocol.ApiVersionHeaderValue)
 
@@ -187,6 +191,7 @@ final class AdminHttpApi(
               runInspection = capabilities.inspection.isDefined,
               harness = capabilities.harness.isDefined,
               memoryGovernance = capabilities.memoryGovernance,
+              runControl = capabilities.commands.isDefined,
               observability = capabilities.observability
             ).toJson
           )
@@ -194,6 +199,36 @@ final class AdminHttpApi(
       }
     }
   )
+
+  /** 管理端任务控制路由（审批通过/驳回）。要求 agent:admin:write 权限。 */
+  private def runControlRoutes: Routes[Any, Nothing] = capabilities.commands.fold(Routes.empty) { cmdService =>
+    Routes(
+      Method.POST / "api" / "v1" / "admin" / "runs" / string("runId") / "approval" ->
+        handler { (runId: String, request: Request) =>
+          respond {
+            for
+              actor   <- authorizeWrite(request)
+              parsed  <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+              command <- decodeJson[ApprovalCommand](request)
+              _       <- ZIO.foreachDiscard(command.reason)(reason =>
+                validateText("reason", reason, AgentHttpLimits.ReasonChars)
+              )
+              decision <- command.decision.toLowerCase match
+                case "approve" => ZIO.succeed(ApprovalDecision.Approve)
+                case "reject"  => ZIO.succeed(ApprovalDecision.Reject(command.reason.getOrElse("rejected")))
+                case other     => ZIO.fail(AgentError.InvalidConfiguration(s"未知审批决定: $other"))
+              record <- cmdService.submitApproval(parsed, decision, actor)
+              receipt = CommandReceipt(
+                record.commandId.asString,
+                record.runId.asString,
+                record.payload.commandType,
+                record.status.toString
+              )
+            yield Response.json(receipt.toJson).status(Status.Accepted)
+          }
+        }
+    )
+  }
 
   /** Run 目录：列表与状态聚合。 */
   private def runRoutes: Routes[Any, Nothing] = capabilities.runs.fold(Routes.empty) { directory =>
