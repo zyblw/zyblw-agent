@@ -1,7 +1,7 @@
 # 管理 API 与运维控制台
 
 > 状态：当前（Beta；不属于稳定 OpenAPI 承诺，见 [HTTP API 演进 §2.1](http-api-versioning.md)）
-> 最后核验：2026-09-23
+> 最后核验：2026-10-10
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -35,6 +35,7 @@ val adminApi = new AdminHttpApi(
     knowledge = Some(knowledgeAdmin),
     evals = Some(evalTrends),
     models = Some(modelAdmin),
+    commands = Some(commandService),
     observability = observabilityLinks
   ),
   contexts = requestContexts
@@ -317,12 +318,20 @@ Provider 的「模型不存在」掩盖，看不出其实是本地目录里就�
 **模型切换没有独立的写端点。** 它复用 `PUT /api/v1/admin/config`，因此同样受 CAS 保护。`GET
 /api/v1/admin/models` 是只读目录兼写入校验依据；`POST /api/v1/admin/models/probe` 是付费探活。详见 1.6。
 
+**等待审批的 Run 由命令服务提交决定。** 只有 `AdminCapabilities.commands` 注入了 `AgentCommandService` 时才挂载
+`POST /api/v1/admin/runs/{runId}/approval`，此时 `capabilities.runControl` 为 `true`。请求体是
+`ApprovalCommand(decision, reason)`：`decision` 为 `approve` 或 `reject`，`reject` 可以带原因。调用方需要
+`agent:admin:write`。成功返回 `202` 和命令回执，不在管理响应里带回工具参数或模型正文。未装配时该路由不存在，
+控制台也不显示审批按钮。
+
 ## 4. 控制台
 
 控制台是纯浏览器端应用，不持有状态、不做服务端数据获取、不直连数据库。使用与部署见
-[`modules/agent-dashboard/README.md`](../modules/agent-dashboard/README.md)。
+[`modules/agent-dashboard/README.md`](../modules/agent-dashboard/README.md)。当前外壳是左侧栏加右侧工作区，
+页签状态仍写在 URL 的 `tab` 参数里。
 
 页签可见性由 `capabilities` 决定。未装配能力对应的页签不会显示，而不是显示一个只会返回 404 的空面板。
+运行检查里的通过/驳回只在 `runControl` 为真时提交。
 
 控制台与后端不同源时，宿主需要允许控制台来源的 CORS 预检，否则浏览器会在 `capabilities` 探测阶段就失败。
 

@@ -101,7 +101,9 @@ final case class ModelCallExecutionRecord(
     routeDecision: Option[com.zyblw.agent.model.RouteDecision] = None,
     priceSnapshot: Option[ModelPrice] = None,
     priceBookFingerprint: Option[String] = None,
-    usageReporting: Boolean = false
+    usageReporting: Boolean = false,
+    /** 供应商请求号。旧账本没有该字段时为空，不拿本地 requestId 冒充。 */
+    providerRequestId: Option[String] = None
 ) derives JsonCodec:
   def toChatRequest: Either[String, ChatRequest] =
     for
@@ -141,6 +143,11 @@ final case class ModelCallExecutionRecord(
           s"工具定义指纹与 CanonicalModelRequest 不一致 expected=${expected.take(12)} actual=${actual.take(12)}"
         )
       case _ => Right(())
+
+object ModelCallExecutionRecord:
+  /** 能放进产品用量列的供应商请求号。过长或含控制字符的值留空，不阻断结算。 */
+  def acceptableProviderRequestId(id: String): Boolean =
+    id.nonEmpty && id.length <= 200 && !id.exists(_.isControl)
 
 /** 当前未结算的主模型调用游标；不携带 prompt 正文。 */
 final case class PendingModelCall(

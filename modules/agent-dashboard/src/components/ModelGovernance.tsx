@@ -152,14 +152,55 @@ export function ModelGovernance() {
             onSelect={selectCombination}
           />
 
+          {/* 弹性高可用降级链路拓扑 */}
+          <div className="rounded-xl border border-indigo-200 bg-indigo-50/30 p-4 shadow-xs">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-indigo-600" />
+                <span className="text-xs font-semibold text-slate-900">高可用模型降级拓扑 (Fallback Chain)</span>
+              </div>
+              <Badge className="text-emerald-700 bg-emerald-50 ring-emerald-600/20">
+                ZIO 结构化断路器驱动
+              </Badge>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <div className="flex items-center gap-2 rounded-lg bg-white border border-indigo-200 px-3 py-2 shadow-xs">
+                <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="text-slate-500 font-medium">主选 Provider:</span>
+                <span className="font-bold text-indigo-900">{view?.defaultProvider ?? '默认'}</span>
+              </div>
+              <span className="text-slate-400">➔ 瞬时故障自愈 ➔</span>
+              {providers
+                .filter((p) => p !== view?.defaultProvider)
+                .map((fallbackProvider) => (
+                  <div
+                    key={fallbackProvider}
+                    className="flex items-center gap-2 rounded-lg bg-white border border-slate-200 px-3 py-2 text-slate-700 shadow-xs"
+                  >
+                    <span className="h-1.5 w-1.5 rounded-full bg-slate-400" />
+                    <span>备用目标:</span>
+                    <Mono className="font-semibold text-slate-900">{fallbackProvider}</Mono>
+                  </div>
+                ))}
+              {providers.length <= 1 && (
+                <span className="text-slate-400 text-[11px]">
+                  （当前仅注册单一 Provider；若需跨厂商主备容灾，可装配 FallbackChatModel 候选）
+                </span>
+              )}
+            </div>
+            <p className="mt-2.5 text-[11px] text-slate-500 leading-relaxed">
+              保护规则：仅瞬时故障（429 限流、5xx 超载、网络超时）触发候选降级；工具 Schema 不兼容、Prompt 注入拦截等严格语义一律 fail-closed，杜绝静默篡改。
+            </p>
+          </div>
+
           <div className="grid gap-4 xl:grid-cols-2">
             <Panel title="生效模型" description="由宿主管理台的角色绑定决定；本页只读">
-              <div className="space-y-2 text-xs leading-6 text-slate-400">
+              <div className="space-y-2 text-xs leading-6 text-slate-600">
                 <p>
                   连接、模型、角色与价格统一在宿主的「模型」管理页维护：每次运行按角色（或用户所选模型）钉住
                   provider/model，改绑后下一次调用即生效，全局模型覆盖不再参与路由。
                 </p>
-                <a href="/admin/models" className="inline-flex items-center gap-1 text-sky-300 hover:underline">
+                <a href="/admin/models" className="inline-flex items-center gap-1 text-indigo-600 font-medium hover:underline">
                   前往模型管理页 →
                 </a>
               </div>
@@ -200,10 +241,10 @@ function CapabilityBadges({ option }: { option: ModelOptionView }) {
           key={flag.label}
           className={
             flag.on
-              ? 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30'
+              ? 'text-emerald-700 bg-emerald-50 ring-emerald-600/20'
               : flag.critical
-                ? 'text-rose-300 bg-rose-500/10 ring-rose-500/30'
-                : 'text-slate-500 bg-slate-500/5 ring-slate-700/60'
+                ? 'text-rose-700 bg-rose-50 ring-rose-600/20'
+                : 'text-slate-400 bg-slate-100 ring-slate-200'
           }
         >
           {flag.label}
@@ -237,38 +278,38 @@ function ModelCatalogTable({
       description="装配时注册的全部 Provider 与模型；点击一行即选中它作为切换与探活的目标"
       actions={
         missingCredentials > 0 ? (
-          <Badge className="text-rose-300 bg-rose-500/10 ring-rose-500/30">
+          <Badge className="text-rose-700 bg-rose-50 ring-rose-600/20">
             {missingCredentials} 个组合缺凭据
           </Badge>
         ) : (
-          <Badge className="text-emerald-300 bg-emerald-500/10 ring-emerald-500/30">凭据全部就位</Badge>
+          <Badge className="text-emerald-700 bg-emerald-50 ring-emerald-600/20">凭据全部就位</Badge>
         )
       }
     >
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
         <table className="w-full text-left text-xs">
           <caption className="sr-only">已注册模型目录，按 Provider 分组</caption>
-          <thead className="text-slate-500">
-            <tr className="border-b border-slate-800">
-              <th scope="col" className="py-2 pr-3 font-medium">模型</th>
-              <th scope="col" className="py-2 pr-3 font-medium">能力</th>
-              <th scope="col" className="py-2 pr-3 font-medium">上下文窗口</th>
-              <th scope="col" className="py-2 pr-3 font-medium">单价 / 百万 token</th>
-              <th scope="col" className="py-2 pr-3 font-medium">凭据</th>
+          <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+            <tr>
+              <th scope="col" className="py-2.5 px-3 font-semibold">模型</th>
+              <th scope="col" className="py-2.5 px-3 font-semibold">能力</th>
+              <th scope="col" className="py-2.5 px-3 font-semibold">上下文窗口</th>
+              <th scope="col" className="py-2.5 px-3 font-semibold">单价 / 百万 token</th>
+              <th scope="col" className="py-2.5 px-3 font-semibold">凭据</th>
             </tr>
           </thead>
           {providers.map((provider) => {
             const group = options.filter((option) => option.provider === provider);
             const first = group[0];
             return (
-              <tbody key={provider}>
-                <tr className="bg-slate-900/40">
-                  <th scope="colgroup" colSpan={5} className="py-1.5 pr-3 text-left font-medium text-slate-300">
+              <tbody key={provider} className="divide-y divide-slate-100">
+                <tr className="bg-slate-50/80 border-b border-slate-100">
+                  <th scope="colgroup" colSpan={5} className="py-2 px-3 text-left font-semibold text-slate-800">
                     <span className="inline-flex items-center gap-2">
-                      <Boxes className="h-3.5 w-3.5 text-slate-500" />
+                      <Boxes className="h-3.5 w-3.5 text-slate-400" />
                       {provider}
                       {first?.isDefaultProvider && (
-                        <Badge className="text-indigo-300 bg-indigo-500/10 ring-indigo-500/30">默认 Provider</Badge>
+                        <Badge className="text-indigo-700 bg-indigo-50 ring-indigo-200">默认 Provider</Badge>
                       )}
                       {first && <span className="text-[11px] font-normal text-slate-500">{first.protocol}</span>}
                     </span>
@@ -282,11 +323,11 @@ function ModelCatalogTable({
                     <tr
                       key={`${option.provider}/${option.model}`}
                       onClick={() => onSelect(option.provider, option.model)}
-                      className={`cursor-pointer border-b border-slate-900 align-top transition hover:bg-slate-900/60 ${
-                        selected ? 'bg-indigo-950/30' : ''
-                      } ${option.credential.present ? '' : 'bg-rose-950/10'}`}
+                      className={`cursor-pointer border-b border-slate-100 align-top transition hover:bg-slate-50 ${
+                        selected ? 'bg-indigo-50/70 ring-1 ring-inset ring-indigo-200' : ''
+                      } ${option.credential.present ? '' : 'bg-rose-50/30'}`}
                     >
-                      <td className="py-2 pr-3">
+                      <td className="py-2.5 px-3">
                         <div className="flex flex-wrap items-center gap-1.5">
                           {/* 行的 onClick 只是指针便利；真正的可达控件是这个按钮。只装配了模型目录而没有
                               配置能力的部署里没有下拉框，此时它是键盘用户选中探活目标的唯一入口。 */}
@@ -294,64 +335,64 @@ function ModelCatalogTable({
                             type="button"
                             aria-pressed={selected}
                             onClick={() => onSelect(option.provider, option.model)}
-                            className={`rounded ${FOCUS_RING}`}
+                            className={`rounded font-medium ${FOCUS_RING}`}
                           >
-                            <Mono className="text-slate-200">{option.model}</Mono>
+                            <Mono className="text-slate-900">{option.model}</Mono>
                           </button>
                           {effective && (
-                            <Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">当前生效</Badge>
+                            <Badge className="text-amber-800 bg-amber-50 ring-amber-600/25">当前生效</Badge>
                           )}
                         </div>
                         <div className="mt-0.5 text-[11px] text-slate-500">{option.displayName}</div>
                         {!option.declaredModel && (
-                          <div className="mt-1 text-[10px] text-amber-400/80">
+                          <div className="mt-1 text-[10px] text-amber-600 font-medium">
                             部署默认模型，能力按 Provider 级推断
                           </div>
                         )}
                       </td>
-                      <td className="py-2 pr-3">
+                      <td className="py-2.5 px-3">
                         <CapabilityBadges option={option} />
                       </td>
-                      <td className="py-2 pr-3 tabular-nums text-slate-400">
+                      <td className="py-2.5 px-3 tabular-nums text-slate-700">
                         <div>入 {formatCount(option.capabilities.maxInputTokens ?? null)}</div>
-                        <div className="text-slate-500">出 {formatCount(option.capabilities.maxOutputTokens ?? null)}</div>
+                        <div className="text-slate-500 text-[11px]">出 {formatCount(option.capabilities.maxOutputTokens ?? null)}</div>
                       </td>
-                      <td className="py-2 pr-3 tabular-nums text-slate-400">
+                      <td className="py-2.5 px-3 tabular-nums text-slate-700 font-mono">
                         {option.price ? (
                           <>
                             <div>
                               入 {option.price.inputPerMillionTokens} {option.price.currency}
                             </div>
-                            <div className="text-slate-500">
+                            <div className="text-slate-500 text-[11px]">
                               出 {option.price.outputPerMillionTokens} {option.price.currency}
                             </div>
                             {option.price.cachedInputPerMillionTokens && (
-                              <div className="text-slate-600">
+                              <div className="text-slate-500 text-[10px]">
                                 缓存读 {option.price.cachedInputPerMillionTokens} {option.price.currency}
                               </div>
                             )}
                             {option.price.cacheWriteInputPerMillionTokens && (
-                              <div className="text-slate-600">
+                              <div className="text-slate-500 text-[10px]">
                                 缓存写 {option.price.cacheWriteInputPerMillionTokens} {option.price.currency}
                               </div>
                             )}
                           </>
                         ) : (
-                          <span className="text-slate-600">未定价 · 成本未知</span>
+                          <span className="text-slate-400">未定价 · 成本未知</span>
                         )}
                       </td>
-                      <td className="py-2 pr-3">
+                      <td className="py-2.5 px-3">
                         {option.credential.present ? (
-                          <span className="inline-flex items-center gap-1 text-emerald-300">
+                          <span className="inline-flex items-center gap-1 text-emerald-700">
                             <KeyRound className="h-3 w-3" />
-                            <Mono className="text-slate-400">{option.credential.reference}</Mono>
+                            <Mono className="text-slate-600">{option.credential.reference}</Mono>
                           </span>
                         ) : (
-                          <div className="text-rose-300">
+                          <div className="text-rose-700">
                             <span className="inline-flex items-center gap-1 font-medium">
                               <AlertTriangle className="h-3 w-3" /> 缺凭据
                             </span>
-                            <div className="mt-0.5 text-[10px] text-rose-300/80">
+                            <div className="mt-0.5 text-[10px] text-rose-600">
                               切到它会因缺凭据而全线失败；请先配置 <Mono>{option.credential.reference}</Mono>
                             </div>
                           </div>
@@ -366,7 +407,7 @@ function ModelCatalogTable({
         </table>
       </div>
 
-      <p className="mt-3 text-[11px] text-slate-600">
+      <p className="mt-3 text-[11px] text-slate-500">
         管理台只能看到凭据是否就位以及它来自哪个引用，看不到也不会请求 Key 值。能力位来自 Provider 的声明，
         用于在切换前发现「这个模型不支持工具调用」这类会让 Agent 循环直接退化的组合。
       </p>
@@ -392,7 +433,7 @@ function ModelProbePanel({
     <Panel
       title="连通性探活"
       description="向 Provider 发一次最小真实调用，验证凭据有效、路由可达、能力协商通过"
-      actions={<Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">需要 agent:admin:debug</Badge>}
+      actions={<Badge className="text-amber-800 bg-amber-50 ring-amber-600/25">需要 agent:admin:debug</Badge>}
     >
       <div className="flex flex-wrap items-center gap-2">
         <Button
@@ -414,7 +455,7 @@ function ModelProbePanel({
           <Radio className="h-3 w-3" /> {probe.isPending ? '探活中…' : '执行探活（产生真实费用）'}
         </Button>
         {option && !option.credential.present && (
-          <span className="text-[11px] text-rose-300">该组合缺凭据，探活预计会以认证失败告终。</span>
+          <span className="text-[11px] text-rose-600 font-medium">该组合缺凭据，探活预计会以认证失败告终。</span>
         )}
       </div>
 
@@ -423,16 +464,16 @@ function ModelProbePanel({
       </div>
 
       {result ? (
-        <div className="mt-3 divide-y divide-slate-900">
+        <div className="mt-3 divide-y divide-slate-100">
           <Field label="结果">
             {result.succeeded ? (
-              <Badge className="text-emerald-300 bg-emerald-500/10 ring-emerald-500/30">成功</Badge>
+              <Badge className="text-emerald-700 bg-emerald-50 ring-emerald-600/20">成功</Badge>
             ) : (
-              <Badge className="text-rose-300 bg-rose-500/10 ring-rose-500/30">失败</Badge>
+              <Badge className="text-rose-700 bg-rose-50 ring-rose-600/20">失败</Badge>
             )}
           </Field>
           <Field label="实际路由">
-            <Mono>
+            <Mono className="text-slate-900 font-semibold">
               {result.provider} / {result.model}
             </Mono>
           </Field>
@@ -441,10 +482,10 @@ function ModelProbePanel({
             入 {formatCount(result.inputTokens)} · 出 {formatCount(result.outputTokens)}
           </Field>
           <Field label="失败分类">
-            {result.failureCode ? <Mono className="text-rose-300">{result.failureCode}</Mono> : '—'}
+            {result.failureCode ? <Mono className="text-rose-700 font-semibold">{result.failureCode}</Mono> : '—'}
           </Field>
           {!result.succeeded && (
-            <div className="py-2 text-xs leading-relaxed text-rose-200">
+            <div className="py-2.5 text-xs leading-relaxed text-rose-700 font-medium">
               {probeFailureMessage(result.failureCode)}
             </div>
           )}
@@ -460,8 +501,8 @@ function ModelProbePanel({
         )
       )}
 
-      <p className="mt-3 flex items-start gap-1.5 text-[11px] text-slate-600">
-        <Sparkles className="mt-0.5 h-3 w-3 shrink-0" />
+      <p className="mt-3 flex items-start gap-1.5 text-[11px] text-slate-500">
+        <Sparkles className="mt-0.5 h-3 w-3 shrink-0 text-indigo-600" />
         探活只返回是否成功、耗时和 token 用量，不返回模型输出正文。否则一个只需要 agent:admin:debug 的端点
         就变成了可以向任意 Provider 提问并读回答案的通道。
       </p>
@@ -492,17 +533,17 @@ function EmbeddingSection({ embedding }: { embedding: EmbeddingModelView | null 
       title="向量化模型"
       description="只读；更换 Embedding 模型必须走迁移与全量重新摄入，不能在运行时切换"
       actions={
-        <Badge className="text-slate-400 bg-slate-500/10 ring-slate-500/30">
+        <Badge className="text-slate-600 bg-slate-100 ring-slate-200">
           <CircleSlash className="mr-1 h-2.5 w-2.5" /> 不可切换
         </Badge>
       }
     >
       {mismatch && (
-        <div className="mb-3 rounded-lg border border-rose-900/60 bg-rose-950/30 px-3 py-2 text-xs text-rose-200">
-          <div className="flex items-center gap-1.5 font-medium">
+        <div className="mb-3 rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800">
+          <div className="flex items-center gap-1.5 font-semibold text-rose-900">
             <AlertTriangle className="h-3.5 w-3.5" /> 模型维度与索引维度不一致
           </div>
-          <div className="mt-0.5 text-rose-300/80">
+          <div className="mt-0.5 text-rose-700">
             模型输出 {embedding.dimension} 维，索引列固定为 {embedding.indexDimension} 维。任何摄入都会在写入前
             失败，既有向量也无法与新查询向量比较。需要执行匹配维度的迁移并全量重新摄入。
           </div>
@@ -510,16 +551,16 @@ function EmbeddingSection({ embedding }: { embedding: EmbeddingModelView | null 
       )}
 
       <div className="grid gap-x-8 md:grid-cols-2">
-        <div className="divide-y divide-slate-900">
+        <div className="divide-y divide-slate-100">
           <Field label="Provider">{embedding.provider}</Field>
           <Field label="模型">
-            <Mono>{embedding.model}</Mono>
+            <Mono className="text-slate-900 font-semibold">{embedding.model}</Mono>
           </Field>
         </div>
-        <div className="divide-y divide-slate-900">
+        <div className="divide-y divide-slate-100">
           <Field label="模型输出维度">{formatCount(embedding.dimension)}</Field>
           <Field label="索引列维度">
-            <span className={mismatch ? 'text-rose-300' : undefined}>
+            <span className={mismatch ? 'text-rose-700 font-bold' : undefined}>
               {embedding.indexDimension === null || embedding.indexDimension === undefined
                 ? '—'
                 : formatCount(embedding.indexDimension)}
@@ -528,7 +569,7 @@ function EmbeddingSection({ embedding }: { embedding: EmbeddingModelView | null 
         </div>
       </div>
 
-      <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-[11px] leading-relaxed text-slate-400">
+      <p className="mt-3 rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2 text-[11px] leading-relaxed text-slate-600">
         {embedding.immutableReason}
       </p>
     </Panel>

@@ -1,8 +1,5 @@
 @import "tailwindcss";
 
-/*
- * 使用系统字体栈，生产构建不访问 Google Fonts；中文控制台在 Linux/macOS/Windows 上均有明确回退。
- */
 @theme {
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
     'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
@@ -10,31 +7,47 @@
 }
 
 :root {
-  --background: #020617;
-  --foreground: #f8fafc;
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --sidebar-bg: #ffffff;
+  --sidebar-border: #e2e8f0;
+  --panel-bg: #ffffff;
+  --panel-border: #e2e8f0;
+  --accent-primary: #4f46e5;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background-color: #f8fafc;
+  color: #0f172a;
   font-family: var(--font-sans);
+  min-height: 100vh;
 }
 
-/* Custom Scrollbar for IDE Panels */
+/* 现代化精致浅色滚动条 */
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
 .custom-scrollbar::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.6);
+  background: transparent;
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(51, 65, 85, 0.8);
+  background: #cbd5e1;
   border-radius: 9999px;
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: rgba(71, 85, 105, 1);
+  background: #94a3b8;
+}
+
+/* 微交互动效 */
+@keyframes subtle-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(0.96); }
+}
+
+.animate-subtle-pulse {
+  animation: subtle-pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }

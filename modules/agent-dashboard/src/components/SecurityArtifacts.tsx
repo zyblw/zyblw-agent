@@ -83,24 +83,24 @@ export function SecurityArtifacts({ onOpenConfig }: { onOpenConfig: () => void }
       <ErrorBanner error={config.error} context="读取安全配置" />
 
       {sensitiveOverrides.length > 0 && (
-        <div className="rounded-lg border border-amber-900/60 bg-amber-950/20 px-3 py-2 text-xs">
-          <div className="flex items-center gap-1.5 font-medium text-amber-200">
-            <ShieldAlert className="h-3.5 w-3.5" /> 有安全敏感配置正在以覆盖值运行
+        <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-3 text-xs">
+          <div className="flex items-center gap-1.5 font-semibold text-amber-900">
+            <ShieldAlert className="h-4 w-4 text-amber-600" /> 有安全敏感配置正在以覆盖值运行
           </div>
-          <div className="mt-1.5 space-y-1">
+          <div className="mt-2 space-y-1.5">
             {sensitiveOverrides.map((field) => (
-              <div key={field.key} className="flex items-center gap-2 text-[11px] text-amber-300/80">
-                <Mono>{field.key}</Mono>
-                <span className="text-amber-300/50">{field.baselineValue}</span>
-                <ArrowRight className="h-2.5 w-2.5" />
-                <span className="font-medium">{field.effectiveValue}</span>
+              <div key={field.key} className="flex items-center gap-2 text-[11px] text-amber-800">
+                <Mono className="font-semibold text-amber-900">{field.key}</Mono>
+                <span className="text-amber-700/70">{field.baselineValue}</span>
+                <ArrowRight className="h-2.5 w-2.5 text-amber-500" />
+                <span className="font-bold text-amber-950">{field.effectiveValue}</span>
               </div>
             ))}
           </div>
           <button
             type="button"
             onClick={onOpenConfig}
-            className={`mt-2 rounded text-[11px] text-amber-200 underline ${FOCUS_RING}`}
+            className={`mt-2.5 inline-block text-[11px] font-medium text-amber-800 underline hover:text-amber-950 ${FOCUS_RING}`}
           >
             在配置页查看并修改
           </button>
@@ -114,18 +114,18 @@ export function SecurityArtifacts({ onOpenConfig }: { onOpenConfig: () => void }
           ) : (
             <>
               <div className="mb-3">
-                <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-emerald-300">
-                  <Unlock className="h-3.5 w-3.5" /> 白名单（{allowed.length}）
+                <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-emerald-800">
+                  <Unlock className="h-3.5 w-3.5 text-emerald-600" /> 白名单（{allowed.length}）
                 </div>
                 {allowed.length === 0 ? (
-                  <div className="rounded border border-rose-900/50 bg-rose-950/20 px-2 py-1.5 text-[11px] text-rose-300">
+                  <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-800 leading-relaxed">
                     白名单为空：当前配置禁用全部工具。这是 fail-closed 语义下的合法状态，但如果并非有意，
                     模型将无法调用任何工具。
                   </div>
                 ) : (
-                  <div className="flex flex-wrap gap-1">
+                  <div className="flex flex-wrap gap-1.5">
                     {allowed.map((tool) => (
-                      <Badge key={tool} className="text-emerald-300 bg-emerald-500/10 ring-emerald-500/30">
+                      <Badge key={tool} className="text-emerald-700 bg-emerald-50 ring-emerald-600/20 font-medium">
                         {tool}
                       </Badge>
                     ))}
@@ -134,15 +134,15 @@ export function SecurityArtifacts({ onOpenConfig }: { onOpenConfig: () => void }
               </div>
 
               <div>
-                <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-rose-300">
-                  <Lock className="h-3.5 w-3.5" /> 黑名单（{denied.length}）
+                <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-rose-800">
+                  <Lock className="h-3.5 w-3.5 text-rose-600" /> 黑名单（{denied.length}）
                 </div>
                 {denied.length === 0 ? (
-                  <div className="text-[11px] text-slate-600">没有显式拒绝的工具。</div>
+                  <div className="text-[11px] text-slate-500">没有显式拒绝的工具。</div>
                 ) : (
-                  <div className="flex flex-wrap gap-1">
+                  <div className="flex flex-wrap gap-1.5">
                     {denied.map((tool) => (
-                      <Badge key={tool} className="text-rose-300 bg-rose-500/10 ring-rose-500/30">
+                      <Badge key={tool} className="text-rose-700 bg-rose-50 ring-rose-600/20 font-medium">
                         {tool}
                       </Badge>
                     ))}
@@ -150,7 +150,7 @@ export function SecurityArtifacts({ onOpenConfig }: { onOpenConfig: () => void }
                 )}
               </div>
 
-              <div className="mt-4 divide-y divide-slate-900">
+              <div className="mt-4 divide-y divide-slate-100 border-t border-slate-100 pt-1">
                 <Field label="单 Run 工具调用上限">{effective(fields, 'toolMaxCallsPerRun')}</Field>
                 <Field label="单步工具调用">{effective(fields, 'toolMaxCallsPerStep')}</Field>
                 <Field label="并行度">{effective(fields, 'toolMaxParallelism')}</Field>
@@ -182,21 +182,21 @@ export function SecurityArtifacts({ onOpenConfig }: { onOpenConfig: () => void }
               {approvals.data?.items.map((run) => (
                 <div
                   key={run.runId}
-                  className="rounded-lg border border-amber-900/40 bg-amber-950/10 px-3 py-2 text-xs"
+                  className="rounded-lg border border-amber-200 bg-amber-50/50 p-2.5 text-xs"
                 >
                   <div className="flex items-center gap-2">
-                    <CopyableId value={run.runId} label="Run ID" truncate={8} />
-                    <span className="text-slate-500">{run.agentId}</span>
+                    <CopyableId value={run.runId} label="Run ID" truncate={8} className="text-slate-900" />
+                    <span className="text-slate-600 font-medium">{run.agentId}</span>
                     <Badge className={runStatusTone(run.status)}>{run.status}</Badge>
                     <span className="ml-auto text-[11px] text-slate-500">
                       {formatRelative(run.updatedAtEpochMilli)}
                     </span>
                   </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-x-3 text-[11px] text-slate-500">
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 text-[11px] text-slate-600">
                     <span>
-                      工具 <Mono className="text-amber-300">{run.pendingApprovalToolName ?? '未知'}</Mono>
+                      工具 <Mono className="font-semibold text-slate-900">{run.pendingApprovalToolName ?? '未知'}</Mono>
                     </span>
-                    <Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">
+                    <Badge className="text-amber-800 bg-amber-100 ring-amber-600/20">
                       风险 {run.pendingApprovalRisk ?? '未知'}
                     </Badge>
                     <span>租户 {run.tenantId ?? '—'}</span>
@@ -213,27 +213,27 @@ export function SecurityArtifacts({ onOpenConfig }: { onOpenConfig: () => void }
         <div className="grid gap-3 md:grid-cols-3 text-xs">
           <ScopeCard
             scope="agent:admin:read"
-            tone="text-sky-300 bg-sky-500/10 ring-sky-500/30"
+            tone="text-blue-700 bg-blue-50 ring-blue-600/20"
             description="只读聚合：Run 目录、队列积压、有效配置快照、评测趋势。泄漏面最小，可以发给值班与监控。"
           />
           <ScopeCard
             scope="agent:admin:write"
-            tone="text-amber-300 bg-amber-500/10 ring-amber-500/30"
+            tone="text-amber-700 bg-amber-50 ring-amber-600/20"
             description="改变部署行为：工具白名单、审批策略、死信重排。蕴含读权限，因为改配置前必须先看到当前配置。"
           />
           <ScopeCard
             scope="agent:admin:debug"
-            tone="text-rose-300 bg-rose-500/10 ring-rose-500/30"
+            tone="text-rose-700 bg-rose-50 ring-rose-600/20"
             description="产生真实 Provider 费用：检索沙盒与模型探活。不被写权限蕴含；沙盒另外需要 knowledge:read。"
           />
           <ScopeCard
             scope="knowledge:read / write"
-            tone="text-emerald-300 bg-emerald-500/10 ring-emerald-500/30"
+            tone="text-emerald-700 bg-emerald-50 ring-emerald-600/20"
             description="知识清单与退役。不被 agent:admin:* 蕴含。"
           />
         </div>
         <p className="mt-3 flex items-start gap-1.5 text-[11px] text-slate-600">
-          <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0" />
+          <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-500" />
           管理面看到的是整个部署而不是单个 Run 的所有者视角，因此不能复用业务侧「归属即可读」的规则。
           身份由宿主的认证层解析，框架不自带认证中间件。
         </p>
@@ -244,9 +244,9 @@ export function SecurityArtifacts({ onOpenConfig }: { onOpenConfig: () => void }
 
 function ScopeCard({ scope, tone, description }: { scope: string; tone: string; description: string }) {
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2">
+    <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
       <Badge className={tone}>{scope}</Badge>
-      <p className="mt-1.5 text-[11px] leading-relaxed text-slate-400">{description}</p>
+      <p className="mt-2 text-[11px] leading-relaxed text-slate-600">{description}</p>
     </div>
   );
 }

@@ -301,6 +301,39 @@ object AgentKernelSpec extends ZIOSpecDefault:
           .exists(_.message.contains("预留"))
       )
     },
+    test("成功结算把供应商请求号写入模型账本") {
+      val pending = PendingModelCall(
+        ModelRequestId(java.util.UUID.fromString("44444444-4444-4444-4444-444444444444")),
+        1,
+        "fingerprint",
+        CapturePolicy.MetadataOnly,
+        "provider",
+        "model"
+      )
+      val response = ChatResponse(
+        AgentMessage.assistant("done"),
+        FinishReason.Stop,
+        TokenUsage(1, 1),
+        providerRequestId = Some("req-provider-1")
+      )
+      val settled = AgentKernel.settleModelTurn(
+        state(),
+        response,
+        "provider",
+        "model",
+        BigDecimal(0),
+        false,
+        None,
+        Some(modelRecord(pending, ModelCallStatus.Dispatched)),
+        now
+      )
+      assertTrue(
+        settled.toOption
+          .flatMap(_.modelCallSettlement)
+          .flatMap(_.providerRequestId)
+          .contains("req-provider-1")
+      )
+    },
     test("已结算成功的工具调用被复用，结果未知的调用必须先经人工确认") {
       val settled = ToolResult(Json.Obj("ok" -> Json.Bool(true)))
       assertTrue(

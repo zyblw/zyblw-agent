@@ -44,6 +44,7 @@ export interface AdminCapabilitiesView {
   runInspection: boolean;
   harness: boolean;
   memoryGovernance: boolean;
+  runControl?: boolean;
   observability: ObservabilityLinks;
 }
 
@@ -108,6 +109,7 @@ export interface AdminModelCallView {
   estimatedRouteCost?: string | null;
   pricingFingerprintPrefix?: string | null;
   explicitModelPinned?: boolean | null;
+  providerRequestId?: string | null;
 }
 
 /** 低敏 Harness 投影。 */

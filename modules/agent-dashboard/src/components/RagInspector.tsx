@@ -146,7 +146,7 @@ function RetrievalSandbox({ tenant, onTenantChange }: { tenant: string; onTenant
       description="以指定租户与权限视角执行一次真实检索；会调用 Embedding Provider 并产生费用"
       actions={
         <>
-          <Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">
+          <Badge className="text-amber-800 bg-amber-50 ring-amber-600/20 font-medium">
             需要 agent:admin:debug + knowledge:read
           </Badge>
           <Button onClick={run} disabled={!canRun || retrieve.isPending}>
@@ -156,6 +156,33 @@ function RetrievalSandbox({ tenant, onTenantChange }: { tenant: string; onTenant
         </>
       }
     >
+      {/* 快捷测试示例 */}
+      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 p-2.5 border border-slate-200">
+        <span className="text-[11px] font-semibold text-slate-600">快速填入测试:</span>
+        <button
+          type="button"
+          onClick={() => {
+            setQuery('中医辨证论治原则与八纲');
+            onTenantChange('zyblw');
+            setMode('hybrid');
+          }}
+          className="rounded-md border border-indigo-200 bg-indigo-50/70 px-2.5 py-1 text-[11px] font-medium text-indigo-700 hover:bg-indigo-100 transition shadow-xs"
+        >
+          🌿 中医辨证论治 (zyblw)
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setQuery('经方桂枝汤的配伍与禁忌');
+            onTenantChange('zyblw');
+            setRerank(true);
+          }}
+          className="rounded-md border border-emerald-200 bg-emerald-50/70 px-2.5 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-100 transition shadow-xs"
+        >
+          📜 经方桂枝汤配伍 (带重排)
+        </button>
+      </div>
+
       <div className="grid gap-3 lg:grid-cols-[3fr_1fr_1fr_auto]">
         <TextInput label="查询" value={query} onChange={setQuery} placeholder="要复现的检索问题" />
         <TextInput
@@ -175,22 +202,22 @@ function RetrievalSandbox({ tenant, onTenantChange }: { tenant: string; onTenant
         <TextInput label="mode" value={mode} onChange={setMode} placeholder="hybrid / phrase" />
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-slate-300">
-        <label className="flex items-center gap-1.5">
+      <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-slate-700">
+        <label className="flex items-center gap-1.5 cursor-pointer">
           <input
             type="checkbox"
             checked={rerank}
             onChange={(event) => setRerank(event.target.checked)}
-            className={`rounded border-slate-700 bg-slate-950 ${FOCUS_RING}`}
+            className={`rounded border-slate-300 bg-white text-indigo-600 ${FOCUS_RING}`}
           />
           执行重排
         </label>
-        <label className="flex items-center gap-1.5">
+        <label className="flex items-center gap-1.5 cursor-pointer">
           <input
             type="checkbox"
             checked={expandContext}
             onChange={(event) => setExpandContext(event.target.checked)}
-            className={`rounded border-slate-700 bg-slate-950 ${FOCUS_RING}`}
+            className={`rounded border-slate-300 bg-white text-indigo-600 ${FOCUS_RING}`}
           />
           上下文扩展（相邻 / 父级）
         </label>
@@ -205,32 +232,32 @@ function RetrievalSandbox({ tenant, onTenantChange }: { tenant: string; onTenant
 
       {result && (
         <>
-          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs text-slate-400">
-            <Badge className="text-sky-300 bg-sky-500/10 ring-sky-500/30">
+          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+            <Badge className="text-blue-700 bg-blue-50 ring-blue-600/20 font-medium">
               {formatDuration(result.elapsedMillis)}
             </Badge>
-            <span>
+            <span className="font-mono text-slate-800">
               {result.embeddingProvider} / {result.embeddingModel} · {result.embeddingDimension} 维
             </span>
-            <Badge className="text-sky-300 bg-sky-500/10 ring-sky-500/30">
+            <Badge className="text-blue-700 bg-blue-50 ring-blue-600/20 font-medium">
               {mode || 'hybrid'}
             </Badge>
-            <Badge className={result.rerankApplied ? 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30' : ''}>
+            <Badge className={result.rerankApplied ? 'text-emerald-700 bg-emerald-50 ring-emerald-600/20 font-medium' : 'text-slate-600 bg-slate-100 ring-slate-400/20'}>
               重排 {result.rerankApplied ? '已执行' : '未执行'}
             </Badge>
-            <Badge className={result.contextExpanded ? 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30' : ''}>
+            <Badge className={result.contextExpanded ? 'text-emerald-700 bg-emerald-50 ring-emerald-600/20 font-medium' : 'text-slate-600 bg-slate-100 ring-slate-400/20'}>
               上下文扩展 {result.contextExpanded ? '已执行' : '未执行'}
             </Badge>
             <Badge
               className={
                 result.evidenceStatus === 'Supported'
-                  ? 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30'
-                  : 'text-amber-300 bg-amber-500/10 ring-amber-500/30'
+                  ? 'text-emerald-700 bg-emerald-50 ring-emerald-600/20 font-medium'
+                  : 'text-amber-800 bg-amber-50 ring-amber-600/20 font-medium'
               }
             >
               证据 {result.evidenceStatus}
             </Badge>
-            <span className="ml-auto">
+            <span className="ml-auto font-medium text-slate-600">
               {result.hits.length} 条命中 · {result.citations.length} 条引用
             </span>
           </div>
@@ -285,57 +312,57 @@ function RetrievalSandbox({ tenant, onTenantChange }: { tenant: string; onTenant
 function EvidenceDiagnostics({ result }: { result: KnowledgeRetrievalResult }) {
   const dropped = result.evidenceSelections.filter((selection) => selection.decision.startsWith('Dropped'));
   return (
-    <Panel title="证据诊断" description="用于复现本次检索使用的索引版本、降级阶段和证据裁剪" className="mt-3 bg-slate-950/30">
+    <Panel title="证据诊断" description="用于复现本次检索使用的索引版本、降级阶段和证据裁剪" className="mt-3 bg-slate-50/60 border border-slate-200">
       <div className="grid gap-3 text-xs sm:grid-cols-2 xl:grid-cols-4">
         <Field label="Knowledge Space">
-          <Mono>{result.knowledgeSpaceId ?? 'default'}</Mono>
+          <Mono className="font-semibold text-slate-900">{result.knowledgeSpaceId ?? 'default'}</Mono>
         </Field>
         <Field label="Index Profile">
-          <Mono>{result.profileId ?? '未解析'}</Mono>
+          <Mono className="font-semibold text-slate-900">{result.profileId ?? '未解析'}</Mono>
         </Field>
         <Field label="候选 / 接受">
-          <span className="tabular-nums text-slate-200">
+          <span className="tabular-nums font-semibold text-slate-900">
             {result.candidateCount} / {result.acceptedCount}
           </span>
         </Field>
         <Field label="证据预算">
-          <span className="tabular-nums text-slate-200">{formatCount(result.maxEvidenceTokens)} tokens</span>
+          <span className="tabular-nums font-semibold text-slate-900">{formatCount(result.maxEvidenceTokens)} tokens</span>
         </Field>
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
         {result.degradedStages.length === 0 ? (
-          <Badge className="text-emerald-300 bg-emerald-500/10 ring-emerald-500/30">无降级</Badge>
+          <Badge className="text-emerald-700 bg-emerald-50 ring-emerald-600/20 font-medium">无降级</Badge>
         ) : (
           result.degradedStages.map((stage) => (
-            <Badge key={stage} className="text-amber-300 bg-amber-500/10 ring-amber-500/30">
+            <Badge key={stage} className="text-amber-800 bg-amber-50 ring-amber-600/20 font-medium">
               {stage}
             </Badge>
           ))
         )}
         {dropped.length > 0 && (
-          <Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">
+          <Badge className="text-amber-800 bg-amber-50 ring-amber-600/20 font-medium">
             丢弃 {dropped.length} 个候选
           </Badge>
         )}
       </div>
       {result.evidenceSelections.length > 0 && (
-        <div className="mt-3 overflow-x-auto rounded-lg border border-slate-800">
+        <div className="mt-3 overflow-x-auto rounded-lg border border-slate-200 bg-white">
           <table className="w-full min-w-[42rem] text-left text-xs">
-            <thead className="bg-slate-900/80 text-slate-400">
+            <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
               <tr>
-                <th className="px-3 py-2 font-medium">决策</th>
-                <th className="px-3 py-2 font-medium">文档</th>
-                <th className="px-3 py-2 font-medium">Chunk</th>
-                <th className="px-3 py-2 font-medium">Seed</th>
+                <th className="px-3 py-2 font-semibold">决策</th>
+                <th className="px-3 py-2 font-semibold">文档</th>
+                <th className="px-3 py-2 font-semibold">Chunk</th>
+                <th className="px-3 py-2 font-semibold">Seed</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-800 text-slate-300">
+            <tbody className="divide-y divide-slate-100 text-slate-700">
               {result.evidenceSelections.map((selection) => (
-                <tr key={`${selection.documentId}:${selection.chunkId}:${selection.decision}`}>
-                  <td className="px-3 py-2">{selection.decision}</td>
-                  <td className="px-3 py-2"><Mono>{selection.documentId}</Mono></td>
-                  <td className="px-3 py-2"><Mono>{selection.chunkId}</Mono></td>
-                  <td className="px-3 py-2"><Mono>{selection.seedChunkId}</Mono></td>
+                <tr key={`${selection.documentId}:${selection.chunkId}:${selection.decision}`} className="hover:bg-slate-50/60">
+                  <td className="px-3 py-2 font-medium">{selection.decision}</td>
+                  <td className="px-3 py-2"><Mono className="text-slate-800">{selection.documentId}</Mono></td>
+                  <td className="px-3 py-2"><Mono className="text-slate-800">{selection.chunkId}</Mono></td>
+                  <td className="px-3 py-2"><Mono className="text-slate-800">{selection.seedChunkId}</Mono></td>
                 </tr>
               ))}
             </tbody>
@@ -363,42 +390,57 @@ function HitRow({
     <button
       type="button"
       onClick={onSelect}
-      className={`w-full rounded-lg border px-3 py-2 text-left transition ${FOCUS_RING} ${
-        selected ? 'border-indigo-600 bg-indigo-950/30' : 'border-slate-800 bg-slate-950/40 hover:bg-slate-900/60'
+      className={`w-full rounded-xl border p-3.5 text-left transition-all duration-150 ${FOCUS_RING} ${
+        selected
+          ? 'border-indigo-500 bg-indigo-50/60 shadow-sm ring-1 ring-indigo-200'
+          : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/60 shadow-xs'
       }`}
     >
       <div className="flex items-center gap-2">
-        <span className="grid h-5 w-5 shrink-0 place-items-center rounded bg-slate-800 text-[10px] font-semibold text-slate-300">
-          {rank}
+        <span className="grid h-5 w-5 shrink-0 place-items-center rounded bg-indigo-100 text-[10px] font-bold text-indigo-700 ring-1 ring-indigo-200">
+          #{rank}
         </span>
-        <Mono className="text-slate-400" title={hit.chunk.documentId}>
+        <Mono className="text-slate-900 text-xs font-semibold" title={hit.chunk.documentId}>
           {hit.chunk.documentId}
         </Mono>
-        <Badge className="ml-auto text-indigo-300 bg-indigo-500/10 ring-indigo-500/30">
-          {formatScore(hit.score)}
-        </Badge>
+        <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 text-xs font-semibold text-indigo-700 ring-1 ring-indigo-200">
+          得分: {formatScore(hit.score)}
+        </span>
       </div>
       {hit.chunk.headingPath.length > 0 && (
-        <div className="mt-1 flex items-center gap-1 text-[11px] text-slate-500">
+        <div className="mt-2 flex flex-wrap items-center gap-1 text-[11px] text-slate-600 bg-slate-50 px-2.5 py-1 rounded border border-slate-200">
+          <span className="text-slate-400 font-medium">路径:</span>
           {hit.chunk.headingPath.map((heading, index) => (
             <React.Fragment key={`${heading}-${index}`}>
-              {index > 0 && <ChevronRight className="h-2.5 w-2.5" />}
-              <span>{heading}</span>
+              {index > 0 && <ChevronRight className="h-2.5 w-2.5 text-slate-400" />}
+              <span className="font-medium text-slate-800">{heading}</span>
             </React.Fragment>
           ))}
         </div>
       )}
-      <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-slate-300">{hit.chunk.text}</p>
+      <p className="mt-2 line-clamp-3 text-xs leading-relaxed text-slate-700 bg-slate-50/70 p-2.5 rounded border border-slate-200/80">
+        {hit.chunk.text}
+      </p>
       {signalKeys.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1">
-          {signalKeys.map((key) => (
-            <span
-              key={key}
-              className="rounded bg-slate-800/60 px-1.5 py-0.5 text-[10px] tabular-nums text-slate-400"
-            >
-              {key} {formatScore(hit.signals[key], 3)}
-            </span>
-          ))}
+        <div className="mt-2.5 grid grid-cols-2 gap-2 sm:grid-cols-3 bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+          {signalKeys.map((key) => {
+            const rawScore = hit.signals[key];
+            const isRank = key.toLowerCase().includes('rank') || key.toLowerCase().includes('rrf');
+            return (
+              <div key={key} className="space-y-0.5">
+                <div className="flex justify-between text-[10px] text-slate-500 font-medium">
+                  <span>{key}</span>
+                  <span className="font-mono text-slate-900 tabular-nums font-semibold">{formatScore(rawScore, 3)}</span>
+                </div>
+                <div className="h-1.5 w-full rounded-full bg-slate-200 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full ${isRank ? 'bg-amber-500' : 'bg-indigo-600'}`}
+                    style={{ width: `${Math.min(100, Math.max(8, rawScore > 1 ? (rawScore / 10) * 100 : rawScore * 100))}%` }}
+                  />
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </button>
@@ -409,18 +451,18 @@ function HitRow({
 function ChunkDetail({ hit }: { hit: KnowledgeRetrievalHitView }) {
   const { chunk } = hit;
   return (
-    <Panel title="Chunk 详情" className="bg-slate-950/40">
-      <div className="divide-y divide-slate-900">
+    <Panel title="Chunk 详情">
+      <div className="divide-y divide-slate-100">
         <Field label="Chunk ID">
-          <CopyableId value={chunk.chunkId} label="chunk ID" truncate={24} className="text-slate-200" />
+          <CopyableId value={chunk.chunkId} label="chunk ID" truncate={24} className="text-slate-900 font-semibold" />
         </Field>
         <Field label="文档">
-          <CopyableId value={chunk.documentId} label="文档 ID" truncate={24} className="text-slate-200" />
+          <CopyableId value={chunk.documentId} label="文档 ID" truncate={24} className="text-slate-900 font-semibold" />
         </Field>
         <Field label="来源">{chunk.sourceUri}</Field>
         <Field label="索引版本">{chunk.indexVersion}</Field>
         <Field label="序号">{chunk.ordinal ?? '—'}</Field>
-        <Field label="父 chunk">{chunk.parentId ? <Mono>{chunk.parentId}</Mono> : '—'}</Field>
+        <Field label="父 chunk">{chunk.parentId ? <Mono className="text-slate-900 font-semibold">{chunk.parentId}</Mono> : '—'}</Field>
         <Field label="前 / 后">
           {chunk.previousChunkId ? '有' : '—'} / {chunk.nextChunkId ? '有' : '—'}
         </Field>
@@ -429,18 +471,18 @@ function ChunkDetail({ hit }: { hit: KnowledgeRetrievalHitView }) {
       </div>
 
       {chunk.origins.length > 0 && (
-        <div className="mt-3">
-          <div className="mb-1.5 text-xs font-medium text-slate-300">页面定位</div>
-          <div className="space-y-1">
+        <div className="mt-3.5">
+          <div className="mb-2 text-xs font-semibold text-slate-900">页面定位</div>
+          <div className="space-y-1.5">
             {chunk.origins.map((origin, index) => (
               <div
                 key={`${origin.pageNumber}-${origin.blockId ?? index}`}
-                className="flex items-center gap-2 rounded bg-slate-900/60 px-2 py-1 text-[11px] text-slate-400"
+                className="flex items-center gap-2 rounded-md bg-slate-50 border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600"
               >
                 <Badge>第 {origin.pageNumber} 页</Badge>
-                {origin.blockId && <Mono className="text-slate-500">{origin.blockId}</Mono>}
+                {origin.blockId && <Mono className="text-slate-600">{origin.blockId}</Mono>}
                 {origin.left !== null && origin.left !== undefined && (
-                  <span className="ml-auto tabular-nums text-slate-500">
+                  <span className="ml-auto tabular-nums font-mono text-slate-500">
                     ({formatScore(origin.left, 1)}, {formatScore(origin.top, 1)}) →(
                     {formatScore(origin.right, 1)}, {formatScore(origin.bottom, 1)})
                   </span>
@@ -451,14 +493,14 @@ function ChunkDetail({ hit }: { hit: KnowledgeRetrievalHitView }) {
         </div>
       )}
 
-      <div className="mt-3">
-        <div className="mb-1.5 flex items-center justify-between text-xs font-medium text-slate-300">
+      <div className="mt-3.5">
+        <div className="mb-1.5 flex items-center justify-between text-xs font-semibold text-slate-900">
           <span>正文</span>
           {chunk.textTruncated && (
-            <Badge className="text-amber-300 bg-amber-500/10 ring-amber-500/30">已截断</Badge>
+            <Badge className="text-amber-800 bg-amber-50 ring-amber-600/20 font-medium">已截断</Badge>
           )}
         </div>
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-slate-950 p-2 text-[11px] leading-relaxed text-slate-300">
+        <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-50 border border-slate-200 p-2.5 text-[11px] leading-relaxed text-slate-800 font-mono">
           {chunk.text}
         </pre>
       </div>
@@ -492,7 +534,7 @@ function IndexManifests({
       description="会话租户下的索引版本；只有 active 版本参与检索。需要 knowledge:read，退役需要 knowledge:write"
       actions={
         <>
-          <Badge className="text-sky-300 bg-sky-500/10 ring-sky-500/30">knowledge:read / write</Badge>
+          <Badge className="text-blue-700 bg-blue-50 ring-blue-600/20 font-medium">knowledge:read / write</Badge>
           <Button variant="secondary" disabled={!canGoBack} onClick={onPrevious}>
             <ChevronLeft className="h-3 w-3" /> 上一页
           </Button>
@@ -517,16 +559,16 @@ function IndexManifests({
           {page?.items.map((doc) => (
             <div
               key={`${doc.tenantId}/${doc.documentId}/${doc.indexVersion}`}
-              className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2"
+              className="rounded-lg border border-slate-200 bg-white p-3 shadow-xs hover:border-slate-300 transition"
             >
               <div className="flex items-center gap-2">
-                <CopyableId value={doc.documentId} label="文档 ID" truncate={28} />
+                <CopyableId value={doc.documentId} label="文档 ID" truncate={28} className="text-slate-900 font-semibold" />
                 <Badge>v{doc.indexVersion}</Badge>
                 <Badge
                   className={
                     doc.active
-                      ? 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30'
-                      : 'text-slate-400 bg-slate-500/10 ring-slate-500/30'
+                      ? 'text-emerald-700 bg-emerald-50 ring-emerald-600/20 font-medium'
+                      : 'text-slate-600 bg-slate-100 ring-slate-400/20 font-medium'
                   }
                 >
                   {doc.status}
@@ -537,27 +579,27 @@ function IndexManifests({
                 </span>
               </div>
               <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
-                <span>{doc.sourceUri}</span>
+                <span className="font-mono text-slate-700">{doc.sourceUri}</span>
                 <span>{formatCount(doc.chunkCount)} chunk</span>
-                <span>
+                <span className="font-mono">
                   {doc.embeddingProvider}/{doc.embeddingModel} · {doc.embeddingDimension} 维
                 </span>
                 <span>{doc.indexingStrategy || '默认切分'}</span>
                 {extractionLabel(doc) && (
-                  <Badge className="text-sky-300 bg-sky-500/10 ring-sky-500/30">{extractionLabel(doc)}</Badge>
+                  <Badge className="text-blue-700 bg-blue-50 ring-blue-600/20 font-medium">{extractionLabel(doc)}</Badge>
                 )}
                 {doc.permissions.length > 0 && <span>权限 {doc.permissions.join(', ')}</span>}
                 {doc.failureCode && (
-                  <Badge className="text-rose-300 bg-rose-500/10 ring-rose-500/30">
+                  <Badge className="text-rose-700 bg-rose-50 ring-rose-600/20 font-medium">
                     {doc.failureCode}
                   </Badge>
                 )}
               </div>
               {doc.active && (
-                <div className="mt-2 flex items-center gap-2">
+                <div className="mt-2.5 flex items-center gap-2 border-t border-slate-100 pt-2">
                   {confirming === doc.documentId ? (
                     <>
-                      <span className="text-[11px] text-rose-300">
+                      <span className="text-[11px] font-medium text-rose-600">
                         退役后该文档立即不再参与检索，确认？
                       </span>
                       <Button
@@ -608,10 +650,10 @@ function IndexManifests({
 function LibrarySourcePanel() {
   return (
     <Panel title="问答写入" description="控制台只检查索引与检索，不写入问答证据">
-      <p className="text-sm leading-6 text-slate-300">
+      <p className="text-sm leading-6 text-slate-700">
         书目与内部知识都在
         {' '}
-        <a className="text-indigo-300 underline" href="/admin/library">
+        <a className="font-medium text-indigo-600 underline hover:text-indigo-800" href="/admin/library">
           /admin/library
         </a>
         {' '}
