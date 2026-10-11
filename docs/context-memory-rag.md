@@ -2,7 +2,7 @@
 
 > 状态：0.9.0 当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-26
+> 最后核验：2026-10-11
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -83,7 +83,7 @@ val applicationLayer = ZLayer.make[AgentApplication.Services](
 
 0.9.0 把检索结果同时写入 `AgentState.citations` / `retrievalEvidence`（fresh-install schema v1），并投影到
 `RunView` 与 `GET /api/v1/runs/{runId}/citations`。模型侧应使用 `knowledge_search` / `knowledge_fetch`，
-而不是自行拼 tenant。稳定知识 HTTP 是 `/api/v1/knowledge/search`，支持 `hybrid|vector|lexical|phrase`
+而不是自行拼 tenant。目录工具 `knowledge_outline` 只在宿主注册后可用，返回结构大纲，不产生 chunk 引用。稳定知识 HTTP 是 `/api/v1/knowledge/search`，支持 `hybrid|vector|lexical|phrase`
 与 document/page/heading/metadata/chunk 过滤；过滤发生在 ACL 之后。
 
 ## 3.1 查询模式

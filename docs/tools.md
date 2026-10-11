@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-10-11
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -28,9 +28,12 @@
 - `CalculatorTool`：显式四则运算，不执行表达式脚本。
 - `CurrentTimeTool`：基于 ZIO Clock 和 IANA 时区。
 - `DangerousActionTool`：演示审批，不执行真实危险操作。
-- `knowledge_search` / `knowledge_fetch`：`agent-rag` 的 `KnowledgeTools`。tenant/permissions 由运行时注入，模型不得覆盖。
+- `knowledge_search` / `knowledge_fetch`：`agent-rag` 的 `KnowledgeTools.layer` 默认注册这两项。tenant/permissions 由运行时注入，模型不得覆盖。
   `knowledge_search` 支持 `hybrid|vector|lexical|phrase` 与结构化过滤。需要 `knowledge:read`。
   宿主必须显式声明资料范围：`documentScope=unrestricted` 才允许在该 tenant 的授权库内检索；`scopeDocumentId` 或 JSON 数组 `scopeDocumentIds` 限定文档。属性缺失、空白或无法解析都会拒绝，不会退回全库。模型把 `documentIds` 改到范围外，或 `knowledge_fetch` 请求范围外的块，都会在查询前失败，范围外正文不会进入工具结果。
+  未命中或证据低于接受门槛时，结果带 `guidance`，只告诉模型下一步怎么改检索或改 chunkId，不是引用。
+  `knowledge_fetch` 可设 `expandNeighbors=true`，在已通过范围检查的命中上再取至多 4 个前后相邻块；相邻读取失败时保留原块。
+- `knowledge_outline`：同一对象上的目录工具，**不**进入默认 `layer`。宿主有 `StructureStore` 时自行 `outlineTool` 注册，并把它加入 Agent 与全局白名单。它只返回已授权 `documentId` 的结构大纲、折叠节数和状态；没有快照时 `status=not_found`。大纲不是 chunk 引用。
 
 生产工具应实现业务级幂等键；支付、删除、发布和外部消息不能仅靠 callId 或普通 Runtime 工具账本默认重试。
 PostgreSQL 业务写应使用 `PostgresReliableWriteTool.make`，它强制经同事务执行器运行，不能用普通 `Tool.json` 后只修改

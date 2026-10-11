@@ -28,5 +28,6 @@
 - 管理面在装配 `AdminCapabilities.commands` 后暴露 `capabilities.runControl`，以及 `POST /api/v1/admin/runs/{runId}/approval`（`agent:admin:write`）。请求体是 `approve` 或 `reject`，驳回可带原因；成功返回 `202` 与命令回执。未装配时路由不存在。
 - 控制台改为左侧栏加工作区。页签仍由 capabilities 决定。运行检查页只在 `runControl` 为真时提交审批。
 - `AgentTransition`、`AgentHandoffEnvelope` 与 `HandoffPolicy` 是核心里的交接类型。内核步进仍走现有 `Transition`，宿主不能把该枚举当成已经执行的多智能体交接。
+- `knowledge_search` / `knowledge_fetch` 在未命中或证据不足时返回 `guidance`。`knowledge_fetch` 可设 `expandNeighbors` 再读至多 4 个相邻块。`knowledge_outline` 读取已授权文档的结构目录，不进入默认 `KnowledgeTools.layer`，也不产生 chunk 引用。
 
 能力成熟度依 canonical roadmap。首次空库构建通过不代表真实领域模型、容量、soak 或生产发布已经验收。首版公开发布后才冻结 V001 与兼容基线。
