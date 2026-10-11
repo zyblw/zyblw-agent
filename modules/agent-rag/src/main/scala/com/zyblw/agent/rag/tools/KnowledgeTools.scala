@@ -9,8 +9,11 @@ import zio.json.ast.Json
 
 /** 开箱知识检索工具。tenant 与 permissions 只从 `ToolExecutionContext.runContext` 读取。 */
 object KnowledgeTools:
-  val SearchName: ToolName   = ToolName("knowledge_search")
-  val FetchName: ToolName    = ToolName("knowledge_fetch")
+  val SearchName: ToolName  = ToolName("knowledge_search")
+  val FetchName: ToolName   = ToolName("knowledge_fetch")
+  val OutlineName: ToolName = ToolName("knowledge_outline")
+
+  /** 默认 `layer` 实际注册的工具。`knowledge_outline` 需要 `StructureStore`，由宿主另行注册并放行。 */
   val Allowed: Set[ToolName] = Set(SearchName, FetchName)
 
   /** 宿主写入的单文档范围。多文档使用 `scopeDocumentIds`，全库必须显式写 `documentScope=unrestricted`。 */
@@ -49,7 +52,23 @@ object KnowledgeTools:
       chunkId: String = "",
       tenantId: Option[String] = None,
       permissions: Option[List[String]] = None,
-      chunkIds: Option[List[String]] = None
+      chunkIds: Option[List[String]] = None,
+      expandNeighbors: Option[Boolean] = None
+  ) derives JsonCodec
+
+  final case class OutlineInput(
+      documentId: String,
+      maxChars: Option[Int] = None
+  ) derives JsonCodec
+
+  final case class OutlineOutput(
+      documentId: String,
+      title: Option[String],
+      outlineText: String,
+      totalSections: Int,
+      foldedSections: Int,
+      status: String,
+      guidance: Option[String] = None
   ) derives JsonCodec
 
   /** 一次核对 1 到 6 个块。单个 chunkId 与 chunkIds 合并后去重。 */
@@ -98,7 +117,8 @@ object KnowledgeTools:
       knowledgeSpaceId: Option[String] = None,
       degradedStages: Chunk[String] = Chunk.empty,
       recipe: Option[String] = None,
-      strategy: Option[String] = None
+      strategy: Option[String] = None,
+      guidance: Option[String] = None
   ) derives JsonCodec
 
   def layer: ZLayer[RagApplication, AgentError, Chunk[RegisteredTool]] =
@@ -113,7 +133,7 @@ object KnowledgeTools:
   def searchTool(rag: RagApplication): Tool[Any, SearchInput, AgentError, SearchOutput] =
     Tool.json[Any, SearchInput, AgentError, SearchOutput](
       SearchName,
-      "在宿主明确授权的知识库中检索可引用资料。返回短摘录与 chunkId，细讲时再 knowledge_fetch。不要填写 tenant 或 permissions。宿主限定资料时，documentIds 只能收窄，不能改到范围外。",
+      "在已授权的知识库中检索可引用资料。返回短摘录与 chunkId；需要细读完整上下文时再调用 knowledge_fetch。不要填写 tenant 或 permissions。宿主限定资料时，documentIds 只能收窄，不能改到范围外。",
       searchSchema,
       None,
       knowledgeReadMetadata()
@@ -141,7 +161,7 @@ object KnowledgeTools:
   def fetchTool(rag: RagApplication): Tool[Any, FetchInput, AgentError, SearchOutput] =
     Tool.json[Any, FetchInput, AgentError, SearchOutput](
       FetchName,
-      "按 chunkId 或 chunkIds 取回 1 到 6 个已授权知识块全文，用于细讲不同要点。不要填写 tenant 或 permissions。",
+      "按 chunkId 或 chunkIds 取回 1 到 6 个已授权知识块全文深入研读。支持设置 expandNeighbors=true 获取前后相邻块，解决跨块分切断问题。不要填写 tenant 或 permissions。",
       fetchSchema,
       None,
       knowledgeReadMetadata()
@@ -159,8 +179,85 @@ object KnowledgeTools:
         result <- rag
           .fetch(chunkIds, scope, filter)
           .mapError(error => AgentError.ToolExecutionFailed(FetchName.value, error.message, error.retryable))
-        _ <- rejectOutsideDocumentScope(FetchName.value, result, hostScope)
-      yield toOutput(result, includeFullChunkText = true)
+        _              <- rejectOutsideDocumentScope(FetchName.value, result, hostScope)
+        expandedResult <-
+          if input.expandNeighbors.contains(true) then
+            val neighborIds = result.hits.flatMap { hit =>
+              hit.chunk.lineage.toList.flatMap(l => List(l.previousChunkId, l.nextChunkId).flatten)
+            }.toSet -- chunkIds
+            if neighborIds.nonEmpty then
+              rag
+                .fetch(neighborIds.take(4), scope, filter)
+                .map { neighbors =>
+                  val combinedHits  = (result.hits ++ neighbors.hits).distinctBy(_.chunk.id)
+                  val combinedCites = (result.citations ++ neighbors.citations).distinctBy(_.id)
+                  result.copy(
+                    hits = combinedHits,
+                    citations = combinedCites,
+                    evidence = result.evidence.copy(
+                      candidateCount = combinedHits.length,
+                      acceptedCount = combinedHits.length
+                    )
+                  )
+                }
+                .catchAll(_ => ZIO.succeed(result))
+            else ZIO.succeed(result)
+          else ZIO.succeed(result)
+      yield toOutput(expandedResult, includeFullChunkText = true, isFetch = true)
+    }
+
+  def outlineTool(
+      store: StructureStore,
+      spec: StructureBuildSpec = StructureBuildSpec()
+  ): Tool[Any, OutlineInput, AgentError, OutlineOutput] =
+    Tool.json[Any, OutlineInput, AgentError, OutlineOutput](
+      OutlineName,
+      "查阅指定书籍或文献的结构化章节大纲（目录树）。用于快速宏观把握全书论述架构、定位特定病症或概念分布的篇章位置。不要填写 tenant 或 permissions。",
+      outlineSchema,
+      None,
+      knowledgeReadMetadata()
+    ) { (input, context) =>
+      for
+        scope     <- trustedScope(context)
+        hostScope <- hostScope(context, OutlineName.value)
+        _         <- hostScope match
+          case DocumentScope.Unrestricted        => ZIO.unit
+          case DocumentScope.Restricted(allowed) =>
+            ZIO
+              .fail(AgentError.ToolInputInvalid(OutlineName.value, "documentId 超出宿主限定的资料范围"))
+              .unless(allowed.contains(input.documentId.trim))
+        snapshotOpt <- store.getActive(input.documentId.trim, spec, scope)
+        limit  = input.maxChars.getOrElse(2000).max(200).min(10000)
+        output = snapshotOpt match
+          case None =>
+            OutlineOutput(
+              input.documentId,
+              None,
+              "未找到该文档的结构化目录（可能尚未生成大纲或为无结构文档）。",
+              0,
+              0,
+              "not_found",
+              Some("未找到该文档的结构化目录（可能尚未生成大纲或为无结构文档）。建议使用 knowledge_search 直接检索正文内容。")
+            )
+          case Some(snapshot) =>
+            val rendered        = StructureOutline.render(snapshot, limit)
+            val title           = snapshot.nodes.headOption.map(_.section.title).filter(_.trim.nonEmpty)
+            val outlineGuidance =
+              if rendered.folded > 0 then
+                Some(
+                  s"目录大纲已渲染，因篇幅限制折叠了 ${rendered.folded} 个深层子小节。若需查阅特定子小节，可使用对应小节标题作为 query 调用 knowledge_search 精准检索。"
+                )
+              else None
+            OutlineOutput(
+              input.documentId,
+              title,
+              rendered.text,
+              snapshot.nodes.length,
+              rendered.folded,
+              "ok",
+              outlineGuidance
+            )
+      yield output
     }
 
   private def rejectCallerOverride(
@@ -247,7 +344,11 @@ object KnowledgeTools:
         .mapError(error => AgentError.ToolInputInvalid(SearchName.value, error.getMessage))
     yield filter
 
-  def toSearchOutput(result: RetrievalResult, includeFullChunkText: Boolean): SearchOutput =
+  def toSearchOutput(
+      result: RetrievalResult,
+      includeFullChunkText: Boolean,
+      isFetch: Boolean = false
+  ): SearchOutput =
     val seedCount = result.evidence.acceptedCount.max(0)
     val seedHits  = result.hits.take(seedCount)
     val seedCites = result.citations.take(seedCount)
@@ -259,6 +360,17 @@ object KnowledgeTools:
       else result.hits.map(hit => ChunkContext.take(hit.chunk.displayText, 500))
     val status =
       if result.evidence.supportsGroundedAnswer then "ok" else "insufficient_evidence"
+    val guidance =
+      if result.hits.isEmpty || result.evidence.acceptedCount == 0 then
+        if isFetch then Some("未找到指定的知识块（chunkId 可能已过期或不存在）。建议：调用 knowledge_search 重新检索以获取最新的有效 chunkId。")
+        else
+          Some(
+            "未检索到直接匹配的证据。建议：1. 提炼或简化检索词，避免使用长问句或口语；2. 尝试换用别名、异名或相关条文关键词；3. 如指定了 documentIds，可检查是否包含目标书籍；4. 可尝试切换 mode 为 lexical 或 phrase 尝试原词匹配。"
+          )
+      else if !result.evidence.supportsGroundedAnswer then
+        if isFetch then Some("细读获得的知识块置信度较低。建议核验上下文，或使用精准关键词重新检索。")
+        else Some("检索到的证据置信度较低（低于接受门槛）。建议使用更精准的概念关键词重新检索，或调用 knowledge_fetch 校验相关块。")
+      else None
     SearchOutput(
       status,
       excerpts,
@@ -269,11 +381,16 @@ object KnowledgeTools:
       result.diagnostics.knowledgeSpaceId,
       result.diagnostics.degradedStages,
       result.diagnostics.recipe,
-      result.diagnostics.strategy
+      result.diagnostics.strategy,
+      guidance
     )
 
-  private def toOutput(result: RetrievalResult, includeFullChunkText: Boolean): SearchOutput =
-    toSearchOutput(result, includeFullChunkText)
+  private def toOutput(
+      result: RetrievalResult,
+      includeFullChunkText: Boolean,
+      isFetch: Boolean = false
+  ): SearchOutput =
+    toSearchOutput(result, includeFullChunkText, isFetch)
 
   private def headingPathOf(chunk: DocumentChunk): List[String] =
     val fromLineage = chunk.lineage.toList.flatMap(_.headingPath.toList)
@@ -306,16 +423,19 @@ object KnowledgeTools:
   private val searchSchema: Json.Obj = Json.Obj(
     "type"       -> Json.Str("object"),
     "properties" -> Json.Obj(
-      "query"          -> Json.Obj("type" -> Json.Str("string")),
-      "recipe"         -> Json.Obj("type" -> Json.Str("string")),
-      "strategy"       -> Json.Obj("type" -> Json.Str("string")),
-      "mode"           -> Json.Obj("type" -> Json.Str("string")),
+      "query"    -> Json.Obj("type" -> Json.Str("string"), "description" -> Json.Str("检索关键词或精炼短语，避免冗长问句")),
+      "recipe"   -> Json.Obj("type" -> Json.Str("string")),
+      "strategy" -> Json.Obj("type" -> Json.Str("string")),
+      "mode"     -> Json.Obj(
+        "type"        -> Json.Str("string"),
+        "description" -> Json.Str("检索模式: hybrid | vector | lexical | phrase")
+      ),
       "documentIds"    -> Json.Obj("type" -> Json.Str("array")),
       "chunkIds"       -> Json.Obj("type" -> Json.Str("array")),
       "pages"          -> Json.Obj("type" -> Json.Str("array")),
       "headingPrefix"  -> Json.Obj("type" -> Json.Str("array")),
       "metadataEquals" -> Json.Obj("type" -> Json.Str("object")),
-      "limit"          -> Json.Obj("type" -> Json.Str("integer"))
+      "limit"          -> Json.Obj("type" -> Json.Str("integer"), "description" -> Json.Str("返回最大结果数"))
     ),
     "required" -> Json.Arr(Json.Str("query"))
   )
@@ -323,7 +443,24 @@ object KnowledgeTools:
   private val fetchSchema: Json.Obj = Json.Obj(
     "type"       -> Json.Str("object"),
     "properties" -> Json.Obj(
-      "chunkId"  -> Json.Obj("type" -> Json.Str("string")),
-      "chunkIds" -> Json.Obj("type" -> Json.Str("array"))
+      "chunkId"  -> Json.Obj("type" -> Json.Str("string"), "description" -> Json.Str("待细读的单个知识块 ID")),
+      "chunkIds" -> Json.Obj(
+        "type"        -> Json.Str("array"),
+        "items"       -> Json.Obj("type" -> Json.Str("string")),
+        "description" -> Json.Str("待细读的知识块 ID 列表（1 到 6 个）")
+      ),
+      "expandNeighbors" -> Json.Obj(
+        "type"        -> Json.Str("boolean"),
+        "description" -> Json.Str("是否扩展上下文读取邻近前后块，解决跨块分截断问题，默认为 false")
+      )
     )
+  )
+
+  private val outlineSchema: Json.Obj = Json.Obj(
+    "type"       -> Json.Str("object"),
+    "properties" -> Json.Obj(
+      "documentId" -> Json.Obj("type" -> Json.Str("string"), "description" -> Json.Str("要查阅目录大纲的书籍或文档 ID")),
+      "maxChars"   -> Json.Obj("type" -> Json.Str("integer"), "description" -> Json.Str("目录大纲最大字符数，默认 2000"))
+    ),
+    "required" -> Json.Arr(Json.Str("documentId"))
   )

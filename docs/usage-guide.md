@@ -2,7 +2,7 @@
 
 > 状态：0.9.0 使用契约
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-10-11
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -305,7 +305,7 @@ val result = rag.retrieve(
 
 `RetrievalMode` 还有 `VectorOnly`、`LexicalOnly`、`Phrase`。`RagQuery.filter`（document/page/heading/metadata/chunk）发生在 ACL
 之后、打分之前。默认切分按 `maxTokens=512`。`text-embedding-3` 设 `EMBEDDING_TOKENIZER=cl100k-base`；通义 / qwen3 文本向量设 `cjk-approx-v1`；OpenAI 4o 系列设 `o200k-base`。live 摄入缺这个值会在装配期失败。模型侧使用 `knowledge_search` / `knowledge_fetch`，不得覆盖
-tenant/permissions。向量、FTS、rerank 和相邻块扩展都不能扩大已经授权的候选集合。完整路径见
+tenant/permissions。`knowledge_outline` 不在默认工具层里，只有宿主接上 `StructureStore` 并单独注册后才能查目录。向量、FTS、rerank 和相邻块扩展都不能扩大已经授权的候选集合。完整路径见
 [PDF RAG 生产流水线](pdf-rag-pipeline.md) 与 [Context、Memory 与 RAG](context-memory-rag.md)。
 
 ## 9. 代码架构与扩展位置

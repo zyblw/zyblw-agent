@@ -214,6 +214,87 @@ object KnowledgeToolsSpec extends ZIOSpecDefault:
         denied <- KnowledgeTools.searchTool(rag).execute(KnowledgeTools.SearchInput("营卫"), blank).exit
         absent <- KnowledgeTools.searchTool(rag).execute(KnowledgeTools.SearchInput("营卫"), context).exit
       yield assertTrue(missing.isLeft, empty.isLeft, denied.isFailure, absent.isFailure)
+    }.provide(memoryRag),
+    test("低证据或未命中时输出指导性 guidance 建议") {
+      for
+        rag <- ZIO.service[RagApplication]
+        search = KnowledgeTools.searchTool(rag)
+        miss <- search.execute(KnowledgeTools.SearchInput("未曾收录的生僻词"), openLibrary)
+      yield assertTrue(
+        miss.guidance.nonEmpty,
+        miss.guidance.get.contains("建议")
+      )
+    }.provide(memoryRag),
+    test("fetch 支持 expandNeighbors 扩展相邻块") {
+      for
+        rag <- ZIO.service[RagApplication]
+        tenant = TenantId("acme")
+        _ <- rag.ingestOne(
+          DocumentIngestionRequest(
+            DocumentInput.fromBytes(
+              "multi-chunk.md",
+              "book://multi",
+              "multi-chunk.md",
+              "text/markdown",
+              Chunk.fromArray(("# 卷一\n\n第一段论述。\n\n" * 20 + "# 卷二\n\n第二段论述。\n\n" * 20).getBytes("UTF-8"))
+            ),
+            tenant,
+            Set("knowledge:read"),
+            "tools-ingest-multi"
+          )
+        )
+        search = KnowledgeTools.searchTool(rag)
+        found <- search.execute(KnowledgeTools.SearchInput("第一段论述"), openLibrary)
+        chunkId = found.citations.head.chunkId
+        fetch   = KnowledgeTools.fetchTool(rag)
+        fetched <- fetch.execute(
+          KnowledgeTools.FetchInput(chunkId, expandNeighbors = Some(true)),
+          openLibrary
+        )
+      yield assertTrue(
+        fetched.status == "ok",
+        fetched.excerpts.nonEmpty
+      )
+    }.provide(memoryRag),
+    test("outlineTool 返回书籍结构大纲，未找到返回 not_found") {
+      val mockStore = new StructureStore:
+        def put(snapshot: StructureSnapshot) = ZIO.unit
+        def get(documentId: String, indexVersion: Long, spec: StructureBuildSpec, scope: RetrievalScope) =
+          ZIO.succeed(None)
+        override def getActive(documentId: String, spec: StructureBuildSpec, scope: RetrievalScope) =
+          if documentId == "doc-mock" then
+            val binding =
+              StructureBinding("acme", "default", "doc-mock", "profile", 1, "ing", "rev", "a" * 64, "b" * 64)
+            val node = StructureNode(
+              DocumentSection("s1", None, 0, 1, "总论", Some(1), Some(5)),
+              Chunk("b-s1"),
+              Chunk("c-s1"),
+              Some("总论概要")
+            )
+            ZIO.succeed(Some(StructureSnapshot(binding, StructureBuildSpec(), Chunk(node))))
+          else ZIO.succeed(None)
+      val tool = KnowledgeTools.outlineTool(mockStore)
+      for
+        found <- tool.execute(KnowledgeTools.OutlineInput("doc-mock"), openLibrary)
+        miss  <- tool.execute(KnowledgeTools.OutlineInput("missing-doc"), openLibrary)
+      yield assertTrue(
+        found.status == "ok",
+        found.outlineText.contains("总论"),
+        found.totalSections == 1,
+        miss.status == "not_found",
+        miss.guidance.nonEmpty,
+        miss.guidance.get.contains("knowledge_search")
+      )
+    },
+    test("fetchTool 未找到 chunk 时返回专有的 fetch guidance 建议") {
+      for
+        rag <- ZIO.service[RagApplication]
+        fetch = KnowledgeTools.fetchTool(rag)
+        miss <- fetch.execute(KnowledgeTools.FetchInput("non-existent-chunk-id"), openLibrary)
+      yield assertTrue(
+        miss.guidance.nonEmpty,
+        miss.guidance.get.contains("chunkId")
+      )
     }.provide(memoryRag)
   )
 

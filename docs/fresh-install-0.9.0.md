@@ -1,7 +1,7 @@
 # 0.9.0 全新安装
 
 > 状态：当前唯一安装基线
-> 最后核验：2026-09-23
+> 最后核验：2026-10-11
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -20,7 +20,7 @@
 
 - `RetrievalMode` 支持 `Hybrid`、`VectorOnly`、`LexicalOnly`、`Phrase`。
 - `RetrievalFilter` 在 ACL 之后、打分之前约束 document、chunk、page、heading 和 metadata。
-- `knowledge_search` 与 `knowledge_fetch` 是正式只读工具；tenant 和 permissions 只能来自可信宿主上下文。资料范围也必须由宿主显式声明：`documentScope=unrestricted` 或非空文档 ID。空白范围不会放宽成全库。
+- `knowledge_search` 与 `knowledge_fetch` 是正式只读工具；tenant 和 permissions 只能来自可信宿主上下文。资料范围也必须由宿主显式声明：`documentScope=unrestricted` 或非空文档 ID。空白范围不会放宽成全库。未命中时结果里的 `guidance` 只是检索建议。`knowledge_fetch` 的 `expandNeighbors` 最多再读 4 个相邻块。`knowledge_outline` 需宿主另接 `StructureStore`，默认工具层不注册它。
 - `AgentState` fresh-install schemaVersion 1 保存有界 citations 与 retrievalEvidence；0.9 之前的候选编号不是可读历史版本。
 - 文档提取、chunk、embedding、rerank、回答与 citation 必须记录同一条 retrieval lineage。
 
