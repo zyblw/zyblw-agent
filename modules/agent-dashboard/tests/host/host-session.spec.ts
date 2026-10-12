@@ -29,8 +29,8 @@ test('宿主会话不读取 Bearer token，并通过同源 BFF 携带 CSRF 标�
 
   await page.goto('/admin/agent');
 
-  await expect(page.getByText('站点账号 · 管理授权')).toBeVisible();
-  await expect(page.getByText(/不存在单独的 Agent 用户名或密码/)).toBeVisible();
+  await expect(page.getByText('站点账号 · 管理授权').first()).toBeVisible();
+  await expect(page.getByText(/不存在单独的 Agent 用户名或密码/).first()).toBeVisible();
   await expect(page.getByRole('heading', { name: '需要管理凭据' })).toHaveCount(0);
   await expect.poll(() => capabilitiesRequests).toBe(1);
 });
