@@ -6,9 +6,14 @@
 **/.scala-build/
 **/metals.sbt
 project/project/
+**/project/.boot/
+**/project/.ivy/
+**/project/.sbtboot/
 project/target/
 target/
 **/target/
+.sbt/
+.ivy2/
 
 # Keep shared VS Code recommendations and safe tasks, but never machine settings,
 # launch configurations, or extension caches.
