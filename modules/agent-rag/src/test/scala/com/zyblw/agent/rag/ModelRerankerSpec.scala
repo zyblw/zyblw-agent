@@ -101,7 +101,36 @@ object ModelRerankerSpec extends ZIOSpecDefault:
       yield assertTrue(
         fallback.map(_.chunk) == original.take(1).map(_.chunk),
         fallback.head.signals.get("rerankFallback").contains(1.0),
+        fallback.head.signals.get("rerankFallbackReason").contains(2.0),
         exit.isInterrupted
+      )
+    },
+    test("接口超时 1.5 秒或更短预算时自动降级使用粗排 RRF，并标记 fallbackReason=1.0") {
+      for
+        started <- Promise.make[Nothing, Unit]
+        slowModel = new RerankerModel:
+          val descriptor = ModelRerankerSpec.descriptor
+          def score(request: RerankRequest): IO[RetrievalError, RerankResponse] =
+            started.succeed(()) *> ZIO.never
+        reranker = ModelReranker(
+          slowModel,
+          ModelRerankerPolicy(
+            timeout = 50.millis,
+            failureMode = RerankerFailureMode.FailOpen,
+            maxCandidates = 3
+          )
+        )
+        original = Chunk(hit(0, "甲"), hit(1, "乙"))
+        fiber    <- reranker.rerank("查询", original, 2).fork
+        _        <- started.await
+        _        <- TestClock.adjust(100.millis)
+        result   <- fiber.join
+      yield assertTrue(
+        result.length == 2,
+        result.map(_.chunk) == original.take(2).map(_.chunk),
+        result.forall(_.signals.get("rerankFallback").contains(1.0)),
+        result.forall(_.signals.get("rerankFallbackReason").contains(1.0))
       )
     }
   )
+

@@ -88,7 +88,8 @@ final class QwenRerankModel(client: Client, config: QwenRerankConfig) extends Re
         .flatMap { case (status, body) =>
           if !status.isSuccess then
             val retryable = status.code == 429 || status.code >= 500
-            ZIO.fail(AgentError.RetrievalFailed(s"Qwen rerank HTTP ${status.code}", retryable))
+            val detail = if body.trim.nonEmpty then s": ${body.trim.take(200)}" else ""
+            ZIO.fail(AgentError.RetrievalFailed(s"Qwen rerank HTTP ${status.code}$detail", retryable))
           else decode(body, request)
         }
 

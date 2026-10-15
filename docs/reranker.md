@@ -50,20 +50,24 @@ Provider 只看到本次请求内的 `candidate-N`，不会收到 tenantId、doc
 val rerankerLayer: URLayer[RerankerModel, Reranker] =
   ModelReranker.configured(
     ModelRerankerPolicy(
-      timeout = 3.seconds,
-      failureMode = RerankerFailureMode.FailClosed,
+      timeout = 1500.millis,
+      failureMode = RerankerFailureMode.FailOpen,
       maxCandidates = 50
     )
   )
 ```
 
-- 候选数取策略上限与 Provider 能力的较小值；
+- 候选数取策略上限与 Provider 能力的较小值（平台默认治理上限 50 候选）；
 - query 和文档按 Unicode code point 截断，不会切断 surrogate pair；
-- `timeoutFail` 给一次完整调用设置硬预算，并中断底层 Fiber；
-- `catchAll` 只处理 typed failure，ZIO interruption 不会被 FailOpen 吞掉；
+- `timeoutFail` 给一次完整调用设置硬预算（平台默认硬超时 1.5 秒，支持 `KNOWLEDGE_RERANK_TIMEOUT_MS` 配置），超时后自动中断底层 Fiber 与 HTTP Body 读取；
+- `catchAll` 处理 typed failure 与超时：
+  - 在 `FailOpen` 模式下回退到 Dense + FTS 加权 RRF 粗排原顺序，并在 signals 中注入 `rerankFallback = 1.0` 与 `rerankFallbackReason`（`1.0` 表示超时，`2.0` 表示 Provider 报错），由 `EvidenceBundle` 记入 `degradedStages: ["rerank-fallback"]`；
+  - 在 `FailClosed` 模式下直接失败并记录审计日志；
+  - 支持通过环境变量 `KNOWLEDGE_RERANK_FAILURE_MODE=fail_closed` 灵活切换；
+- ZIO interruption 不会被 FailOpen 吞掉，客户端主动取消仍会传播到底层 Adapter；
 - 同分结果按原始候选 rank 排序，响应数组顺序不会制造结果漂移。
 
-普通站内搜索可根据业务评测选择 `FailOpen`，回退到 hybrid 原排序。要求引用质量硬门禁的中医学习问答应默认 `FailClosed`，避免重排服务故障时静默降低依据质量。
+普通站内搜索与 C 端交互问答使用 `FailOpen` 保障可用性（首字毫秒级响应不白屏）。要求引用质量硬门禁的医疗辩证/考试场景可配置 `FailClosed`，避免重排服务故障时静默降低依据质量。
 
 ## 4. Reranker 不是授权边界
 
