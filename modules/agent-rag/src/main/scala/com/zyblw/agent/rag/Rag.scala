@@ -1072,15 +1072,18 @@ final class DefaultRetriever(
     else ZIO.fail(AgentError.RetrievalFailed("上下文扩展输出违反权限、数量或有限值契约"))
 
 object DefaultRetriever:
-  /** 词法命中直接接受；仅向量近邻必须过余弦阈值。RRF fused score 不参与门槛。 */
+  /** 词法命中直接接受；仅向量近邻必须过余弦阈值；成功重排时优先采用精排相关度。RRF fused score 不参与门槛。 */
   def acceptsSeed(hit: RetrievalHit, minimumScore: Double): Boolean =
     hasLexicalSupport(hit) || relevanceScore(hit) >= minimumScore
 
   def relevanceScore(hit: RetrievalHit): Double =
-    hit.signals.get("vectorScore").getOrElse {
-      if hasLexicalSupport(hit) && hit.signals.contains("textScore") then hit.signals("textScore")
-      else hit.signals.get("phraseScore").orElse(hit.signals.get("retrievalScore")).getOrElse(hit.score)
-    }
+    if !hit.signals.get("rerankFallback").contains(1.0) && hit.signals.contains("rerankScore") then
+      hit.signals("rerankScore")
+    else
+      hit.signals.get("vectorScore").getOrElse {
+        if hasLexicalSupport(hit) && hit.signals.contains("textScore") then hit.signals("textScore")
+        else hit.signals.get("phraseScore").orElse(hit.signals.get("retrievalScore")).getOrElse(hit.score)
+      }
 
   private def hasLexicalSupport(hit: RetrievalHit): Boolean =
     hit.signals.get("textScore").exists(_ > 0.0) || hit.signals.get("textRank").exists(_ > 0.0)

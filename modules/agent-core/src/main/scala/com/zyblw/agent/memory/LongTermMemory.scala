@@ -20,18 +20,18 @@ enum MemoryScope:
     case MemoryScope.User(tenantId, userId) => s"user:${tenantId.value}:${userId.value}"
     case MemoryScope.Tenant(tenantId)       => s"tenant:${tenantId.value}"
 
-/** 记忆的语义类别；Run State 和聊天历史不应伪装成这里的长期记忆。 */
+/** 记忆的语义类别；支撑专属心智画像与认知长效记忆，Run State 和单纯聊天历史不应伪装成长期记忆。 */
 enum MemoryKind:
-  /** 用户明确表达的稳定偏好。 */
+  /** 志趣偏好：用户的学术流派倾向、研读志趣、审美与表达风格、交流语气偏好。 */
   case Preference
 
-  /** 经验证的用户/业务事实。 */
+  /** 见解感悟：用户形成的核心认知、独到学术观点、读书心得、典籍顿悟与价值理念。 */
   case Semantic
 
-  /** 过去发生过的事件；通常应设置过期时间。 */
+  /** 近期探索：用户近期深入钻研的课题、阶段性阅读随感、未决学术疑问（带有时效性）。 */
   case Episodic
 
-  /** 可复用的方法、工作习惯或操作策略。 */
+  /** 思维习惯：用户的认知推导路径、求索论证习惯、评论习惯与交流互动风格。 */
   case Procedural
 
 /** 记忆内容的敏感级别，用于阻止模型推断的敏感信息被静默长期保存。 */

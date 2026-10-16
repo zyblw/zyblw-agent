@@ -8,6 +8,7 @@
 
 import React from 'react';
 import {
+  ArrowLeft,
   ExternalLink,
   KeyRound,
   SlidersHorizontal,
@@ -108,6 +109,15 @@ export function Header({
         {/* 当前模块面包屑与副标题 */}
         <div className="flex flex-col min-w-0">
           <div className="flex items-center gap-2 text-xs">
+            <a
+              href="/admin"
+              className="inline-flex items-center gap-1 font-medium text-indigo-600 hover:text-indigo-800 transition-colors"
+              title="返回医文间主站运营工作区"
+            >
+              <ArrowLeft className="h-3 w-3" />
+              <span>运营工作区</span>
+            </a>
+            <span className="text-slate-300">/</span>
             <span className="font-medium text-slate-400">{info.section}</span>
             <span className="text-slate-300">/</span>
             <h1 className="font-semibold text-slate-900 text-sm">{info.title}</h1>
@@ -172,6 +182,16 @@ export function Header({
               Grafana <ExternalLink className="h-3 w-3" />
             </a>
           )}
+
+          {/* 返回主站运营工作区 */}
+          <a
+            href="/admin"
+            className={`inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 transition shadow-xs ${FOCUS_RING}`}
+            title="返回主站内容运营与智能体治理工作区"
+          >
+            <ArrowLeft className="h-3.5 w-3.5 text-slate-500" />
+            <span>返回运营工作区</span>
+          </a>
 
           {/* 凭据设置展开按钮 */}
           <button

@@ -86,6 +86,17 @@ While iterating:
   `["all"]`.
 - Run the full release gates below before release or merge readiness, not after every small edit.
 
+## Troubleshoot IDE & Metals/Bloop Cache Sync
+
+When Scala files display false red errors ("爆红", e.g. package not found, unresolvable class names, or `no build target found`) in the IDE:
+
+1. **Verify via CLI first**: Always run `sbt "<module>/compile"` or `sbt compile`. If CLI compilation succeeds, the code and build definitions are completely valid; the error is strictly an IDE/Metals/Bloop build server cache desync.
+2. **Regenerate Bloop target configs**: Run `sbt --batch bloopInstall` in the project root containing `build.sbt`. This updates `.bloop/*.json` across all subprojects with up-to-date dependencies, classpaths, and compiler flags.
+3. **Reload / restart build server**:
+   - If red squiggles remain, kill the stale bloop daemon (`pkill -f "bloop.BloopServer"`) or restart Metals (`pkill -f "scala.meta.metals.Main"`).
+   - In VS Code / Antigravity IDE Command Palette: run `Metals: Connect to build server` / `Metals: Restart build server` / `Metals: Clean workspace` -> `Metals: Import build`.
+4. **Never blindly modify code or revert dependencies** when CLI compilation and tests already pass cleanly.
+
 ## Release and compatibility gate
 
 Treat Scala APIs, serialized state, HTTP/schema contracts, Maven coordinates, and Flyway migrations

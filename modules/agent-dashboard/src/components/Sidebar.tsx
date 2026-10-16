@@ -13,6 +13,7 @@
 import React, { useRef } from 'react';
 import {
   Activity,
+  ArrowLeft,
   Brain,
   Cpu,
   Database,
@@ -197,6 +198,21 @@ export function Sidebar({
           </div>
           <span className="text-[11px] text-slate-500 font-medium truncate">智能体开发与运维平台</span>
         </div>
+      </div>
+
+      {/* 返回主站运营工作区快捷入口 */}
+      <div className="px-3 pt-3 pb-2 border-b border-slate-100">
+        <a
+          href="/admin"
+          className="group flex items-center justify-between rounded-lg border border-slate-200/80 bg-slate-50/80 px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-indigo-50/80 hover:border-indigo-200 hover:text-indigo-900 shadow-2xs"
+          title="返回主站内容运营与智能体治理工作区"
+        >
+          <span className="flex items-center gap-2">
+            <ArrowLeft className="h-3.5 w-3.5 text-slate-500 transition-transform group-hover:-translate-x-0.5 group-hover:text-indigo-600" />
+            <span>返回运营工作区</span>
+          </span>
+          <span className="text-[10px] text-slate-400 group-hover:text-indigo-500 font-mono">/admin</span>
+        </a>
       </div>
 
       {/* 分组导航列表 */}
