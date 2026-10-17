@@ -17,8 +17,8 @@ enum DiscoveredModelKind(val id: String):
 
 /** 从上游目录归一化得到的模型候选。
   *
-  * 候选只是"可以登记"的建议:能力与价格来自上游的自我声明,登记前由运维确认。价格单位统一为**每百万 token 的 USD**,
-  * 与 OpenRouter 原始的每 token 单价相比少了一次在前端做浮点乘法的机会。
+  * 候选只是"可以登记"的建议:能力与价格来自上游的自我声明,登记前由运维确认。价格单位统一为**每百万 token 的 USD**, 与 OpenRouter 原始的每 token
+  * 单价相比少了一次在前端做浮点乘法的机会。
   */
 final case class DiscoveredModel(
     id: String,
@@ -76,8 +76,8 @@ object ModelDiscovery:
   ): IO[AgentError, Chunk[DiscoveredModel]] =
     if !ProviderEndpointUrl.isAllowed(baseUrl) then ZIO.fail(AgentError.InvalidConfiguration("baseUrl 不被允许"))
     else
-      fetch(client, s"${baseUrl.stripSuffix("/")}/models", Some(apiKey), extraHeaders, timeout).flatMap(body =>
-        ZIO.fromEither(parseOpenAIModels(body)).mapError(AgentError.InvalidConfiguration(_))
+      fetch(client, s"${baseUrl.stripSuffix("/")}/models", Some(apiKey), extraHeaders, timeout).flatMap(
+        body => ZIO.fromEither(parseOpenAIModels(body)).mapError(AgentError.InvalidConfiguration(_))
       )
 
   /** 解析 OpenRouter `/models` 响应。 */
@@ -87,8 +87,7 @@ object ModelDiscovery:
   /** 解析 OpenAI `/models` 响应;只有 id 可信,用途按命名惯例推断。 */
   def parseOpenAIModels(body: String): Either[String, Chunk[DiscoveredModel]] =
     data(body).map(
-      _.flatMap(entry => string(entry, "id"))
-        .distinct
+      _.flatMap(entry => string(entry, "id")).distinct
         .map(id => DiscoveredModel(id = id, name = id, kind = kindByName(id)))
         .sortBy(_.id)
     )
@@ -155,7 +154,9 @@ object ModelDiscovery:
     entry.get(field).collect { case Json.Str(value) if value.trim.nonEmpty => value.trim }
 
   private def strings(entry: Option[Json.Obj], field: String): Set[String] =
-    entry.flatMap(_.get(field)).collect { case Json.Arr(items) => items.collect { case Json.Str(v) => v }.toSet }
+    entry
+      .flatMap(_.get(field))
+      .collect { case Json.Arr(items) => items.collect { case Json.Str(v) => v }.toSet }
       .getOrElse(Set.empty)
 
   private def long(entry: Option[Json.Obj], field: String): Option[Long] =
@@ -169,7 +170,8 @@ object ModelDiscovery:
       timeout: Duration
   ): IO[AgentError, String] =
     val base = Request.get(url).addHeader(Header.Accept(MediaType.application.json))
-    val auth = apiKey.filter(_.trim.nonEmpty).fold(base)(key => base.addHeader(Header.Authorization.Bearer(key)))
+    val auth =
+      apiKey.filter(_.trim.nonEmpty).fold(base)(key => base.addHeader(Header.Authorization.Bearer(key)))
     val request = extraHeaders
       .filterNot((name, _) => OpenAICompatibleConfig.ReservedHeaders.contains(name.toLowerCase))
       .foldLeft(auth) { case (req, (name, value)) => req.addHeader(name, value) }
@@ -179,7 +181,9 @@ object ModelDiscovery:
         if response.status.code == 401 || response.status.code == 403 then
           ZIO.fail(AgentError.ModelFailure("discovery", "上游拒绝了凭据", retryable = false))
         else if !response.status.isSuccess then
-          ZIO.fail(AgentError.ModelFailure("discovery", s"上游目录返回 HTTP ${response.status.code}", retryable = true))
+          ZIO.fail(
+            AgentError.ModelFailure("discovery", s"上游目录返回 HTTP ${response.status.code}", retryable = true)
+          )
         else response.body.asString
       }
       .timeoutFail(AgentError.ModelFailure("discovery", "读取模型目录超时", retryable = true))(timeout)

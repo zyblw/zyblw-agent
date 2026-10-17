@@ -117,8 +117,8 @@ object ProviderEndpointsSpec extends ZIOSpecDefault:
       )
     },
     test("未声明推理档位时沿用兼容档案，显式档位才覆盖") {
-      val base = OpenAICompatibility.deepSeek.descriptor.capabilities
-      val inherited = ProviderEndpointCapabilities().applyTo(base)
+      val base       = OpenAICompatibility.deepSeek.descriptor.capabilities
+      val inherited  = ProviderEndpointCapabilities().applyTo(base)
       val restricted = ProviderEndpointCapabilities(
         reasoningEfforts = Set(ReasoningEffort.Low)
       ).applyTo(base)

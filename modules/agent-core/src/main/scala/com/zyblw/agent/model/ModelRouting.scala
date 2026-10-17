@@ -111,7 +111,7 @@ object ModelRouter:
         .flatMap(adapter(_, ref))
     case _: FallbackChatModel => Left(AgentError.InvalidConfiguration("耐久路由不能嵌套 FallbackChatModel"))
     case leaf if leaf.provider == ref.provider || leaf.provider == "router" => Right(leaf)
-    case _                                                                  => Left(AgentError.ProviderNotFound(ref.provider))
+    case _ => Left(AgentError.ProviderNotFound(ref.provider))
 
   /** 请求内容与显式要求共同过滤；能力声明仍以 ModelCapabilities 为权威。 */
   def rejectionCodes(

@@ -5,40 +5,58 @@ import sbt.Keys.*
 // 发布元数据
 // ---------------------------------------------------------------------------
 
-ThisBuild / organization  := "io.github.zyblw"
-ThisBuild / scalaVersion  := "3.9.0"
-ThisBuild / versionScheme := Some("early-semver")
-ThisBuild / homepage      := Some(url("https://github.com/zyblw/zyblw-agent"))
-ThisBuild / licenses      := List(
-  "Apache-2.0" -> url("https://www.apache.org/licenses/LICENSE-2.0.txt")
+organization  := "io.github.zyblw"
+scalaVersion  := "3.9.0"
+versionScheme := Some("early-semver")
+homepage      := Some(uri("https://github.com/zyblw/zyblw-agent"))
+licenses      := List(
+  "Apache-2.0" -> uri("https://www.apache.org/licenses/LICENSE-2.0.txt")
 )
-ThisBuild / developers := List(
+developers := List(
   Developer(
     id = "zyblw",
     name = "zyblw",
     email = "zyblw@users.noreply.github.com",
-    url = url("https://github.com/zyblw")
+    url = uri("https://github.com/zyblw")
   )
 )
-ThisBuild / scmInfo := Some(
+scmInfo := Some(
   ScmInfo(
-    browseUrl = url("https://github.com/zyblw/zyblw-agent"),
+    browseUrl = uri("https://github.com/zyblw/zyblw-agent"),
     connection = "scm:git:https://github.com/zyblw/zyblw-agent.git",
     devConnection = Some("scm:git:ssh://git@github.com/zyblw/zyblw-agent.git")
   )
 )
-ThisBuild / pomIncludeRepository := (_ => false)
-ThisBuild / javacOptions ++= Seq("-source", "21", "-target", "21")
-ThisBuild / scalacOptions ++= Seq(
+pomIncludeRepository := (_ => false)
+javacOptions ++= Seq("-source", "21", "-target", "21")
+scalacOptions ++= Seq(
   "-deprecation",
   "-feature",
   "-unchecked",
   "-Wunused:all",
   "-Wvalue-discard",
+  "-Wnonunit-statement",
   "-Xkind-projector"
 )
-ThisBuild / testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework")
-ThisBuild / Test / parallelExecution := true
+testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework")
+Test / parallelExecution      := true
+Compile / run / baseDirectory := baseDirectory.value
+Test / run / baseDirectory    := baseDirectory.value
+
+// ---------------------------------------------------------------------------
+// 字节码优化器（Scala 3 Optimizer & Inlining）
+// ---------------------------------------------------------------------------
+// 开发与测试默认关闭，保障增量编译（Zinc）亚秒级反馈与断点调试；
+// 生产发布（SCALA_OPTIMIZE=true 或 CI release）开启局部优化与组织内受控内联，
+// 消除高阶函数、Lambda 闭包、装箱拆箱与兆态调用开销，严禁跨库内联以防 CVE 补丁失效。
+val optimizerOptions = Seq(
+  "-opt",
+  "-opt-inline:<sources>,io.github.zyblw.**"
+)
+scalacOptions ++= {
+  if (sys.env.get("SCALA_OPTIMIZE").contains("true")) optimizerOptions
+  else Seq.empty
+}
 
 /** Provider、OTLP、MCP 等测试会创建真实 Netty stub server。限制跨项目 Test 并发可以避免 CI 因 native thread 上限产生与断言无关的随机失败；单项目内部仍由
   * ZIO Test 并行。

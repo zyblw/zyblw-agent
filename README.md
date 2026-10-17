@@ -332,14 +332,19 @@ ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`
 
 ```bash
 ./scripts/verify-business-ready.sh
-sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
-RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
+sbt --batch "scalafmtCheckAll ; scalafmtSbtCheck ; testFull"
+RUN_POSTGRES_INTEGRATION=1 sbt --batch postgres/testFull
 ./integration-tests/command-worker-kill-recovery.sh --restart-postgres
 ./integration-tests/workflow-wake-worker-kill-recovery.sh --restart-postgres
 ./integration-tests/durable-worker-soak.sh
 ./integration-tests/workflow-wake-worker-soak.sh
-sbt -batch 'set ThisBuild / version := "0.9.0-local"; publishM2'
-cd integration-tests/maven-consumer && ZYBLW_AGENT_VERSION=0.9.0-local sbt -batch compile
+sbt --batch 'set version := "0.9.0-local"; publishM2'
+cd integration-tests/maven-consumer && ZYBLW_AGENT_VERSION=0.9.0-local sbt --batch compile
+```
+
+生产打包与字节码优化验证（开启 Scala 3 Optimizer 与领域受控内联）：
+```bash
+SCALA_OPTIMIZE=true sbt --batch "testFull ; publishM2"
 ```
 
 控制台单独验证：

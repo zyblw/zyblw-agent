@@ -140,7 +140,10 @@ object ModelAdminLive:
     for
       started <- Clock.nanoTime
       // `.timeout` 会中断底层调用,因此超时不会留下一个继续计费的后台请求。
-      exit     <- chatModel.complete(probeRequest(provider, model, config.maxOutputTokens)).timeout(config.timeout).exit
+      exit <- chatModel
+        .complete(probeRequest(provider, model, config.maxOutputTokens))
+        .timeout(config.timeout)
+        .exit
       finished <- Clock.nanoTime
       latency = ((finished - started) / 1_000_000L).max(0L)
       result <- exit match
@@ -178,7 +181,6 @@ object ModelAdminLive:
       metadata = Map("purpose" -> ProbePurpose)
     )
   )
-
 
   /** 标准装配。
     *

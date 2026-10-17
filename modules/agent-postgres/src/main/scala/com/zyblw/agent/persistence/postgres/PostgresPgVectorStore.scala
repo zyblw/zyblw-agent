@@ -330,7 +330,7 @@ final class PostgresPgVectorStore(
           statement.setArray(3, connection.createArrayOf("text", chunkIds.toArray))
           statement.setInt(4, filter.documentIds.size)
           statement.setArray(5, connection.createArrayOf("text", filter.documentIds.toArray))
-          bindVisibility(statement, 6, scope, profile)
+          val _       = bindVisibility(statement, 6, scope, profile)
           val result  = statement.executeQuery()
           val builder = ChunkBuilder.make[DocumentChunk]()
           while result.next() do builder += readChunk(result, scope)

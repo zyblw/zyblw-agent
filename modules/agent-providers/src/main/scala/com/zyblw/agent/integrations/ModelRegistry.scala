@@ -14,8 +14,8 @@ import java.security.MessageDigest
 
 /** 模型连接使用的 wire 协议。
   *
-  * 代理/聚合平台(OpenRouter、One API、各类中转站)几乎都暴露 OpenAI Chat Completions,因此它们是
-  * `OpenAICompatible` + `compatibilityProfile = generic` 的一个连接,而不是一个新协议。
+  * 代理/聚合平台(OpenRouter、One API、各类中转站)几乎都暴露 OpenAI Chat Completions,因此它们是 `OpenAICompatible` +
+  * `compatibilityProfile = generic` 的一个连接,而不是一个新协议。
   */
 enum ModelWireProtocol(val id: String):
   case OpenAICompatible   extends ModelWireProtocol("openai-compatible")
@@ -28,8 +28,8 @@ object ModelWireProtocol:
 
 /** 一个由值(而不是环境变量)描述的模型连接。
   *
-  * 宿主从自己的存储(数据库、管理台)读出连接后构造本类型;框架只负责把它装配成适配器。`apiKey` 是值本身,
-  * 因此 `toString` 必须脱敏,而 `credentialReference` 只是可展示的低基数标签,例如 `db:connection/deepseek`。
+  * 宿主从自己的存储(数据库、管理台)读出连接后构造本类型;框架只负责把它装配成适配器。`apiKey` 是值本身, 因此 `toString` 必须脱敏,而 `credentialReference`
+  * 只是可展示的低基数标签,例如 `db:connection/deepseek`。
   *
   * @param providerId
   *   路由名,与 `ModelSettings.provider` 同一命名空间
@@ -54,7 +54,10 @@ final case class ModelConnectionSpec(
     credentialReference: String = CredentialReference.Unspecified
 ):
   require(providerId.matches("[a-z][a-z0-9_-]{0,31}"), "providerId 必须是 1..32 的小写标识")
-  require(ProviderEndpointUrl.isAllowed(baseUrl), "baseUrl 必须是无 user-info/query/fragment 的 https URL 或本机 http URL")
+  require(
+    ProviderEndpointUrl.isAllowed(baseUrl),
+    "baseUrl 必须是无 user-info/query/fragment 的 https URL 或本机 http URL"
+  )
   require(defaultModel.trim.nonEmpty, "defaultModel 不能为空")
   require(
     compatibilityProfile.forall(ProviderEndpoints.SupportedCompatibilityProfiles.contains),
@@ -128,7 +131,9 @@ object ChatAdapterFactory:
       .attempt(unsafeBuild(client, spec))
       .mapError {
         case error: IllegalArgumentException =>
-          AgentError.InvalidConfiguration(s"${spec.providerId} 连接无效: ${error.getMessage.stripPrefix("requirement failed: ")}")
+          AgentError.InvalidConfiguration(
+            s"${spec.providerId} 连接无效: ${error.getMessage.stripPrefix("requirement failed: ")}"
+          )
         case _ => AgentError.InvalidConfiguration(s"${spec.providerId} 连接无效")
       }
 
@@ -155,7 +160,11 @@ object ChatAdapterFactory:
           compatibility = compatibility.copy(descriptor = descriptor),
           extraHeaders = spec.extraHeaders
         )
-        ProviderRegistration.openAICompatible(OpenAICompatibleChatModel(client, config), config, spec.credentialReference)
+        ProviderRegistration.openAICompatible(
+          OpenAICompatibleChatModel(client, config),
+          config,
+          spec.credentialReference
+        )
       case ModelWireProtocol.OpenAIResponses =>
         val config = OpenAIResponsesConfig(
           baseUrl = spec.baseUrl,
@@ -181,7 +190,11 @@ object ChatAdapterFactory:
         )
         registration(spec, GeminiInteractionsChatModel(client, config), config.apiKey)
 
-  private def registration(spec: ModelConnectionSpec, inner: ChatModel, apiKey: String): ProviderRegistration =
+  private def registration(
+      spec: ModelConnectionSpec,
+      inner: ChatModel,
+      apiKey: String
+  ): ProviderRegistration =
     val base       = inner.descriptor
     val descriptor = base.copy(
       id = spec.providerId,
@@ -206,7 +219,8 @@ final private[integrations] class AliasedChatModel(
 ) extends ChatModel:
   def complete(request: ChatRequest): IO[AgentError, ChatResponse] = inner.complete(request)
 
-  override def stream(request: ChatRequest): ZStream[Any, AgentError, ModelStreamEvent] = inner.stream(request)
+  override def stream(request: ChatRequest): ZStream[Any, AgentError, ModelStreamEvent] =
+    inner.stream(request)
 
 /** 一个版本的已装配状态。
   *
@@ -221,8 +235,7 @@ final case class LiveModelRegistryState(
 
 /** 随 `ModelRegistrySource` 版本变化而重建路由的注册表。
   *
-  * 每次调用先读快照版本;版本变化时只重建缓存键变化的适配器(换 Key、换 URL、改能力),其余连接复用原实例。
-  * 进行中的调用持有旧版本的路由器,因此改配置不会打断已经发出的请求。
+  * 每次调用先读快照版本;版本变化时只重建缓存键变化的适配器(换 Key、换 URL、改能力),其余连接复用原实例。 进行中的调用持有旧版本的路由器,因此改配置不会打断已经发出的请求。
   */
 final class LiveModelRegistry private (
     client: Client,
@@ -284,8 +297,13 @@ final class LiveModelRegistry private (
     ZIO
       .foreach(snapshot.connections) { spec =>
         cache.get(spec.providerId) match
-          case Some((key, registration)) if key == spec.cacheKey => ZIO.succeed(spec.providerId -> Right(spec.cacheKey -> registration))
-          case _ => ChatAdapterFactory.build(client, spec).either.map(result => spec.providerId -> result.map(spec.cacheKey -> _))
+          case Some((key, registration)) if key == spec.cacheKey =>
+            ZIO.succeed(spec.providerId -> Right(spec.cacheKey -> registration))
+          case _ =>
+            ChatAdapterFactory
+              .build(client, spec)
+              .either
+              .map(result => spec.providerId -> result.map(spec.cacheKey -> _))
       }
       .flatMap { results =>
         val built    = results.collect { case (id, Right(entry)) => id -> entry }.toMap
@@ -301,8 +319,9 @@ final class LiveModelRegistry private (
               router   <- RoutedChatModel.make(defaultId, registrations.map(_.chatModel))
               registry <- ProviderRegistry.make(router, registrations)
             yield registry).either.map {
-              case Right(registry) => LiveModelRegistryState(snapshot.revision, Some(registry), failures) -> built
-              case Left(error)     =>
+              case Right(registry) =>
+                LiveModelRegistryState(snapshot.revision, Some(registry), failures) -> built
+              case Left(error) =>
                 LiveModelRegistryState(snapshot.revision, None, failures.updated("*", error.message)) -> built
             }
       }

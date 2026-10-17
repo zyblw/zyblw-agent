@@ -109,7 +109,7 @@ object ModelRerankerSpec extends ZIOSpecDefault:
       for
         started <- Promise.make[Nothing, Unit]
         slowModel = new RerankerModel:
-          val descriptor = ModelRerankerSpec.descriptor
+          val descriptor                                                        = ModelRerankerSpec.descriptor
           def score(request: RerankRequest): IO[RetrievalError, RerankResponse] =
             started.succeed(()) *> ZIO.never
         reranker = ModelReranker(
@@ -121,10 +121,10 @@ object ModelRerankerSpec extends ZIOSpecDefault:
           )
         )
         original = Chunk(hit(0, "甲"), hit(1, "乙"))
-        fiber    <- reranker.rerank("查询", original, 2).fork
-        _        <- started.await
-        _        <- TestClock.adjust(100.millis)
-        result   <- fiber.join
+        fiber  <- reranker.rerank("查询", original, 2).fork
+        _      <- started.await
+        _      <- TestClock.adjust(100.millis)
+        result <- fiber.join
       yield assertTrue(
         result.length == 2,
         result.map(_.chunk) == original.take(2).map(_.chunk),
@@ -133,4 +133,3 @@ object ModelRerankerSpec extends ZIOSpecDefault:
       )
     }
   )
-

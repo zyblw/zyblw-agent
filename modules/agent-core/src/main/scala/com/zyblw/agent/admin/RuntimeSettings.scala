@@ -164,10 +164,12 @@ object RuntimeOverrides:
       overrides.explorationMaxDurationSeconds
         .filterNot(value => value >= 1L && value <= 1800L)
         .map(_ => "问答单次时长熔断必须在 1 到 1800 秒之间"),
-      overrides.explorationMaxTotalTokens.filter { total =>
-        total < overrides.explorationMaxInputTokens.getOrElse(0L) ||
-        total < overrides.explorationMaxOutputTokens.getOrElse(0L)
-      }.map(_ => "问答累计 token 上限不能小于已设置的输入或输出上限")
+      overrides.explorationMaxTotalTokens
+        .filter { total =>
+          total < overrides.explorationMaxInputTokens.getOrElse(0L) ||
+          total < overrides.explorationMaxOutputTokens.getOrElse(0L)
+        }
+        .map(_ => "问答累计 token 上限不能小于已设置的输入或输出上限")
     )
     val consistency =
       for
@@ -556,7 +558,8 @@ object RuntimeSettingsService:
     baseline.copy(
       maxSteps = boundedInt(overrides.explorationMaxSteps, baseline.maxSteps, 64),
       maxModelCalls = boundedInt(overrides.explorationMaxModelCalls, baseline.maxModelCalls, 64),
-      maxRepeatedActions = boundedInt(overrides.explorationMaxRepeatedActions, baseline.maxRepeatedActions, 16),
+      maxRepeatedActions =
+        boundedInt(overrides.explorationMaxRepeatedActions, baseline.maxRepeatedActions, 16),
       maxInputTokens = input,
       maxOutputTokens = output,
       maxTotalTokens = requestedTotal,
@@ -617,7 +620,9 @@ object RuntimeSettingsService:
           .when(problems.nonEmpty)
         record <- store.put(expectedVersion, overrides, updatedBy, reason)
         _      <- ZIO.succeed(
-          cache.set(merge(baseline, baselineTopK, baselineMinimumScore, baselineRerank, baselineExploration, record))
+          cache.set(
+            merge(baseline, baselineTopK, baselineMinimumScore, baselineRerank, baselineExploration, record)
+          )
         )
       yield toView(record)
 
@@ -626,8 +631,9 @@ object RuntimeSettingsService:
     /** 把基线、覆盖与生效值渲染成管理台字段列表。 */
     private def toView(record: RuntimeOverrideRecord): RuntimeConfigView =
       val overrides = record.overrides
-      val effective = merge(baseline, baselineTopK, baselineMinimumScore, baselineRerank, baselineExploration, record)
-      val fields    = Chunk(
+      val effective =
+        merge(baseline, baselineTopK, baselineMinimumScore, baselineRerank, baselineExploration, record)
+      val fields = Chunk(
         RuntimeSettingField(
           "toolAllowedTools",
           renderTools(baseline.allowedTools.map(_.value)),

@@ -175,7 +175,7 @@ final class PostgresArtifactStore(
                 finally result.close()
               finally statement.close()
             victims.foreach { case (kind, key, name, version) =>
-              deleteVersion(connection, kind, key, name, version)
+              val _     = deleteVersion(connection, kind, key, name, version)
               val scope = decodeScope(kind, key)
               insertAudit(
                 connection,

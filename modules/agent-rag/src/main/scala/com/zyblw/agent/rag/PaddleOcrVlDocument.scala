@@ -432,7 +432,8 @@ object PaddleOcrVlDocument:
           cell = Some(rs -> cs)
           text.clear()
       override def handleText(data: Array[Char], pos: Int): Unit =
-        if cell.nonEmpty then { text.append(new String(data)).append(' '); () }
+        if cell.nonEmpty then
+          val _ = text.append(new String(data)).append(' ')
       override def handleEndTag(tag: HTML.Tag, pos: Int): Unit =
         if tag == HTML.Tag.TD || tag == HTML.Tag.TH then
           cell.foreach { case (rs, cs) =>

@@ -10,7 +10,7 @@ Read `README.md`, `docs/README.md`, `docs/architecture.md`, `docs/maturity-and-r
 configuration. Build definitions, sources, tests, migrations, and generated POMs take precedence
 over roadmap prose. When code and a document disagree, fix the document.
 
-Project skills live in `.agents/skills/` and are committed with the repository. Third-party sources
+Project skills live in `.agents/skills/` and are committed with the repository (including `scala3-zio2-stack` for progressive Scala 3/ZIO 2 stack guardrails and `zyblw-agent-development` for framework delivery). Third-party sources
 are pinned in `skills-lock.json`. Another machine can clone this repo and use them without running
 `npx skills add`.
 
@@ -184,6 +184,10 @@ provider tests are opt-in and must never run on an ordinary pull request.
 A test that fails intermittently is a defect, not noise. Fix the coupling that makes it racy;
 do not raise the timeout and move on. Running many `testFull` rounds against one long-lived sbt
 server can exhaust class space — restart the server rather than shrinking the test suite.
+
+Production releases compile with `SCALA_OPTIMIZE=true` to enable Scala 3 bytecode optimizations
+(`-opt` and scoped `-opt-inline:<sources>,io.github.zyblw.**`). Local development and ordinary CI
+leave this unset to preserve sub-second incremental compile speeds.
 
 ## Security and documentation
 

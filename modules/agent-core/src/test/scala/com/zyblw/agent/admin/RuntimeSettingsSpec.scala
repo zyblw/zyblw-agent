@@ -39,7 +39,7 @@ object RuntimeSettingsSpec extends ZIOSpecDefault:
     test("稀疏补丁只改写被设置的字段，其余保持基线") {
       (for
         settings <- service()
-        _ <- settings.update(
+        _        <- settings.update(
           0L,
           RuntimeOverrides(toolMaxCallsPerStep = Some(1), toolDefaultTimeoutMillis = Some(5_000L)),
           "ops",
@@ -247,18 +247,18 @@ object RuntimeSettingsSpec extends ZIOSpecDefault:
         maxDuration = 1800.seconds
       )
       (for
-        settings <- RuntimeSettingsService.make(baseline, baselineExploration = open)
-        before   <- settings.view
-        _        <- settings.update(0L, RuntimeOverrides(explorationMaxSteps = Some(4)), "ops", "收紧步数")
-        after    <- settings.effective
-        view     <- settings.view
+        settings  <- RuntimeSettingsService.make(baseline, baselineExploration = open)
+        before    <- settings.view
+        _         <- settings.update(0L, RuntimeOverrides(explorationMaxSteps = Some(4)), "ops", "收紧步数")
+        after     <- settings.effective
+        view      <- settings.view
         tightened <- settings.update(
           view.overrideVersion,
           RuntimeOverrides(explorationMaxTotalTokens = Some(100_000L)),
           "ops",
           "只收紧累计"
         )
-        tight <- settings.effective
+        tight    <- settings.effective
         rejected <- settings
           .update(
             tightened.overrideVersion,
@@ -279,13 +279,13 @@ object RuntimeSettingsSpec extends ZIOSpecDefault:
           )
           .exit
         store <- ZIO.service[RuntimeOverrideStore]
-        _ <- store.put(
+        _     <- store.put(
           tightened.overrideVersion,
           RuntimeOverrides(toolMaxCallsPerRun = Some(1000)),
           "ops",
           "旧数据"
         )
-        _ <- settings.refresh
+        _      <- settings.refresh
         capped <- settings.effective
       yield assertTrue(
         before.fields.find(_.key == "explorationMaxSteps").exists(_.baselineValue == "64"),

@@ -91,17 +91,17 @@ object StructureOutline:
       maxSelect: Int
   ): Either[String, Chunk[String]] =
     json
-        .fromJson[Selection]
-        .left
-        .map(_ => "outline selection JSON invalid")
-        .flatMap { selection =>
-          selection.sections.orElse(selection.ids) match
-            case None       => Left("outline selection field missing")
-            case Some(refs) =>
-              val resolved = refs.flatMap(outline.nodeId).distinct
-              if refs.nonEmpty && resolved.isEmpty then Left("outline selection outside outline")
-              else Right(Chunk.fromIterable(resolved.take(maxSelect.max(0))))
-        }
+      .fromJson[Selection]
+      .left
+      .map(_ => "outline selection JSON invalid")
+      .flatMap { selection =>
+        selection.sections.orElse(selection.ids) match
+          case None       => Left("outline selection field missing")
+          case Some(refs) =>
+            val resolved = refs.flatMap(outline.nodeId).distinct
+            if refs.nonEmpty && resolved.isEmpty then Left("outline selection outside outline")
+            else Right(Chunk.fromIterable(resolved.take(maxSelect.max(0))))
+      }
 
   /** 规则摘要形如「标题：包含 N 处论述。主要涵盖：……」，只取正文开头；模型摘要原样使用。 */
   def navigationHint(node: StructureNode): Option[String] =
@@ -121,8 +121,8 @@ object StructureOutline:
   /** 思考标签和说明文字里的花括号不并进正式 JSON；从后往前取能单独解码的对象。 */
   private def jsonObjects(raw: String): List[String] =
     val closed = "(?s)<think>.*?</think>".r.replaceAllIn(raw, "")
-    val open = closed.indexOf("<think>")
-    val text = (if open >= 0 then closed.substring(0, open) else closed)
+    val open   = closed.indexOf("<think>")
+    val text   = (if open >= 0 then closed.substring(0, open) else closed)
       .replace("```json", "")
       .replace("```", "")
     val found = scala.collection.mutable.ListBuffer.empty[String]
@@ -138,11 +138,11 @@ object StructureOutline:
     found.toList
 
   private def endOfObject(text: String, start: Int): Int =
-    var depth = 0
-    var index = start
+    var depth    = 0
+    var index    = start
     var inString = false
-    var escape = false
-    var end = -1
+    var escape   = false
+    var end      = -1
     while index < text.length && end < 0 do
       val char = text.charAt(index)
       if inString then

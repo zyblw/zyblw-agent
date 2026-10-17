@@ -54,8 +54,8 @@ object ModelRoleCatalog:
 
 /** 角色目录的读取端口。
   *
-  * 每次创建 Run 时读取一次，结果随 provider/model 一起冻结进定义与组合指纹；因此管理面改绑角色只影响**新** Run，
-  * 进行中的 Run 不会被热切。静态目录用 `ModelRoleSource.static`，数据库/管理台驱动的目录由宿主实现。
+  * 每次创建 Run 时读取一次，结果随 provider/model 一起冻结进定义与组合指纹；因此管理面改绑角色只影响**新** Run， 进行中的 Run 不会被热切。静态目录用
+  * `ModelRoleSource.static`，数据库/管理台驱动的目录由宿主实现。
   */
 trait ModelRoleSource:
   def current: UIO[ModelRoleCatalog]

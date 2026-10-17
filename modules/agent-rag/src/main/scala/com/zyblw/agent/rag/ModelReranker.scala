@@ -166,7 +166,7 @@ final class ModelReranker(model: RerankerModel, policy: ModelRerankerPolicy = Mo
         .timeoutFail(AgentError.RetrievalFailed("Reranker Provider 超时", retryable = true))(policy.timeout)
         .flatMap(response => validateAndMap(response, selected, request.topN))
       call.catchAll { error =>
-        val isTimeout = error.message.contains("超时") || error.message.toLowerCase.contains("timeout")
+        val isTimeout      = error.message.contains("超时") || error.message.toLowerCase.contains("timeout")
         val fallbackReason = if isTimeout then 1.0 else 2.0
         policy.failureMode match
           case RerankerFailureMode.FailOpen =>
@@ -174,12 +174,16 @@ final class ModelReranker(model: RerankerModel, policy: ModelRerankerPolicy = Mo
               s"Reranker 触发降级 (${if isTimeout then "超时 > " + policy.timeout.toMillis + "ms" else "调用异常"}): ${error.message}，自动回退使用 Dense + FTS 加权 RRF 粗排结果"
             ) *>
               ZIO.succeed(
-                hits.take(limit).map(hit =>
-                  hit.copy(signals = hit.signals ++ Map(
-                    "rerankFallback" -> 1.0,
-                    "rerankFallbackReason" -> fallbackReason
-                  ))
-                )
+                hits
+                  .take(limit)
+                  .map(hit =>
+                    hit.copy(signals =
+                      hit.signals ++ Map(
+                        "rerankFallback"       -> 1.0,
+                        "rerankFallbackReason" -> fallbackReason
+                      )
+                    )
+                  )
               )
           case RerankerFailureMode.FailClosed =>
             ZIO.logError(s"Reranker 调用失败且策略为 FailClosed: ${error.message}") *> ZIO.fail(error)

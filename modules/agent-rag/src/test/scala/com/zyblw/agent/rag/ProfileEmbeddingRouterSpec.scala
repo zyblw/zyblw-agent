@@ -7,9 +7,9 @@ import zio.test.*
 object ProfileEmbeddingRouterSpec extends ZIOSpecDefault:
   private val tenant = TenantId("profile-router")
 
-  private final class Counting(val inner: EmbeddingModel, calls: Ref[Int]) extends EmbeddingModel:
-    def capabilities = inner.capabilities
-    def descriptor   = inner.descriptor
+  final private class Counting(val inner: EmbeddingModel, calls: Ref[Int]) extends EmbeddingModel:
+    def capabilities                                                            = inner.capabilities
+    def descriptor                                                              = inner.descriptor
     def embed(request: EmbeddingRequest): IO[RetrievalError, EmbeddingResponse] =
       calls.update(_ + 1) *> inner.embed(request)
 
@@ -43,8 +43,8 @@ object ProfileEmbeddingRouterSpec extends ZIOSpecDefault:
       for
         buildCalls <- Ref.make(0)
         oldCalls   <- Ref.make(0)
-        build = Counting(buildModel, buildCalls)
-        old   = Counting(oldModel, oldCalls)
+        build      = Counting(buildModel, buildCalls)
+        old        = Counting(oldModel, oldCalls)
         router     = ProfileEmbeddingRouter.make(build, buildSpec, Chunk(old))
         oldProfile = ProfileEmbeddingRouter.profileOf(old, buildSpec)
         store <- InMemoryKnowledgeIndexStore.make
@@ -56,8 +56,8 @@ object ProfileEmbeddingRouterSpec extends ZIOSpecDefault:
         _          <- session.retrieve(RetrievalRequest("问题", pinned, 3)).either
         _          <- session.retrieve(RetrievalRequest("问题", pinned, 3)).either
         afterShare <- oldCalls.get
-        _          <- retriever.retrieve(RetrievalRequest("问题", RetrievalScope(tenant, Set("read")), 3)).either
-        buildUsed  <- buildCalls.get
+        _         <- retriever.retrieve(RetrievalRequest("问题", RetrievalScope(tenant, Set("read")), 3)).either
+        buildUsed <- buildCalls.get
       yield assertTrue(afterOld == 1, afterShare == 2, buildUsed == 1)
     }
   )

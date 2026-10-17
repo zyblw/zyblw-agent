@@ -265,23 +265,23 @@ final class LlmMemoryExtractor(model: ChatModel, config: LlmMemoryExtractorConfi
     case "sensitive" => ZIO.succeed(MemorySensitivity.Sensitive)
     case _           => ZIO.fail(AgentError.MemoryExtractionFailed("memory-extractor-sensitivity-invalid"))
 
-  /** 过期秒数使用 exact arithmetic，拒绝非正、超限和 Long 溢出。
-    * 对近期探索 (Episodic) 类别，若模型未显式返回过期秒数，默认分配 30 天，防止被确定性治理策略拒收。
+  /** 过期秒数使用 exact arithmetic，拒绝非正、超限和 Long 溢出。 对近期探索 (Episodic) 类别，若模型未显式返回过期秒数，默认分配 30 天，防止被确定性治理策略拒收。
     */
-  private def parseExpiry(kind: MemoryKind, value: Option[Long], now: Long): IO[StoreError, Option[Long]] = value match
-    case None if kind == MemoryKind.Episodic =>
-      val defaultEpisodicSeconds = 30L * 24L * 60L * 60L
-      ZIO
-        .fromEither(Try(Math.addExact(now, Math.multiplyExact(defaultEpisodicSeconds, 1000L))).toEither)
-        .mapError(_ => AgentError.MemoryExtractionFailed("memory-extractor-expiry-overflow"))
-        .map(Some(_))
-    case None                                                                => ZIO.none
-    case Some(seconds) if seconds > 0L && seconds <= config.maxExpirySeconds =>
-      ZIO
-        .fromEither(Try(Math.addExact(now, Math.multiplyExact(seconds, 1000L))).toEither)
-        .mapError(_ => AgentError.MemoryExtractionFailed("memory-extractor-expiry-overflow"))
-        .map(Some(_))
-    case _ => ZIO.fail(AgentError.MemoryExtractionFailed("memory-extractor-expiry-invalid"))
+  private def parseExpiry(kind: MemoryKind, value: Option[Long], now: Long): IO[StoreError, Option[Long]] =
+    value match
+      case None if kind == MemoryKind.Episodic =>
+        val defaultEpisodicSeconds = 30L * 24L * 60L * 60L
+        ZIO
+          .fromEither(Try(Math.addExact(now, Math.multiplyExact(defaultEpisodicSeconds, 1000L))).toEither)
+          .mapError(_ => AgentError.MemoryExtractionFailed("memory-extractor-expiry-overflow"))
+          .map(Some(_))
+      case None                                                                => ZIO.none
+      case Some(seconds) if seconds > 0L && seconds <= config.maxExpirySeconds =>
+        ZIO
+          .fromEither(Try(Math.addExact(now, Math.multiplyExact(seconds, 1000L))).toEither)
+          .mapError(_ => AgentError.MemoryExtractionFailed("memory-extractor-expiry-overflow"))
+          .map(Some(_))
+      case _ => ZIO.fail(AgentError.MemoryExtractionFailed("memory-extractor-expiry-invalid"))
 
   /** Provider 错误只投影稳定分类与 retryable，不复制可能含消息正文的错误 message。 */
   private def mapModelError(error: AgentError): StoreError = error match
@@ -347,7 +347,9 @@ object LlmMemoryExtractor:
             Chunk(
               "type"        -> Json.Str("string"),
               "pattern"     -> Json.Str("^[a-z][a-z0-9_.-]{0,199}$"),
-              "description" -> Json.Str("稳定语义标识，如 scholarly.preferred_classics, insight.shaoyang_mechanism, cognition.reasoning_pattern, exploration.active_topic")
+              "description" -> Json.Str(
+                "稳定语义标识，如 scholarly.preferred_classics, insight.shaoyang_mechanism, cognition.reasoning_pattern, exploration.active_topic"
+              )
             )
           ),
           "value" -> Json.Obj(
@@ -355,29 +357,59 @@ object LlmMemoryExtractor:
               "description" -> Json.Str("结构化事实内容或摘要字符串")
             )
           ),
-          "kind"  -> Json.Obj(
+          "kind" -> Json.Obj(
             Chunk(
-              "type"        -> Json.Str("string"),
-              "enum"        -> Json.Arr(Chunk("preference", "semantic", "episodic", "procedural").map(Json.Str(_))),
-              "description" -> Json.Str("记忆语义维度：preference(志趣偏好/流派风格), semantic(见解感悟/核心认知/心得体会), procedural(思维习惯/推导路径/交流风格), episodic(近期探索/阶段课题/未决疑问)")
+              "type" -> Json.Str("string"),
+              "enum" -> Json.Arr(Chunk("preference", "semantic", "episodic", "procedural").map(Json.Str(_))),
+              "description" -> Json.Str(
+                "记忆语义维度：preference(志趣偏好/流派风格), semantic(见解感悟/核心认知/心得体会), procedural(思维习惯/推导路径/交流风格), episodic(近期探索/阶段课题/未决疑问)"
+              )
             )
           ),
           "importance" -> Json.Obj(
-            Chunk("type" -> Json.Str("number"), "minimum" -> Json.Num(0), "maximum" -> Json.Num(1), "description" -> Json.Str("未来互动参考权重 0.0-1.0"))
+            Chunk(
+              "type"        -> Json.Str("number"),
+              "minimum"     -> Json.Num(0),
+              "maximum"     -> Json.Num(1),
+              "description" -> Json.Str("未来互动参考权重 0.0-1.0")
+            )
           ),
           "confidence" -> Json.Obj(
-            Chunk("type" -> Json.Str("number"), "minimum" -> Json.Num(0), "maximum" -> Json.Num(1), "description" -> Json.Str("证据确凿程度 0.0-1.0"))
+            Chunk(
+              "type"        -> Json.Str("number"),
+              "minimum"     -> Json.Num(0),
+              "maximum"     -> Json.Num(1),
+              "description" -> Json.Str("证据确凿程度 0.0-1.0")
+            )
           ),
           "sensitivity" -> Json.Obj(
             Chunk(
-              "type" -> Json.Str("string"),
-              "enum" -> Json.Arr(Chunk("public", "personal", "sensitive").map(Json.Str(_))),
+              "type"        -> Json.Str("string"),
+              "enum"        -> Json.Arr(Chunk("public", "personal", "sensitive").map(Json.Str(_))),
               "description" -> Json.Str("敏感级别：public, personal, sensitive")
             )
           ),
-          "sourceMessageIndex" -> Json.Obj(Chunk("type" -> Json.Str("integer"), "minimum" -> Json.Num(0), "description" -> Json.Str("对应来源消息索引"))),
-          "evidenceQuote"      -> Json.Obj(Chunk("type" -> Json.Str("string"), "minLength" -> Json.Num(1), "description" -> Json.Str("消息中逐字存在的短原文证据"))),
-          "expiresInSeconds"   -> Json.Obj(Chunk("type" -> Json.Str("integer"), "minimum" -> Json.Num(1), "description" -> Json.Str("可选过期秒数，近期探索 episodic 建议设置")))
+          "sourceMessageIndex" -> Json.Obj(
+            Chunk(
+              "type"        -> Json.Str("integer"),
+              "minimum"     -> Json.Num(0),
+              "description" -> Json.Str("对应来源消息索引")
+            )
+          ),
+          "evidenceQuote" -> Json.Obj(
+            Chunk(
+              "type"        -> Json.Str("string"),
+              "minLength"   -> Json.Num(1),
+              "description" -> Json.Str("消息中逐字存在的短原文证据")
+            )
+          ),
+          "expiresInSeconds" -> Json.Obj(
+            Chunk(
+              "type"        -> Json.Str("integer"),
+              "minimum"     -> Json.Num(1),
+              "description" -> Json.Str("可选过期秒数，近期探索 episodic 建议设置")
+            )
+          )
         )
       )
     )

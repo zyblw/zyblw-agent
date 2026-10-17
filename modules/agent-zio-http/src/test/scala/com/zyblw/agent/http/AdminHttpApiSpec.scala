@@ -270,29 +270,38 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
 
   final private class RecordingCommands(val calls: Ref[Chunk[String]])
       extends com.zyblw.agent.runtime.AgentCommandService:
-    private def unexpected[A](name: String): IO[AgentError, A] = ZIO.fail(AgentError.Unexpected(s"测试不应调用 $name"))
-    def submitStart(agent: AgentDefinition, request: RunRequest, idempotencyKey: String) = unexpected("submitStart")
+    private def unexpected[A](name: String): IO[AgentError, A] =
+      ZIO.fail(AgentError.Unexpected(s"测试不应调用 $name"))
+    def submitStart(agent: AgentDefinition, request: RunRequest, idempotencyKey: String) = unexpected(
+      "submitStart"
+    )
     def submitApproval(id: RunId, decision: ApprovalDecision, actor: RunContext) =
-      calls.update(_ :+ s"approval:${id.asString}:$decision").as(
-        RunCommandRecord(
-          commandId = CommandId(UUID.fromString("11111111-1111-1111-1111-111111111111")),
-          runId = id,
-          payload = RunCommandPayload.ResumeApproval("approval-1", decision),
-          idempotencyKey = "approval-key",
-          status = RunCommandStatus.Queued,
-          priority = 0,
-          availableAt = Instant.EPOCH,
-          attempt = 0,
-          manualRetryCount = 0,
-          lastFailure = None,
-          createdAt = Instant.EPOCH,
-          updatedAt = Instant.EPOCH
+      calls
+        .update(_ :+ s"approval:${id.asString}:$decision")
+        .as(
+          RunCommandRecord(
+            commandId = CommandId(UUID.fromString("11111111-1111-1111-1111-111111111111")),
+            runId = id,
+            payload = RunCommandPayload.ResumeApproval("approval-1", decision),
+            idempotencyKey = "approval-key",
+            status = RunCommandStatus.Queued,
+            priority = 0,
+            availableAt = Instant.EPOCH,
+            attempt = 0,
+            manualRetryCount = 0,
+            lastFailure = None,
+            createdAt = Instant.EPOCH,
+            updatedAt = Instant.EPOCH
+          )
         )
-      )
     def submitCancel(id: RunId, reason: Option[String], actor: RunContext) = unexpected("submitCancel")
     def submitRecover(id: RunId, actor: RunContext)                        = unexpected("submitRecover")
-    def submitRetry(id: RunId, requestId: String, reason: String, actor: RunContext) = unexpected("submitRetry")
-    def retryDeadLetter(id: CommandId, actor: RunContext, availableAt: Instant)       = unexpected("retryDeadLetter")
+    def submitRetry(id: RunId, requestId: String, reason: String, actor: RunContext) = unexpected(
+      "submitRetry"
+    )
+    def retryDeadLetter(id: CommandId, actor: RunContext, availableAt: Instant) = unexpected(
+      "retryDeadLetter"
+    )
     def inspect(id: CommandId, actor: RunContext) = unexpected("inspect")
     def list(id: RunId, actor: RunContext)        = unexpected("list")
 

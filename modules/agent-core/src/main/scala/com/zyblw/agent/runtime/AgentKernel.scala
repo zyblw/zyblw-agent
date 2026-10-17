@@ -227,7 +227,8 @@ private[agent] object AgentKernel:
           usage = Option.when(response.usageReported)(response.usage),
           finishReason = Some(response.finishReason),
           updatedAtEpochMilli = at.toEpochMilli,
-          providerRequestId = response.providerRequestId.filter(ModelCallExecutionRecord.acceptableProviderRequestId)
+          providerRequestId =
+            response.providerRequestId.filter(ModelCallExecutionRecord.acceptableProviderRequestId)
         )
       }
       ModelTurnTransition(Transition(next, events), usage, modelSettlement)

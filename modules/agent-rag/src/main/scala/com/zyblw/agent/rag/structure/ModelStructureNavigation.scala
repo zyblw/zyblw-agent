@@ -22,9 +22,9 @@ object ModelStructureNavigation:
 
   /** 正文含 JSON 时用正文；否则用推理通道。结束原因不是 stop 时仍把文本交给解析。 */
   private def plannerText(message: AgentMessage): String =
-    val content = message.text
+    val content   = message.text
     val reasoning = message.metadata.get("reasoning_content").getOrElse("")
-    val chosen =
+    val chosen    =
       if content.contains('{') then content
       else if reasoning.contains('{') then reasoning
       else content

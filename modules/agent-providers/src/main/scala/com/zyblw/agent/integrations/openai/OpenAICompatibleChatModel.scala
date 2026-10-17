@@ -82,7 +82,9 @@ final class OpenAICompatibleChatModel(client: Client, config: OpenAICompatibleCo
             .addHeader(Header.ContentType(MediaType.application.json))
             .addHeader(Header.Accept(MediaType.text.`event-stream`))
           withOrganization = config.extraHeaders.foldLeft(
-            config.organization.fold(httpRequest)(value => httpRequest.addHeader("OpenAI-Organization", value))
+            config.organization.fold(httpRequest)(value =>
+              httpRequest.addHeader("OpenAI-Organization", value)
+            )
           ) { case (req, (name, value)) => req.addHeader(name, value) }
           stream = client
             .stream(withOrganization) { response =>

@@ -19,7 +19,9 @@ final case class OpenAICompatibleConfig(
 ):
   require(
     extraHeaders.forall((name, value) =>
-      name.matches("[A-Za-z0-9-]{1,64}") && !OpenAICompatibleConfig.ReservedHeaders.contains(name.toLowerCase) &&
+      name.matches("[A-Za-z0-9-]{1,64}") && !OpenAICompatibleConfig.ReservedHeaders.contains(
+        name.toLowerCase
+      ) &&
         value.length <= 500 && !value.exists(_.isControl)
     ),
     "extraHeaders must be short, printable and must not override authorization or content headers"

@@ -38,7 +38,7 @@ object StructureOutlineSpec extends ZIOSpecDefault:
       finish: FinishReason = FinishReason.Stop,
       reasoning: Option[String] = None
   ): ChatModel = new ChatModel:
-    val provider = "test"
+    val provider                       = "test"
     def complete(request: ChatRequest) =
       val message = reasoning.fold(AgentMessage.assistant(text))(value =>
         AgentMessage.assistant(text).copy(metadata = Map("reasoning_content" -> value))

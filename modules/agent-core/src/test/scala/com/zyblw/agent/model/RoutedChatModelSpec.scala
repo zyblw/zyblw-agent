@@ -67,14 +67,14 @@ object RoutedChatModelSpec extends ZIOSpecDefault:
     },
     test("router 外壳按请求里的 provider 转发，而不是报 ProviderNotFound") {
       val shell = new ChatModel:
-        val provider = "router"
+        val provider                                                     = "router"
         def complete(request: ChatRequest): IO[AgentError, ChatResponse] =
           request.settings.provider match
             case Some(name) =>
               ZIO.succeed(ChatResponse(AgentMessage.assistant(name), FinishReason.Stop))
             case None => ZIO.fail(AgentError.ProviderNotFound("missing"))
       for
-        model <- ZIO.fromEither(ModelRouter.adapter(shell, ModelRef("deepseek", "deepseek-v4-flash")))
+        model    <- ZIO.fromEither(ModelRouter.adapter(shell, ModelRef("deepseek", "deepseek-v4-flash")))
         response <- model.complete(
           ChatRequest(
             Chunk(AgentMessage.user("逻辑能量学的能量有哪些")),

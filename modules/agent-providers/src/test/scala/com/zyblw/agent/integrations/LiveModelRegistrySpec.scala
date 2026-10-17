@@ -60,14 +60,17 @@ object LiveModelRegistrySpec extends ZIOSpecDefault:
     }.provide(Client.default),
     test("按 provider 路由多个连接,发送额外请求头,换 Key 后新版本立即生效") {
       for
-        _        <- TestServer.addRoutes(routes)
-        port     <- ZIO.serviceWithZIO[Server](_.port)
-        client   <- ZIO.service[Client]
-        ref      <- Ref.make(
+        _      <- TestServer.addRoutes(routes)
+        port   <- ZIO.serviceWithZIO[Server](_.port)
+        client <- ZIO.service[Client]
+        ref    <- Ref.make(
           ModelRegistrySnapshot(
             1L,
             Some("alpha"),
-            Chunk(connection("alpha", port, "key-a1", Map("X-Title" -> "zyblw")), connection("beta", port, "key-b1"))
+            Chunk(
+              connection("alpha", port, "key-a1", Map("X-Title" -> "zyblw")),
+              connection("beta", port, "key-b1")
+            )
           )
         )
         registry <- LiveModelRegistry.make(client, ModelRegistrySource.fromRef(ref))
@@ -76,7 +79,8 @@ object LiveModelRegistrySpec extends ZIOSpecDefault:
         _        <- ref.update(snapshot =>
           snapshot.copy(
             revision = 2L,
-            connections = snapshot.connections.map(c => if c.providerId == "alpha" then c.copy(apiKey = "key-a2") else c)
+            connections =
+              snapshot.connections.map(c => if c.providerId == "alpha" then c.copy(apiKey = "key-a2") else c)
           )
         )
         rotated <- ask(registry.chatModel, "alpha")

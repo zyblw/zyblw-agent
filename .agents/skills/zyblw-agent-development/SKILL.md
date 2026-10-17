@@ -30,6 +30,17 @@ Work from the checked-in implementation, not from an imagined framework.
 - Treat administration as an optional sub-surface: every capability is a host-supplied `Option`,
   unwired capabilities mount no route, and admin scopes never reuse the business ownership rule.
 
+## Apply Scala 3 + ZIO 2 Stack Best Practices
+
+Follow the progressive engineering guidelines in `.agents/skills/scala3-zio2-stack/SKILL.md`:
+- **Domain Modeling**: Opaque types for IDs/primitives, eliminate boolean blindness via ADTs/enums, automatic schema derivation (`zio-schema`/`zio-json`).
+- **Effects & Errors**: Precision `ZIO[R, E, A]` with domain error ADTs (`E <: AgentError`); bounded parallelism (`.withParallelism`); zero discarded effects (`-Wvalue-discard`, `-Wnonunit-statement`).
+- **Persistence & Storage**: Parameterized SQL, multi-tenant pre-filtering, pgvector cosine search (`<=>`) with HNSW hints, and transactional outbox/inbox/checkpoint patterns.
+- **Verification & Review**: Deterministic tests via `TestClock.adjust`; run the 5-perspective Orca review checklist (`references/06-review-loop-guardrails.md`) before final handoff.
+- **Quality Pipelines**: Enforce Bill Venners' Green Gate (never review uncompiled or failing code), single adjudicator mutation, and deterministic-first discipline (`references/07-quality-pipeline.md`).
+- **Validation Rings & EARS**: Apply EARS syntax to acceptance criteria, decouple test generation from implementation, and verify against the 6 concentric rings (`references/08-validation-rings-and-intent.md`).
+- **Functional Architecture & Refinements**: Follow HtDP mechanical derivation (data modeling first), Everything-is-Data (Commands vs Events mirror model), combinator domain modeling, Parse Don't Validate, and decoupled late architecture (`references/09-functional-architecture-and-refinement.md`).
+
 ## Implement in this order
 
 1. Define or amend the domain contract and typed error/stop reason.

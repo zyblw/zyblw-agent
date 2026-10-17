@@ -51,8 +51,7 @@ final case class ProviderEndpointCapabilities(
 
   /** 只覆盖端点 JSON 可配置的字段；strict schema、tool choice 等协议能力继承 Adapter 档案。
     *
-    * 推理档位空集表示端点未声明，沿用兼容档案。注册表里常见的 `[]` 因此不会抹掉
-    * DeepSeek 档案里的 None，辅助规划才能关闭思考并在正文里输出 JSON。
+    * 推理档位空集表示端点未声明，沿用兼容档案。注册表里常见的 `[]` 因此不会抹掉 DeepSeek 档案里的 None，辅助规划才能关闭思考并在正文里输出 JSON。
     */
   def applyTo(base: ModelCapabilities): ModelCapabilities =
     base.copy(
