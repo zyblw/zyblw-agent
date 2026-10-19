@@ -3,6 +3,7 @@ package com.zyblw.agent.persistence.postgres
 import com.dimafeng.testcontainers.PostgreSQLContainer
 import com.zyblw.agent.core.*
 import com.zyblw.agent.rag.*
+import com.zyblw.agent.rag.tools.{DocumentScope, KnowledgeTools}
 import javax.sql.DataSource
 import org.postgresql.ds.PGSimpleDataSource
 import org.testcontainers.utility.DockerImageName
@@ -106,6 +107,24 @@ object PostgresStructureIntegrationSpec extends ZIOSpecDefault:
           reranker,
           structural = Some(StructuralRetrieval(trees, spec))
         )
+        loaders <- DocumentLoaderRegistry.make(Chunk.empty)
+        rag         = RagApplication(DocumentIngestionService(loaders, indexer), retriever)
+        outline     = KnowledgeTools.outlineTool(trees, spec, Some(rag))
+        toolContext = ToolExecutionContext(
+          RunId(java.util.UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")),
+          ThreadId("outline-postgres"),
+          "outline-call",
+          RunContext(
+            tenantId = Some(tenant.value),
+            scopes = Set("read"),
+            attributes = DocumentScope.unrestrictedAttributes
+          )
+        )
+        directory       <- outline.execute(KnowledgeTools.OutlineInput(document.id), toolContext)
+        deniedDirectory <- outline.execute(
+          KnowledgeTools.OutlineInput(document.id),
+          toolContext.copy(runContext = toolContext.runContext.copy(scopes = Set("other")))
+        )
         result <- retriever.retrieve(
           RetrievalRequest(
             "太阳病",
@@ -120,6 +139,9 @@ object PostgresStructureIntegrationSpec extends ZIOSpecDefault:
         active.nonEmpty,
         hidden.isEmpty,
         denied.isEmpty,
+        directory.status == "ok",
+        directory.totalSections > 0,
+        deniedDirectory.status == "not_found",
         originalCalls == active.get.nodes.length,
         resumedCalls == originalCalls * 2,
         totalCalls == resumedCalls,

@@ -208,7 +208,8 @@ object KnowledgeTools:
 
   def outlineTool(
       store: StructureStore,
-      spec: StructureBuildSpec = StructureBuildSpec()
+      spec: StructureBuildSpec = StructureBuildSpec(),
+      rag: Option[RagApplication] = None
   ): Tool[Any, OutlineInput, AgentError, OutlineOutput] =
     Tool.json[Any, OutlineInput, AgentError, OutlineOutput](
       OutlineName,
@@ -226,7 +227,11 @@ object KnowledgeTools:
             ZIO
               .fail(AgentError.ToolInputInvalid(OutlineName.value, "documentId 超出宿主限定的资料范围"))
               .unless(allowed.contains(input.documentId.trim))
-        snapshotOpt <- store.getActive(input.documentId.trim, spec, scope)
+        // Persistent structure stores require the active chunk Profile, just like search/fetch.
+        pinned <- rag.fold[IO[RetrievalError, RetrievalScope]](ZIO.succeed(scope))(
+          _.querySession(scope).map(_._2)
+        )
+        snapshotOpt <- store.getActive(input.documentId.trim, spec, pinned)
         limit  = input.maxChars.getOrElse(2000).max(200).min(10000)
         output = snapshotOpt match
           case None =>

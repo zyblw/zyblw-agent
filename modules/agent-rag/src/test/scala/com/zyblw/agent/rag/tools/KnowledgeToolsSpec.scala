@@ -256,6 +256,39 @@ object KnowledgeToolsSpec extends ZIOSpecDefault:
         fetched.excerpts.nonEmpty
       )
     }.provide(memoryRag),
+    test("outlineTool 固定当前 Profile 后读取目录，并拒绝越出宿主范围") {
+      for
+        rag      <- ZIO.service[RagApplication]
+        _        <- ingest(rag, "outline-book", "太阳病原文")
+        observed <- Ref.make(Option.empty[RetrievalScope])
+        store = new StructureStore:
+          def put(snapshot: StructureSnapshot) = ZIO.unit
+          def get(documentId: String, indexVersion: Long, spec: StructureBuildSpec, scope: RetrievalScope) =
+            ZIO.succeed(None)
+          override def getActive(documentId: String, spec: StructureBuildSpec, scope: RetrievalScope) =
+            observed.set(Some(scope)).as(None)
+        tool = KnowledgeTools.outlineTool(store, rag = Some(rag))
+        _      <- tool.execute(KnowledgeTools.OutlineInput("outline-book"), openLibrary)
+        scope  <- observed.get
+        denied <- tool
+          .execute(
+            KnowledgeTools.OutlineInput("another-book"),
+            openLibrary.copy(runContext =
+              openLibrary.runContext.copy(
+                attributes = Map(DocumentScope.SingleAttribute -> "outline-book")
+              )
+            )
+          )
+          .exit
+        after <- observed.get
+      yield assertTrue(
+        scope.flatMap(_.pinnedProfileId).nonEmpty,
+        scope.exists(_.tenantId == TenantId("acme")),
+        scope.exists(_.permissions == Set("knowledge:read")),
+        denied.isFailure,
+        after == scope
+      )
+    }.provide(memoryRag),
     test("outlineTool 返回书籍结构大纲，未找到返回 not_found") {
       val mockStore = new StructureStore:
         def put(snapshot: StructureSnapshot) = ZIO.unit

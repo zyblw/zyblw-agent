@@ -474,3 +474,10 @@ Recall/Precision/MRR/NDCG、引用证据、租户授权、禁止片段、数值�
 Loader 的信任边界、参数说明、Tika 使用示例和生产隔离要求见 [文档 Loader 与知识摄取](document-loaders.md)；
 PDF/OCR/切分/pgvector/检索/重排/Agent 接入的完整路径见 [PDF RAG 生产流水线](pdf-rag-pipeline.md)；
 RAG 指标定义、数据集字段和 CI 接法见 [RAG 评测与发布门禁](rag-evaluation.md)。
+
+### 目录工具的 Profile 边界
+
+持久化结构仓储要求固定的知识 Profile。宿主注册目录工具时使用
+`KnowledgeTools.outlineTool(structureStore, structureSpec, Some(ragApplication))`，
+使其通过 `querySession` 解析当前 Profile 后再读取目录；只传 StructureStore 的旧调用
+不负责解析 Profile。目录工具继续检查可信 tenant/scopes 与 DocumentScope，目录不作为原文引用。
