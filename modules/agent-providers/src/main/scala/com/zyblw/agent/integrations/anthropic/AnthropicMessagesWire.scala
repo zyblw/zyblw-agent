@@ -2,6 +2,7 @@ package com.zyblw.agent.integrations.anthropic
 
 import com.zyblw.agent.artifacts.ProviderImagePolicy
 import com.zyblw.agent.core.*
+import com.zyblw.agent.integrations.ProviderBilling
 import zio.*
 import zio.json.*
 import zio.json.ast.Json
@@ -114,7 +115,7 @@ private[anthropic] object AnthropicMessagesWire:
     yield ChatResponse(
       message,
       finishReason(dto.stop_reason, calls.nonEmpty),
-      usage,
+      ProviderBilling.reported(usage, json),
       dto.id,
       usageReported = dto.usage.nonEmpty
     )

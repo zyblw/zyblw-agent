@@ -1,0 +1,6 @@
+interface:
+  display_name: "Scala/ZIO · Agent Framework"
+  short_description: "Apply Scala/ZIO rules with checks sized to the change"
+  default_prompt: "使用 $scala3-zio2-stack，按本次改动的风险选择参考、实现和验证，保留现有契约。"
+policy:
+  allow_implicit_invocation: true

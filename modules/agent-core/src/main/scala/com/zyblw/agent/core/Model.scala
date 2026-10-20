@@ -85,7 +85,8 @@ final case class TokenUsage(
     outputTokens: Long = 0L,
     cachedInputTokens: Long = 0L,
     reasoningOutputTokens: Long = 0L,
-    cacheWriteInputTokens: Long = 0L
+    cacheWriteInputTokens: Long = 0L,
+    billing: Option[BillingUsage] = None
 ) derives JsonCodec:
   require(inputTokens >= 0L, "inputTokens 不能为负数")
   require(outputTokens >= 0L, "outputTokens 不能为负数")
@@ -114,6 +115,7 @@ final case class TokenUsage(
     *   新的不可变累计值，不修改任一操作数
     */
   def +(that: TokenUsage): TokenUsage =
+    // Billing dimensions belong to individual calls; aggregated tokens cannot be repriced as one request.
     TokenUsage(
       inputTokens + that.inputTokens,
       outputTokens + that.outputTokens,

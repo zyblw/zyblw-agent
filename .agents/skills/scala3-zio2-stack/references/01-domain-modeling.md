@@ -1,89 +1,25 @@
-# Domain Modeling in Scala 3
+# 领域类型与边界解析
 
-## 1. Opaque Types for Zero-Cost Domain Primitives
-Never pass raw primitives (`String`, `Int`, `Long`, `UUID`) for domain identifiers, names, dimensions, or bounded quantities. Use Scala 3 `opaque type` with smart constructors and companion extension methods.
+用于新增领域 ID、状态或序列化契约；先找现有类型和调用方，不重建第二套概念。
 
-```scala
-// ❌ BAD: Primitive obsession allows swapping arguments accidentally
-def findChunks(
-  tenantId: String,
-  spaceId: String,
-  profileId: String,
-  query: String,
-  topK: Int
-): IO[AgentError, Chunk[DocumentChunk]]
+## 决策规则
 
-// ✅ GOOD: Zero-cost opaque types with type-safe companions
-object DomainTypes:
-  opaque type TenantId = String
-  object TenantId:
-    def apply(value: String): TenantId = value
-    extension (id: TenantId) def value: String = id
+- 对可能混用的领域 ID 复用或新增 `opaque type` 与受控构造入口；公共 API 的改动同时检查消费者和 codec。
+- 普通搜索文本、展示字符串、SQL/JDBC 值和已有外部 DTO 不需要逐个包装。先在可信边界解析为现有领域类型。
+- 多个标记表达同一生命周期时，用 `enum` 表达 Running / Succeeded / Failed 等互斥状态，并处理全部分支。
+- 两个真正独立且含义明确的配置 Boolean 不自动变成组合状态树；只有排除非法组合或消除调用歧义时才增加类型。
+- 有界数量由 smart constructor 检查，核心复用已验证值；反序列化、数据库读回和版本迁移同样是边界。
 
-  opaque type KnowledgeSpaceId = String
-  object KnowledgeSpaceId:
-    def apply(value: String): KnowledgeSpaceId = value
-    extension (id: KnowledgeSpaceId) def value: String = id
+## Schema 与兼容
 
-  opaque type PositiveInt = Int
-  object PositiveInt:
-    def make(v: Int): Either[String, PositiveInt] =
-      Either.cond(v > 0, v, s"Expected positive integer, got $v")
-    extension (p: PositiveInt) def value: Int = p
+优先沿用当前 `zio-schema` / `zio-json` 派生方式；已有 wire 格式、厂商协议、别名或精确数值格式确需自定义时使用明确 codec，并覆盖兼容测试。
+派生 codec 不代表任意自定义构造约束都会自动执行。验证失败不能用默认合法值替换。
+新增必填字段、enum case、ID 表示或持久化字段前，核对历史数据、公开 JSON、HTTP/schema 和跨模块调用。
 
-// Signature is completely immune to argument inversion:
-def findChunks(
-  tenantId: TenantId,
-  spaceId: KnowledgeSpaceId,
-  query: String,
-  topK: PositiveInt
-): IO[AgentError, Chunk[DocumentChunk]]
-```
+## 交付检查
 
-## 2. Eliminate Boolean Blindness & Illegal States
-Functions or case classes with 2+ `Boolean` parameters (or single booleans with implicit side effects) are BANNED. Model the lifecycle and mutual exclusivity using Scala 3 `enum` (Algebraic Data Types).
+- 同形 ID 是否仍可能传反？非法状态能否构造？
+- 字段新增是否扩大了改动面，却没有减少真实错误？
+- 外部输入与旧版本数据是否仍按约定解析或明确拒绝？
 
-```scala
-// ❌ BAD: Boolean blindness allows impossible states (e.g., isFailed=true && isSucceeded=true)
-final case class ToolExecution(
-  id: ToolCallId,
-  isCompleted: Boolean,
-  isFailed: Boolean,
-  isSuspendedForApproval: Boolean,
-  failureReason: Option[String],
-  output: Option[String]
-)
-
-// ✅ GOOD: Make illegal states unrepresentable via Scala 3 enum
-enum ToolExecution:
-  case Running(startedAt: Instant)
-  case SuspendedForApproval(approvalId: ApprovalRequestId, requestedAt: Instant)
-  case Succeeded(output: String, completedAt: Instant)
-  case Failed(error: AgentError, failedAt: Instant)
-
-// Pattern matching is checked exhaustively by the Scala 3 compiler:
-def handle(exec: ToolExecution): UIO[Unit] = exec match
-  case ToolExecution.Running(_)                => ZIO.unit
-  case ToolExecution.SuspendedForApproval(id, _) => notifyOperator(id)
-  case ToolExecution.Succeeded(out, _)         => recordSuccess(out)
-  case ToolExecution.Failed(err, _)            => logFailure(err)
-```
-
-## 3. Automatic Schema & Codec Derivation (`zio-schema` & `zio-json`)
-Never hand-write JSON serializers, string parsers, or manual OpenAPI/tool-call JSON schemas. Derive them directly from ADTs and case classes:
-
-```scala
-import zio.json.{DeriveJsonCodec, JsonCodec}
-import zio.schema.{DeriveSchema, Schema}
-
-final case class SearchToolInput(
-  query: String,
-  maxResults: Int,
-  minScore: Option[Double]
-)
-
-object SearchToolInput:
-  // Compile-time automatic derivation: zero runtime reflection overhead
-  given Schema[SearchToolInput] = DeriveSchema.gen[SearchToolInput]
-  given JsonCodec[SearchToolInput] = DeriveJsonCodec.gen[SearchToolInput]
-```
+类型约束不能证明引用忠实性、医学事实或业务规则本身正确；这些仍需要独立验收。

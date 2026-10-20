@@ -192,3 +192,18 @@ Property / 确定性测试必须锁住：
 
 Goal 自动对账也检查同一 ModelCall 账本：有 Prepared/Dispatched/Unknown 时保留 Reserved，不把终态当作费用已知。
 需要人工或后续对账协议解决未知消费；第一版不会自动释放这笔预留。
+
+
+## 可选规则价与计费事实
+
+`ModelPrice.tariff: Option[BillingTariff]` 在旧四类 token 价格之上扩展纯规则数据；旧 JSON 缺少该字段仍可读。新规则与完整原币规则、来源 hash/汇率随调用快照保存；不从运行时公网报价重算。`rated` 返回 typed error 或金额，`tariff.rate` 返回匹配规则及数量/单价/单位/金额明细。`estimate` 是旧标量统计接口，不能用它把未知当作完整账单；宿主财务记录必须使用 `rated` 的成功结果，否则保留空金额及原因。
+
+上下文区间下界不含、上界包含，使用输入总 token（含缓存）选择整次请求档位；不支持伪装成单次条件的账期累计阶梯。条件为 service_tier、mode、region、cache_ttl、period 的精确匹配；standard/sync/global 是默认执行条件，其他值必须来自可信执行配置或供应商响应。period 是宿主明确提供的合同条件，内核不读取时钟猜峰谷时段。重叠规则、未知计量项和非法分母在边界拒绝。价目最多 64 条规则。
+
+缓存读写和音频 token 是总 token 子集，1h 缓存写入是写入子集；对应数量先从基础类别扣除。图片、音视频秒数、搜索、缓存 token·小时使用独立单位，只有实际报告才计算。缺失计量保持未知，明确 0 才是零；`requireZeroMeters` 可以声明仅覆盖某种功能未使用的调用，缺失或非零都拒绝计价。`TokenUsage.+` 只汇总主 token，刻意不合并每次调用的计费条件，汇总量不能重新套档位。
+
+预算预检 `reserve` 使用所有规则的最高输入（含缓存/音频子类）、最高输出和最高请求价；未知的其他收费上界拒绝准入。实际 `rated` 仍按本次条件精确选择规则。普通/SSE 响应保留实际 service_tier（优先于 auto）、OpenAI audio_tokens、Anthropic 1h 缓存和搜索次数。扩展用量不完整时宿主应保持费用待确认，不以标量 0 扣款。
+
+这是 Beta 的可重现成本估算：不包含账期免费额度、税费、银行结算和发票差额。新增 JSON 字段兼容旧快照读取，但旧程序会忽略 tariff，不能在规则价发布后未经兼容处理直接回滚到旧程序。
+
+Gemini Interactions 的 output 是可见输出与 thought 的合计，reasoningOutputTokens 是其中子集；OpenAI 兼容普通/SSE 保留缓存写入与一致的缓存命中别名。独立 reasoning_tokens 单价替换普通输出中的该子集，不能叠加；没有独立价时仍按总输出计费。免费音频/TTL/推理分摊也需要真实数量，只有父总量为零才可证明子集为零。BillingUsage.issues 保存已发现的分类缺口，规则价和旧固定价均返回待计价；音频与缓存交集未知不能猜测。

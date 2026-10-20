@@ -15,6 +15,8 @@
 - HTTP v1 初始 OpenAPI 1.0.0 单快照；十一项 Maven artifact 同一精确版本。独立消费者、PostgreSQL、确定性评测及公开 PDF/RAG 门禁。
 - 实际平台问答使用同源框架结构装配；多分支使用 RagApplication.querySession，业务切块参数通过 DocumentStructureChunker.aligned(config) 落实。
 - ModelCallExecutionRecord 记录冻结 ModelPrice、价目摘要与 usageReporting；内存和 PostgreSQL 转移拒绝改写历史单价。
+- 修复 Gemini Interactions 思考 token 漏计、OpenAI 兼容缓存写入漏计；普通/SSE 共享校验并拒绝无效计数及别名冲突。免费细分项不能用缺失数量补零；分摊缺口以 BillingUsage.issues 保留，旧快照仍可读。
+- 可选 BillingTariff 提供互斥上下文/执行条件与多计量项、原币规则证据、确定性费用明细和 typed 待计价原因；TokenUsage.billing 保存调用事实，旧 JSON 仍可读。缓存/音频分类避免重复收费；预算预检使用保守上界，缺失额外收费上界拒绝准入。普通/SSE 适配保留服务等级、缓存 TTL 和已报告的音频/搜索计量；该能力仍是成本估算 Beta，不是供应商账单结算。
 - ModelPrice 可保留原币报价、来源身份与汇率依据；ModelPolicySource.pricesFor 和 LiveComposition.freezeFor 允许宿主按冻结指纹恢复旧路由价目，未找到旧版本仍拒绝漂移。
 - 有费用上限的直连模型复用路由预算预检，发送前补齐输出上限并拒绝预计 token/费用越界，避免仅在响应后发现超支；主调用预算按最高输入分类价格准入，覆盖更贵的缓存写入。
 - 费用上限下直连 Disabled 保留 MetadataOnly 账本；缺失用量的付费调用阻止后续工具/模型动作，崩溃恢复读取同一账本门禁。

@@ -2,6 +2,7 @@ package com.zyblw.agent.integrations.gemini
 
 import com.zyblw.agent.artifacts.ProviderImagePolicy
 import com.zyblw.agent.core.*
+import com.zyblw.agent.integrations.ProviderBilling
 import zio.*
 import zio.json.*
 import zio.json.ast.Json
@@ -139,7 +140,7 @@ private[gemini] object GeminiInteractionsWire:
     yield ChatResponse(
       message,
       finish,
-      usage,
+      ProviderBilling.reported(usage, json),
       stringField(json, "id"),
       usageReported = field(json, "usage").exists(u =>
         longField(u, "total_input_tokens").nonEmpty && longField(u, "total_output_tokens").nonEmpty
@@ -288,22 +289,105 @@ private[gemini] object GeminiInteractionsWire:
         )
     else Chunk.empty
 
-  /** 校验 usage。总 thought/tool token 保留在厂商侧，框架硬预算使用输入和输出主计数。 */
-  private def decodeUsage(value: Option[Json], location: String): IO[AgentError, TokenUsage] =
+  /** Interactions reports visible output and thoughts separately; core output includes both exactly once. */
+  private[gemini] def decodeUsage(value: Option[Json], location: String): IO[AgentError, TokenUsage] =
     value match
       case None       => ZIO.succeed(TokenUsage())
       case Some(json) =>
-        val input  = longField(json, "total_input_tokens").getOrElse(0L)
-        val output = longField(json, "total_output_tokens").getOrElse(0L)
-        val cached = longField(json, "total_cached_tokens").getOrElse(0L)
-        if input >= 0L && output >= 0L && cached >= 0L && cached <= input then
-          ZIO.succeed(TokenUsage(input, output, cachedInputTokens = cached))
-        else
-          ZIO.fail(
-            AgentError.InvalidModelResponse(
-              s"$location 包含无效 token: input=$input, output=$output, cache_read=$cached"
-            )
+        def count(name: String, alias: Option[String] = None): Either[AgentError, Long] =
+          val supplied = (field(json, name).toList ++ alias.toList.flatMap(field(json, _)))
+          val parsed   = supplied.map {
+            case Json.Num(n)
+                if n.signum >= 0 && n.scale <= 0 && n.compareTo(
+                  java.math.BigDecimal.valueOf(Long.MaxValue)
+                ) <= 0 =>
+              Some(n.longValue)
+            case Json.Num(n)
+                if n.signum >= 0 && n.stripTrailingZeros.scale <= 0 && n.compareTo(
+                  java.math.BigDecimal.valueOf(Long.MaxValue)
+                ) <= 0 =>
+              Some(n.longValue)
+            case _ => None
+          }
+          Either.cond(
+            parsed.forall(_.nonEmpty) && parsed.flatten.distinct.size <= 1,
+            parsed.flatten.headOption.getOrElse(0L),
+            AgentError.InvalidModelResponse(s"$location.$name 无效或别名冲突")
           )
+        def modalities(name: String): Either[AgentError, Option[Map[String, Long]]] =
+          field(json, name) match
+            case None                  => Right(None)
+            case Some(Json.Arr(items)) =>
+              val decoded = items.toList.map { item =>
+                for
+                  modality <- stringField(item, "modality")
+                  tokens   <- field(item, "tokens").collect {
+                    case Json.Num(n)
+                        if n.signum >= 0 && n.stripTrailingZeros.scale <= 0 &&
+                          n.compareTo(java.math.BigDecimal.valueOf(Long.MaxValue)) <= 0 =>
+                      n.longValue
+                  }
+                yield modality.toLowerCase -> tokens
+              }
+              Either.cond(
+                decoded.forall(_.nonEmpty) && decoded.flatten.map(_._1).distinct.size == items.size,
+                Some(decoded.flatten.toMap),
+                AgentError.InvalidModelResponse(s"$location.$name 无效")
+              )
+            case _ => Left(AgentError.InvalidModelResponse(s"$location.$name 无效"))
+        val decoded = for
+          input            <- count("total_input_tokens", Some("prompt_tokens"))
+          visible          <- count("total_output_tokens", Some("completion_tokens"))
+          thoughts         <- count("total_thought_tokens")
+          cached           <- count("total_cached_tokens")
+          tools            <- count("total_tool_use_tokens")
+          total            <- count("total_tokens")
+          inputModalities  <- modalities("input_tokens_by_modality")
+          outputModalities <- modalities("output_tokens_by_modality")
+          cachedModalities <- modalities("cached_tokens_by_modality")
+          _                <- Either.cond(
+            List(inputModalities -> input, outputModalities -> visible, cachedModalities -> cached)
+              .forall((parts, total) => parts.forall(_.values.map(BigInt(_)).sum <= BigInt(total))),
+            (),
+            AgentError.InvalidModelResponse(s"$location 模态子集超过总量")
+          )
+          _ <- Either.cond(
+            cached <= input && thoughts <= Long.MaxValue - visible &&
+              input <= Long.MaxValue - visible - thoughts,
+            (),
+            AgentError.InvalidModelResponse(s"$location token 子集无效或总量溢出")
+          )
+        yield
+          val inputAudio = inputModalities.flatMap { parts =>
+            val audio = parts.getOrElse("audio", 0L)
+            if audio == 0 || cached == 0 then Some(audio)
+            else
+              cachedModalities.flatMap(c =>
+                Option.when(c.getOrElse("audio", 0L) <= audio)(audio - c.getOrElse("audio", 0L))
+              )
+          }
+          val meters = Map("reasoning_tokens" -> thoughts.toString, "tool_use_tokens" -> tools.toString) ++
+            inputAudio.map(n => "input_audio_tokens" -> n.toString).toMap ++
+            outputModalities.map(m => "output_audio_tokens" -> m.getOrElse("audio", 0L).toString).toMap
+          val issues = List(
+            Option.when(field(json, "total_tokens").nonEmpty && total != input + visible + thoughts)(
+              "供应商总 token 与输入、可见输出及推理分类不一致"
+            ),
+            Option.when(inputModalities.exists(_.getOrElse("audio", 0L) > 0) && inputAudio.isEmpty)(
+              "供应商未报告音频缓存分摊，不能确定普通输入与音频用量"
+            ),
+            Option.when(
+              (inputModalities.toList ++ outputModalities.toList).exists(_.getOrElse("image", 0L) > 0)
+            )("供应商报告图片 token；当前适配器无法将其转换为图片张数")
+          ).flatten
+          TokenUsage(
+            input,
+            visible + thoughts,
+            cachedInputTokens = cached,
+            reasoningOutputTokens = thoughts,
+            billing = Some(BillingUsage(meters = meters, issues = issues))
+          )
+        ZIO.fromEither(decoded)
 
   /** 工具结果优先保持单个 JSON 值；多内容块退化为按顺序排列的 JSON 数组。 */
   private def toolResultValue(message: AgentMessage): Json =

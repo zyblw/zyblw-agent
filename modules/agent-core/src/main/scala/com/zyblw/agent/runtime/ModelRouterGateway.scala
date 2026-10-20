@@ -160,7 +160,7 @@ final private[agent] class ModelRouterGateway(
           output,
           prices.fingerprint,
           price,
-          price.map(_.estimate(TokenUsage(estimatedInputTokens, output.toLong)))
+          price.flatMap(_.rated(TokenUsage(estimatedInputTokens, output.toLong)).toOption)
         )
       )
     )

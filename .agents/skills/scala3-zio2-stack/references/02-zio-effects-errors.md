@@ -1,71 +1,26 @@
-# ZIO 2 Effects, Error Channels & Concurrency
+# 效应、错误、并发与中断
 
-## 1. Precision Error Channels (No `Throwable` Soup)
-- In domain services and kernel interfaces, `E` MUST be a typed domain ADT (typically `E <: AgentError` or a localized `enum`).
-- Never return `Task[A]` (which is `ZIO[Any, Throwable, A]`) in public domain traits.
-- External boundary exceptions (JDBC `SQLException`, HTTP `IOException`, Netty defects) must be caught and translated immediately at the infrastructure boundary using `.mapError` or `.refineOrDie`.
+用于业务效应与适配器调用；具体 API 以当前固定版本源码、官方资料和编译为准。
 
-```scala
-// ❌ BAD: Leaking raw Throwable, swallowing fatal JVM errors, and hiding domain causes
-def executePrompt(prompt: String): Task[String] =
-  ZIO.attempt {
-    externalClient.call(prompt)
-  }.catchAll(e => ZIO.succeed("fallback")) // Swallows InterruptedException and OutOfMemoryError!
+## 错误通道
 
-// ✅ GOOD: Explicit domain error ADT and precise translation
-enum ProviderError extends AgentError:
-  case RateLimited(retryAfter: Duration)
-  case ContextWindowExceeded(tokens: Int, maxTokens: Int)
-  case UpstreamFailure(statusCode: Int, message: String)
+- 领域服务使用所属模块现有的错误 ADT。框架可能使用 AgentError；产品服务使用自己的领域错误，不为复用本 skill 强行改继承体系。
+- JDBC/文件/SDK 边界可在内部使用 Throwable，再映射成稳定、低敏、可操作的领域错误；不要把异常全文或请求正文直接交给日志/用户。
+- `catchAll` 处理类型化失败 E，不处理所有 defects 或 interruption。不能笼统声称它会吞掉 JVM 致命错误；若使用 cause/sandbox/exit 等更宽处理，逐项核对中断传播。
+- 不以假成功掩盖数据库故障、权限拒绝或未知用量。允许降级时，显式记录状态和原因。
+- `throw` / `require` 不用于可恢复业务失败；可信构造不变量、同步 CLI 或 Java 互操作按边界契约处理。不要借此把整个核心改成 Throwable。
 
-def executePrompt(prompt: String): IO[ProviderError, String] =
-  ZIO.attemptBlocking(externalClient.call(prompt))
-    .mapError {
-      case e: RateLimitException => ProviderError.RateLimited(e.retryAfter)
-      case e: ContextExceededException => ProviderError.ContextWindowExceeded(e.tokens, e.max)
-      case e => ProviderError.UpstreamFailure(500, e.getMessage)
-    }
-```
+## 执行与并发
 
-## 2. Bounded Concurrency & Backpressure
-Never invoke unbounded parallel combinators (`ZIO.foreachPar`, `ZIO.collectAllPar`) on dynamic collections or external requests. Unbounded parallelism rapidly exhausts database connection pools, HTTP client worker pools, and LLM rate limits.
+- ZIO 值是执行描述；在链中用 `<-`、`*>`、`flatMap` 等组合，不能把构造出的 effect 丢掉。具体警告与失败级别以 build.sbt 为准。
+- 外部动态批量使用明确的并发上限；调用链已有上限时先验证其覆盖范围，再决定是否增加局部限制。
+- 限制需结合数据库池、供应商限速和任务预算；不要给所有集合随意套同一个数字。
+- fork 后明确 fiber 的所有者与结束条件；取消时必须释放资源，避免无人等待的后台任务。
 
-```scala
-// ❌ BAD: Unbounded parallel processing can spike thousands of fibers concurrently
-ZIO.foreachPar(chunks)(vectorStore.indexChunk)
+## 阻塞与资源
 
-// ✅ GOOD: Always bound parallelism explicitly
-ZIO.foreachPar(chunks)(vectorStore.indexChunk)
-  .withParallelism(8)
-```
+阻塞 JDBC/文件操作放在阻塞边界。仅使用 attemptBlocking 不意味着底层 Java 调用一定可取消；取消需求需核对驱动、超时和关闭策略。
+ZIO 托管资源优先 Scope/acquireRelease；已由外层托管的资源不重复关闭。同步 JDBC helper/CLI 可以使用受控 try/finally，但必须覆盖异常释放路径。
+释放异常如何报告按资源重要性决定；不要把每个 close 失败都机械转成 defect，或在取消期间无限重试。
 
-## 3. Resource Lifecycle & Fiber Interruption Safety
-Every closeable resource (JDBC `Connection`, `ResultSet`, file stream, HTTP streaming connection) MUST be managed via `ZIO.acquireRelease` within a `Scope`.
-
-```scala
-// ✅ GOOD: Guaranteed cleanup even if the parent Fiber is interrupted or canceled
-def managedConnection(ds: DataSource): ZIO[Scope, StorageError, Connection] =
-  ZIO.acquireRelease(
-    ZIO.attemptBlocking(ds.getConnection).mapError(StorageError.fromSqlException)
-  )(conn => ZIO.attemptBlocking(conn.close()).orDie)
-```
-
-## 4. Effect Discard Vigilance (`-Wvalue-discard` & `-Wnonunit-statement`)
-In pure functional programming with ZIO, an effect is a lazy description of execution. It does NOT run unless bound in a `for`-comprehension or `flatMap`.
-
-```scala
-// ❌ CRITICAL BUG: Unexecuted effect (silently ignored in Scala without compiler guardrails!)
-for
-  user   <- loadUser(userId)
-  _      = ZIO.logInfo(s"Loaded user ${user.id}") // BUG: '=' creates a pure unexecuted effect!
-  result <- process(user)
-yield result
-
-// ✅ GOOD: Correctly bound into the monadic effect chain '<-'
-for
-  user   <- loadUser(userId)
-  _      <- ZIO.logInfo(s"Loaded user ${user.id}") // Executed in order
-  result <- process(user)
-yield result
-```
-The codebase enforces `-Wvalue-discard` and `-Wnonunit-statement`. Any un-bound effect or discarded value will immediately fail or warn during `sbt compile`.
+具体错误处理对照 [ZIO 官方源码](https://github.com/zio/zio/blob/v2.1.26/core/shared/src/main/scala/zio/ZIO.scala)，该链接的版本仍需与当前 build 对齐。

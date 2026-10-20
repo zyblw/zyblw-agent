@@ -14,6 +14,13 @@ Project skills live in `.agents/skills/` and are committed with the repository (
 are pinned in `skills-lock.json`. Another machine can clone this repo and use them without running
 `npx skills add`.
 
+For Scala implementation, debugging, refactoring, tests, or code review, read the local
+`.agents/skills/scala3-zio2-stack/SKILL.md` and only the relevant references. Framework delivery
+uses `zyblw-agent-development` as the repository workflow; the stack skill supplies language,
+effect, resource and verification guidance. Five review perspectives are a self-check, not
+five mandatory agents. Small fixes use narrow checks; public contracts and release candidates
+still follow the compatibility gates below. Skills grant no execution or delegation permissions.
+
 ## Where things live
 
 | Path | Contents | Published |

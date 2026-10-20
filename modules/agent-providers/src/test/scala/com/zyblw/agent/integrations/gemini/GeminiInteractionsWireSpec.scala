@@ -32,7 +32,7 @@ object GeminiInteractionsWireSpec extends ZIOSpecDefault:
 
   private val streamPayload =
     """event: interaction.created
-      |data: {"interaction":{"id":"int-stream","status":"in_progress"},"event_type":"interaction.created"}
+      |data: {"interaction":{"id":"int-stream","status":"in_progress","service_tier":"priority"},"event_type":"interaction.created"}
       |
       |event: step.start
       |data: {"index":0,"step":{"type":"thought","signature":"thought-signature"},"event_type":"step.start"}
@@ -67,6 +67,60 @@ object GeminiInteractionsWireSpec extends ZIOSpecDefault:
       |""".stripMargin
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("Gemini Interactions wire")(
+    test("thought output is billed once and terminal streaming facts match ordinary responses") {
+      val usage =
+        """{"total_input_tokens":100,"total_output_tokens":1000,"total_thought_tokens":9000,"total_tokens":10100,"total_tool_use_tokens":0}"""
+      val response = s"""{"id":"r","status":"completed","service_tier":"flex","steps":[],"usage":$usage}"""
+      val stream   = s"""event: interaction.completed
+ data: {"event_type":"interaction.completed","interaction":$response}
+
+""".replace(" data:", "data:")
+      for
+        ordinary     <- GeminiInteractionsWire.decodeResponse(response)
+        inconsistent <- GeminiInteractionsWire.decodeResponse(
+          response.replace("\"total_tokens\":10100", "\"total_tokens\":10101")
+        )
+        events <- GeminiInteractionsSse
+          .events(ZStream.fromIterable(stream.getBytes(StandardCharsets.UTF_8)))
+          .runCollect
+        invalid <- ZIO.foreach(List("-1", "1.5", "9223372036854775807", "\"unknown\""))(bad =>
+          GeminiInteractionsWire
+            .decodeResponse(
+              response.replace("\"total_thought_tokens\":9000", s"\"total_thought_tokens\":$bad")
+            )
+            .either
+        )
+        completed = events.collect { case ModelStreamEvent.Completed(r) => r }
+      yield assertTrue(
+        ordinary.usage.outputTokens == 10000,
+        ordinary.usage.reasoningOutputTokens == 9000,
+        ModelPrice(1, 10).rated(
+          ordinary.usage.copy(billing = ordinary.usage.billing.map(_.copy(dimensions = Map.empty)))
+        ) == Right(BigDecimal("0.1001")),
+        completed.head.usage == ordinary.usage,
+        completed.head.usage.billing.exists(_.dimensions.get("service_tier").contains("flex")),
+        invalid.forall(_.isLeft),
+        inconsistent.usage.billing.exists(_.issues.nonEmpty)
+      )
+    },
+    test("modality facts distinguish fresh audio, cached audio and unsupported tool prompts") {
+      val raw = """{"total_input_tokens":100,"total_output_tokens":10,"total_cached_tokens":20,
+        "input_tokens_by_modality":[{"modality":"audio","tokens":40},{"modality":"text","tokens":60}],
+        "cached_tokens_by_modality":[{"modality":"audio","tokens":10},{"modality":"text","tokens":10}],
+        "output_tokens_by_modality":[{"modality":"text","tokens":10}],"total_tool_use_tokens":5}"""
+      for
+        usage   <- GeminiInteractionsWire.decodeUsage(Some(raw.fromJson[Json].toOption.get), "usage")
+        unknown <- GeminiInteractionsWire.decodeUsage(
+          Some(raw.replace("\"cached_tokens_by_modality\"", "\"omitted\"").fromJson[Json].toOption.get),
+          "usage"
+        )
+      yield assertTrue(
+        usage.billing.exists(_.meters.get("input_audio_tokens").contains("30")),
+        usage.billing.exists(_.meters.get("tool_use_tokens").contains("5")),
+        unknown.billing.exists(_.issues.nonEmpty),
+        ModelPrice(1, 2).rated(unknown).isLeft
+      )
+    },
     test("缺失或不完整 usage 不成为准确零，流式同样保留未知") {
       val body =
         """{"id":"r","status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"ok"}]}]}"""
@@ -109,7 +163,8 @@ object GeminiInteractionsWireSpec extends ZIOSpecDefault:
       yield assertTrue(
         decoded.message.text == "需要查询",
         decoded.message.toolCalls.map(_.id) == Chunk("call-1"),
-        decoded.usage == TokenUsage(12, 6, cachedInputTokens = 5),
+        decoded.usage
+          .copy(billing = None) == TokenUsage(12, 9, cachedInputTokens = 5, reasoningOutputTokens = 3),
         decoded.finishReason == FinishReason.ToolCalls,
         decoded.message.metadata(GeminiInteractionsWire.RawStepsMetadata).contains("signed-thought"),
         body.contains("\"store\":false"),
@@ -138,7 +193,8 @@ object GeminiInteractionsWireSpec extends ZIOSpecDefault:
             completed.forall(_.message.text == "正在查询"),
             completed.forall(_.message.toolCalls.map(_.id) == Chunk("call-stream")),
             completed.forall(_.message.toolCalls.head.arguments.toJson.contains("zio")),
-            completed.forall(_.usage == TokenUsage(8, 4, cachedInputTokens = 3)),
+            completed.forall(_.usage.copy(billing = None) == TokenUsage(8, 4, cachedInputTokens = 3)),
+            completed.forall(_.usage.billing.exists(_.dimensions.get("service_tier").contains("priority"))),
             completed.forall(
               _.message.metadata(GeminiInteractionsWire.RawStepsMetadata).contains("thought-signature")
             ),

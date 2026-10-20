@@ -1,6 +1,7 @@
 package com.zyblw.agent.integrations.anthropic
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.integrations.ProviderBilling
 import com.zyblw.agent.model.*
 import zio.*
 import zio.http.*
@@ -70,8 +71,10 @@ final class AnthropicMessagesChatModel(client: Client, config: AnthropicMessages
 
   /** 追加只含 Provider、模型和协议的安全元数据。 */
   private def enrich(response: ChatResponse, request: ChatRequest): ChatResponse =
-    response.copy(metadata =
-      response.metadata ++ Map(
+    response.copy(
+      usage = ProviderBilling
+        .options(response.usage, config.defaultOptions ++ request.settings.providerOptions, request),
+      metadata = response.metadata ++ Map(
         "provider" -> provider,
         "model"    -> request.settings.model.getOrElse(config.defaultModel),
         "protocol" -> descriptor.protocol

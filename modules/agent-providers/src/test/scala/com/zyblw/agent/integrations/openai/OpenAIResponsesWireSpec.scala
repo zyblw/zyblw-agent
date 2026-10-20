@@ -35,7 +35,7 @@ object OpenAIResponsesWireSpec extends ZIOSpecDefault:
 
   /** typed SSE 样例同时覆盖工具增量、文本增量、usage 与最终完整 Response。 */
   private val streamPayload =
-    """data: {"type":"response.created","response":{"id":"resp-stream","status":"in_progress","output":[]}}
+    """data: {"type":"response.created","response":{"id":"resp-stream","status":"in_progress","service_tier":"priority","output":[]}}
       |
       |data: {"type":"response.output_item.added","response_id":"resp-stream","output_index":0,"item":{"id":"fc-stream","type":"function_call","call_id":"call-stream","name":"lookup","arguments":""}}
       |
@@ -93,7 +93,7 @@ object OpenAIResponsesWireSpec extends ZIOSpecDefault:
       yield assertTrue(
         decoded.message.text == "需要查询",
         decoded.message.toolCalls.map(_.id) == Chunk("call-1"),
-        decoded.usage == TokenUsage(
+        decoded.usage.copy(billing = None) == TokenUsage(
           12,
           7,
           cachedInputTokens = 5,
@@ -126,9 +126,10 @@ object OpenAIResponsesWireSpec extends ZIOSpecDefault:
           assertTrue(
             completed.length == 13,
             completed.forall(_.message.text == "查询中"),
+            completed.forall(_.usage.billing.exists(_.dimensions.get("service_tier").contains("priority"))),
             completed.forall(_.message.toolCalls.headOption.exists(_.name == "lookup")),
             completed.forall(
-              _.usage == TokenUsage(
+              _.usage.copy(billing = None) == TokenUsage(
                 9,
                 4,
                 cachedInputTokens = 4,

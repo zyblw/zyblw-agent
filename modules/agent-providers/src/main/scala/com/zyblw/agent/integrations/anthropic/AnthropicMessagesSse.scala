@@ -1,6 +1,7 @@
 package com.zyblw.agent.integrations.anthropic
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.integrations.ProviderBilling
 import com.zyblw.agent.model.ModelStreamEvent
 import zio.*
 import zio.json.*
@@ -31,6 +32,7 @@ private[anthropic] object AnthropicMessagesSse:
       cacheReadInputTokens: Long = 0L,
       cacheWriteInputTokens: Long = 0L,
       outputTokens: Long = 0L,
+      billing: Option[BillingUsage] = None,
       inputReported: Boolean = false,
       outputReported: Boolean = false,
       stopReason: Option[String] = None,
@@ -99,6 +101,7 @@ private[anthropic] object AnthropicMessagesSse:
       normalized =>
         val next = state.copy(
           responseId = id,
+          billing = ProviderBilling.reported(normalized, message).billing,
           inputTokens = normalized.inputTokens,
           inputReported = usage.flatMap(AnthropicMessagesWire.longField(_, "input_tokens")).nonEmpty,
           cacheReadInputTokens = cacheRead,
@@ -205,15 +208,17 @@ private[anthropic] object AnthropicMessagesSse:
         outputReported =
           state.outputReported || usage.flatMap(AnthropicMessagesWire.longField(_, "output_tokens")).nonEmpty
       )
+      val reported   = ProviderBilling.reported(TokenUsage(billing = next.billing), event).billing
       val usageEvent = ModelStreamEvent.UsageUpdated(
         TokenUsage(
           next.inputTokens,
           next.outputTokens,
           cachedInputTokens = next.cacheReadInputTokens,
-          cacheWriteInputTokens = next.cacheWriteInputTokens
+          cacheWriteInputTokens = next.cacheWriteInputTokens,
+          billing = reported
         )
       )
-      ZIO.succeed(next -> Chunk(usageEvent))
+      ZIO.succeed(next.copy(billing = reported) -> Chunk(usageEvent))
 
   /** 组装最终助手消息、原始 blocks、usage 和唯一 Completed。 */
   private def messageStop(state: State): IO[AgentError, (State, Chunk[ModelStreamEvent])] =
@@ -239,7 +244,8 @@ private[anthropic] object AnthropicMessagesSse:
         state.inputTokens,
         state.outputTokens,
         cachedInputTokens = state.cacheReadInputTokens,
-        cacheWriteInputTokens = state.cacheWriteInputTokens
+        cacheWriteInputTokens = state.cacheWriteInputTokens,
+        billing = state.billing
       )
       val response = ChatResponse(
         message,

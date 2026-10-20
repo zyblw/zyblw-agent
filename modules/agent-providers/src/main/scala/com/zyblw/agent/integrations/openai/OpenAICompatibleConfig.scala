@@ -34,7 +34,13 @@ final case class OpenAICompatibleConfig(
   require(apiKey.nonEmpty, "apiKey must not be empty")
   require(defaultModel.nonEmpty, "defaultModel must not be empty")
 
-  val chatCompletionsUrl: String = s"${baseUrl.stripSuffix("/")}/chat/completions"
+  val normalizedBaseUrl: String =
+    val trimmed = baseUrl.trim.stripSuffix("/")
+    if trimmed.toLowerCase.endsWith("/chat/completions") then
+      trimmed.substring(0, trimmed.length - "/chat/completions".length).stripSuffix("/")
+    else trimmed
+
+  val chatCompletionsUrl: String = s"$normalizedBaseUrl/chat/completions"
 
   /** 返回脱敏配置摘要，永不打印真实 API Key。 */
   override def toString: String =

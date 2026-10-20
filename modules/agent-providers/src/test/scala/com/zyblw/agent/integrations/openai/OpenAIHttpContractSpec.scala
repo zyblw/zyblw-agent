@@ -151,7 +151,8 @@ object OpenAIHttpContractSpec extends ZIOSpecDefault:
           case Exit.Success(_)     => None
       yield assertTrue(
         result._1.message.text == "stub ok",
-        result._1.usage == TokenUsage(7, 3, cachedInputTokens = 4, reasoningOutputTokens = 2),
+        result._1.usage
+          .copy(billing = None) == TokenUsage(7, 3, cachedInputTokens = 4, reasoningOutputTokens = 2),
         unauthorized.exists(_.category == ErrorCategory.Authentication),
         unauthorized.exists(!_.retryable),
         unauthorized.forall(!_.message.contains("sk-must-not-leak")),

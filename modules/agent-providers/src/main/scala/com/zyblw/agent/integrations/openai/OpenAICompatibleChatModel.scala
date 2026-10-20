@@ -2,6 +2,7 @@ package com.zyblw.agent.integrations.openai
 
 import com.zyblw.agent.artifacts.ProviderImagePolicy
 import com.zyblw.agent.core.*
+import com.zyblw.agent.integrations.ProviderBilling
 import com.zyblw.agent.model.*
 import zio.*
 import zio.http.*
@@ -50,6 +51,8 @@ final class OpenAICompatibleChatModel(client: Client, config: OpenAICompatibleCo
           else ZIO.fail(httpError(response.status.code, responseBody))
         )
     yield result.copy(
+      usage = ProviderBilling
+        .options(result.usage, config.defaultOptions ++ request.settings.providerOptions, request),
       metadata = result.metadata ++ Map(
         "provider" -> provider,
         "model"    -> request.settings.model.getOrElse(config.defaultModel)
@@ -103,7 +106,19 @@ final class OpenAICompatibleChatModel(client: Client, config: OpenAICompatibleCo
             .timeoutFail(AgentError.ModelFailure(provider, "stream timed out", retryable = true))(
               config.requestTimeout
             )
-        yield stream
+        yield stream.map {
+          case ModelStreamEvent.Completed(response) =>
+            ModelStreamEvent.Completed(
+              response.copy(
+                usage = ProviderBilling.options(
+                  response.usage,
+                  config.defaultOptions ++ request.settings.providerOptions,
+                  request
+                )
+              )
+            )
+          case event => event
+        }
       }
 
   /** 只保留 HTTP 状态与 OpenAI 风格 envelope 的低基数 code/type；原始响应正文不进入错误。 */
@@ -127,13 +142,17 @@ private[openai] object OpenAIWire:
       tool_calls: Option[Chunk[ToolCallDto]]
   ) derives JsonDecoder
   final private case class ChoiceDto(message: MessageDto, finish_reason: Option[String]) derives JsonDecoder
-  final private case class PromptTokensDetailsDto(cached_tokens: Option[Long]) derives JsonDecoder
+  final private case class PromptTokensDetailsDto(
+      cached_tokens: Option[Long],
+      cache_write_tokens: Option[Long]
+  ) derives JsonDecoder
   final private case class CompletionTokensDetailsDto(reasoning_tokens: Option[Long]) derives JsonDecoder
   final private case class UsageDto(
       prompt_tokens: Long,
       completion_tokens: Long,
       prompt_tokens_details: Option[PromptTokensDetailsDto],
-      completion_tokens_details: Option[CompletionTokensDetailsDto]
+      completion_tokens_details: Option[CompletionTokensDetailsDto],
+      prompt_cache_hit_tokens: Option[Long]
   ) derives JsonDecoder
   final private case class ResponseDto(id: Option[String], choices: Chunk[ChoiceDto], usage: Option[UsageDto])
       derives JsonDecoder
@@ -317,30 +336,39 @@ private[openai] object OpenAIWire:
         validatedUsage(
           value.prompt_tokens,
           value.completion_tokens,
-          value.prompt_tokens_details.flatMap(_.cached_tokens).getOrElse(0L),
+          value.prompt_tokens_details
+            .flatMap(_.cached_tokens)
+            .orElse(value.prompt_cache_hit_tokens)
+            .getOrElse(0L),
           value.completion_tokens_details.flatMap(_.reasoning_tokens).getOrElse(0L),
+          value.prompt_tokens_details.flatMap(_.cache_write_tokens).getOrElse(0L),
+          value.prompt_tokens_details.flatMap(_.cached_tokens).zip(value.prompt_cache_hit_tokens).forall {
+            case (a, b) => a == b
+          },
           "response.usage"
         )
       )
     yield ChatResponse(
       message,
       finishReason(choice.finish_reason),
-      usage,
+      ProviderBilling.reported(usage, body.fromJson[Json].toOption.getOrElse(Json.Null)),
       decoded.id,
       usageReported = decoded.usage.nonEmpty
     )
 
   /** Provider usage 必须是非负数；负 token 会绕过预算门禁，因此视为无效响应而不是自动归零。 */
-  private def validatedUsage(
+  private[openai] def validatedUsage(
       input: Long,
       output: Long,
       cachedInput: Long,
       reasoningOutput: Long,
+      cacheWrite: Long,
+      aliasesAgree: Boolean,
       location: String
   ): IO[AgentError, TokenUsage] =
     if input >= 0L && output >= 0L && cachedInput >= 0L && reasoningOutput >= 0L &&
-      cachedInput <= input && reasoningOutput <= output
-    then ZIO.succeed(TokenUsage(input, output, cachedInput, reasoningOutput))
+      cacheWrite >= 0L && cachedInput <= input && cacheWrite <= input - cachedInput && reasoningOutput <= output && aliasesAgree
+    then ZIO.succeed(TokenUsage(input, output, cachedInput, reasoningOutput, cacheWrite))
     else
       ZIO.fail(
         AgentError.InvalidModelResponse(
@@ -472,13 +500,15 @@ private[openai] object OpenAISse:
       tool_calls: Option[Chunk[ToolDelta]]
   ) derives JsonDecoder
   final private case class Choice(delta: Delta, finish_reason: Option[String]) derives JsonDecoder
-  final private case class PromptTokensDetails(cached_tokens: Option[Long]) derives JsonDecoder
+  final private case class PromptTokensDetails(cached_tokens: Option[Long], cache_write_tokens: Option[Long])
+      derives JsonDecoder
   final private case class CompletionTokensDetails(reasoning_tokens: Option[Long]) derives JsonDecoder
   final private case class Usage(
       prompt_tokens: Long,
       completion_tokens: Long,
       prompt_tokens_details: Option[PromptTokensDetails],
-      completion_tokens_details: Option[CompletionTokensDetails]
+      completion_tokens_details: Option[CompletionTokensDetails],
+      prompt_cache_hit_tokens: Option[Long]
   ) derives JsonDecoder
   final private case class ChunkDto(id: Option[String], choices: Chunk[Choice], usage: Option[Usage])
       derives JsonDecoder
@@ -547,78 +577,89 @@ private[openai] object OpenAISse:
         .flatMap { dto =>
           val startedEvents =
             if state.started then Chunk.empty else Chunk(ModelStreamEvent.ResponseStarted(dto.id))
-          val withId = state.copy(requestId = dto.id.orElse(state.requestId), started = true)
-          validateUsage(dto.usage).flatMap { validUsage =>
-            val withUsage = validUsage.fold(withId)(usage => withId.copy(usage = usage, usageReported = true))
-            dto.choices.headOption match
-              case None =>
-                val usageEvents = validUsage
-                  .fold(Chunk.empty[ModelStreamEvent])(usage => Chunk(ModelStreamEvent.UsageUpdated(usage)))
-                ZIO.succeed(withUsage -> (startedEvents ++ usageEvents))
-              case Some(choice) =>
-                val textDelta      = choice.delta.content.getOrElse("")
-                val reasoningDelta = choice.delta.reasoning_content.getOrElse("")
-                val textEvents = Option.when(textDelta.nonEmpty)(ModelStreamEvent.TextDelta(textDelta)).toList
-                val reasoningEvents =
-                  Option.when(reasoningDelta.nonEmpty)(ModelStreamEvent.ReasoningDelta(reasoningDelta)).toList
-                val (updatedTools, toolEvents) = choice.delta.tool_calls
-                  .getOrElse(Chunk.empty)
-                  .foldLeft(
-                    withUsage.tools -> Chunk.empty[ModelStreamEvent]
-                  ) { case ((tools, events), delta) =>
-                    val previous = tools.get(delta.index)
-                    val id       = delta.id.orElse(previous.map(_.id)).getOrElse(s"tool-${delta.index}")
-                    val name     = delta.function.flatMap(_.name).orElse(previous.map(_.name)).getOrElse("")
-                    val fragment = delta.function.flatMap(_.arguments).getOrElse("")
-                    val next     = PartialTool(id, name, previous.fold("")(_.arguments) + fragment)
-                    val started  = Option
-                      .when(previous.isEmpty && name.nonEmpty)(ModelStreamEvent.ToolCallStarted(id, name))
+          val billingJson = frame.fromJson[Json].toOption.getOrElse(Json.Null)
+          val withId      = state.copy(
+            requestId = dto.id.orElse(state.requestId),
+            started = true,
+            usage = ProviderBilling.reported(state.usage, billingJson)
+          )
+          validateUsage(dto.usage)
+            .map(
+              _.map(u =>
+                ProviderBilling
+                  .inheritConditions(ProviderBilling.reported(u, billingJson), withId.usage.billing)
+              )
+            )
+            .flatMap { validUsage =>
+              val withUsage =
+                validUsage.fold(withId)(usage => withId.copy(usage = usage, usageReported = true))
+              dto.choices.headOption match
+                case None =>
+                  val usageEvents = validUsage
+                    .fold(Chunk.empty[ModelStreamEvent])(usage => Chunk(ModelStreamEvent.UsageUpdated(usage)))
+                  ZIO.succeed(withUsage -> (startedEvents ++ usageEvents))
+                case Some(choice) =>
+                  val textDelta      = choice.delta.content.getOrElse("")
+                  val reasoningDelta = choice.delta.reasoning_content.getOrElse("")
+                  val textEvents     =
+                    Option.when(textDelta.nonEmpty)(ModelStreamEvent.TextDelta(textDelta)).toList
+                  val reasoningEvents =
+                    Option
+                      .when(reasoningDelta.nonEmpty)(ModelStreamEvent.ReasoningDelta(reasoningDelta))
                       .toList
-                    val changed = Option
-                      .when(fragment.nonEmpty)(
-                        ModelStreamEvent.ToolCallDelta(id, Option.when(name.nonEmpty)(name), fragment)
-                      )
-                      .toList
-                    (tools.updated(delta.index, next), events ++ Chunk.fromIterable(started ++ changed))
-                  }
-                val next = withUsage.copy(
-                  text = withUsage.text + textDelta,
-                  reasoning = withUsage.reasoning + reasoningDelta,
-                  tools = updatedTools,
-                  finish =
-                    choice.finish_reason.fold(withUsage.finish)(value => OpenAIWire.finishReason(Some(value)))
-                )
-                ZIO.succeed(
-                  next -> (startedEvents ++ Chunk.fromIterable(textEvents ++ reasoningEvents) ++ toolEvents)
-                )
-          }
+                  val (updatedTools, toolEvents) = choice.delta.tool_calls
+                    .getOrElse(Chunk.empty)
+                    .foldLeft(
+                      withUsage.tools -> Chunk.empty[ModelStreamEvent]
+                    ) { case ((tools, events), delta) =>
+                      val previous = tools.get(delta.index)
+                      val id       = delta.id.orElse(previous.map(_.id)).getOrElse(s"tool-${delta.index}")
+                      val name     = delta.function.flatMap(_.name).orElse(previous.map(_.name)).getOrElse("")
+                      val fragment = delta.function.flatMap(_.arguments).getOrElse("")
+                      val next     = PartialTool(id, name, previous.fold("")(_.arguments) + fragment)
+                      val started  = Option
+                        .when(previous.isEmpty && name.nonEmpty)(ModelStreamEvent.ToolCallStarted(id, name))
+                        .toList
+                      val changed = Option
+                        .when(fragment.nonEmpty)(
+                          ModelStreamEvent.ToolCallDelta(id, Option.when(name.nonEmpty)(name), fragment)
+                        )
+                        .toList
+                      (tools.updated(delta.index, next), events ++ Chunk.fromIterable(started ++ changed))
+                    }
+                  val next = withUsage.copy(
+                    text = withUsage.text + textDelta,
+                    reasoning = withUsage.reasoning + reasoningDelta,
+                    tools = updatedTools,
+                    finish = choice.finish_reason
+                      .fold(withUsage.finish)(value => OpenAIWire.finishReason(Some(value)))
+                  )
+                  ZIO.succeed(
+                    next -> (startedEvents ++ Chunk.fromIterable(textEvents ++ reasoningEvents) ++ toolEvents)
+                  )
+            }
         }
 
   /** 校验 SSE usage，防止负值污染累计预算；None 表示 Provider 尚未发送 usage。 */
   private def validateUsage(usage: Option[Usage]): IO[AgentError, Option[TokenUsage]] = usage match
-    case None => ZIO.none
-    case Some(value)
-        if value.prompt_tokens >= 0L && value.completion_tokens >= 0L &&
-          value.prompt_tokens_details
-            .flatMap(_.cached_tokens)
-            .forall(token => token >= 0L && token <= value.prompt_tokens) &&
-          value.completion_tokens_details
-            .flatMap(_.reasoning_tokens)
-            .forall(token => token >= 0L && token <= value.completion_tokens) =>
-      ZIO.some(
-        TokenUsage(
+    case None        => ZIO.none
+    case Some(value) =>
+      OpenAIWire
+        .validatedUsage(
           value.prompt_tokens,
           value.completion_tokens,
-          value.prompt_tokens_details.flatMap(_.cached_tokens).getOrElse(0L),
-          value.completion_tokens_details.flatMap(_.reasoning_tokens).getOrElse(0L)
+          value.prompt_tokens_details
+            .flatMap(_.cached_tokens)
+            .orElse(value.prompt_cache_hit_tokens)
+            .getOrElse(0L),
+          value.completion_tokens_details.flatMap(_.reasoning_tokens).getOrElse(0L),
+          value.prompt_tokens_details.flatMap(_.cache_write_tokens).getOrElse(0L),
+          value.prompt_tokens_details.flatMap(_.cached_tokens).zip(value.prompt_cache_hit_tokens).forall {
+            case (a, b) => a == b
+          },
+          "stream.usage"
         )
-      )
-    case Some(value) =>
-      ZIO.fail(
-        AgentError.InvalidModelResponse(
-          s"stream.usage token 用量无效: input=${value.prompt_tokens}, output=${value.completion_tokens}"
-        )
-      )
+        .map(Some(_))
 
   /** 在 DONE 或网络结束时校验完整性并生成唯一 Completed。 */
   private def finish(

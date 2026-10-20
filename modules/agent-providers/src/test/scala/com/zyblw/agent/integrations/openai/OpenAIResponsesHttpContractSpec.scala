@@ -119,9 +119,9 @@ object OpenAIResponsesHttpContractSpec extends ZIOSpecDefault:
         streamCompleted = result._2.collectFirst { case ModelStreamEvent.Completed(response) => response }
       yield assertTrue(
         result._1.message.text == "stub ok",
-        result._1.usage == TokenUsage(5, 2),
+        result._1.usage.copy(billing = None) == TokenUsage(5, 2),
         streamCompleted.exists(_.message.text == "stub stream"),
-        streamCompleted.exists(_.usage == TokenUsage(6, 3)),
+        streamCompleted.exists(_.usage.copy(billing = None) == TokenUsage(6, 3)),
         result._3.isFailure,
         retryable,
         result._4.length == 3,

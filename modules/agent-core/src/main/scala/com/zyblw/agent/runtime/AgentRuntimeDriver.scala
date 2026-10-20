@@ -831,11 +831,13 @@ final class AgentRuntimeDriver(
     else
       store.getModelCalls(state.runId).flatMap { calls =>
         val unknown = calls.exists(record =>
-          record.status == ModelCallStatus.Succeeded && (!record.usageReporting || record.usage.isEmpty) &&
-            record.priceSnapshot.forall(p =>
+          record.status == ModelCallStatus.Succeeded && (record.usage
+            .exists(u => record.priceSnapshot.exists(_.rated(u).isLeft)) ||
+            ((!record.usageReporting || record.usage.isEmpty) && record.priceSnapshot.forall(p =>
               p.inputPerMillionTokens > 0 || p.outputPerMillionTokens > 0 ||
-                p.cachedInputPerMillionTokens.exists(_ > 0) || p.cacheWriteInputPerMillionTokens.exists(_ > 0)
-            )
+                p.cachedInputPerMillionTokens.exists(_ > 0) || p.cacheWriteInputPerMillionTokens
+                  .exists(_ > 0) || p.tariff.nonEmpty
+            )))
         )
         ZIO.fail(AgentError.InvalidModelResponse("费用上限下缺少可核验用量，禁止继续外部动作")).when(unknown).unit
       }

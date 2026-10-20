@@ -232,6 +232,6 @@ object GeminiInteractionsHttpContractSpec extends ZIOSpecDefault:
           events <- model.stream(request("slow-stream")).runCollect
         yield events.collectFirst { case ModelStreamEvent.Completed(value) => value })
           .provide(Client.default, Server.defaultWith(_.onAnyOpenPort))
-      yield assertTrue(response.exists(_.usage == TokenUsage(2, 1)))
+      yield assertTrue(response.exists(_.usage.copy(billing = None) == TokenUsage(2, 1)))
     } @@ TestAspect.withLiveClock @@ TestAspect.sequential
   )

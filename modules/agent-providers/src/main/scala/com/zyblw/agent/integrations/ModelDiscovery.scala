@@ -74,10 +74,17 @@ object ModelDiscovery:
       extraHeaders: Map[String, String] = Map.empty,
       timeout: Duration = 20.seconds
   ): IO[AgentError, Chunk[DiscoveredModel]] =
-    if !ProviderEndpointUrl.isAllowed(baseUrl) then ZIO.fail(AgentError.InvalidConfiguration("baseUrl 不被允许"))
+    val clean   = baseUrl.trim.stripSuffix("/")
+    val rootUrl =
+      if clean.toLowerCase.endsWith("/chat/completions") then
+        clean.substring(0, clean.length - "/chat/completions".length).stripSuffix("/")
+      else if clean.toLowerCase.endsWith("/models") then
+        clean.substring(0, clean.length - "/models".length).stripSuffix("/")
+      else clean
+    if !ProviderEndpointUrl.isAllowed(rootUrl) then ZIO.fail(AgentError.InvalidConfiguration("baseUrl 不被允许"))
     else
-      fetch(client, s"${baseUrl.stripSuffix("/")}/models", Some(apiKey), extraHeaders, timeout).flatMap(
-        body => ZIO.fromEither(parseOpenAIModels(body)).mapError(AgentError.InvalidConfiguration(_))
+      fetch(client, s"$rootUrl/models", Some(apiKey), extraHeaders, timeout).flatMap(body =>
+        ZIO.fromEither(parseOpenAIModels(body)).mapError(AgentError.InvalidConfiguration(_))
       )
 
   /** 解析 OpenRouter `/models` 响应。 */

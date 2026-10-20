@@ -1,6 +1,7 @@
 package com.zyblw.agent.integrations.gemini
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.integrations.ProviderBilling
 import com.zyblw.agent.model.ModelStreamEvent
 import zio.*
 import zio.json.*
@@ -105,7 +106,8 @@ private[gemini] object GeminiInteractionsSse:
       .stringField(interaction, "id")
       .orElse(GeminiInteractionsWire.stringField(event, "interaction_id"))
       .orElse(state.responseId)
-    val next    = state.copy(responseId = id, started = true)
+    val next =
+      state.copy(responseId = id, started = true, usage = ProviderBilling.reported(state.usage, interaction))
     val emitted = if state.started then Chunk.empty else Chunk(ModelStreamEvent.ResponseStarted(id))
     ZIO.succeed(next -> emitted)
 
@@ -188,7 +190,13 @@ private[gemini] object GeminiInteractionsSse:
         .field(interaction, "usage")
         .orElse(GeminiInteractionsWire.field(event, "usage"))
       for
-        usage <- decodeUsage(usageJson, state.usage)
+        decodedUsage <- usageJson.fold[IO[AgentError, TokenUsage]](ZIO.succeed(state.usage))(json =>
+          GeminiInteractionsWire.decodeUsage(Some(json), "stream.usage")
+        )
+        usage = ProviderBilling.inheritConditions(
+          ProviderBilling.reported(ProviderBilling.reported(decodedUsage, event), interaction),
+          state.usage.billing
+        )
         calls <- completeUnstoppedCalls(state)
         text = state.steps.toList
           .sortBy(_._1)
@@ -299,30 +307,6 @@ private[gemini] object GeminiInteractionsSse:
     case None                 => ""
     case Some(Json.Str(text)) => text
     case Some(json)           => json.toJson
-
-  /** 校验终止 usage；负 token 永远不能被归零后继续。 */
-  private def decodeUsage(value: Option[Json], fallback: TokenUsage): IO[AgentError, TokenUsage] = value match
-    case None       => ZIO.succeed(fallback)
-    case Some(json) =>
-      val input = GeminiInteractionsWire
-        .longField(json, "total_input_tokens")
-        .orElse(GeminiInteractionsWire.longField(json, "prompt_tokens"))
-        .getOrElse(fallback.inputTokens)
-      val output = GeminiInteractionsWire
-        .longField(json, "total_output_tokens")
-        .orElse(GeminiInteractionsWire.longField(json, "completion_tokens"))
-        .getOrElse(fallback.outputTokens)
-      val cached = GeminiInteractionsWire
-        .longField(json, "total_cached_tokens")
-        .getOrElse(fallback.cachedInputTokens)
-      if input >= 0L && output >= 0L && cached >= 0L && cached <= input then
-        ZIO.succeed(TokenUsage(input, output, cachedInputTokens = cached))
-      else
-        ZIO.fail(
-          AgentError.InvalidModelResponse(
-            s"Gemini stream usage 包含无效 token: input=$input, output=$output, cache_read=$cached"
-          )
-        )
 
   /** Provider 的流内错误只保留稳定类别，不把完整事件写入错误消息。 */
   private def streamFailure(event: Json, retryable: Boolean): IO[AgentError, Nothing] =

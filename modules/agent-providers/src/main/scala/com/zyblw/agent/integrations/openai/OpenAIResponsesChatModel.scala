@@ -2,6 +2,7 @@ package com.zyblw.agent.integrations.openai
 
 import com.zyblw.agent.artifacts.ProviderImagePolicy
 import com.zyblw.agent.core.*
+import com.zyblw.agent.integrations.ProviderBilling
 import com.zyblw.agent.model.*
 import zio.*
 import zio.http.*
@@ -89,6 +90,8 @@ final class OpenAIResponsesChatModel(client: Client, config: OpenAIResponsesConf
   /** 给归一化响应补充路由与模型元数据，便于 trace、成本统计和故障定位。 */
   private def enrich(response: ChatResponse, request: ChatRequest): ChatResponse =
     response.copy(
+      usage = ProviderBilling
+        .options(response.usage, config.defaultOptions ++ request.settings.providerOptions, request),
       metadata = response.metadata ++ Map(
         "provider" -> provider,
         "model"    -> request.settings.model.getOrElse(config.defaultModel),
@@ -284,7 +287,13 @@ private[openai] object OpenAIResponsesWire:
             )
           )
       reason = finishReason(dto.status, dto.incomplete_details.flatMap(_.reason), calls.nonEmpty)
-    yield ChatResponse(message, reason, usage, dto.id, usageReported = dto.usage.nonEmpty)
+    yield ChatResponse(
+      message,
+      reason,
+      ProviderBilling.reported(usage, json),
+      dto.id,
+      usageReported = dto.usage.nonEmpty
+    )
 
   /** 把一条框架消息扩展为零到多个 Responses input item。 */
   private def encodeMessage(message: AgentMessage): Either[AgentError, Chunk[Json]] = message.role match
@@ -477,6 +486,7 @@ private[openai] object OpenAIResponsesSse:
   final private case class PartialTool(itemId: String, callId: String, name: String, arguments: String)
   final private case class State(
       responseId: Option[String] = None,
+      billing: Option[BillingUsage] = None,
       tools: Map[Int, PartialTool] = Map.empty,
       completedCalls: Set[String] = Set.empty,
       started: Boolean = false,
@@ -529,7 +539,13 @@ private[openai] object OpenAIResponsesSse:
         val responseId = OpenAIResponsesWire.stringField(response, "id").orElse(state.responseId)
         val emitted    =
           if state.started then Chunk.empty else Chunk(ModelStreamEvent.ResponseStarted(responseId))
-        ZIO.succeed(state.copy(responseId = responseId, started = true) -> emitted)
+        ZIO.succeed(
+          state.copy(
+            responseId = responseId,
+            started = true,
+            billing = ProviderBilling.reported(TokenUsage(billing = state.billing), response).billing
+          ) -> emitted
+        )
       case Some("response.output_text.delta") =>
         val delta = OpenAIResponsesWire.stringField(event, "delta").getOrElse("")
         ZIO.succeed(
@@ -621,7 +637,8 @@ private[openai] object OpenAIResponsesSse:
   /** 使用终止事件内的完整 response 作为最终权威结果，并补发缺失的工具完成事件。 */
   private def complete(state: State, event: Json): IO[AgentError, (State, Chunk[ModelStreamEvent])] =
     val response = OpenAIResponsesWire.field(event, "response").getOrElse(event)
-    OpenAIResponsesWire.decodeResponseJson(response).map { decoded =>
+    OpenAIResponsesWire.decodeResponseJson(response).map { raw =>
+      val decoded      = raw.copy(usage = ProviderBilling.inheritConditions(raw.usage, state.billing))
       val started      = ensureStarted(state, decoded.providerRequestId)
       val startedEvent =
         if state.started then Chunk.empty

@@ -23,6 +23,67 @@ object OpenAISseSpec extends ZIOSpecDefault:
       |""".stripMargin
 
   def spec = suite("OpenAI SSE")(
+    test("actual service tier in an early frame survives a later usage-only frame") {
+      val stream =
+        """data: {"service_tier":"priority","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}
+
+ data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}
+
+ data: [DONE]
+
+""".replace(" data:", "data:")
+      for
+        events <- OpenAISse
+          .events(ZStream.fromIterable(stream.getBytes(StandardCharsets.UTF_8)), OpenAICompatibility.openAI)
+          .runCollect
+        completed = events.collect { case ModelStreamEvent.Completed(r) => r }
+      yield assertTrue(
+        completed.head.usage.billing.exists(_.dimensions.get("service_tier").contains("priority"))
+      )
+    },
+    test("OpenRouter cache writes and DeepSeek cache hits agree across ordinary and streaming responses") {
+      val usage =
+        """{"prompt_tokens":1000000,"completion_tokens":1000,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":100000},"prompt_cache_hit_tokens":0}"""
+      val response = s"""{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":$usage}"""
+      val stream   = s"""data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":$usage}
+
+ data: [DONE]
+
+""".replace(" data:", "data:")
+      for
+        ordinary <- OpenAIWire.decodeResponse(response, OpenAICompatibility.openAI)
+        events   <- OpenAISse
+          .events(ZStream.fromIterable(stream.getBytes(StandardCharsets.UTF_8)), OpenAICompatibility.openAI)
+          .runCollect
+        alias <- OpenAIWire.decodeResponse(
+          response
+            .replace("\"cached_tokens\":0,", "")
+            .replace("\"prompt_cache_hit_tokens\":0", "\"prompt_cache_hit_tokens\":200000"),
+          OpenAICompatibility.deepSeek
+        )
+        conflict <- OpenAIWire
+          .decodeResponse(
+            response.replace("\"prompt_cache_hit_tokens\":0", "\"prompt_cache_hit_tokens\":1"),
+            OpenAICompatibility.openAI
+          )
+          .either
+        invalid <- OpenAIWire
+          .decodeResponse(
+            response.replace("\"cache_write_tokens\":100000", "\"cache_write_tokens\":1000001"),
+            OpenAICompatibility.openAI
+          )
+          .either
+        completed = events.collect { case ModelStreamEvent.Completed(r) => r }
+        price     = ModelPrice(2, 4, cacheWriteInputPerMillionTokens = Some(4))
+      yield assertTrue(
+        ordinary.usage.cacheWriteInputTokens == 100000,
+        completed.head.usage == ordinary.usage,
+        price.rated(ordinary.usage) == Right(BigDecimal("2.204")),
+        alias.usage.cachedInputTokens == 200000,
+        conflict.isLeft,
+        invalid.isLeft
+      )
+    },
     test("缺失 usage 与明确报告零用量保持不同，流式和非流式一致") {
       val absent =
         """{"id":"r","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"""
@@ -60,7 +121,10 @@ object OpenAISseSpec extends ZIOSpecDefault:
             completed.length == 11,
             completed.forall(_.message.text == "你"),
             completed.forall(_.message.toolCalls.headOption.exists(_.arguments.toJson.contains("好"))),
-            completed.forall(_.usage == TokenUsage(12, 7, cachedInputTokens = 5, reasoningOutputTokens = 3))
+            completed.forall(
+              _.usage
+                .copy(billing = None) == TokenUsage(12, 7, cachedInputTokens = 5, reasoningOutputTokens = 3)
+            )
           )
         }
     },

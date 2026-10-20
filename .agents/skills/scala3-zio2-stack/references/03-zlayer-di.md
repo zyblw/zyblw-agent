@@ -1,52 +1,13 @@
-# ZLayer Dependency Injection & Lifecycle Management
+# 依赖组装与生命周期
 
-## 1. Composition with `ZLayer`
-- Services are declared as traits with clear, narrow responsibilities.
-- Implementations are provided via `ZLayer.fromFunction`, `ZLayer.fromZIO`, or `ZLayer.scoped`.
-- Do NOT hide global singletons inside companion objects or application builders.
-- Never fall back to in-memory fake stores in production entry points when the real database connection fails.
+用于新增服务、替换基础设施或调整资源所有权，不为每个纯函数增加 ZLayer。
 
-```scala
-// Service contract
-trait KnowledgeIndexService:
-  def search(query: KnowledgeQuery): IO[RetrievalError, Chunk[DocumentChunk]]
+- 先读现有 composition root；复用已有 trait、构造器和 layer，避免隐式全局依赖。
+- 有生命周期的实现使用 scoped layer；纯依赖组装沿用 fromFunction/fromZIO 等现有方式，不为“统一风格”重写无关模块。
+- 时钟、随机、配置和客户端在需要确定性或替换时通过现有 ZIO 服务/端口获得。不要在业务核心散落 Instant.now、全局随机源或环境变量读取。
+- 静态不可变常量、纯工具函数不等于有害全局单例，无需为其增加依赖注入。
+- 核对 ZIO 2 当前服务和环境类型，不从旧示例推断 Clock/Random 必须出现在每个 R 类型中。
+- 生产数据库不可用时不能静默换成内存库；可选能力必须明确未装配，并在调用处报告。
+- 连接池、HTTP client、长生命周期 worker 的创建与关闭由拥有它们的层负责；一次请求借用资源不意味着可以关掉整个共享服务。
 
-// Implementation
-final class PostgresKnowledgeIndexService(
-  vectorStore: VectorStore,
-  config: KnowledgeConfig
-) extends KnowledgeIndexService:
-  def search(query: KnowledgeQuery): IO[RetrievalError, Chunk[DocumentChunk]] =
-    vectorStore.similaritySearch(query.embedding, query.topK, query.scope)
-
-// Idiomatic Layer wiring
-object PostgresKnowledgeIndexService:
-  val live: ZLayer[VectorStore & KnowledgeConfig, Nothing, KnowledgeIndexService] =
-    ZLayer.fromFunction(new PostgresKnowledgeIndexService(_, _))
-```
-
-## 2. Explicit Dependencies for Determinism
-Never hardcode non-deterministic Java static methods in business or kernel logic. Always rely on ZIO's built-in, test-overridable services:
-
-- **Time**: Use `Clock.instant` or `Clock.currentTime(TimeUnit.MILLISECONDS)` instead of `System.currentTimeMillis()` or `Instant.now()`.
-- **Randomness**: Use `Random.nextUUID` or `Random.nextIntBounded` instead of `java.util.UUID.randomUUID()` or `scala.util.Random`.
-- **Configuration**: Load configuration via typed `ZLayer` or `Config`, not via unparsed `sys.env.getOrElse(...)` scattered across deep methods.
-
-```scala
-// ❌ BAD: Hardcoded non-deterministic side-effects make tests non-reproducible
-def createRun(agentId: AgentId): UIO[AgentRun] =
-  ZIO.succeed(AgentRun(
-    id = java.util.UUID.randomUUID().toString,
-    createdAt = java.time.Instant.now()
-  ))
-
-// ✅ GOOD: Pure ZIO services can be deterministically frozen or advanced in ZIO Test
-def createRun(agentId: AgentId): URIO[Random & Clock, AgentRun] =
-  for
-    uuid <- Random.nextUUID
-    now  <- Clock.instant
-  yield AgentRun(
-    id = RunId(uuid.toString),
-    createdAt = now
-  )
-```
+交付前说明依赖在哪组装、谁拥有资源、取消/启动失败时如何收口；用生命周期或替换测试覆盖本次改变的风险。

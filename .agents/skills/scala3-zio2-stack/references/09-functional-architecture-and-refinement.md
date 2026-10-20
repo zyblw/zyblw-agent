@@ -1,140 +1,26 @@
-# Functional Software Architecture & Refinement Invariants
+# 函数式核心与适度的类型细化
 
-Inspired by Michael Sperber's (iSAQB Functional Architecture Designer, CEO Active Group) *Teaching Software Architecture using Scala* and Matt Bovel's (EPFL / LAMP) *First-class Logical Refinement Types for Scala*, this guide establishes the macro-architectural foundations and micro-level typing invariants for `zyblw-agent` and `zyblw-server`.
+用于状态机、复杂规则和基础设施边界；保持数据建模先于控制流，不把小功能扩成通用框架。
 
----
+## 数据与转换
 
-## 1. HtDP Design Recipes: AI Mechanical Derivation
+新行为先复用或补充 sum/product ADT，再实现完整分支。核心决定“允许什么、状态如何变”，适配器负责数据库、网络和模型副作用。
+命令表达意图，事件表达已发生的事实。使用现有 kernel/reducer 的实际签名，不从设计草图推断所有模块都有同一 reduce 方法。
+简单查询或短函数无需包装成事件流；只在重放、持久化或生命周期确有需要时增加命令/事件。
 
-> **"If data modeling is right, function templates are derived mechanically without thinking."** — Michael Sperber
+## 规则组合
 
-AI Coding Agents fail when asked to write complex logic from vague prompts, because they guess architecture. The single highest-leverage human-AI collaboration pattern is:
-1. **Human / Architect designs the Algebraic Data Types (Sums & Products)**:
-   - **Sum Types (OR)**: Distinct states modeled as Scala 3 `enum`.
-   - **Product Types (AND)**: Cohesive bundles modeled as `final case class`.
-2. **AI mechanically expands the Template**:
-   - The model generates exhaustive `match` expressions covering all variants.
-   - The Scala 3 compiler enforces exhaustiveness; no branch can be forgotten.
+重复组合、需要审计/持久化的规则才考虑 And/Or/Not 数据树；两三个清晰分支直接写即可。
+包含任意函数的 predicate 不能因为套了 case class/enum 就自动获得可靠 JSON 持久化；需要存储时使用可编码的规则数据和明确解释器。
+组合子减少重复规则，但不能让安全、医学或业务含义自动正确。
 
-```scala
-// 1. Architect defines Sum/Product ADT (Make illegal states unrepresentable)
-enum StepExecution:
-  case Scheduled(at: Instant)
-  case InProgress(startedAt: Instant, timeout: Duration)
-  case Suspended(reason: Suspension, since: Instant)
-  case Succeeded(result: StepOutput, completedAt: Instant)
-  case Failed(error: AgentError, failedAt: Instant)
+## Parse, Don't Validate 的边界
 
-// 2. AI mechanically expands template with 100% compiler-verified precision
-def dispatch(step: StepExecution): URIO[DriverEnvironment, Unit] = step match
-  case StepExecution.Scheduled(at)           => scheduleFiber(at)
-  case StepExecution.InProgress(start, to)   => monitorTimeout(start, to)
-  case StepExecution.Suspended(reason, _)    => persistSuspension(reason)
-  case StepExecution.Succeeded(res, _)       => commitSuccess(res)
-  case StepExecution.Failed(err, _)          => handleFailure(err)
-```
+在不可信入口、反序列化和数据库读回解析一次，内部复用经过约束的值。长期保存、版本迁移和跨服务输入仍可能重新形成不可信边界，不能一概取消校验。
+Opaque type 隐藏表示，不自动冻结底层对象。向量若基于 Array，构造/导出须防止外部修改别名，或复用现有不可变表示；不能只检查长度后把原可变数组直接暴露。
+类型细化优先解决可发生的参数混用和非法状态，不要求每个展示字段、新函数都增加一个包装器。
 
----
+## 依赖方向
 
-## 2. Everything is Data: Commands & Events Mirror Pattern
-
-Never mutate object state in-place or execute side-effects across module boundaries. Model all system interactions as **pure, immutable data**:
-
-- **Command (Intent)**: What a caller *desires* to happen (e.g., `SubmitRunCommand`, `ApproveToolCall`). May be rejected.
-- **Event (Fact)**: What *actually happened* after validation against business rules (e.g., `ToolCallApproved`, `RunSuspended`). Cannot be altered or rejected.
-
-```
-Caller ───(Command: Desired Intent)───► [ Domain State Machine ]
-                                                 │
-                                   (Rule Validation & Invariants)
-                                                 │
-                                                 ▼
-Caller ◄───(Events: Historical Facts)──── Emits immutable facts
-```
-
-In `zyblw-agent`, this is enshrined in `AgentKernel`:
-```scala
-// Pure mathematical kernel: (State, Input) => (NextState, Events, Decisions)
-def reduce(
-  state: AgentState,
-  input: AgentInput
-): (AgentState, Chunk[AgentEvent], KernelDecisions)
-```
-Because events and commands are pure data, they can be serialized to JSON, stored in PostgreSQL outbox tables, replayed across network restarts, and audited without distributed locking.
-
----
-
-## 3. Combinator Domain Modeling (The Lego Brick Pattern)
-
-For complex domain logic (such as TCM symptom differentiation, tool permission policies, or dynamic pricing), **never write 1,000-line if-else spaghetti**. Use Simon Peyton Jones' and Michael Sperber's **Combinator Pattern**:
-
-1. **Primitives**: Small, atomic predicate cases.
-2. **Combinators**: Higher-order operators (`And`, `Or`, `Not`, `Threshold`, `When`).
-
-```scala
-// Composable rule engine as pure recursive data
-enum Rule[A]:
-  case Satisfies(predicate: A => Boolean, description: String)
-  case And(left: Rule[A], right: Rule[A])
-  case Or(left: Rule[A], right: Rule[A])
-  case Not(rule: Rule[A])
-
-  def eval(target: A): Boolean = this match
-    case Satisfies(p, _) => p(target)
-    case And(l, r)       => l.eval(target) && r.eval(target)
-    case Or(l, r)        => l.eval(target) || r.eval(target)
-    case Not(r)          => !r.eval(target)
-
-  infix def &&(other: Rule[A]): Rule[A] = And(this, other)
-  infix def ||(other: Rule[A]): Rule[A] = Or(this, other)
-  def unary_! : Rule[A] = Not(this)
-```
-
-### Why Combinators Excel in AI Software Engineering:
-- **Zero Code Generation Risk**: Complex policies are constructed by combining data nodes, not writing new mutable code.
-- **Explainability**: The rule tree can generate user-facing reasoning trails or audit logs automatically.
-- **Storage**: Combinators derive `zio.schema.Schema` and `zio.json.JsonCodec` out-of-the-box for persistence in PostgreSQL.
-
----
-
-## 4. Refinement Types & "Parse, Don't Validate"
-
-Matt Bovel's logical refinement types `{ x: Int => x > 0 }` prove that business invariants belong in the type system, not scattered runtime asserts.
-
-In Scala 3.9, enforce this via **Opaque Types with Smart Constructors**:
-
-```scala
-// ❌ BAD: Defensive programming everywhere (validating in every service method)
-def searchVectors(query: Array[Float], dim: Int): IO[StorageError, Results] =
-  if dim != 1024 then ZIO.fail(StorageError.InvalidDimension) // Repeated in 20 places!
-  else ...
-
-// ✅ GOOD: Parse, don't validate at the ingress boundary
-object EmbeddingVector1024:
-  opaque type EmbeddingVector1024 = Array[Float]
-  
-  def fromArray(arr: Array[Float]): Either[String, EmbeddingVector1024] =
-    if arr.length == 1024 then Right(arr)
-    else Left(s"Expected 1024 dimensions, got ${arr.length}")
-
-  extension (v: EmbeddingVector1024)
-    def toArray: Array[Float] = v
-
-// Domain core has 0 defensive checks; compiler guarantees 1024 dimensions:
-def searchVectors(query: EmbeddingVector1024): IO[StorageError, Results]
-```
-
-### The Parse-at-Boundary Rule:
-- Parse untrusted data (HTTP payloads, JDBC rows, LLM tool responses) into refined types **at the adapter edge**.
-- Once inside domain services and the functional kernel, functions operate on guaranteed invariants with zero defensive runtime checks.
-
----
-
-## 5. Decoupled Late Architecture (David Parnas Modularity)
-
-> **"Architecture is not about making early irrevocable decisions. It is about hiding decisions so they can be changed late."** — David Parnas
-
-In both `zyblw-agent` and `zyblw-server`:
-- **Core Domain is Pure**: `com.zyblw.agent.core` and `com.zyblw.domain.*` have **zero** dependencies on JDBC, ZIO HTTP, Flyway, Netty, or AI vendor SDKs.
-- **Infrastructure is an Adapter**: PostgreSQL, HTTP routes, Tika, and LLM APIs exist strictly in outer `adapter` or `infrastructure` modules.
-- **Late Composition via `ZLayer`**: All technical decisions (connection pools, timeouts, retry backoff) are deferred to the outermost composition root (`AppModule.scala` / `AgentApplication.scala`).
+领域模型不依赖 JDBC row、路由实现或厂商 SDK；模块已定义的公开 SPI 保持原合同。通过现有 composition root 组装技术实现，不为“纯度”改写无关公共 API。
+数据库事务、资源和调用取消仍由边界保证；纯 reducer 不意味着分布式副作用天然幂等，也不替代 CAS、fencing 和重放测试。

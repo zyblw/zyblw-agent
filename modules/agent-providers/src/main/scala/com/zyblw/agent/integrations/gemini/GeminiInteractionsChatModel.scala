@@ -1,6 +1,7 @@
 package com.zyblw.agent.integrations.gemini
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.integrations.ProviderBilling
 import com.zyblw.agent.model.*
 import zio.*
 import zio.http.*
@@ -81,8 +82,10 @@ final class GeminiInteractionsChatModel(client: Client, config: GeminiInteractio
 
   /** 补充可安全记录的 Provider、模型与协议元数据，不包含 Secret 或原始 steps。 */
   private def enrich(response: ChatResponse, request: ChatRequest): ChatResponse =
-    response.copy(metadata =
-      response.metadata ++ Map(
+    response.copy(
+      usage = ProviderBilling
+        .options(response.usage, config.defaultOptions ++ request.settings.providerOptions, request),
+      metadata = response.metadata ++ Map(
         "provider" -> provider,
         "model"    -> request.settings.model.getOrElse(config.defaultModel),
         "protocol" -> descriptor.protocol

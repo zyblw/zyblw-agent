@@ -123,8 +123,8 @@ final case class ModelCallExecutionRecord(
       Either.cond(
         decision.selectedModel.provider == provider && decision.selectedModel.model == model &&
           com.zyblw.agent.model.ModelRouter.select(decision.candidates).contains(decision.selectedModel) &&
-          decision.selectedPrice.map(
-            _.estimate(TokenUsage(decision.estimatedInputTokens, decision.maxOutputTokens.toLong))
+          decision.selectedPrice.flatMap(
+            _.rated(TokenUsage(decision.estimatedInputTokens, decision.maxOutputTokens.toLong)).toOption
           ) == decision.estimatedCost &&
           canonicalRequest.forall(c =>
             c.settings.provider.contains(provider) && c.settings.model.contains(model)

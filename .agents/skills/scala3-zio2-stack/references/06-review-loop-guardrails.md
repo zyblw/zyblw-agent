@@ -1,41 +1,14 @@
-# Orca-Inspired Review Loop & Guardrails
+# 五视角检查：按风险取证
 
-Adam Warski's Orca demonstrated that complex code generation requires a deterministic, adversarial review loop with specialized roles. When reviewing or finalizing any PR or code edit in `zyblw-agent`, conduct this systematic five-perspective review:
+这是同一开发者的检查视角，不是自动启动五位 Reviewer Agent 的要求。只读审查可直接诊断红代码；准备宣称合并/发布就绪时再要求对应编译与测试通过。
 
----
+| 视角 | 核对本次改动 |
+| --- | --- |
+| 安全 | 输入是否可信；租户/权限/来源过滤是否完整；日志、fixture、trace 是否暴露秘密或私有正文 |
+| 性能与并发 | 动态并发、超时、预算是否有界；阻塞是否隔离；资源和子 fiber 是否关闭/收口 |
+| 类型与效应 | 非法状态、错误通道、取消传播、丢弃 effect；所用 API 是否符合固定版本 |
+| 最小改动与兼容 | 是否复用现有概念；包装和层次是否解决真实问题；Scala/JSON/HTTP/数据库合同是否改变 |
+| 测试信号 | 测试是否会在错误实现下失败；失败/权限/取消等关键边界是否覆盖；哪些只在真实环境中才能证明 |
 
-## 1. Security Reviewer (The Scat & Redaction Gate)
-- [ ] **No Secret Exposure**: Ensure no API keys, bearer tokens, or sensitive prompts are committed or logged. Credentials must only be referenced via `env:VARIABLE` plus a presence flag.
-- [ ] **Data Redaction in Traces**: Are sensitive tool input/output fields properly registered in `ToolMetadata.sensitiveInputFields` / `sensitiveOutputFields`?
-- [ ] **Untrusted Boundary Ingestion**: Are tool outputs, HTTP payloads, and external documents treated as untrusted data? Is input schema validated via `decodeInput` before execution?
-- [ ] **SQL Injection Prevention**: Are all SQL statements strictly parameterized?
-
----
-
-## 2. Performance & Concurrency Reviewer (The Loom & Fiber Gate)
-- [ ] **Bounded Parallelism**: Does any `ZIO.foreachPar` / `collectAllPar` call omit `.withParallelism(n)` on dynamic lists?
-- [ ] **Resource Leakage**: Are all JDBC connections, HTTP client streaming responses, and temporary file handles managed inside `ZIO.acquireRelease` within a `Scope`?
-- [ ] **Blocking I/O Isolation**: Is blocking I/O (JDBC, disk operations) wrapped in `ZIO.attemptBlocking` to avoid starving the ZIO compute pool?
-- [ ] **Conflict-Aware Tool Execution**: If a tool declares `ConflictAware`, has its static conflict group been properly reviewed?
-
----
-
-## 3. Scala 3 & ZIO Correctness Reviewer (The Compiler & Effect Gate)
-- [ ] **No Swallowed Exceptions**: Does any `catchAll` or `catchNonFatalOrDie` silently swallow cancellation or fatal defects?
-- [ ] **Pure Signatures**: Does any domain interface leak `Task[A]` / `Throwable` instead of a typed `E <: AgentError`?
-- [ ] **No Discarded Effects**: Are all statements inside `for`-comprehensions properly bound (`<-`)? Verify that `sbt compile` emits zero `-Wnonunit-statement` or `-Wvalue-discard` warnings.
-- [ ] **Strict Immutability**: Are any `var`s or mutable Java collections introduced in domain state?
-
----
-
-## 4. Code Structure & Minimalism Reviewer (The Anti-Bloat Gate)
-- [ ] **Zero Primitive Obsession**: Are IDs and bounded quantities modeled as `opaque type` rather than raw `String` or `Int`?
-- [ ] **No Boolean Blindness**: Are multiple boolean flags or optional states consolidated into a Scala 3 `enum` (Sum Type)?
-- [ ] **No Over-Engineering**: Did the agent invent unnecessary wrapper classes, factories, or spec-kits? Prefer the simplest direct code that fulfills the requirement.
-
----
-
-## 5. Test Quality Reviewer (The Signal-to-Noise Gate)
-- [ ] **No AI Filler Tests**: Have useless getter/setter tests or trivial assertion duplicates been eliminated?
-- [ ] **High-Signal Edge Cases**: Are failure injection, permission denial, fiber interruption, and CAS lease contention covered?
-- [ ] **Zero Flakiness**: Does any test rely on real `sleep` or un-synchronized race conditions? Enforce `TestClock.adjust`.
+小改动快速自查即可，无关项标明不适用；不为凑清单创造改动。复杂改动记录有证据的问题：文件、行号、触发条件、影响和建议。
+有授权并适合独立评审时，评审者只读，由单一实施者裁决和修改。结构化 JSON 仅在下游需要消费时使用，不要求每次交付新建报告文件。

@@ -17,7 +17,9 @@ final case class ModelPriceProvenance(
     fxToCny: String,
     fxDate: String,
     fxSourceUri: String,
-    observedAt: String
+    observedAt: String,
+    nativeTariff: Option[BillingTariff] = None,
+    sourceHash: Option[String] = None
 ) derives JsonCodec
 
 /** 单个 Provider+Model 的单价,按每百万 token 计。
@@ -42,7 +44,8 @@ final case class ModelPrice(
     cachedInputPerMillionTokens: Option[BigDecimal] = None,
     currency: String = "USD",
     cacheWriteInputPerMillionTokens: Option[BigDecimal] = None,
-    provenance: Option[ModelPriceProvenance] = None
+    provenance: Option[ModelPriceProvenance] = None,
+    tariff: Option[BillingTariff] = None
 ) derives JsonCodec:
   require(inputPerMillionTokens >= 0, "输入单价不能为负数")
   require(outputPerMillionTokens >= 0, "输出单价不能为负数")
@@ -56,7 +59,71 @@ final case class ModelPrice(
     *
     * `reasoningOutputTokens` 同样是 `outputTokens` 的子集,并且主流厂商按普通输出 token 计费,因此这里刻意不为它 单独计价:再乘一次就是重复计费。
     */
-  def estimate(usage: TokenUsage): BigDecimal =
+  def rated(usage: TokenUsage): Either[BillingError, BigDecimal] =
+    tariff match
+      case Some(value) => value.rate(usage).map(result => BigDecimal(result.total))
+      case None if usage.billing.exists(_.issues.nonEmpty) =>
+        Left(BillingError.InvalidTariff(usage.billing.toList.flatMap(_.issues).take(8).mkString("；")))
+      case None if usage.billing.exists(_.meters.exists {
+            case ("reasoning_tokens", v) =>
+              BillingTariff.decimal(v).forall(n => !n.isWhole || n > usage.outputTokens)
+            case (_, v) => BillingTariff.decimal(v).forall(_ != 0)
+          }) =>
+        Left(BillingError.InvalidTariff("基础价不覆盖额外计量项"))
+      case None
+          if usage.billing.exists(
+            _.dimensions.exists((k, v) =>
+              Map("service_tier" -> "standard", "mode" -> "sync", "region" -> "global").get(k).forall(_ != v)
+            )
+          ) =>
+        Left(BillingError.NoMatchingRule)
+      case None => Right(flatEstimate(usage))
+
+  /** Compatibility scalar for runtime summaries; authoritative accounting uses rated. */
+  def estimate(usage: TokenUsage): BigDecimal = rated(usage).getOrElse(BigDecimal(0))
+
+  /** Pre-dispatch bound: cache mix and the actual context tier are not known yet. */
+  def reserve(usage: TokenUsage): Either[BillingError, BigDecimal] = tariff match
+    case None =>
+      val highest = inputPerMillionTokens
+        .max(cachedInputPerMillionTokens.getOrElse(inputPerMillionTokens))
+        .max(cacheWriteInputPerMillionTokens.getOrElse(inputPerMillionTokens))
+      Right(
+        (BigDecimal(usage.inputTokens) * highest + BigDecimal(
+          usage.outputTokens
+        ) * outputPerMillionTokens) / 1000000
+      )
+    case Some(value) =>
+      val inputMeters  = Set("input", "cache_read", "cache_write", "cache_write_1h", "input_audio_tokens")
+      val outputMeters = Set("output", "output_audio_tokens", "reasoning_tokens")
+      val rates        = value.rules.flatMap(_.rates)
+      for
+        _ <- value.validate
+        _ <- Either.cond(
+          value.requireZeroMeters.isEmpty && !rates.exists(r =>
+            !inputMeters.contains(r.meter) && !outputMeters.contains(
+              r.meter
+            ) && r.meter != "request" && BigDecimal(r.amount) > 0
+          ),
+          (),
+          BillingError.InvalidTariff("额外计量项无法在调用前确定费用上界")
+        )
+        perInput = rates
+          .filter(r => inputMeters.contains(r.meter))
+          .map(r => BigDecimal(r.amount) / BigDecimal(r.per))
+          .max
+        perOutput = rates
+          .filter(r => outputMeters.contains(r.meter))
+          .map(r => BigDecimal(r.amount) / BigDecimal(r.per))
+          .max
+        perRequest = rates
+          .filter(_.meter == "request")
+          .map(r => BigDecimal(r.amount) / BigDecimal(r.per))
+          .maxOption
+          .getOrElse(BigDecimal(0))
+      yield BigDecimal(usage.inputTokens) * perInput + BigDecimal(usage.outputTokens) * perOutput + perRequest
+
+  private def flatEstimate(usage: TokenUsage): BigDecimal =
     val cachedRead  = usage.cacheReadInputTokens
     val cachedWrite = usage.cacheWriteInputTokens
     val freshInput  = usage.freshInputTokens

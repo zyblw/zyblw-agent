@@ -131,12 +131,7 @@ object ModelRouter:
       case _                                                               => false
     })
     // 缓存读写比例在发送前未知，预算按最高输入单价准入；结算仍按实际分类计费。
-    val estimate = price.map { p =>
-      val input = p.inputPerMillionTokens
-        .max(p.cachedInputPerMillionTokens.getOrElse(p.inputPerMillionTokens))
-        .max(p.cacheWriteInputPerMillionTokens.getOrElse(p.inputPerMillionTokens))
-      p.copy(inputPerMillionTokens = input).estimate(TokenUsage(estimatedInputTokens, output.toLong))
-    }
+    val estimate = price.flatMap(_.reserve(TokenUsage(estimatedInputTokens, output.toLong)).toOption)
     Chunk.fromIterable(
       List(
         Option.when(candidate.maxSensitivity.ordinal < requirement.sensitivity.ordinal)("data-policy"),

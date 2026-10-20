@@ -1,43 +1,25 @@
-# Testing & Verification Guidelines
+# 测试与验证的信号
 
-## 1. ZIO Test Deterministic Testing
-Never use real wall-clock sleeps (`Thread.sleep`, `ZIO.sleep(10.seconds)`) in tests. Rely on `TestClock.adjust` to simulate time passage instantly and deterministically.
+用于新增或修改测试；oracle 来自需求、旧合同和独立事实，不照抄实现的计算过程。
 
-```scala
-// ❌ BAD: Sleeping real threads makes test suites slow, non-deterministic, and flaky
-test("worker lease expires after timeout") {
-  for
-    _ <- worker.start
-    _ <- ZIO.sleep(35.seconds) // Blocks CI thread for 35 seconds!
-    status <- worker.status
-  yield assertTrue(status == WorkerStatus.Expired)
-}
+## 选择本次必要的检查
 
-// ✅ GOOD: Instant deterministic time advance via TestClock
-test("worker lease expires after timeout") {
-  for
-    fiber  <- worker.run.fork
-    _      <- TestClock.adjust(35.seconds)
-    status <- worker.status
-    _      <- fiber.interrupt
-  yield assertTrue(status == WorkerStatus.Expired)
-}
-```
+- 纯逻辑：边界、非法状态、预算/排序/数值不变量；已有测试足以证明机械改动时不添重复用例。
+- 资源/并发：取消清理、失败路径、所有权与 CAS/lease 冲突。
+- 权限/存储：真实 SQL 过滤、事务回滚、撤回及版本隔离，使用仓库的临时 PostgreSQL 契约入口。
+- 外部协议：现有 stub/fixture 校验边界；真实 Provider、生产数据或收费评测不自动启用。
+- 文档/skill：检查 frontmatter、引用路径、示例依据与触发场景；不为改变说明文字启动整套后端。
 
-## 2. Test Minimalism: Reject AI Test Bloat
-AI coding assistants have an acute tendency to generate dozens of bloated, low-value tests (testing case class getters, testing trivial string interpolations) to artificially boost test count.
+## 时间与观察
 
-**BANNED**:
-- Tests that merely assert case class field assignment (`assertTrue(item.name == "test")`).
-- Repetitive happy-path variations that test standard library or framework functions.
+TestClock 用于虚拟推进时间；ZIO.sleep 在测试时可能由测试时钟控制，不等同于 Thread.sleep 阻塞线程。
+推进时钟后，用 join、Promise、Queue 或明确可观察状态等待结果；不要仅凭“已经 adjust”就立即断言后台写入完成。
+必须接触真实 I/O 的测试用有界超时与明确握手，不用任意真实等待碰运气。
+参见 [ZIO TestClock](https://zio.dev/reference/test/services/clock/)。
 
-**REQUIRED (High-Signal Verification)**:
-- **Failure Injection**: Network disconnection, malformed JSON, truncated streams.
-- **Security & Authorization**: Scope denial, missing permission masks, sensitive field redaction in traces.
-- **Concurrency & CAS Collisions**: Concurrent tool dispatch, optimistic lock / lease collision (`FencingTokenConflict`).
-- **Cancellation & Interruption**: Ensure cleanup logic (`ZIO.acquireRelease`) runs cleanly when a parent fiber is interrupted.
+同一实现者可以写代码与测试，但预期值/拒绝条件必须独立于实现；必要时使用旧版本数据、协议 fixture、性质或人工 gold。是否独立审核按风险与已有授权决定。
 
-## 3. Database & Container Integration Tests
-- PostgreSQL integration tests use `testcontainers-scala-postgresql`.
-- Run with `RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull`.
-- An intermittently failing test is a defect, not noise: fix the underlying concurrency or coupling race rather than widening timeouts.
+## 命令与报告
+
+从目标仓库 AGENTS/build 中选择模块 ID 与命令。框架合并/发布门禁可能使用 testFull；平台 app 有自己的任务，不把 postgres/testFull 机械复制到所有仓库。
+Testcontainers 未启用或测试被忽略时报告 conditional/ignored，不算通过。报告命令、结果和适用范围；测试数和编译通过都不是实际模型质量或临床正确率。
