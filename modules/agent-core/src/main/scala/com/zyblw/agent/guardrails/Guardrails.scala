@@ -233,14 +233,14 @@ object UntrustedContentMonitor:
   private def normalize(s: String): String =
     Option(s)
       .getOrElse("")
-      .replaceAll("[\\s\\p{C}\\u00A0\\u2000-\\u200F\\u2028-\\u202F\\u3000\\uFEFF]+", "")
-      .toLowerCase
+      .replaceAll("(?U)[\\s\\p{C}\\u00A0\\u2000-\\u200F\\u2028-\\u202F\\u3000\\uFEFF]+", "")
+      .toLowerCase(java.util.Locale.ROOT)
 
   private[guardrails] def decide(text: String): GuardrailDecision =
-    val lower      = Option(text).getOrElse("").toLowerCase
+    val lower      = Option(text).getOrElse("").toLowerCase(java.util.Locale.ROOT)
     val normalized = normalize(text)
     val matched    = suspicious.filter { token =>
-      lower.contains(token.toLowerCase) || normalized.contains(normalize(token))
+      lower.contains(token.toLowerCase(java.util.Locale.ROOT)) || normalized.contains(normalize(token))
     }
     GuardrailDecision(
       allowed = matched.isEmpty,

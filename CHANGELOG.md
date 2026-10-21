@@ -4,6 +4,7 @@
 
 本站与当前框架候选尚未发布。当前所有能力构成同一个首次发布候选，不提供旧候选升级或兼容读取路径。Git 历史中的候选记录不参与当前构建；远端既有 tag/制品不改写。
 
+- 注入监测补齐 Unicode 空白归一化，并固定 Locale.ROOT 大小写转换，避免宿主区域设置影响现有词表；不扩大匹配词或做 NFKC 转换。
 - Provider-neutral Scala 3/ZIO 2 Runtime，Functional Kernel + Driver；耐久命令、lease/fencing、取消、恢复、统一 Suspension、权限与工具审计。
 - 分层 Prompt、上下文预算、受治理 Memory/RAG、模型目录/路由、冻结调用身份与单价。模型调用最低必要元数据可审计；正文采集可关闭。Token 输入包含缓存读写、输出包含推理，明细不能重复累加。
 - PaddleOCR JSON/Markdown/PDF 配对、HTML 表格、章节层级、页码/几何与来源 SHA；document-structure-v4 按实际 tokenizer 约束完整 dense 文本。
