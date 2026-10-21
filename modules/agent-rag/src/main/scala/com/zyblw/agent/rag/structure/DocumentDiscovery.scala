@@ -68,7 +68,10 @@ object AuthorizedDocumentDiscovery:
           )
         )
         if page.hasMore && remaining > 1 then scan(page.nextCursor, remaining - 1, next)
-        else if page.hasMore then ZIO.succeed(Chunk.empty)
+        else if page.hasMore then
+          ZIO.logWarning(
+            s"AuthorizedDocumentDiscovery: metadata scan reached limit (${next.length} documents scanned, more available); upgrading to indexed catalog is recommended."
+          ) *> ZIO.succeed(next)
         else ZIO.succeed(next)
       }
     // ponytail: bounded metadata scan (1000 manifests); replace with indexed authorized catalog for larger corpora.

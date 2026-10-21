@@ -55,7 +55,17 @@ object RetrievalContractSpec extends ZIOSpecDefault:
         )
         _      <- ZIO.foreach(modes)(mode => retriever.retrieve(RetrievalRequest("桂枝汤", scope, 3, mode)))
         actual <- calls.get
-      yield assertTrue(actual.map(_._1) == modes, actual.last._2 == "桂枝汤")
+      yield assertTrue(
+        actual.map(_._1) == Chunk(
+          RetrievalMode.Hybrid,
+          RetrievalMode.Phrase,
+          RetrievalMode.VectorOnly,
+          RetrievalMode.LexicalOnly,
+          RetrievalMode.Phrase
+        ),
+        actual.count(_._1 == RetrievalMode.Phrase) == 2,
+        actual.last._2 == "桂枝汤"
+      )
     },
     test("all evidence dropped by budget produces insufficient evidence and preserves diagnostic reason") {
       val result = ContextAssembler
@@ -120,6 +130,57 @@ object RetrievalContractSpec extends ZIOSpecDefault:
         ).retrieve("桂枝", scope, 3)
       yield assertTrue(result.diagnostics.degradedStages.contains("rewrite-fallback")))
         .provide(InMemoryVectorStore.layer)
+    },
+    test("query assist rewrites only the primary route and preserves comparison routes") {
+      (for
+        embeddingCalls <- Ref.make(Chunk.empty[String])
+        model = EmbeddingModel.stub(onEmbed =
+          texts =>
+            embeddingCalls.set(texts) *> ZIO.succeed(
+              texts.map(text => Embedding(Chunk(text.length.toFloat, 1.0f)))
+            )
+        )
+        assist = new QueryAssist:
+          def rewrite(query: String, config: QueryAssistConfig): IO[RetrievalError, QueryRewrite] =
+            ZIO.succeed(QueryRewrite(query, "桂枝别名", "assist:test"))
+        store <- ZIO.service[VectorStore]
+        _     <- store.upsert(Chunk(IndexedChunk(chunk, Embedding(Chunk(1.0f, 0.0f)))))
+        _     <- DefaultRetriever(
+          model,
+          store,
+          identity,
+          assist = assist,
+          assistConfig = QueryAssistConfig(enabled = true)
+        ).retrieve("桂枝 对比 麻黄", scope, 3)
+        calls <- embeddingCalls.get
+      yield assertTrue(calls == Chunk("桂枝别名", "麻黄"))).provide(InMemoryVectorStore.layer)
+    },
+    test("comparison query triggers hybrid and phrase routes for both subqueries") {
+      for
+        calls <- Ref.make(Chunk.empty[(RetrievalMode, String)])
+        store = new VectorStore:
+          def upsert(chunks: Chunk[IndexedChunk]): UIO[Unit]                                        = ZIO.unit
+          def deleteByDocument(id: String, tenant: TenantId): UIO[Unit]                             = ZIO.unit
+          def search(query: Embedding, scope: RetrievalScope, limit: Int): UIO[Chunk[RetrievalHit]] =
+            ZIO.succeed(Chunk(hit))
+          override def searchFiltered(
+              mode: RetrievalMode,
+              text: String,
+              query: Embedding,
+              scope: RetrievalScope,
+              filter: RetrievalFilter,
+              limit: Int,
+              sparseQuery: Option[SparseEmbedding]
+          ): UIO[Chunk[RetrievalHit]] =
+            calls.update(_ :+ (mode -> text)).as(Chunk(hit))
+        retriever = DefaultRetriever(EmbeddingModel.stub(), store, identity)
+        _      <- retriever.retrieve(RetrievalRequest("桂枝汤 对比 麻黄汤", scope, 3, RetrievalMode.Hybrid))
+        actual <- calls.get
+        phrases = actual.filter(_._1 == RetrievalMode.Phrase).map(_._2)
+      yield assertTrue(
+        actual.count(_._1 == RetrievalMode.Hybrid) == 2,
+        phrases == Chunk("桂枝汤", "麻黄汤")
+      )
     },
     test("扩展块不占用来源名额，挂上种子后仍进入上下文") {
       val neighbor = RetrievalHit(

@@ -107,8 +107,13 @@ Chat Completions 的基础形状相近。推理开关、tool choice、strict sch
 ## 中转站与多端点
 
 一个 URL + 一个 Key + 按任务切换模型名时，使用配置驱动的 OpenAI-compatible 端点，而不是再写一个 Adapter。
-这里的“可兼容”有明确边界：中转站必须真正实现 `POST /chat/completions`、Bearer Key、OpenAI 形状的 JSON/SSE、工具调用和
+这里的“可兼容”有明确边界：中转站必须真正实现 `POST /v1/chat/completions`（或其文档声明的等价根路径）、Bearer Key、OpenAI 形状的 JSON/SSE、工具调用和
 usage 语义。仅仅声称“支持某模型”，不能证明这些协议细节成立；应以该中转站自己的协议文档和 live smoke 为准。
+
+以 4sAPI 为例，文档给出的海外地址是 `https://4sapi.com/v1/chat/completions`，模型名必须原样放入
+`model`，认证使用 `Authorization: Bearer <key>`。管理台推荐填写 `https://4sapi.com/v1`；运行时也兼容填写文档中的
+`https://4sapi.com` 根地址并自动补上 `/v1`。国内节点（如 `4sapi.org`、`4sapi.top`）按同样规则配置。不同模型或分组的
+稳定性、限流和价格仍以中转站实际账户与 smoke 结果为准，不能从模型名称推断。
 
 环境变量 `ZYBLW_AGENT_PROVIDER_ENDPOINTS_JSON` 声明多个端点：
 

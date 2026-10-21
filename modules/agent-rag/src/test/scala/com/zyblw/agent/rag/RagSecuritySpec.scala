@@ -41,7 +41,7 @@ object RagSecuritySpec extends ZIOSpecDefault:
     },
     test("DefaultRetriever 把受控 lexical query 交给 hybrid store，并保持统一候选预算") {
       for
-        observed <- Ref.make(Option.empty[(String, Int)])
+        observed <- Ref.make(Chunk.empty[(String, Int)])
         tenant = TenantId("tenant-a")
         scope  = RetrievalScope(tenant, Set("read"))
         hit    = RetrievalHit(
@@ -71,7 +71,7 @@ object RagSecuritySpec extends ZIOSpecDefault:
               sparseQuery: Option[SparseEmbedding]
           ): IO[RetrievalError, Chunk[RetrievalHit]] =
             val _ = (mode, query, scope, filter, sparseQuery)
-            observed.set(Some(queryText -> limit)).as(Chunk(hit))
+            observed.update(_ :+ (queryText -> limit)).as(Chunk(hit))
           def deleteByDocument(documentId: String, tenantId: TenantId): IO[RetrievalError, Unit] = ZIO.unit
         reranker = new Reranker:
           def rerank(
@@ -80,9 +80,10 @@ object RagSecuritySpec extends ZIOSpecDefault:
               limit: Int
           ): IO[RetrievalError, Chunk[RetrievalHit]] = ZIO.succeed(hits.take(limit))
         result <- DefaultRetriever(embedding, store, reranker).retrieve("桂枝", scope, 2)
-        call   <- observed.get
+        calls  <- observed.get
       yield assertTrue(
-        call.contains("桂 枝 桂枝" -> 80),
+        calls.contains("桂 枝 桂枝" -> 80),
+        calls.contains("桂枝"     -> 80),
         result.hits == Chunk(hit),
         result.hits.head.signals("textRank") == 2.0,
         result.citations.head.sourceUri == "doc://1"

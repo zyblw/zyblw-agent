@@ -187,7 +187,11 @@ object OpenAICompatibility:
         "openai-chat-completions",
         ModelCapabilities(toolCalls = true, streaming = true, usageReporting = true)
       ),
-      DeveloperRoleMode.Native,
+      // Generic relays commonly expose the Chat Completions system/user role set.
+      // Mapping developer to system keeps the request valid for gateways that do
+      // not implement the newer developer role while preserving its instruction
+      // semantics.
+      DeveloperRoleMode.MapToSystem,
       StrictToolSchemaMode.Omit,
       ToolChoiceMode.Full
     )

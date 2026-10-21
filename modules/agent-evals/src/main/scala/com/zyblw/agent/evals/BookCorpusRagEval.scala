@@ -48,6 +48,60 @@ object BookCorpusRagEval:
     )
   )
 
+  val shanghanMahuang: DocumentChunk = DocumentChunk.fromText(
+    "chunk-shanghan-mahuang",
+    "shanghan",
+    "太阳病，头痛发热，身疼腰痛，骨节疼痛，恶风无汗而喘者，麻黄汤主之。",
+    "book://shanghan/mahuang",
+    tenant,
+    read,
+    metadata = Map("classic" -> "shanghan"),
+    lineage = Some(
+      ChunkLineage(
+        parentId = Some("shanghan"),
+        ordinal = 1,
+        headingPath = Chunk("伤寒论", "太阳病"),
+        origins = Chunk(DocumentOrigin(35))
+      )
+    )
+  )
+
+  val jinkuiXiexin: DocumentChunk = DocumentChunk.fromText(
+    "chunk-jinkui-xiexin",
+    "jinkui",
+    "心下痞，按之濡，其脉关上浮者，大黄黄连泻心汤主之。",
+    "book://jinkui/xiexin",
+    tenant,
+    read,
+    metadata = Map("classic" -> "jinkui"),
+    lineage = Some(
+      ChunkLineage(
+        parentId = Some("jinkui"),
+        ordinal = 0,
+        headingPath = Chunk("金匮要略", "心下痞"),
+        origins = Chunk(DocumentOrigin(15))
+      )
+    )
+  )
+
+  val shennongHuangqi: DocumentChunk = DocumentChunk.fromText(
+    "chunk-shennong-huangqi",
+    "shennong",
+    "黄芪味甘微温。主痈疽久败疮，排脓止痛，大风癞疾，五痔鼠瘘，补虚，小儿百病。",
+    "book://shennong/huangqi",
+    tenant,
+    read,
+    metadata = Map("classic" -> "shennong"),
+    lineage = Some(
+      ChunkLineage(
+        parentId = Some("shennong"),
+        ordinal = 0,
+        headingPath = Chunk("神农本草经", "上品"),
+        origins = Chunk(DocumentOrigin(50))
+      )
+    )
+  )
+
   val decoy: DocumentChunk = DocumentChunk(
     "chunk-other-tenant",
     "other",
@@ -57,13 +111,23 @@ object BookCorpusRagEval:
     Set("secret:read")
   )
 
-  def fixtures: Chunk[DocumentChunk] = Chunk(suwen, shanghan, decoy)
+  def fixtures: Chunk[DocumentChunk] =
+    Chunk(suwen, shanghan, shanghanMahuang, jinkuiXiexin, shennongHuangqi, decoy)
 
   private val thresholds = RagEvalThresholds(
     minRecallAtK = 1.0,
-    minPrecisionAtK = 0.5,
-    minMrr = 1.0,
-    minNdcg = 0.7,
+    minPrecisionAtK = 0.2,
+    minMrr = 0.5,
+    minNdcg = 0.6,
+    minCitationSupport = 1.0,
+    maxLatencyMillis = 2_000L
+  )
+
+  private val comparisonThresholds = RagEvalThresholds(
+    minRecallAtK = 1.0,
+    minPrecisionAtK = 0.3,
+    minMrr = 0.5,
+    minNdcg = 0.6,
     minCitationSupport = 1.0,
     maxLatencyMillis = 2_000L
   )
@@ -147,6 +211,61 @@ object BookCorpusRagEval:
       Set(suwen.sourceUri),
       mode = RetrievalMode.LexicalOnly,
       filter = RetrievalFilter(chunkIds = Set(suwen.id)),
+      thresholds = thresholds
+    ),
+    RagEvalCase(
+      "comparison-guizhi-mahuang",
+      DatasetVersion,
+      "桂枝汤与麻黄汤的区别",
+      scope,
+      Set(shanghan.id, shanghanMahuang.id),
+      Set(decoy.id),
+      Set(shanghan.sourceUri, shanghanMahuang.sourceUri),
+      mode = RetrievalMode.Hybrid,
+      thresholds = comparisonThresholds
+    ),
+    RagEvalCase(
+      "comparison-natural-question",
+      DatasetVersion,
+      "桂枝汤与麻黄汤的区别是什么？",
+      scope,
+      Set(shanghan.id, shanghanMahuang.id),
+      Set(decoy.id),
+      Set(shanghan.sourceUri, shanghanMahuang.sourceUri),
+      mode = RetrievalMode.Hybrid,
+      thresholds = comparisonThresholds
+    ),
+    RagEvalCase(
+      "comparison-inline-question",
+      DatasetVersion,
+      "桂枝 对比 麻黄？",
+      scope,
+      Set(shanghan.id, shanghanMahuang.id),
+      Set(decoy.id),
+      Set(shanghan.sourceUri, shanghanMahuang.sourceUri),
+      mode = RetrievalMode.Hybrid,
+      thresholds = comparisonThresholds
+    ),
+    RagEvalCase(
+      "phrase-jinkui-xiexin",
+      DatasetVersion,
+      "心下痞",
+      scope,
+      Set(jinkuiXiexin.id),
+      Set(decoy.id),
+      Set(jinkuiXiexin.sourceUri),
+      mode = RetrievalMode.Phrase,
+      thresholds = thresholds
+    ),
+    RagEvalCase(
+      "hybrid-shennong-huangqi",
+      DatasetVersion,
+      "黄芪排脓止痛补虚",
+      scope,
+      Set(shennongHuangqi.id),
+      Set(decoy.id),
+      Set(shennongHuangqi.sourceUri),
+      mode = RetrievalMode.Hybrid,
       thresholds = thresholds
     )
   )

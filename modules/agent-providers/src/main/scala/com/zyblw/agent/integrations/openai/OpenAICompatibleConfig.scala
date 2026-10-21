@@ -4,6 +4,7 @@ package com.zyblw.agent.integrations.openai
 
 import com.zyblw.agent.core.*
 import com.zyblw.agent.integrations.{CredentialReference, ProviderEndpointUrl}
+import java.net.URI
 import zio.*
 
 final case class OpenAICompatibleConfig(
@@ -35,10 +36,21 @@ final case class OpenAICompatibleConfig(
   require(defaultModel.nonEmpty, "defaultModel must not be empty")
 
   val normalizedBaseUrl: String =
-    val trimmed = baseUrl.trim.stripSuffix("/")
-    if trimmed.toLowerCase.endsWith("/chat/completions") then
-      trimmed.substring(0, trimmed.length - "/chat/completions".length).stripSuffix("/")
-    else trimmed
+    val trimmed         = baseUrl.trim.stripSuffix("/")
+    val hadEndpoint     = trimmed.toLowerCase.endsWith("/chat/completions")
+    val withoutEndpoint =
+      if hadEndpoint then trimmed.substring(0, trimmed.length - "/chat/completions".length).stripSuffix("/")
+      else trimmed
+    // 4sAPI documents its public URL as `https://4sapi.com` while the
+    // OpenAI-compatible endpoint is `/v1/chat/completions`. Accept that
+    // documented root form without changing the semantics of other providers,
+    // whose root paths are not interchangeable.
+    val uri  = URI(withoutEndpoint)
+    val host = Option(uri.getHost).map(_.toLowerCase)
+    val path = Option(uri.getPath).getOrElse("")
+    if !hadEndpoint && path.isEmpty && host.exists(OpenAICompatibleConfig.V1RootHosts.contains) then
+      s"$withoutEndpoint/v1"
+    else withoutEndpoint
 
   val chatCompletionsUrl: String = s"$normalizedBaseUrl/chat/completions"
 
@@ -48,6 +60,9 @@ final case class OpenAICompatibleConfig(
       s"provider=${compatibility.descriptor.id}, requestTimeout=$requestTimeout)"
 
 object OpenAICompatibleConfig:
+  private val V1RootHosts: Set[String] =
+    Set("4sapi.com", "4sapi.org", "4sapi.top", "4stoken.com", "4sapi.cn", "4sapi.net", "4sapi.ai")
+
   /** Headers owned by the adapter; a connection cannot replace credentials or the wire content type. */
   val ReservedHeaders: Set[String] =
     Set("authorization", "content-type", "accept", "content-length", "host", "openai-organization", "cookie")

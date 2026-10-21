@@ -30,8 +30,9 @@ object DeterministicQueryPlanner:
       sparseEnabled: Boolean = false
   ): RetrievalPlan =
     val normalized = QueryNormalizer.normalize(query)
+    val comparison = comparisonParts(normalized)
     val kind       =
-      if normalized.contains(" vs ") || normalized.contains("对比") then QueryKind.Comparison
+      if comparison.size == 2 then QueryKind.Comparison
       else if normalized.endsWith("？") || normalized.endsWith("?") || normalized.contains("为什么") ||
         normalized.contains("如何")
       then QueryKind.Explanation
@@ -39,23 +40,47 @@ object DeterministicQueryPlanner:
       else QueryKind.Keyword
     RetrievalPlan(
       kind = kind,
-      subqueries = subqueriesFor(kind, normalized),
+      subqueries = subqueriesFor(kind, normalized, comparison),
       mode = mode,
       includeSparse = sparseEnabled && kind != QueryKind.Exact,
-      includeExact = kind == QueryKind.Exact,
+      includeExact =
+        kind == QueryKind.Exact || (kind == QueryKind.Comparison && comparison.forall(_.length <= 16)),
       budgets = budgets
     )
 
-  private def subqueriesFor(kind: QueryKind, normalized: String): Chunk[String] =
+  private def subqueriesFor(
+      kind: QueryKind,
+      normalized: String,
+      comparison: List[String]
+  ): Chunk[String] =
     val split = kind match
-      case QueryKind.Comparison =>
-        val parts =
-          if normalized.contains(" vs ") then normalized.split(" vs ", 2)
-          else normalized.split("对比", 2)
-        Chunk.fromArray(parts.map(_.trim).filter(_.nonEmpty)).take(2)
-      case _ => Chunk(normalized)
+      case QueryKind.Comparison => Chunk.fromIterable(comparison)
+      case _                    => Chunk(normalized)
     val queries = if split.isEmpty then Chunk(normalized) else split
     queries.take(3)
+
+  private val comparisonTail    = """(?:之处)?(?:是什么|有哪些|有何不同|有何区别|在哪|在哪里|呢)?[？?。!！\s]*$"""
+  private val leadingComparison = s"""(?U)^(?:对比|比较)(.+?)(?:与|和|跟)(.+?)[？?。!！\\s]*$$""".r
+  private val inlineComparison  = s"""(?U)^(.+?)\\s*(?:对比|比较)\\s*(.+?)[？?。!！\\s]*$$""".r
+  private val betweenComparison =
+    s"""(?U)^(.+?)(?:与|和|跟)(.+?)(?:的)?(?:异同|区别|差异|不同|对比|比较)$comparisonTail""".r
+  private val versusComparison = s"""(?i)^(.+?)\\s+vs\\s+(.+?)[？?。!！\\s]*$$""".r
+
+  /** 只在出现明确比较谓词时拆两侧，避免把普通“人与自然”误判成比较题。 */
+  private def comparisonParts(query: String): List[String] =
+    val found = query match
+      case leadingComparison(left, right) => List(left, right)
+      case inlineComparison(left, right)  => List(left, right)
+      case betweenComparison(left, right) => List(left, right)
+      case versusComparison(left, right)  => List(left, right)
+      case _                              => Nil
+    found
+      .map(_.trim.replaceAll("^[《（(]|[》）)]$", ""))
+      .map(_.replaceAll("(?:有什么|有何|有哪些)$", "").trim)
+      .map(_.replaceAll("[？?。!！\\s]+$", "").trim)
+      .filter(value => value.codePointCount(0, value.length) >= 2)
+      .distinct
+      .take(2)
 
 final case class QueryAssistConfig(
     enabled: Boolean = false,

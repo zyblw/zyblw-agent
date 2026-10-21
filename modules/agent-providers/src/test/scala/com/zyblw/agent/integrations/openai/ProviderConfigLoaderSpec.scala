@@ -73,6 +73,16 @@ object ProviderConfigLoaderSpec extends ZIOSpecDefault:
         )
       }
     },
+    test("4sAPI 文档中的根 URL 自动落到 /v1，而其他根端点保持原样") {
+      val relay    = OpenAICompatibleConfig("https://4sapi.com", "secret", "qwen3.8-max")
+      val other    = OpenAICompatibleConfig("https://gateway.example", "secret", "model")
+      val explicit = OpenAICompatibleConfig("https://4sapi.com/chat/completions", "secret", "model")
+      assertTrue(
+        relay.chatCompletionsUrl == "https://4sapi.com/v1/chat/completions",
+        other.chatCompletionsUrl == "https://gateway.example/chat/completions",
+        explicit.chatCompletionsUrl == "https://4sapi.com/chat/completions"
+      )
+    },
     test("构造失败信息不包含 API Key") {
       val secret = "must-not-appear-in-error"
       val values = Map("OPENAI_API_KEY" -> secret, "OPENAI_MODEL" -> "")

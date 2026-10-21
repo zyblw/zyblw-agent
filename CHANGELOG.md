@@ -32,5 +32,8 @@
 - `AgentTransition`、`AgentHandoffEnvelope` 与 `HandoffPolicy` 是核心里的交接类型。内核步进仍走现有 `Transition`，宿主不能把该枚举当成已经执行的多智能体交接。
 - `knowledge_outline` 可注入 `RagApplication`，查询前固定当前知识 Profile，避免持久化结构已发布却返回 not_found；保留宿主文档范围和 ACL 校验。
 - `knowledge_search` / `knowledge_fetch` 在未命中或证据不足时返回 `guidance`。`knowledge_fetch` 可设 `expandNeighbors` 再读至多 4 个相邻块。`knowledge_outline` 读取已授权文档的结构目录，不进入默认 `KnowledgeTools.layer`，也不产生 chunk 引用。
+- `DeterministicQueryPlanner` 结构化对比检索增强（`comparisonParts` 支持「对比/比较 A 与/和 B 的异同/区别」等复合谓词），`DefaultRetriever` 对比题仅对主路径执行 assist 改写并保留对偶分支，触发 Hybrid + Phrase 精确短语双重召回，杜绝单侧证据静默丢失；`AuthorizedDocumentDiscovery` 扫描达到上限时保留已扫描文档并记录告警。
+- OpenAI 兼容协议优化：`OpenAICompatibility.relay` 将 `developer` 角色消息映射为 `system` 角色，增强通用中转站兼容性；`OpenAICompatibleConfig` 自动识别 4sAPI 根端点并规整为 `/v1`。
+- `BookCorpusRagEval` 增加伤寒、金匮、神农本草经比对测试用例与对比阈值，全面通过确定性离线回归。
 
 能力成熟度依 canonical roadmap。首次空库构建通过不代表真实领域模型、容量、soak 或生产发布已经验收。首版公开发布后才冻结 V001 与兼容基线。

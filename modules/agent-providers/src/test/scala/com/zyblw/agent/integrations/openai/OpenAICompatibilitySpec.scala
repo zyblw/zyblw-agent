@@ -111,6 +111,19 @@ object OpenAICompatibilitySpec extends ZIOSpecDefault:
         specific.exists(_.contains("\"name\":\"lookup\""))
       )
     },
+    test("generic relay maps developer messages to the portable system role") {
+      val request = ChatRequest(
+        Chunk(AgentMessage.developer("must cite sources"), AgentMessage.user("question"))
+      )
+      val encoded = OpenAIWire
+        .encodeRequest(request, "relay-model", OpenAICompatibility.relay("relay"))
+        .map(_.toString)
+      assertTrue(
+        encoded.exists(_.contains("\"role\":\"system\"")),
+        encoded.forall(!_.contains("\"role\":\"developer\"")),
+        encoded.forall(!_.contains("reasoning_effort"))
+      )
+    },
     test("OpenAI keeps strict schema and uses max_completion_tokens") {
       val request = ChatRequest(
         Chunk(AgentMessage.user("question")),

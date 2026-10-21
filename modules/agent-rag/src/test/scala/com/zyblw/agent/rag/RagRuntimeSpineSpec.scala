@@ -42,6 +42,27 @@ object RagRuntimeSpineSpec extends ZIOSpecDefault:
         )
       }
     },
+    test("比较查询识别异同和区别并拆出两侧，支持疑问尾缀与问号标点") {
+      val same    = DeterministicQueryPlanner.plan("太阳病与阳明病的异同", RetrievalMode.Hybrid)
+      val diff    = DeterministicQueryPlanner.plan("桂枝汤和麻黄汤有什么区别", RetrievalMode.Hybrid)
+      val qMark   = DeterministicQueryPlanner.plan("桂枝汤与麻黄汤的区别是什么？", RetrievalMode.Hybrid)
+      val which   = DeterministicQueryPlanner.plan("桂枝汤和麻黄汤的区别有哪些", RetrievalMode.Hybrid)
+      val inlineQ = DeterministicQueryPlanner.plan("桂枝 对比 麻黄？", RetrievalMode.Hybrid)
+      val nonComp = DeterministicQueryPlanner.plan("人与自然", RetrievalMode.Hybrid)
+      assertTrue(
+        same.kind == QueryKind.Comparison,
+        same.subqueries == Chunk("太阳病", "阳明病"),
+        diff.kind == QueryKind.Comparison,
+        diff.subqueries == Chunk("桂枝汤", "麻黄汤"),
+        qMark.kind == QueryKind.Comparison,
+        qMark.subqueries == Chunk("桂枝汤", "麻黄汤"),
+        which.kind == QueryKind.Comparison,
+        which.subqueries == Chunk("桂枝汤", "麻黄汤"),
+        inlineQ.kind == QueryKind.Comparison,
+        inlineQ.subqueries == Chunk("桂枝", "麻黄"),
+        nonComp.kind != QueryKind.Comparison
+      )
+    },
     test("EvidenceBundle citation 只用 displayText") {
       val tenant = TenantId("t")
       val chunk  = DocumentChunk(

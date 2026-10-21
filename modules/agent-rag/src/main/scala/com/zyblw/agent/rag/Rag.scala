@@ -758,7 +758,10 @@ final class DefaultRetriever(
               )
               .catchAll(_ => ZIO.succeed(None))
           else ZIO.succeed(None)
-        subqueries = rewritten.fold(plan.subqueries)(value => Chunk(value))
+        // Rewrite only the primary route. Comparison/alias plans carry useful
+        // independent routes; replacing the whole plan would silently drop
+        // evidence for the other side.
+        subqueries = rewritten.fold(plan.subqueries)(value => Chunk(value) ++ plan.subqueries.drop(1))
         traceRun <- scope.runId.fold(RunId.random)(ZIO.succeed(_))
         detailed <- observe(traceRun, scope, "embed")(
           model.embed(
@@ -812,6 +815,25 @@ final class DefaultRetriever(
             sparseQuery = if wantSparse then detailed.items.headOption.flatMap(_.sparse) else None
           )
         )(_.length.toLong)
+        exact <-
+          if plan.includeExact && searchMode == RetrievalMode.Hybrid &&
+            !selectedRecipe.contains(RetrievalRecipe.LowLatency)
+          then
+            observe(traceRun, scope, "exact_search")(
+              ZIO
+                .foreach(subqueries.zip(detailed.denseEmbeddings)) { case (sq, emb) =>
+                  vectors.searchFiltered(
+                    RetrievalMode.Phrase,
+                    sq,
+                    emb,
+                    pinnedScope,
+                    request.filter,
+                    candidateLimit
+                  )
+                }
+                .map(DefaultRetriever.mergeHits(_, plan.budgets.fusion))
+            )(_.length.toLong)
+          else ZIO.succeed(Chunk.empty)
         rest <- ZIO.foreach(subqueries.zip(detailed.denseEmbeddings).drop(1)) { case (subquery, embedding) =>
           vectors.searchFiltered(
             searchMode,
@@ -823,7 +845,7 @@ final class DefaultRetriever(
             sparseQuery = None
           )
         }
-        classic = DefaultRetriever.mergeHits(first +: rest, plan.budgets.fusion)
+        classic = DefaultRetriever.mergeHits(Chunk(first, exact) ++ rest, plan.budgets.fusion)
         _ <- validateReranked(classic, classic, pinnedScope, plan.budgets.fusion)
         _ <- ZIO
           .fail(AgentError.RetrievalFailed("检索候选违反请求过滤条件"))
