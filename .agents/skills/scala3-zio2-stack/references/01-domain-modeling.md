@@ -1,25 +1,54 @@
-# 领域类型与边界解析
+# 01. 领域类型与边界解析
 
-用于新增领域 ID、状态或序列化契约；先找现有类型和调用方，不重建第二套概念。
+用于新增或修改领域 ID、实体状态、边界 DTO 或序列化契约。以现有领域模型为基准，严禁凭空创造平行概念。
 
-## 决策规则
+## 一、 Scala 3 Opaque Types 与智能构造器 (Smart Constructor)
 
-- 对可能混用的领域 ID 复用或新增 `opaque type` 与受控构造入口；公共 API 的改动同时检查消费者和 codec。
-- 普通搜索文本、展示字符串、SQL/JDBC 值和已有外部 DTO 不需要逐个包装。先在可信边界解析为现有领域类型。
-- 多个标记表达同一生命周期时，用 `enum` 表达 Running / Succeeded / Failed 等互斥状态，并处理全部分支。
-- 两个真正独立且含义明确的配置 Boolean 不自动变成组合状态树；只有排除非法组合或消除调用歧义时才增加类型。
-- 有界数量由 smart constructor 检查，核心复用已验证值；反序列化、数据库读回和版本迁移同样是边界。
+对于容易在方法调用中混淆位置的同构 ID（例如 `UserId`、`DocumentId`、`TenantId` 均为 String），必须使用 `opaque type` 配合私有伴生对象构造器进行强类型封装，实现零运行时开销的编译期安全。
 
-## Schema 与兼容
+```scala
+opaque type DocumentId = String
 
-优先沿用当前 `zio-schema` / `zio-json` 派生方式；已有 wire 格式、厂商协议、别名或精确数值格式确需自定义时使用明确 codec，并覆盖兼容测试。
-派生 codec 不代表任意自定义构造约束都会自动执行。验证失败不能用默认合法值替换。
-新增必填字段、enum case、ID 表示或持久化字段前，核对历史数据、公开 JSON、HTTP/schema 和跨模块调用。
+object DocumentId:
+  def from(raw: String): Either[DomainError.ValidationError, DocumentId] =
+    val trimmed = raw.trim
+    if trimmed.nonEmpty && trimmed.length <= 64 then Right(trimmed)
+    else Left(DomainError.ValidationError("DocumentId 必须为 1-64 位的非空字符"))
 
-## 交付检查
+  def unsafe(raw: String): DocumentId =
+    from(raw).fold(err => throw new IllegalArgumentException(err.message), identity)
 
-- 同形 ID 是否仍可能传反？非法状态能否构造？
-- 字段新增是否扩大了改动面，却没有减少真实错误？
-- 外部输入与旧版本数据是否仍按约定解析或明确拒绝？
+  extension (id: DocumentId)
+    def value: String = id
+```
 
-类型约束不能证明引用忠实性、医学事实或业务规则本身正确；这些仍需要独立验收。
+- **严禁的反模式**：在业务逻辑层大量传递裸 `String`，依赖命名约定（如 `def link(docId: String, userId: String)`），这极易在调用端发生参数颠倒（Transposition Bug）。
+- **受控例外**：普通展示用文本、内部临时格式化字符串、SQL 静态表名等不需要过度包装；只对具有明确业务身份的标识符使用 `opaque type`。
+
+## 二、 Parse, Don't Validate 与消除布尔盲区 (Boolean Blindness)
+
+- **核心准则**：在不可信边界（HTTP 请求、外部 JSON、数据库读取、CLI 参数）**一次性解析（Parse）**为强类型领域对象；核心业务逻辑只接受已合法的强类型，不再进行防御性的布尔检查。
+- **消除布尔盲区**：严禁使用多个离散的 Boolean 字段表达互斥状态（例如 `isCompleted: Boolean, isFailed: Boolean, isCancelled: Boolean` 会产生 $2^3 = 8$ 种组合，其中绝大部分是非法状态）。
+- **代数数据类型建模（ADTs）**：
+  ```scala
+  enum RunStatus:
+    case Pending
+    case Running(startedAt: java.time.Instant)
+    case Succeeded(output: String, completedAt: java.time.Instant)
+    case Failed(reason: String, error: Option[DomainError])
+    case Cancelled(reason: String)
+  ```
+  通过模式匹配（Pattern Matching）强制覆盖所有合法状态，利用编译器的 `-Werror` 或穷尽性检查防止遗漏分支。
+
+## 三、 ZIO Schema 与 ZIO JSON 序列化契约
+
+1. **派生优先**：优先利用 `DeriveJsonCodec.gen` 或 `DeriveSchema.gen` 自动生成 Codec，保持与已有协议严格对齐。
+2. **严禁静默兜底**：反序列化缺少必填字段或格式非法时，必须明确 Fail-Closed 并抛出类型化错误；**严禁使用默认值伪造成功**（如将缺失的 `tenantId` 默认为空字符串），这会引发严重的安全穿透漏洞。
+3. **向后兼容性**：新增字段必须为 `Option[T]` 并提供合理的演进策略；修改已有枚举值时必须核验历史数据库记录与外部调用方的兼容性。
+
+## 四、 交付前自检清单
+
+- [ ] 是否存在由于同形裸类型（String/Long）导致的参数混淆风险？
+- [ ] 系统中是否存在可被构造出来的“非法状态组合”（如同时成功且失败）？
+- [ ] 外部输入是否在入口边界即完成了合法性解析，而非深入到业务核心后才报空指针或格式错误？
+- [ ] 新增或变更的字段是否提供了针对旧格式数据的兼容性与回滚测试？

@@ -1,13 +1,42 @@
-# 依赖组装与生命周期
+# 03. 依赖组装与生命周期
 
-用于新增服务、替换基础设施或调整资源所有权，不为每个纯函数增加 ZLayer。
+用于新增业务服务、替换底层基础设施组件或调整生命周期。基于纯函数式内核与延迟架构（Late Architecture）理念。
 
-- 先读现有 composition root；复用已有 trait、构造器和 layer，避免隐式全局依赖。
-- 有生命周期的实现使用 scoped layer；纯依赖组装沿用 fromFunction/fromZIO 等现有方式，不为“统一风格”重写无关模块。
-- 时钟、随机、配置和客户端在需要确定性或替换时通过现有 ZIO 服务/端口获得。不要在业务核心散落 Instant.now、全局随机源或环境变量读取。
-- 静态不可变常量、纯工具函数不等于有害全局单例，无需为其增加依赖注入。
-- 核对 ZIO 2 当前服务和环境类型，不从旧示例推断 Clock/Random 必须出现在每个 R 类型中。
-- 生产数据库不可用时不能静默换成内存库；可选能力必须明确未装配，并在调用处报告。
-- 连接池、HTTP client、长生命周期 worker 的创建与关闭由拥有它们的层负责；一次请求借用资源不意味着可以关掉整个共享服务。
+## 一、 领域抽象与组装根解耦 (Inversion of Control)
 
-交付前说明依赖在哪组装、谁拥有资源、取消/启动失败时如何收口；用生命周期或替换测试覆盖本次改变的风险。
+1. **核心纯度（Late Architecture）**：
+   - 领域核心模块（如 `agent-core` 或 `zyblw-server/domain`）只定义业务 Trait 和纯函数，对具体的数据库驱动、网络客户端或云端 SDK **零依赖、零感知**。
+   - 所有外部技术依赖通过抽象 Trait 表达（如 `RunStore`、`EmbeddingClient`、`UserRepository`）。
+2. **延迟组装（Composition Root）**：
+   - 具体实现（如 `PostgresRunStoreLive`、`OpenAiEmbeddingClientLive`）统一在系统启动入口（`Main.scala` 或 `bootstrap/` 模块）通过 `ZLayer` 进行组装，不让具体类渗透进业务领域。
+
+## 二、 Scoped 资源管理与优雅停机 (Capture Checking 精神)
+
+具备物理生命周期的外部资源（如数据库连接池 HikariCP、HTTP 客户端、文件流通道），必须通过 `ZLayer.scoped` 与 `ZIO.acquireRelease` 管理生命周期：
+
+```scala
+val live: ZLayer[DbConfig, Throwable, DataSource] =
+  ZLayer.scoped {
+    ZIO.acquireRelease(
+      ZIO.attemptBlocking(createHikariPool(config))
+    )(ds => ZIO.attemptBlocking(ds.close()).ignoreLogged)
+  }
+```
+
+- **生命周期收口**：应用关闭、测试退出或发生未捕获异常时，ZIO 运行时会依据依赖图的拓扑逆序严格执行释放逻辑，杜绝连接泄露与挂死。
+- **严禁重复关闭**：已被上层 Scope 托管的对象，内部调用方严禁私自二次执行 `close()`。
+
+## 三、 确定性环境注入 (Deterministic Testing)
+
+- **避免环境污染**：严禁在业务逻辑中直接调用 `java.time.Instant.now()`、`System.currentTimeMillis()`、`scala.util.Random` 或 `sys.env`。
+- **环境显式注入**：
+  - 时间相关的逻辑依赖 ZIO 内置的 `Clock` 或显式传入的时钟服务；
+  - 随机行为依赖 `Random`；
+  - 配置通过 `ZLayer` 注入强类型配置对象。
+- **单测确定性**：在单元测试中，可通过 `TestClock.adjust(...)` 或固定随机种子，在毫秒级时间内重现复杂的超时、退避和抖动逻辑，无需等待真实世界的时间流逝。
+
+## 四、 严禁的反模式
+
+1. **全局单例（Global Singleton）**：严禁使用 `object GlobalCache` 或静态 `var` 共享状态，这会直接破坏并发隔离并导致单元测试间互相污染。
+2. **上帝 Layer（God Layer）**：严禁将数十个互不相关的服务揉成一个庞大的万能 Layer，导致细粒度测试无法单独替换某一桩模块。
+3. **嵌套 Unsafe Run**：严禁在服务内部调用 `Unsafe.unsafe { ... runtime.unsafe.run(...) }`，这会打断 ZIO 的纤程调度与 FiberRef 传递。
