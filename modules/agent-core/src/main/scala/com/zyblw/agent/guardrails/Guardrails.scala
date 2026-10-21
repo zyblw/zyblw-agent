@@ -230,8 +230,18 @@ final class UntrustedContentMonitor extends RetrievalGuardrail with RemoteMessag
 object UntrustedContentMonitor:
   private val suspicious = List("ignore previous instructions", "忽略之前的指令", "system prompt", "系统提示词")
 
+  private def normalize(s: String): String =
+    Option(s)
+      .getOrElse("")
+      .replaceAll("[\\s\\p{C}\\u00A0\\u2000-\\u200F\\u2028-\\u202F\\u3000\\uFEFF]+", "")
+      .toLowerCase
+
   private[guardrails] def decide(text: String): GuardrailDecision =
-    val matched = suspicious.filter(token => text.toLowerCase.contains(token.toLowerCase))
+    val lower      = Option(text).getOrElse("").toLowerCase
+    val normalized = normalize(text)
+    val matched    = suspicious.filter { token =>
+      lower.contains(token.toLowerCase) || normalized.contains(normalize(token))
+    }
     GuardrailDecision(
       allowed = matched.isEmpty,
       Option.when(matched.nonEmpty)(s"检测到可疑指令: ${matched.mkString(",")}")
