@@ -163,6 +163,150 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
 
   /** 定义耐久状态机、审批和崩溃恢复的核心回归用例。 */
   def spec: Spec[TestEnvironment & Scope, Any] = suite("AgentRuntime")(
+    test("malformed model tool calls fail the run before any tool executes") {
+      val malformed = Chunk(
+        toolResponse("", "private-input"),
+        toolResponse(" ", "private-input"),
+        parallelToolResponse("duplicate", "duplicate"),
+        toolResponse("call-1", "private-input").copy(message =
+          AgentMessage.assistantToolCalls(Chunk(ToolCall("call-1", " ", Json.Obj())))
+        )
+      )
+      ZIO
+        .foreach(malformed) { response =>
+          for
+            model      <- ScriptedChatModel.make(Chunk(response))
+            executions <- Ref.make(0)
+            tool       <- registeredEcho(ToolRisk.ReadOnly, SideEffect.None, executions)
+            result     <- (for
+              runtime <- ZIO.service[AgentRuntime]
+              store   <- ZIO.service[RunStore]
+              created <- Promise.make[Nothing, RunId]
+              exit    <- runtime
+                .runEvents(echoAgent, RunRequest(ThreadId("invalid-tools"), AgentMessage.user("hello")))
+                .tap {
+                  case AgentEvent.RunCreated(id, _, _) => created.succeed(id).unit
+                  case _                               => ZIO.unit
+                }
+                .runDrain
+                .exit
+              id     <- created.await
+              state  <- store.load(id)
+              ledger <- store.listToolExecutions(id)
+              count  <- executions.get
+            yield (exit, state, ledger, count)).provideLayer(layers(model, List(tool)))
+          yield result
+        }
+        .map(results =>
+          assertTrue(results.forall { case (exit, state, ledger, count) =>
+            exit.causeOption.exists(cause =>
+              cause.defects.isEmpty && cause.failureOption
+                .exists(_.isInstanceOf[AgentError.InvalidModelResponse])
+            ) &&
+            state.status == RunStatus.Failed && ledger.isEmpty && count == 0
+          })
+        )
+    },
+    test("recover closes fresh model and provider failures instead of leaving a Running run") {
+      val failures: Chunk[AgentError] = Chunk(
+        AgentError.InvalidModelResponse("invalid response"),
+        AgentError.InvalidConfiguration("invalid schema"),
+        AgentError.UnsupportedModelCapability("provider", "strict", "unsupported")
+      )
+      ZIO
+        .foreach(failures) { failure =>
+          val model = new ChatModel:
+            val provider                                                     = "test-provider"
+            def complete(request: ChatRequest): IO[AgentError, ChatResponse] = ZIO.fail(failure)
+          (for
+            service  <- ZIO.service[AgentCommandService]
+            runtime  <- ZIO.service[LeaseAwareAgentRuntime]
+            runs     <- ZIO.service[RunStore]
+            commands <- ZIO.service[RunCommandStore]
+            accepted <- service.submitStart(
+              agent,
+              RunRequest(ThreadId("recover-failure"), AgentMessage.user("hello")),
+              "recover-failure-key"
+            )
+            before <- runs.load(accepted.runId)
+            _      <- runs.save(before.version, before.copy(status = RunStatus.Running))
+            host   <- WorkerHost
+              .make(WorkerId("recover-worker"), WorkerHostConfig())
+              .provide(ZLayer.succeed(commands), ZLayer.succeed(runtime))
+            claimed <- host.claimOnce
+            after   <- runs.load(accepted.runId)
+            command <- commands.get(accepted.commandId)
+          yield (claimed, after, command)).provideLayer(durableControlLayers(model))
+        }
+        .map(results =>
+          assertTrue(results.forall { case (claimed, state, command) =>
+            claimed && state.status == RunStatus.Failed && command.status == RunCommandStatus.DeadLetter
+          })
+        )
+    },
+    test("historical malformed plans are closed as Failed and the same worker processes the next run") {
+      val badCalls = Chunk(
+        Chunk(ToolCall("", "echo", Json.Obj())),
+        Chunk(ToolCall("call-1", " ", Json.Obj())),
+        Chunk(ToolCall("duplicate", "echo", Json.Obj()), ToolCall("duplicate", "echo", Json.Obj()))
+      )
+      ZIO
+        .foreach(badCalls) { calls =>
+          for
+            model  <- ScriptedChatModel.make(Chunk(finalResponse("healthy")))
+            result <- (for
+              service  <- ZIO.service[AgentCommandService]
+              runtime  <- ZIO.service[LeaseAwareAgentRuntime]
+              runs     <- ZIO.service[RunStore]
+              commands <- ZIO.service[RunCommandStore]
+              bad      <- service.submitStart(
+                agent,
+                RunRequest(ThreadId("bad-plan"), AgentMessage.user("hello")),
+                "bad-plan-key"
+              )
+              before <- runs.load(bad.runId)
+              plan = DurableToolPlan(
+                "historical-plan",
+                Chunk(
+                  DurableToolBatch(
+                    0,
+                    calls.zipWithIndex.map { case (call, index) => DurableToolPlanItem(index, call) }
+                  )
+                ),
+                toolContractFingerprints = calls
+                  .map(call =>
+                    call.name -> com.zyblw.agent.composition.ToolContractFingerprint.missing(call.name)
+                  )
+                  .toMap,
+                approvalSubjects = Map.empty
+              )
+              _ <- runs
+                .save(before.version, before.copy(status = RunStatus.Running, pendingToolPlan = Some(plan)))
+              host <- WorkerHost
+                .make(WorkerId("protocol-worker"), WorkerHostConfig())
+                .provide(ZLayer.succeed(commands), ZLayer.succeed(runtime))
+              first  <- host.claimOnce
+              failed <- runs.load(bad.runId)
+              dead   <- commands.get(bad.commandId)
+              good   <- service.submitStart(
+                agent,
+                RunRequest(ThreadId("good-plan"), AgentMessage.user("hello")),
+                "good-plan-key"
+              )
+              second    <- host.claimOnce
+              completed <- runs.load(good.runId)
+              requests  <- model.recordedRequests
+            yield (first, failed, dead, second, completed, requests))
+              .provideLayer(durableControlLayers(model))
+          yield result
+        }
+        .map(results =>
+          assertTrue(results.forall { case (first, failed, dead, second, completed, requests) =>
+            first && second && failed.status == RunStatus.Failed && dead.status == RunCommandStatus.DeadLetter &&
+            completed.status == RunStatus.Completed && requests.size == 1
+          })
+        )
+    },
     test("模型覆盖到达真实请求，未覆盖字段沿用 Agent 定义，价格表折算进 estimatedCost") {
       // 这个测试守住"保存成功却毫无效果"这一整类缺陷：只断言覆盖被存下来无法证明它影响了任何一次模型调用，
       // 因此这里断言的是 ChatModel 实际收到的 settings 与状态里的累计费用。

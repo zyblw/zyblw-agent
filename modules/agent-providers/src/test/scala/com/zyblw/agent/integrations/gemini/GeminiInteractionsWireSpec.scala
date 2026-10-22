@@ -1,6 +1,7 @@
 package com.zyblw.agent.integrations.gemini
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.model.ModelRequirement
 import com.zyblw.agent.model.ModelStreamEvent
 import java.nio.charset.StandardCharsets
 import zio.*
@@ -67,6 +68,40 @@ object GeminiInteractionsWireSpec extends ZIOSpecDefault:
       |""".stripMargin
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("Gemini Interactions wire")(
+    test("hard strict requires an adapter guarantee, not only a closed schema") {
+      val tool = ToolDefinition(
+        "lookup",
+        "lookup",
+        Json.Obj(
+          "type"                 -> Json.Str("object"),
+          "properties"           -> Json.Obj(),
+          "required"             -> Json.Arr(),
+          "additionalProperties" -> Json.Bool(false)
+        )
+      )
+      val request = ChatRequest(
+        Chunk(AgentMessage.user("query")),
+        Chunk(tool),
+        ModelSettings(requirement = Some(ModelRequirement(strictToolSchema = true)))
+      )
+      assertTrue(
+        GeminiInteractionsWire
+          .encodeRequest(request, config, false)
+          .left
+          .toOption
+          .exists(_.isInstanceOf[AgentError.UnsupportedModelCapability])
+      )
+    },
+    test("whitespace-only function call identities are typed failures") {
+      for
+        id <- GeminiInteractionsWire
+          .decodeResponse(toolResponse.replace("\"id\":\"call-1\"", "\"id\":\" \""))
+          .exit
+        name <- GeminiInteractionsWire
+          .decodeResponse(toolResponse.replace("\"name\":\"lookup\"", "\"name\":\" \""))
+          .exit
+      yield assertTrue(id.causeOption.exists(_.defects.isEmpty), id.isFailure, name.isFailure)
+    },
     test("thought output is billed once and terminal streaming facts match ordinary responses") {
       val usage =
         """{"total_input_tokens":100,"total_output_tokens":1000,"total_thought_tokens":9000,"total_tokens":10100,"total_tool_use_tokens":0}"""

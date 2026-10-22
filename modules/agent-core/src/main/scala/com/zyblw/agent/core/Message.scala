@@ -19,6 +19,23 @@ enum ContentPart derives JsonCodec:
 /** Provider-neutral 工具调用；稳定 callId 是恢复和幂等的基础。 */
 final case class ToolCall(id: String, name: String, arguments: Json) derives JsonCodec
 
+object ToolCall:
+  /** 在执行或恢复前校验不可信调用；不能用构造器 require 把 Provider 数据变成进程缺陷。 */
+  def validateAll(calls: Chunk[ToolCall]): Either[AgentError.InvalidModelResponse, Unit] =
+    calls.zipWithIndex
+      .foldLeft[Either[AgentError.InvalidModelResponse, Set[String]]](Right(Set.empty)) {
+        case (seen, (call, index)) =>
+          seen.flatMap { ids =>
+            if ToolCallId.fromString(call.id).isLeft || ToolName.fromString(call.name).isLeft then
+              Left(AgentError.InvalidModelResponse(s"工具调用 $index 缺少有效的 id 或 name"))
+            else if ids.contains(call.id) then Left(AgentError.InvalidModelResponse(s"工具调用 $index 的 id 重复"))
+            else if !call.arguments.isInstanceOf[Json.Obj] then
+              Left(AgentError.InvalidModelResponse(s"工具调用 $index 的参数必须是 JSON object"))
+            else Right(ids + call.id)
+          }
+      }
+      .map(_ => ())
+
 final case class AgentMessage(
     role: MessageRole,
     content: Chunk[ContentPart],

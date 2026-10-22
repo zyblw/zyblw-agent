@@ -2,6 +2,7 @@ package com.zyblw.agent.consumer
 
 import com.zyblw.agent.app.*
 import com.zyblw.agent.core.*
+import com.zyblw.agent.integrations.{ModelProbeConfig, ModelProbeMode}
 import com.zyblw.agent.memory.*
 import com.zyblw.agent.persistence.postgres.PostgresAgentPersistence
 import com.zyblw.agent.rag.*
@@ -20,6 +21,8 @@ import zio.Unsafe
   */
 object MavenConsumerSmoke:
   private val toolPolicy = ToolPolicyConfig.secureDefault
+
+  val toolProbe: ModelProbeConfig = ModelProbeConfig(maxOutputTokens = 1024, mode = ModelProbeMode.ToolRoundTrip)
 
   val applicationConfig: AgentApplicationConfig = AgentApplicationConfig(
     toolPolicy = toolPolicy,
@@ -74,6 +77,7 @@ object MavenConsumerSmoke:
     require(ModelPolicySource.static(ModelPolicy.default, prices).pricesFor(Some(prices.fingerprint)) == prices)
     require(prices.prices("provider" -> "model").provenance.exists(_.nativeCurrency == "USD"))
     require(applicationConfig.worker.parallelism == 4)
+    require(toolProbe.mode == ModelProbeMode.ToolRoundTrip)
     require(providerUnauthorized.category == ErrorCategory.Authentication)
     Unsafe.unsafe { implicit unsafe =>
       val embeddings = Runtime.default.unsafe

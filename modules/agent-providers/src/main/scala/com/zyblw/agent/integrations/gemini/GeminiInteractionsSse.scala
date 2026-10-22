@@ -206,7 +206,8 @@ private[gemini] object GeminiInteractionsSse:
           rawStep(index, step, calls)
         }
         orderedCalls = Chunk.fromIterable(calls.toList.sortBy(_._1).map(_._2))
-        base         =
+        _ <- ZIO.fromEither(ToolCall.validateAll(orderedCalls))
+        base =
           if orderedCalls.nonEmpty then AgentMessage.assistantToolCalls(orderedCalls, text)
           else AgentMessage.assistant(text)
         message =

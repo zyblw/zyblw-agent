@@ -181,7 +181,7 @@ private[openai] object OpenAIResponsesWire:
   ): Either[AgentError, Json.Obj] =
     val options  = config.defaultOptions ++ request.settings.providerOptions
     val reserved = options.keySet.intersect(reservedOptions)
-    ProviderImagePolicy.requireBound(request).flatMap { _ =>
+    ProviderImagePolicy.requireBound(request).flatMap(_ => ToolSchema.validate(request)).flatMap { _ =>
       if reserved.nonEmpty then
         Left(
           AgentError.InvalidConfiguration(
@@ -249,6 +249,7 @@ private[openai] object OpenAIResponsesWire:
       calls <- ZIO.foreach(dto.output.filter(item => stringField(item, "type").contains("function_call"))) {
         item => decodeToolCall(item)
       }
+      _ <- ZIO.fromEither(ToolCall.validateAll(calls))
       text = dto.output.flatMap(outputText).mkString
       raw  = Json.Arr(dto.output).toJson
       base =
@@ -385,7 +386,7 @@ private[openai] object OpenAIResponsesWire:
       "name"        -> Json.Str(tool.name),
       "description" -> Json.Str(tool.description),
       "parameters"  -> tool.inputSchema,
-      "strict"      -> Json.Bool(tool.strict)
+      "strict"      -> Json.Bool(tool.strict && ToolSchema.supportsStrict(tool.inputSchema))
     )
 
   /** 把统一 ToolChoice 映射为 Responses 原生形状。 */
@@ -583,12 +584,14 @@ private[openai] object OpenAIResponsesSse:
     else
       val index        = OpenAIResponsesWire.intField(event, "output_index").getOrElse(state.tools.size)
       val itemId       = OpenAIResponsesWire.stringField(item, "id").getOrElse(s"item-$index")
-      val callId       = OpenAIResponsesWire.stringField(item, "call_id").getOrElse(itemId)
+      val callId       = OpenAIResponsesWire.stringField(item, "call_id").getOrElse("")
       val name         = OpenAIResponsesWire.stringField(item, "name").getOrElse("")
       val args         = OpenAIResponsesWire.stringField(item, "arguments").getOrElse("")
       val partial      = PartialTool(itemId, callId, name, args)
       val startedState = ensureStarted(state, OpenAIResponsesWire.stringField(event, "response_id"))
-      val startEvent   = Option.when(name.nonEmpty)(ModelStreamEvent.ToolCallStarted(callId, name)).toList
+      val startEvent   = Option
+        .when(callId.trim.nonEmpty && name.trim.nonEmpty)(ModelStreamEvent.ToolCallStarted(callId, name))
+        .toList
       ZIO.succeed(
         startedState.copy(tools = startedState.tools.updated(index, partial)) -> Chunk.fromIterable(
           startEvent
@@ -600,11 +603,11 @@ private[openai] object OpenAIResponsesSse:
     val index    = OpenAIResponsesWire.intField(event, "output_index").getOrElse(0)
     val itemId   = OpenAIResponsesWire.stringField(event, "item_id").getOrElse(s"item-$index")
     val delta    = OpenAIResponsesWire.stringField(event, "delta").getOrElse("")
-    val previous = state.tools.getOrElse(index, PartialTool(itemId, itemId, "", ""))
+    val previous = state.tools.getOrElse(index, PartialTool(itemId, "", "", ""))
     val next     = previous.copy(arguments = previous.arguments + delta)
     val started  = ensureStarted(state, OpenAIResponsesWire.stringField(event, "response_id"))
     val emitted  = Option
-      .when(delta.nonEmpty)(
+      .when(delta.nonEmpty && next.callId.trim.nonEmpty && next.name.trim.nonEmpty)(
         ModelStreamEvent.ToolCallDelta(next.callId, Option.when(next.name.nonEmpty)(next.name), delta)
       )
       .toList
@@ -618,7 +621,11 @@ private[openai] object OpenAIResponsesSse:
     val itemId   =
       OpenAIResponsesWire.stringField(item, "id").orElse(previous.map(_.itemId)).getOrElse(s"item-$index")
     val callId =
-      OpenAIResponsesWire.stringField(item, "call_id").orElse(previous.map(_.callId)).getOrElse(itemId)
+      OpenAIResponsesWire
+        .stringField(item, "call_id")
+        .filter(_.trim.nonEmpty)
+        .orElse(previous.map(_.callId))
+        .getOrElse("")
     val name = OpenAIResponsesWire.stringField(item, "name").orElse(previous.map(_.name)).getOrElse("")
     val args =
       OpenAIResponsesWire.stringField(item, "arguments").orElse(previous.map(_.arguments)).getOrElse("")
@@ -626,7 +633,8 @@ private[openai] object OpenAIResponsesSse:
       arguments <- ZIO
         .fromEither(args.fromJson[Json])
         .mapError(details => AgentError.InvalidModelResponse(s"流式工具参数不是合法 JSON: $details"))
-      call    = ToolCall(callId, name, arguments)
+      call = ToolCall(callId, name, arguments)
+      _ <- ZIO.fromEither(ToolCall.validateAll(Chunk(call)))
       next    = PartialTool(itemId, callId, name, args)
       started = ensureStarted(state, OpenAIResponsesWire.stringField(event, "response_id"))
     yield started.copy(

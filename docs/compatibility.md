@@ -43,7 +43,7 @@
 - ModelSettings：`reasoningEffort` 和 `selectionAuthority` 均有默认值；前者进入组合指纹，显式设置但模型未声明支持时 fail closed。后者在 `RunPinned` 时进入指纹并保护 provider/model 不被部署级策略覆盖。
 - Database：核心 `zyblw_agent_core`、知识 `zyblw_agent_knowledge` 各有独立 history；扩展固定在 `zyblw_extensions`，SQL 不依赖 `public` 或宿主搜索路径；知识向量固定为 1024 维。知识 V001 以 `DocumentLineage`、`IndexBuildSpec` 和 `ChunkSetDigest` 为身份，已有知识库必须清空重建。`approval_requests` 归位为 `agent_suspensions`。
 - Retrieval：支持 Hybrid、VectorOnly、LexicalOnly 与 Phrase，ACL 在打分和 fetch 前强制执行。查询先解析 Profile，再以绑定参数过滤，并设置 `hnsw.iterative_scan`、`ef_search` 与 `max_scan_tuples`。不按 Profile 做列表分区。目录下架用 `retire`（可再次索引）；`withdraw` 只给必须永不复活的来源修订写墓碑。
-- Provider：业务只依赖 provider-neutral SPI；密钥只由宿主环境注入。
+- Provider：业务只依赖 provider-neutral SPI；密钥只由宿主环境注入。`ModelProbeConfig` 在未发布候选中增加默认 `Connectivity` 的 `mode` 参数，旧源码调用不变，二进制消费者须重编译。工具调用 ADT 与 State JSON 形状不变；新增 opaque metadata 为可选键，不回填历史已丢失的签名。
 
 ## 变更规则
 

@@ -435,12 +435,15 @@ object KnowledgeTools:
         "type"        -> Json.Str("string"),
         "description" -> Json.Str("检索模式: hybrid | vector | lexical | phrase")
       ),
-      "documentIds"    -> Json.Obj("type" -> Json.Str("array")),
-      "chunkIds"       -> Json.Obj("type" -> Json.Str("array")),
-      "pages"          -> Json.Obj("type" -> Json.Str("array")),
-      "headingPrefix"  -> Json.Obj("type" -> Json.Str("array")),
-      "metadataEquals" -> Json.Obj("type" -> Json.Str("object")),
-      "limit"          -> Json.Obj("type" -> Json.Str("integer"), "description" -> Json.Str("返回最大结果数"))
+      "documentIds" -> Json
+        .Obj("type" -> Json.Str("array"), "items" -> Json.Obj("type" -> Json.Str("string"))),
+      "chunkIds" -> Json.Obj("type" -> Json.Str("array"), "items" -> Json.Obj("type" -> Json.Str("string"))),
+      "pages"    -> Json.Obj("type" -> Json.Str("array"), "items" -> Json.Obj("type" -> Json.Str("integer"))),
+      "headingPrefix" -> Json
+        .Obj("type" -> Json.Str("array"), "items" -> Json.Obj("type" -> Json.Str("string"))),
+      "metadataEquals" -> Json
+        .Obj("type" -> Json.Str("object"), "additionalProperties" -> Json.Obj("type" -> Json.Str("string"))),
+      "limit" -> Json.Obj("type" -> Json.Str("integer"), "description" -> Json.Str("返回最大结果数"))
     ),
     "required" -> Json.Arr(Json.Str("query"))
   )

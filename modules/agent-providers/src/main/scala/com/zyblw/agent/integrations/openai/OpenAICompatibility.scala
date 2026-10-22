@@ -193,5 +193,6 @@ object OpenAICompatibility:
       // semantics.
       DeveloperRoleMode.MapToSystem,
       StrictToolSchemaMode.Omit,
-      ToolChoiceMode.Full
+      ToolChoiceMode.Full,
+      preserveReasoningContent = true
     )

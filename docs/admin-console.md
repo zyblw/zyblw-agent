@@ -232,6 +232,12 @@ Provider「未注册」（因为目录同时是写入校验依据）；多声明
 `POST /api/v1/admin/models/probe` 对一个已注册组合发一次最小调用，返回成功与否、耗时、token 用量和稳定失败
 码。它要求 `agent:admin:debug` 而不是读权限，因为它会产生真实 Provider 费用。
 
+上述为默认 `ModelProbeMode.Connectivity`。宿主可通过 `ModelProbeConfig(mode = ModelProbeMode.ToolRoundTrip,
+maxOutputTokens = 1024)` 选择两轮流式工具诊断，先验证固定工具提议，再按真实 call ID 和原始协议状态回填结果并验证最终回答。
+能力从注册表中实际选中的适配器读取，两轮共用同一硬超时；第一轮截断或任一轮缺少完整结束事件都不能认证成功。
+该模式最多产生两次真实计费调用，不执行业务工具、不自动改写能力声明；仅证明固定小请求的协议闭环，不能替代完整业务验收。
+协议限制与失败码见 [Provider 接入](providers.md)。
+
 结果**不含模型输出正文**。回显输出会把一个只需要 debug scope 的端点变成一个可以向任意 Provider 提问并读回答案
 的通道。失败码是框架分类而非 Provider 原始响应。内置适配器已经不把原始响应正文写进错误；管理服务仍然只读错误
 类型与 `ErrorCategory`，不读 `message`，因为自定义 `ChatModel` 并不自动获得同样的脱敏保证。
@@ -243,7 +249,7 @@ Provider「未注册」（因为目录同时是写入校验依据）；多声明
 Provider 的「模型不存在」掩盖，看不出其实是本地目录里就没有。目录拒绝会进一步区分
 `provider-not-found` 与 `model-not-found`，运维可以判断应该修路由装配还是模型声明。
 
-探活有独立于适配器自身超时的外层硬超时（默认 20 秒），超时会中断底层调用，因此不会留下一个继续计费的后台请求。
+探活有独立于适配器自身超时的外层硬超时（默认 20 秒），超时会中断本地底层调用；远端是否停止生成和计费仍取决于服务商。
 
 内置 Chat Provider 通过 `ModelHttpFailure` 按 HTTP 状态稳定分类：401/407 是认证失败，403 是授权失败，408 是超时，
 409 是冲突，429 是限流，5xx 是暂时不可用，其余 4xx 是无效请求。分类只读取状态码；Provider code/type 只有满足

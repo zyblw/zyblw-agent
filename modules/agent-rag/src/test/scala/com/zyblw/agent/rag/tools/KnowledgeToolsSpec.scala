@@ -8,6 +8,14 @@ import zio.test.*
 /** knowledge_search / knowledge_fetch 拒绝模型覆盖 tenant，并在低证据时显式拒答。 */
 object KnowledgeToolsSpec extends ZIOSpecDefault:
   def spec: Spec[TestEnvironment & Scope, Any] = suite("KnowledgeTools")(
+    test("search Schema declares portable array element types") {
+      for
+        rag <- ZIO.service[RagApplication]
+        schema = KnowledgeTools.searchTool(rag).inputSchema
+      yield assertTrue(
+        ToolSchema.validate(Chunk(ToolDefinition("knowledge_search", "search", schema))).isRight
+      )
+    }.provide(memoryRag),
     test("模型参数携带 tenantId 时拒绝执行") {
       for
         rag <- ZIO.service[RagApplication]

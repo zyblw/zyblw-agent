@@ -140,13 +140,15 @@ final class AgentRuntimeDriver(
     * 批准会先保存 RunResumed 再允许副作用；拒绝会回填结构化工具错误。批准前会重新校验审批主体：人不能替一件他没看过的 事情背书。
     */
   def resume(runId: RunId, decision: ApprovalDecision): IO[AgentError, RunOutcome] =
-    for
-      state  <- store.load(runId)
-      target <- ZIO.fromEither(AgentKernel.resumeTarget(state))
-      next   <- decision match
-        case ApprovalDecision.Approve                 => approveResume(state, target)
-        case reject @ ApprovalDecision.Reject(reason) => rejectResume(state, target, reject, reason)
-    yield next
+    closeModelFailure(runId) {
+      for
+        state  <- loadExecutable(runId)
+        target <- ZIO.fromEither(AgentKernel.resumeTarget(state))
+        next   <- decision match
+          case ApprovalDecision.Approve                 => approveResume(state, target)
+          case reject @ ApprovalDecision.Reject(reason) => rejectResume(state, target, reject, reason)
+      yield next
+    }
 
   private def approveResume(
       state: AgentState,
@@ -210,19 +212,40 @@ final class AgentRuntimeDriver(
 
   /** 依据状态与执行账本恢复，而不是重新从用户输入开始。 */
   def recover(runId: RunId): IO[AgentError, RunOutcome] =
-    for
-      state  <- store.load(runId)
-      result <- AgentKernel.recoveryDecision(state.status) match
-        case AgentKernel.RecoveryDecision.ReturnCompleted =>
-          ZIO.fromEither(AgentKernel.completedOutcome(state))
-        case AgentKernel.RecoveryDecision.ReturnCancelled         => ZIO.fail(AgentError.Cancelled(runId))
-        case AgentKernel.RecoveryDecision.CloseUncertainModelCall => closeUncertainModelCall(state)
-        case AgentKernel.RecoveryDecision.RecoverSuspended        =>
-          guard.ensureCompatible(state) *> recoverPending(state)
-        case AgentKernel.RecoveryDecision.StartCreated   => startCreated(state)
-        case AgentKernel.RecoveryDecision.RecoverRunning =>
-          guard.ensureCompatible(state) *> recoverRunning(state)
-    yield result
+    closeModelFailure(runId) {
+      for
+        state  <- loadExecutable(runId)
+        result <- AgentKernel.recoveryDecision(state.status) match
+          case AgentKernel.RecoveryDecision.ReturnCompleted =>
+            ZIO.fromEither(AgentKernel.completedOutcome(state))
+          case AgentKernel.RecoveryDecision.ReturnCancelled         => ZIO.fail(AgentError.Cancelled(runId))
+          case AgentKernel.RecoveryDecision.CloseUncertainModelCall => closeUncertainModelCall(state)
+          case AgentKernel.RecoveryDecision.RecoverSuspended        =>
+            guard.ensureCompatible(state) *> recoverPending(state)
+          case AgentKernel.RecoveryDecision.StartCreated   => startCreated(state)
+          case AgentKernel.RecoveryDecision.RecoverRunning =>
+            guard.ensureCompatible(state) *> recoverRunning(state)
+      yield result
+    }
+
+  private def closeModelFailure[A](runId: RunId)(effect: IO[AgentError, A]): IO[AgentError, A] =
+    effect.tapError {
+      case error: ModelError    => terminator.markFailed(runId, error)
+      case error: ProviderError => terminator.markFailed(runId, error)
+      case _                    => ZIO.unit
+    }
+
+  /** 旧计划也经过同一边界，避免重启后再次执行已落库的非法模型调用。 */
+  private def loadExecutable(runId: RunId): IO[AgentError, AgentState] =
+    store.load(runId).flatMap { state =>
+      val calls = state.pendingToolPlan.toList.flatMap(_.batches.flatMap(_.items.map(_.call)))
+      if RunStatus.isTerminal(state.status) then ZIO.succeed(state)
+      else
+        ZIO
+          .fromEither(ToolCall.validateAll(Chunk.fromIterable(calls)))
+          .tapError(error => terminator.markFailed(runId, error))
+          .as(state)
+    }
 
   /** 执行 WorkerHost claim 的类型化耐久命令，并把 fencing 凭证绑定到当前 Fiber 及其所有子 Fiber。 */
   def executeLeased(lease: RunCommandLease): IO[AgentError, Unit] =
@@ -466,6 +489,7 @@ final class AgentRuntimeDriver(
     else
       val policy = toolPolicies.current()
       for
+        _        <- ZIO.fromEither(ToolCall.validateAll(calls))
         resolved <- ZIO.foreach(calls.zipWithIndex) { case (call, ordinal) =>
           registry.get(ToolName(call.name)).either.map(plannedCall(state, policy, call, ordinal, _))
         }

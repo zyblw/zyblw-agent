@@ -48,8 +48,10 @@ private[anthropic] object AnthropicMessagesWire:
   ): Either[AgentError, Json.Obj] =
     val options   = config.defaultOptions ++ request.settings.providerOptions
     val conflicts = options.keySet.intersect(reservedOptions)
-    ProviderImagePolicy.requireBound(request).flatMap { _ =>
-      if conflicts.nonEmpty then
+    ProviderImagePolicy.requireBound(request).flatMap(_ => ToolSchema.validate(request)).flatMap { _ =>
+      if request.settings.requirement.exists(_.strictToolSchema) then
+        Left(AgentError.UnsupportedModelCapability("anthropic", "strict tool schema", "当前原生适配器尚未承诺该合同"))
+      else if conflicts.nonEmpty then
         Left(
           AgentError.InvalidConfiguration(
             s"providerOptions cannot override reserved Anthropic fields: ${conflicts.toList.sorted.mkString(", ")}"
@@ -92,6 +94,7 @@ private[anthropic] object AnthropicMessagesWire:
       dto   <- ZIO.fromEither(json.toJson.fromJson[ResponseDto]).mapError(AgentError.InvalidModelResponse(_))
       calls <- ZIO
         .foreach(dto.content.filter(block => stringField(block, "type").contains("tool_use")))(decodeToolUse)
+      _     <- ZIO.fromEither(ToolCall.validateAll(calls))
       usage <- dto.usage match
         case None        => ZIO.succeed(TokenUsage())
         case Some(value) =>

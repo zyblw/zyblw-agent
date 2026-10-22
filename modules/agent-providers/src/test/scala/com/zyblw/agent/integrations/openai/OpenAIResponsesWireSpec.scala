@@ -54,6 +54,39 @@ object OpenAIResponsesWireSpec extends ZIOSpecDefault:
       |""".stripMargin
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("OpenAI Responses wire")(
+    test("Responses item ids never substitute for missing tool call ids") {
+      val completedJson = responsePayload.fromJson[Json].toOption.get.toJson
+      val orphanDelta   =
+        """data: {"type":"response.function_call_arguments.delta","item_id":"private-item-id","output_index":0,"delta":"{}"}
+
+""" + s"data: {\"type\":\"response.completed\",\"response\":$completedJson}\n\n"
+      val missing = streamPayload.replace("\"call_id\":\"call-stream\"", "\"call_id\":\"\"")
+      for
+        events <- OpenAIResponsesSse
+          .events(ZStream.fromIterable(orphanDelta.getBytes(StandardCharsets.UTF_8)))
+          .runCollect
+        failed <- OpenAIResponsesSse
+          .events(ZStream.fromIterable(missing.getBytes(StandardCharsets.UTF_8)))
+          .runDrain
+          .exit
+      yield assertTrue(
+        !events.exists { case ModelStreamEvent.ToolCallDelta(_, _, _) => true; case _ => false },
+        events.collect { case ModelStreamEvent.ToolCallCompleted(call) => call.id } == Chunk("call-1"),
+        failed.causeOption.exists(cause =>
+          cause.defects.isEmpty && cause.failureOption.exists(_.isInstanceOf[AgentError.InvalidModelResponse])
+        )
+      )
+    },
+    test("blank function call identities are rejected as typed protocol errors") {
+      for
+        id <- OpenAIResponsesWire
+          .decodeResponse(responsePayload.replace("\"call_id\":\"call-1\"", "\"call_id\":\" \""))
+          .exit
+        name <- OpenAIResponsesWire
+          .decodeResponse(responsePayload.replace("\"name\":\"lookup\"", "\"name\":\" \""))
+          .exit
+      yield assertTrue(id.causeOption.exists(_.defects.isEmpty), id.isFailure, name.isFailure)
+    },
     test("响应没有 usage 时保留未报告标记") {
       OpenAIResponsesWire
         .decodeResponse(

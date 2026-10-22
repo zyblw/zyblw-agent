@@ -135,7 +135,8 @@ final private[agent] class ModelCallCoordinator(
                 at
               )
             )
-          case ModelStreamEvent.Completed(response) => completed.set(Some(response))
+          case ModelStreamEvent.Completed(response) =>
+            ZIO.fromEither(ToolCall.validateAll(response.message.toolCalls)) *> completed.set(Some(response))
         }
         .runDrain
       response <- completed.get.someOrFail(AgentError.InvalidModelResponse("模型流结束但没有 Completed 事件"))

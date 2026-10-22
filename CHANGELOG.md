@@ -4,6 +4,7 @@
 
 本站与当前框架候选尚未发布。当前所有能力构成同一个首次发布候选，不提供旧候选升级或兼容读取路径。Git 历史中的候选记录不参与当前构建；远端既有 tag/制品不改写。
 
+- 工具协议加固：补齐知识检索数组元素类型；发网前校验可移植 Schema 与 strict 硬约束；所有适配器和 Runtime 验证工具身份/参数，旧非法计划恢复收口为 Failed。OpenAI-compatible 忽略正常空身份分片、拒绝身份冲突，保留通用中转 reasoning_content 与按 call id 关联的 Gemini opaque extra_content。ModelProbeConfig 增加可选 ToolRoundTrip 模式，覆盖流式工具调用与结果回填；默认基本探活不变。
 - 注入监测补齐 Unicode 空白归一化，并固定 Locale.ROOT 大小写转换，避免宿主区域设置影响现有词表；不扩大匹配词或做 NFKC 转换。
 - Provider-neutral Scala 3/ZIO 2 Runtime，Functional Kernel + Driver；耐久命令、lease/fencing、取消、恢复、统一 Suspension、权限与工具审计。
 - 分层 Prompt、上下文预算、受治理 Memory/RAG、模型目录/路由、冻结调用身份与单价。模型调用最低必要元数据可审计；正文采集可关闭。Token 输入包含缓存读写、输出包含推理，明细不能重复累加。

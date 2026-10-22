@@ -3,7 +3,9 @@ package com.zyblw.agent.integrations.openai
 // 以纯编解码方式验证 OpenAI、DeepSeek、GLM、Qwen、Kimi 的字段兼容矩阵，不依赖真实 API Key 和网络。
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.model.ModelRequirement
 import zio.*
+import zio.json.*
 import zio.json.ast.Json
 import zio.test.*
 
@@ -19,6 +21,82 @@ object OpenAICompatibilitySpec extends ZIOSpecDefault:
   )
 
   def spec = suite("OpenAI-compatible provider profiles")(
+    test("generic relay keeps reasoning and per-call Gemini opaque metadata across ordinary tool turns") {
+      val relay   = OpenAICompatibility.relay("relay")
+      val payload =
+        """{"choices":[{"message":{"content":"","reasoning_content":"opaque-reasoning","tool_calls":[{"id":"call-google","function":{"name":"lookup","arguments":"{}"},"extra_content":{"google":{"thought_signature":"opaque-signature"}}}]},"finish_reason":"tool_calls"}]}"""
+      for
+        decoded <- OpenAIWire.decodeResponse(payload, relay)
+        encoded = OpenAIWire.encodeRequest(
+          ChatRequest(
+            Chunk(decoded.message, AgentMessage.tool("call-google", "lookup", ToolResult(Json.Obj())))
+          ),
+          "gemini",
+          relay
+        )
+      yield assertTrue(
+        encoded.exists(_.toJson.contains("\"reasoning_content\":\"opaque-reasoning\"")),
+        encoded.exists(_.toJson.contains("\"thought_signature\":\"opaque-signature\""))
+      )
+    },
+    test("missing array items fail locally and strict is enabled only for closed complete schemas") {
+      val malformed = ToolDefinition("lookup", "lookup", Json.Obj("type" -> Json.Str("array")))
+      val optional  = ToolDefinition(
+        "lookup",
+        "lookup",
+        Json.Obj(
+          "type"       -> Json.Str("object"),
+          "properties" -> Json.Obj("q" -> Json.Obj("type" -> Json.Str("string")))
+        )
+      )
+      val closed = optional.copy(inputSchema =
+        Json.Obj(
+          optional.inputSchema.fields ++ Chunk(
+            "required"             -> Json.Arr(Json.Str("q")),
+            "additionalProperties" -> Json.Bool(false)
+          )
+        )
+      )
+      def encode(value: ToolDefinition) = OpenAIWire
+        .encodeRequest(
+          ChatRequest(Chunk(AgentMessage.user("query")), Chunk(value)),
+          "model",
+          OpenAICompatibility.openAI
+        )
+        .map(_.toJson)
+      assertTrue(
+        encode(malformed).isLeft,
+        encode(optional).exists(_.contains("\"strict\":false")),
+        encode(closed).exists(_.contains("\"strict\":true"))
+      )
+    },
+    test("hard strict is rejected when the selected protocol cannot send that guarantee") {
+      val closed = ToolDefinition(
+        "lookup",
+        "lookup",
+        Json.Obj(
+          "type"                 -> Json.Str("object"),
+          "properties"           -> Json.Obj(),
+          "required"             -> Json.Arr(),
+          "additionalProperties" -> Json.Bool(false)
+        )
+      )
+      val request = ChatRequest(
+        Chunk(AgentMessage.user("query")),
+        Chunk(closed),
+        ModelSettings(requirement = Some(ModelRequirement(strictToolSchema = true)))
+      )
+      val unsupported =
+        Chunk(OpenAICompatibility.relay("relay"), OpenAICompatibility.qwen, OpenAICompatibility.deepSeek)
+          .map(profile => OpenAIWire.encodeRequest(request, "model", profile))
+      assertTrue(
+        OpenAIWire.encodeRequest(request, "model", OpenAICompatibility.openAI).isRight,
+        OpenAIResponsesWire
+          .encodeRequest(request, OpenAIResponsesConfig("https://example.test/v1", "secret", "model"), false)
+          .isRight,
+        unsupported.forall(_.left.toOption.exists(_.isInstanceOf[AgentError.UnsupportedModelCapability]))
+      )
+    },
     test("DeepSeek maps developer role, omits incompatible fields and keeps thinking options") {
       val request = ChatRequest(
         Chunk(AgentMessage.developer("rule"), AgentMessage.user("question")),

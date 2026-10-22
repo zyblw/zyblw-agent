@@ -23,6 +23,119 @@ object OpenAISseSpec extends ZIOSpecDefault:
       |""".stripMargin
 
   def spec = suite("OpenAI SSE")(
+    test(
+      "late identities buffer arguments by index and late Google signatures preserve exact call ownership"
+    ) {
+      val frames = Chunk(
+        """{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":"},"extra_content":{"google":{"thought_signature":""}}},{"index":1,"id":"second","function":{"name":"echo","arguments":"{}"}}]}}]}""",
+        """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"first","function":{"name":"echo","arguments":"1}"},"extra_content":{"google":{"thought_signature":"late-signed-state"}}}]},"finish_reason":"tool_calls"}]}"""
+      )
+      val stream = frames.map(value => s"data: $value\n\n").mkString + "data: [DONE]\n\n"
+      for
+        events <- OpenAISse
+          .events(
+            ZStream.fromIterable(stream.getBytes(StandardCharsets.UTF_8)),
+            OpenAICompatibility.relay("relay")
+          )
+          .runCollect
+        response = events.collect { case ModelStreamEvent.Completed(value) => value }.head
+        replay   = OpenAIWire
+          .encodeRequest(ChatRequest(Chunk(response.message)), "gemini", OpenAICompatibility.relay("relay"))
+          .map(_.toJson)
+      yield assertTrue(
+        response.message.toolCalls.map(_.id) == Chunk("first", "second"),
+        events.collect { case ModelStreamEvent.ToolCallStarted(id, _) => id } == Chunk("second", "first"),
+        events.collect { case ModelStreamEvent.ToolCallDelta("first", _, value) =>
+          value
+        }.mkString == "{\"a\":1}",
+        replay.exists(_.contains("late-signed-state")),
+        replay.exists(value => value.indexOf("late-signed-state") < value.indexOf("second"))
+      )
+    },
+    test("nonempty identity or thought-signature changes are typed failures") {
+      val initial =
+        """{"index":0,"id":"real","function":{"name":"echo","arguments":"{}"},"extra_content":{"google":{"thought_signature":"one"}}}"""
+      val conflicting = Chunk(
+        """{"index":0,"id":"different"}""",
+        """{"index":0,"function":{"name":"different"}}""",
+        """{"index":0,"extra_content":{"google":{"thought_signature":"two"}}}"""
+      )
+      ZIO
+        .foreach(conflicting) { delta =>
+          val stream =
+            s"data: {\"choices\":[{\"delta\":{\"tool_calls\":[$initial]}}]}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[$delta]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"
+          OpenAISse
+            .events(ZStream.fromIterable(stream.getBytes(StandardCharsets.UTF_8)), OpenAICompatibility.qwen)
+            .runDrain
+            .exit
+        }
+        .map(results =>
+          assertTrue(
+            results.forall(
+              _.causeOption.exists(cause =>
+                cause.defects.isEmpty && cause.failureOption
+                  .exists(_.isInstanceOf[AgentError.InvalidModelResponse])
+              )
+            )
+          )
+        )
+    },
+    test("Qwen empty identity deltas retain the real call id and Gemini signatures survive tool replay") {
+      val stream =
+        """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-real","function":{"name":"echo","arguments":"{\"value\":"},"extra_content":{"google":{"thought_signature":"opaque-test-signature"}}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","function":{"name":"","arguments":"\"ok\"}"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+"""
+      for
+        events <- OpenAISse
+          .events(
+            ZStream.fromIterable(stream.getBytes(StandardCharsets.UTF_8)),
+            OpenAICompatibility.relay("relay")
+          )
+          .runCollect
+        response = events.collect { case ModelStreamEvent.Completed(value) => value }.head
+        replay   = OpenAIWire
+          .encodeRequest(ChatRequest(Chunk(response.message)), "gemini", OpenAICompatibility.relay("relay"))
+      yield assertTrue(
+        response.message.toolCalls.map(_.id) == Chunk("call-real"),
+        response.message.toolCalls.map(_.name) == Chunk("echo"),
+        replay.exists(_.toJson.contains("\"thought_signature\":\"opaque-test-signature\"")),
+        !events.exists { case ModelStreamEvent.ToolCallDelta(id, _, _) => id.isEmpty; case _ => false }
+      )
+    },
+    test("missing identities, duplicate ids and scalar arguments are typed protocol failures") {
+      val calls = Chunk(
+        """{"index":0,"function":{"name":"echo","arguments":"{}"}}""",
+        """{"index":0,"id":"call-1","function":{"name":" ","arguments":"{}"}}""",
+        """{"index":0,"id":"call-1","function":{"name":"echo","arguments":"[]"}}""",
+        """{"index":0,"id":"call-1","function":{"name":"echo","arguments":"{}"}},{"index":1,"id":"call-1","function":{"name":"echo","arguments":"{}"}}"""
+      )
+      ZIO
+        .foreach(calls) { call =>
+          val stream = s"""data: {"choices":[{"delta":{"tool_calls":[$call]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+"""
+          OpenAISse
+            .events(ZStream.fromIterable(stream.getBytes(StandardCharsets.UTF_8)), OpenAICompatibility.qwen)
+            .runDrain
+            .exit
+        }
+        .map(results =>
+          assertTrue(
+            results.forall(
+              _.causeOption.exists(cause =>
+                cause.defects.isEmpty && cause.failureOption
+                  .exists(_.isInstanceOf[AgentError.InvalidModelResponse])
+              )
+            )
+          )
+        )
+    },
     test("actual service tier in an early frame survives a later usage-only frame") {
       val stream =
         """data: {"service_tier":"priority","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}

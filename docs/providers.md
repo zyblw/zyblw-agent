@@ -4,7 +4,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-10-01（补充响应用量完整性与确定性协议验证）
+> 最后核验：2026-10-22（工具边界、流式身份、opaque 状态与工具往返诊断）
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -26,6 +26,44 @@
 | SSE streaming | typed event | typed event | choices/delta | choices/delta | choices/delta | choices/delta | choices/delta |
 
 能力表是配置基线，具体模型仍可通过 `ProviderDescriptor.models` 覆盖。
+
+## 工具协议与自动适配边界
+
+发送前 `ToolSchema.validate` 检查嵌套数组必须有明确的 `items` Schema，缺失时返回可定位的配置错误，不猜测字符串或整数。
+OpenAI Chat/Responses 只在 Schema 满足已支持的 strict 结构子集时发送 `strict=true`：根为 object、对象关闭额外属性、全部属性 required，并排除不支持的组合关键词。普通 `ToolDefinition.strict` 是偏好；`ModelRequirement.strictToolSchema` 是硬要求，不能通过降级为 `strict=false` 满足。
+
+工具输出在各适配器和 Runtime 完整响应边界共用 `ToolCall.validateAll`：ID/名称不可空白、同轮 ID 唯一、参数必须是 JSON object。
+恢复旧 `pendingToolPlan` 时先校验再读工具契约；非法计划以类型化模型错误收口，禁止执行工具，不把坏数据升级成 Worker defect。
+真正的 JVM/存储缺陷、取消与租约监督语义保留。
+
+OpenAI-compatible 流按 index 保留工具槽，空/null/省略的 ID 与名称不覆盖有效值；参数按顺序累积，身份尚未齐备时缓冲。
+身份冲突、负 index、缺失真实 ID 或非法参数明确失败，不生成跨回合可能重复的 `tool-index`。
+通用中转档案保留 Provider 返回的 `reasoning_content`；兼容端点的 `tool_calls[].extra_content` 按原始 call id 保存在
+`AgentMessage.metadata` 并原样回填，支持 Gemini 所需的 opaque thought signature。它们是协议续接状态，不是可展示的回答或日志。
+原生 Responses、Anthropic、Gemini 的 output items/content blocks/steps 仍由各自适配器保存，不互相转换。
+
+连接的协议与 compatibility profile 决定 wire，逐模型 capabilities 决定是否允许工具、视觉、推理控制及容量。
+不根据模型名字自动切换协议、修改中转模型后缀、伪造签名、删除工具后重试，或擅自切换已钉住模型。
+新模型仍可能引入新协议；同协议应先登记精确能力并做工具往返 smoke，未知必需字段或未覆盖的协议明确失败。
+
+### 工具往返探活
+
+`ModelProbeConfig.mode` 默认为 `Connectivity`，保留一次最小非流式探活。
+宿主可为声明支持工具和流式的模型选择 `ToolRoundTrip`，并为工具 JSON 设置足够输出预算，例如：
+
+```scala
+ModelProbeConfig(maxOutputTokens = 1024, mode = ModelProbeMode.ToolRoundTrip)
+```
+
+该模式最多两次真实调用：固定无敏感数据 prompt → `probe_echo` → 固定结果回填 → 最终文本。
+不执行业务工具；使用 `Auto` 以兼容不支持强制工具选择的档案，必须实际观察到合法调用、流开始与完整终态才算通过。
+一次外层 timeout 覆盖整个往返，取消继续传播。`tool-not-observed` 是未验证工具能力，`stream-not-observed` 是未观察到流协议，不能当成模型离线。
+结果仍只返回计数、耗时与稳定分类，不自动改写能力声明，也不证明 RAG 质量、真实负载或未来可用性。
+
+协议依据（2026-10-22 核对）：[4SAPI 工具接入](https://4sapi.apifox.cn/523240073e0)、
+[4SAPI Gemini 兼容接口](https://4sapi.apifox.cn/523240101e0)、[Qwen 流式工具调用](https://www.alibabacloud.com/help/en/model-studio/qwen-function-calling)、
+[Gemini 思考签名](https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures)、
+[DeepSeek 思考回填](https://api-docs.deepseek.com/guides/thinking_mode/)、[OpenAI strict Schema 子集](https://developers.openai.com/api/docs/guides/structured-outputs)。
 
 ## 配置
 

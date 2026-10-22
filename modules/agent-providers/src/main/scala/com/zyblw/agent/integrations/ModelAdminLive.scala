@@ -2,8 +2,12 @@ package com.zyblw.agent.integrations
 
 import com.zyblw.agent.admin.*
 import com.zyblw.agent.core.*
-import com.zyblw.agent.model.ChatModel
+import com.zyblw.agent.model.{ChatModel, ModelRef, ModelRouter, ModelStreamEvent}
 import zio.*
+import zio.json.ast.Json
+
+enum ModelProbeMode:
+  case Connectivity, ToolRoundTrip
 
 /** 连通性探活的预算。
   *
@@ -17,7 +21,8 @@ import zio.*
   */
 final case class ModelProbeConfig(
     timeout: Duration = 20.seconds,
-    maxOutputTokens: Int = 16
+    maxOutputTokens: Int = 16,
+    mode: ModelProbeMode = ModelProbeMode.Connectivity
 ):
   require(timeout > Duration.Zero, "探活超时必须大于零")
   require(maxOutputTokens > 0, "探活输出上限必须为正数")
@@ -140,8 +145,11 @@ object ModelAdminLive:
     for
       started <- Clock.nanoTime
       // `.timeout` 会中断底层调用,因此超时不会留下一个继续计费的后台请求。
-      exit <- chatModel
-        .complete(probeRequest(provider, model, config.maxOutputTokens))
+      exit <- (config.mode match
+        case ModelProbeMode.Connectivity =>
+          chatModel.complete(probeRequest(provider, model, config.maxOutputTokens)).map(Right(_))
+        case ModelProbeMode.ToolRoundTrip => toolRoundTrip(chatModel, provider, model, config)
+      )
         .timeout(config.timeout)
         .exit
       finished <- Clock.nanoTime
@@ -149,7 +157,7 @@ object ModelAdminLive:
       result <- exit match
         // 调用方取消不能被伪装成一次探活失败,否则管理台断开连接后仍会显示一个凭空产生的故障。
         case Exit.Failure(cause) if cause.isInterrupted => ZIO.interrupt
-        case Exit.Success(Some(response))               =>
+        case Exit.Success(Some(Right(response)))        =>
           ZIO.succeed(
             ModelProbeResult(
               provider = provider,
@@ -161,9 +169,99 @@ object ModelAdminLive:
               failureCode = None
             )
           )
-        case Exit.Success(None)  => ZIO.succeed(failed(provider, model, latency, Timeout))
+        case Exit.Success(Some(Left(code))) => ZIO.succeed(failed(provider, model, latency, code))
+        case Exit.Success(None)             => ZIO.succeed(failed(provider, model, latency, Timeout))
         case Exit.Failure(cause) => ZIO.succeed(failed(provider, model, latency, failureCode(cause)))
     yield result
+
+  /** 不执行真实业务工具；在同一预算内验证流、工具参数以及携带协议状态的结果回填。 */
+  private def toolRoundTrip(
+      chatModel: ChatModel,
+      provider: String,
+      model: String,
+      config: ModelProbeConfig
+  ): IO[AgentError, Either[String, ChatResponse]] =
+    val tool = ToolDefinition(
+      "probe_echo",
+      "Return the supplied value; this is a harmless connection diagnostic.",
+      Json.Obj(
+        "type"                 -> Json.Str("object"),
+        "properties"           -> Json.Obj("value" -> Json.Obj("type" -> Json.Str("string"))),
+        "required"             -> Json.Arr(Json.Str("value")),
+        "additionalProperties" -> Json.Bool(false)
+      )
+    )
+    val request = ChatRequest(
+      Chunk(
+        AgentMessage.user(
+          "Call probe_echo once with value probe-ok. After its result reply exactly probe-ok without calling more tools."
+        )
+      ),
+      Chunk(tool),
+      ModelSettings(
+        provider = Some(provider),
+        model = Some(model),
+        maxOutputTokens = Some(config.maxOutputTokens),
+        metadata = Map("purpose" -> "model-probe-tool-round-trip-v1")
+      )
+    )
+    for
+      adapter      <- ZIO.fromEither(ModelRouter.adapter(chatModel, ModelRef(provider, model)))
+      capabilities <- adapter.capabilities(Some(model))
+      result       <-
+        if !capabilities.toolCalls || !capabilities.streaming then
+          ZIO.succeed(Left("tool-stream-unsupported"))
+        else
+          streamProbe(chatModel, request).flatMap {
+            case (_, false) => ZIO.succeed(Left("stream-not-observed"))
+            case (first, true)
+                if first.message.toolCalls.nonEmpty && first.finishReason != FinishReason.ToolCalls =>
+              ZIO.succeed(Left("tool-round-trip-incomplete"))
+            case (first, true) =>
+              first.message.toolCalls.toList match
+                case call :: Nil
+                    if call.name == tool.name && call.arguments == Json.Obj(
+                      "value" -> Json.Str("probe-ok")
+                    ) =>
+                  val followUp = request.copy(messages =
+                    request.messages ++ Chunk(
+                      first.message,
+                      AgentMessage
+                        .tool(call.id, call.name, ToolResult(Json.Obj("value" -> Json.Str("probe-ok"))))
+                    )
+                  )
+                  streamProbe(chatModel, followUp).map { case (last, streamed) =>
+                    if !streamed then Left("stream-not-observed")
+                    else if last.message.toolCalls.nonEmpty || last.message.text.trim != "probe-ok" || last.finishReason != FinishReason.Stop
+                    then Left("tool-round-trip-incomplete")
+                    else
+                      Right(
+                        last.copy(
+                          usage = first.usage + last.usage,
+                          usageReported = first.usageReported && last.usageReported
+                        )
+                      )
+                  }
+                case Nil => ZIO.succeed(Left("tool-not-observed"))
+                case _   => ZIO.succeed(Left("invalid-probe-tool-call"))
+          }
+    yield result
+
+  private def streamProbe(
+      model: ChatModel,
+      request: ChatRequest
+  ): IO[AgentError, (ChatResponse, Boolean)] =
+    for
+      observed <- model.stream(request).runFoldZIO((Option.empty[ChatResponse], false)) {
+        case ((Some(_), _), _) =>
+          ZIO.fail(AgentError.InvalidModelResponse("探活流在完整结束事件后仍发送内容"))
+        case ((None, streamed), ModelStreamEvent.Completed(response)) =>
+          ZIO.fromEither(ToolCall.validateAll(response.message.toolCalls)).as(Some(response) -> streamed)
+        case ((response, _), ModelStreamEvent.ResponseStarted(_)) => ZIO.succeed(response -> true)
+        case (state, _)                                           => ZIO.succeed(state)
+      }
+      response <- ZIO.fromOption(observed._1).orElseFail(AgentError.InvalidModelResponse("探活流没有完整结束事件"))
+    yield response -> observed._2
 
   /** 固定探活请求。
     *

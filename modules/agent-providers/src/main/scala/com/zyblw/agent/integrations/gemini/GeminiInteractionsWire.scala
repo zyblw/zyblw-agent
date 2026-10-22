@@ -54,8 +54,10 @@ private[gemini] object GeminiInteractionsWire:
     val options  = config.defaultOptions ++ request.settings.providerOptions
     val reserved = options.keySet.intersect(reservedOptions)
     val unknown  = options.keySet.diff(allowedOptions).diff(reservedOptions)
-    ProviderImagePolicy.requireBound(request).flatMap { _ =>
-      if reserved.nonEmpty then
+    ProviderImagePolicy.requireBound(request).flatMap(_ => ToolSchema.validate(request)).flatMap { _ =>
+      if request.settings.requirement.exists(_.strictToolSchema) then
+        Left(AgentError.UnsupportedModelCapability("gemini", "strict tool schema", "当前原生适配器尚未承诺该合同"))
+      else if reserved.nonEmpty then
         Left(
           AgentError.InvalidConfiguration(
             s"providerOptions cannot override reserved Gemini fields: ${reserved.toList.sorted.mkString(", ")}"
@@ -118,6 +120,7 @@ private[gemini] object GeminiInteractionsWire:
       calls <- ZIO.foreach(steps.filter(step => stringField(step, "type").contains("function_call")))(
         decodeFunctionCall
       )
+      _ <- ZIO.fromEither(ToolCall.validateAll(calls))
       _ <- ZIO
         .fail(
           AgentError.InvalidModelResponse("Gemini requires_action response does not contain function_call")

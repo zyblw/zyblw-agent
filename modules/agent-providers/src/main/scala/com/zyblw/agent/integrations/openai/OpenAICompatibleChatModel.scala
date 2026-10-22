@@ -134,8 +134,19 @@ object OpenAICompatibleChatModel:
     ZLayer.succeed(config) >>> layer
 
 private[openai] object OpenAIWire:
+  private val ToolExtraContentMetadata = "openai.chat.tool_extra_content"
+
+  /** Gemini 等兼容端点的签名是 opaque 协议状态，只按原始 call id 保存和回填。 */
+  private[openai] def retainToolMetadata(
+      message: AgentMessage,
+      extras: Chunk[(String, Json.Obj)]
+  ): AgentMessage =
+    if extras.isEmpty then message
+    else message.copy(metadata = message.metadata.updated(ToolExtraContentMetadata, Json.Obj(extras).toJson))
+
   final private case class FunctionCallDto(name: String, arguments: String) derives JsonDecoder
-  final private case class ToolCallDto(id: String, function: FunctionCallDto) derives JsonDecoder
+  final private case class ToolCallDto(id: String, function: FunctionCallDto, extra_content: Option[Json.Obj])
+      derives JsonDecoder
   final private case class MessageDto(
       content: Option[String],
       reasoning_content: Option[String],
@@ -191,8 +202,11 @@ private[openai] object OpenAIWire:
     val reserved = request.settings.providerOptions.keySet.intersect(reservedOptions)
     val media    = ProviderImagePolicy.requireBound(request)
 
-    media.flatMap { _ =>
-      if request.tools.nonEmpty && !capabilities.toolCalls then
+    media.flatMap(_ => ToolSchema.validate(request)).flatMap { _ =>
+      if request.settings.requirement.exists(_.strictToolSchema) &&
+        (!capabilities.strictToolSchema || compatibility.strictToolSchemaMode != StrictToolSchemaMode.Include)
+      then Left(AgentError.UnsupportedModelCapability(provider, "strict tool schema", "当前协议档案不发送 strict 合同"))
+      else if request.tools.nonEmpty && !capabilities.toolCalls then
         Left(AgentError.UnsupportedModelCapability(provider, "tool calls", "tools were supplied"))
       else if request.tools.nonEmpty && unsupportedChoice.nonEmpty then
         Left(AgentError.UnsupportedModelCapability(provider, "tool_choice", unsupportedChoice.get))
@@ -319,6 +333,7 @@ private[openai] object OpenAIWire:
           .mapError(details => AgentError.InvalidModelResponse(s"invalid tool arguments: $details"))
           .map(arguments => ToolCall(call.id, call.function.name, arguments))
       }
+      _ <- ZIO.fromEither(ToolCall.validateAll(calls))
       baseMessage =
         if calls.nonEmpty then AgentMessage.assistantToolCalls(calls, choice.message.content.getOrElse(""))
         else AgentMessage.assistant(choice.message.content.getOrElse(""))
@@ -332,6 +347,10 @@ private[openai] object OpenAIWire:
             )
           else baseMessage
         )
+      withToolMetadata = retainToolMetadata(
+        message,
+        choice.message.tool_calls.getOrElse(Chunk.empty).flatMap(call => call.extra_content.map(call.id -> _))
+      )
       usage <- decoded.usage.fold[IO[AgentError, TokenUsage]](ZIO.succeed(TokenUsage()))(value =>
         validatedUsage(
           value.prompt_tokens,
@@ -349,7 +368,7 @@ private[openai] object OpenAIWire:
         )
       )
     yield ChatResponse(
-      message,
+      withToolMetadata,
       finishReason(choice.finish_reason),
       ProviderBilling.reported(usage, body.fromJson[Json].toOption.getOrElse(Json.Null)),
       decoded.id,
@@ -393,15 +412,22 @@ private[openai] object OpenAIWire:
     )
     val toolCallId = message.toolCallId.map(value => "tool_call_id" -> Json.Str(value))
     val name       = message.name.map(value => "name" -> Json.Str(value))
-    val calls      = Option.when(message.toolCalls.nonEmpty)(
+    val extras     = message.metadata
+      .get(ToolExtraContentMetadata)
+      .flatMap(_.fromJson[Json].toOption)
+      .collect { case Json.Obj(fields) => fields.toMap }
+      .getOrElse(Map.empty)
+    val calls = Option.when(message.toolCalls.nonEmpty)(
       "tool_calls" -> arr(message.toolCalls.map { call =>
         obj(
-          "id"       -> Json.Str(call.id),
-          "type"     -> Json.Str("function"),
-          "function" -> obj(
-            "name"      -> Json.Str(call.name),
-            "arguments" -> Json.Str(call.arguments.toJson)
-          )
+          List(
+            "id"       -> Json.Str(call.id),
+            "type"     -> Json.Str("function"),
+            "function" -> obj(
+              "name"      -> Json.Str(call.name),
+              "arguments" -> Json.Str(call.arguments.toJson)
+            )
+          ) ++ extras.get(call.id).collect { case value: Json.Obj => "extra_content" -> value }.toList*
         )
       })
     )
@@ -440,7 +466,8 @@ private[openai] object OpenAIWire:
   /** 编码 function tool；不支持 strict 时明确省略对应字段。 */
   private def encodeTool(tool: ToolDefinition, compatibility: OpenAICompatibility): Json =
     val strict = compatibility.strictToolSchemaMode match
-      case StrictToolSchemaMode.Include => Some("strict" -> Json.Bool(tool.strict))
+      case StrictToolSchemaMode.Include =>
+        Some("strict" -> Json.Bool(tool.strict && ToolSchema.supportsStrict(tool.inputSchema)))
       case StrictToolSchemaMode.Disable => Some("strict" -> Json.Bool(false))
       case StrictToolSchemaMode.Omit    => None
     obj(
@@ -492,8 +519,12 @@ private[openai] object OpenAISse:
   /** 内部 EOF 标记，不是 Provider 协议内容；用于区分正常 [DONE] 与网络断流。 */
   private val EndOfStream = "\u0000zyblw-agent-sse-eof\u0000"
   final private case class FunctionDelta(name: Option[String], arguments: Option[String]) derives JsonDecoder
-  final private case class ToolDelta(index: Int, id: Option[String], function: Option[FunctionDelta])
-      derives JsonDecoder
+  final private case class ToolDelta(
+      index: Int,
+      id: Option[String],
+      function: Option[FunctionDelta],
+      extra_content: Option[Json.Obj]
+  ) derives JsonDecoder
   final private case class Delta(
       content: Option[String],
       reasoning_content: Option[String],
@@ -512,7 +543,12 @@ private[openai] object OpenAISse:
   ) derives JsonDecoder
   final private case class ChunkDto(id: Option[String], choices: Chunk[Choice], usage: Option[Usage])
       derives JsonDecoder
-  final private case class PartialTool(id: String, name: String, arguments: String)
+  final private case class PartialTool(
+      id: String,
+      name: String,
+      arguments: String,
+      extraContent: Option[Json.Obj]
+  )
   final private case class State(
       requestId: Option[String] = None,
       text: String = "",
@@ -607,38 +643,86 @@ private[openai] object OpenAISse:
                     Option
                       .when(reasoningDelta.nonEmpty)(ModelStreamEvent.ReasoningDelta(reasoningDelta))
                       .toList
-                  val (updatedTools, toolEvents) = choice.delta.tool_calls
-                    .getOrElse(Chunk.empty)
-                    .foldLeft(
-                      withUsage.tools -> Chunk.empty[ModelStreamEvent]
-                    ) { case ((tools, events), delta) =>
-                      val previous = tools.get(delta.index)
-                      val id       = delta.id.orElse(previous.map(_.id)).getOrElse(s"tool-${delta.index}")
-                      val name     = delta.function.flatMap(_.name).orElse(previous.map(_.name)).getOrElse("")
-                      val fragment = delta.function.flatMap(_.arguments).getOrElse("")
-                      val next     = PartialTool(id, name, previous.fold("")(_.arguments) + fragment)
-                      val started  = Option
-                        .when(previous.isEmpty && name.nonEmpty)(ModelStreamEvent.ToolCallStarted(id, name))
-                        .toList
-                      val changed = Option
-                        .when(fragment.nonEmpty)(
-                          ModelStreamEvent.ToolCallDelta(id, Option.when(name.nonEmpty)(name), fragment)
-                        )
-                        .toList
-                      (tools.updated(delta.index, next), events ++ Chunk.fromIterable(started ++ changed))
+                  ZIO
+                    .fromEither(appendTools(withUsage.tools, choice.delta.tool_calls.getOrElse(Chunk.empty)))
+                    .map { case (updatedTools, toolEvents) =>
+                      val next = withUsage.copy(
+                        text = withUsage.text + textDelta,
+                        reasoning = withUsage.reasoning + reasoningDelta,
+                        tools = updatedTools,
+                        finish = choice.finish_reason
+                          .fold(withUsage.finish)(value => OpenAIWire.finishReason(Some(value)))
+                      )
+                      next -> (startedEvents ++ Chunk.fromIterable(
+                        textEvents ++ reasoningEvents
+                      ) ++ toolEvents)
                     }
-                  val next = withUsage.copy(
-                    text = withUsage.text + textDelta,
-                    reasoning = withUsage.reasoning + reasoningDelta,
-                    tools = updatedTools,
-                    finish = choice.finish_reason
-                      .fold(withUsage.finish)(value => OpenAIWire.finishReason(Some(value)))
-                  )
-                  ZIO.succeed(
-                    next -> (startedEvents ++ Chunk.fromIterable(textEvents ++ reasoningEvents) ++ toolEvents)
-                  )
             }
         }
+
+  private def appendTools(
+      initial: Map[Int, PartialTool],
+      deltas: Chunk[ToolDelta]
+  ): Either[AgentError, (Map[Int, PartialTool], Chunk[ModelStreamEvent])] =
+    deltas.foldLeft[Either[AgentError, (Map[Int, PartialTool], Chunk[ModelStreamEvent])]](
+      Right(initial -> Chunk.empty)
+    ) { (result, delta) =>
+      result.flatMap { case (tools, events) =>
+        val previous     = tools.get(delta.index)
+        val incomingId   = delta.id.filter(_.trim.nonEmpty)
+        val incomingName = delta.function.flatMap(_.name).filter(_.trim.nonEmpty)
+        val conflicting  = previous.exists(value =>
+          incomingId.exists(id => value.id.nonEmpty && id != value.id) ||
+            incomingName.exists(name => value.name.nonEmpty && name != value.name)
+        )
+        if delta.index < 0 || conflicting then Left(AgentError.InvalidModelResponse("流式工具 index 或身份字段不一致"))
+        else
+          val id       = incomingId.orElse(previous.map(_.id)).getOrElse("")
+          val name     = incomingName.orElse(previous.map(_.name)).getOrElse("")
+          val fragment = delta.function.flatMap(_.arguments).getOrElse("")
+          mergeToolExtra(previous.flatMap(_.extraContent), delta.extra_content).map { extra =>
+            val next          = PartialTool(id, name, previous.fold("")(_.arguments) + fragment, extra)
+            val wasIdentified = previous.exists(value => value.id.nonEmpty && value.name.nonEmpty)
+            val identified    = id.nonEmpty && name.nonEmpty
+            val started       =
+              Option.when(!wasIdentified && identified)(ModelStreamEvent.ToolCallStarted(id, name))
+            val visibleFragment = if wasIdentified then fragment else next.arguments
+            val changed         = Option.when(identified && visibleFragment.nonEmpty)(
+              ModelStreamEvent.ToolCallDelta(id, Some(name), visibleFragment)
+            )
+            tools.updated(delta.index, next) -> (events ++ Chunk.fromIterable(
+              started.toList ++ changed.toList
+            ))
+          }
+      }
+    }
+
+  private def googleSignature(extra: Option[Json.Obj]): Option[String] =
+    extra
+      .flatMap(_.fields.toMap.get("google"))
+      .collect { case Json.Obj(fields) => fields.toMap }
+      .flatMap(_.get("thought_signature"))
+      .collect { case Json.Str(value) if value.nonEmpty => value }
+
+  private def mergeToolExtra(
+      previous: Option[Json.Obj],
+      incoming: Option[Json.Obj]
+  ): Either[AgentError, Option[Json.Obj]] =
+    val before = googleSignature(previous)
+    val after  = googleSignature(incoming)
+    if before.zip(after).exists { case (a, b) => a != b } then
+      Left(AgentError.InvalidModelResponse("同一工具调用的 thought signature 不一致"))
+    else if before.isEmpty && after.nonEmpty then
+      Right(
+        Some(
+          Json.Obj(
+            Chunk.fromIterable(
+              previous.toList.flatMap(_.fields).toMap ++ incoming.toList.flatMap(_.fields).toMap
+            )
+          )
+        )
+      )
+    else Right(previous.orElse(incoming.filter(_.fields.nonEmpty)))
 
   /** 校验 SSE usage，防止负值污染累计预算；None 表示 Provider 尚未发送 usage。 */
   private def validateUsage(usage: Option[Usage]): IO[AgentError, Option[TokenUsage]] = usage match
@@ -676,14 +760,21 @@ private[openai] object OpenAISse:
             .mapError(details => AgentError.InvalidModelResponse(s"流式工具参数不是合法 JSON: $details"))
             .map(arguments => ToolCall(tool.id, tool.name, arguments))
         }
+        .flatMap { calls =>
+          ZIO.fromEither(ToolCall.validateAll(calls)).as(calls)
+        }
         .map { calls =>
           val base =
             if calls.nonEmpty then AgentMessage.assistantToolCalls(calls, state.text)
             else AgentMessage.assistant(state.text)
-          val message =
+          val withReasoning =
             if compatibility.preserveReasoningContent && state.reasoning.nonEmpty then
               base.copy(metadata = base.metadata.updated("reasoning_content", state.reasoning))
             else base
+          val message = OpenAIWire.retainToolMetadata(
+            withReasoning,
+            Chunk.fromIterable(state.tools.values.flatMap(tool => tool.extraContent.map(tool.id -> _)))
+          )
           val response = ChatResponse(
             message,
             state.finish,

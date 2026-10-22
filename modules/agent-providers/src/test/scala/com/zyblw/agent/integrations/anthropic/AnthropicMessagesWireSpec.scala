@@ -1,6 +1,7 @@
 package com.zyblw.agent.integrations.anthropic
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.model.ModelRequirement
 import java.nio.charset.StandardCharsets
 import zio.*
 import zio.json.*
@@ -61,6 +62,40 @@ object AnthropicMessagesWireSpec extends ZIOSpecDefault:
       |""".stripMargin
 
   def spec: Spec[TestEnvironment & Scope, Any] = suite("Anthropic Messages wire")(
+    test("hard strict requires an adapter guarantee, not only a closed schema") {
+      val tool = ToolDefinition(
+        "lookup",
+        "lookup",
+        Json.Obj(
+          "type"                 -> Json.Str("object"),
+          "properties"           -> Json.Obj(),
+          "required"             -> Json.Arr(),
+          "additionalProperties" -> Json.Bool(false)
+        )
+      )
+      val request = ChatRequest(
+        Chunk(AgentMessage.user("query")),
+        Chunk(tool),
+        ModelSettings(requirement = Some(ModelRequirement(strictToolSchema = true)))
+      )
+      assertTrue(
+        AnthropicMessagesWire
+          .encodeRequest(request, config, false)
+          .left
+          .toOption
+          .exists(_.isInstanceOf[AgentError.UnsupportedModelCapability])
+      )
+    },
+    test("blank tool ids and names fail before returning a model response") {
+      for
+        id <- AnthropicMessagesWire
+          .decodeResponse(responsePayload.replace("\"id\":\"toolu-1\"", "\"id\":\" \""))
+          .exit
+        name <- AnthropicMessagesWire
+          .decodeResponse(responsePayload.replace("\"name\":\"lookup\"", "\"name\":\" \""))
+          .exit
+      yield assertTrue(id.causeOption.exists(_.defects.isEmpty), id.isFailure, name.isFailure)
+    },
     test("缺少响应用量或流式最终输出用量时不能标为准确零") {
       val stream = streamPayload.replaceAll(",\"usage\":\\{\"output_tokens\":5\\}", "")
       for

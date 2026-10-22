@@ -122,7 +122,7 @@ private[anthropic] object AnthropicMessagesSse:
       case "tool_use" =>
         PartialBlock(
           kind,
-          id = AnthropicMessagesWire.stringField(block, "id").getOrElse(s"tool-$index"),
+          id = AnthropicMessagesWire.stringField(block, "id").getOrElse(""),
           name = AnthropicMessagesWire.stringField(block, "name").getOrElse("")
         )
       case "thinking" =>
@@ -254,7 +254,9 @@ private[anthropic] object AnthropicMessagesSse:
         state.responseId,
         usageReported = state.inputReported && state.outputReported
       )
-      ZIO.succeed(state.copy(terminal = true) -> Chunk(ModelStreamEvent.Completed(response)))
+      ZIO
+        .fromEither(ToolCall.validateAll(calls))
+        .as(state.copy(terminal = true) -> Chunk(ModelStreamEvent.Completed(response)))
 
   /** 将累积 block 重建为下一轮可原样回填的 Anthropic content block。 */
   private def rawBlock(index: Int, block: PartialBlock, calls: Map[Int, ToolCall]): Option[Json] =
