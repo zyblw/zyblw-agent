@@ -16,9 +16,9 @@
 | 业务接入 | 业务仓库用 Docker + 自管 PostgreSQL 引入框架 | `scripts/verify-business-ready.sh`：格式、`testFull`、问答契约、证据清单结构与 PostgreSQL 18 全量契约。然后 `publishM2` 得到 `0.9.0-local`，或 `compose.business.yml` 启动 | 长时 soak、主备、PgBouncer、滚动发布、备份 RPO/RTO、SLO owner |
 | 公开发布 | annotated tag 上 Maven Central | 现有 release workflow：`testFull`、`publishM2`、Maven consumer、签名、Portal | 在没有宿主环境时不把 7 项证据改成 `verified_host`，也不因此阻塞业务接入 |
 
-业务项目固定精确版本，不要写版本范围或 `SNAPSHOT`。当前全新安装版本是 `0.9.0`。
-首版尚未公开发布；准备发布时将 CHANGELOG 的 Unreleased 定日为真实发布日期，再把 annotated tag `v0.9.0` 打在包含全部当前基线及 `docs/fresh-install-0.9.0.md` 的 `origin/main` commit 上。见
-[0.9.0 全新安装](fresh-install-0.9.0.md)。
+业务项目固定精确版本，不要写版本范围或 `SNAPSHOT`。当前全新安装版本是 `0.10.0`。
+准备发布时将 CHANGELOG 的顶部版本定日为真实发布日期，再把 annotated tag `v0.10.0` 打在包含全部当前基线及 `docs/fresh-install-0.10.0.md` 的 `origin/main` commit 上。见
+[0.10.0 全新安装](fresh-install-0.10.0.md)。
 
 ## 发布目标
 
@@ -64,8 +64,8 @@ Git、Actions cache 或日志。发布步骤还会先停止前序验证启动的
 使用与 CHANGELOG、升级指南一致的 annotated tag 触发发布，例如：
 
 ```bash
-git tag -a v0.9.0 -m "zyblw-agent v0.9.0"
-git push origin v0.9.0
+git tag -a v0.10.0 -m "zyblw-agent v0.10.0"
+git push origin v0.10.0
 ```
 
 标签触发 release workflow：
@@ -84,9 +84,9 @@ Central artifact 不可覆盖；失败修复必须用新版本。
 
 ## 日常版本策略
 
-- 当前唯一开发与安装版本是 `0.9.0`，核心与 1024 知识各只有一份 V001 空库基线。
+- 当前唯一开发与安装版本是 `0.10.0`，核心与 1024 知识各只有一份 V001 空库基线。
 - build、CI 和 release 不比较或消费旧版本 artifact；旧 tag 与 Central 制品只作为不可变发布记录存在。
-- 当前使用 early SemVer。`0.9.0` 发布后，后续 `0.9.x` 以它为二进制和源码兼容基线；破坏性变化进入新的 minor。
+- 当前使用 early SemVer。`0.10.0` 发布后，后续 `0.10.x` 以它为二进制和源码兼容基线；破坏性变化进入新的 minor。
 - Provider、Beta/Experimental 模块跟随统一版本，减少多模块组合矩阵。
 - `modules/agent-dashboard` 随仓库打 tag，但不发布 Maven 制品。
 - 独立 Maven consumer 仍保留，用来验证当前候选的 POM、资源和 source/doc JAR，不构成业务运行的第二版本路径。
@@ -94,7 +94,7 @@ Central artifact 不可覆盖；失败修复必须用新版本。
 ## 发布前清单
 
 1. CHANGELOG 中有用户可理解的变化、升级方式和风险。
-2. annotated tag、CHANGELOG 顶部版本与 `docs/fresh-install-0.9.0.md` 一致，且 tag commit 已经包含在远端 `main`；
+2. annotated tag、CHANGELOG 顶部版本与 `docs/fresh-install-0.10.0.md` 一致，且 tag commit 已经包含在远端 `main`；
    release workflow 会通过 `.github/scripts/verify-release.sh` fail-closed 校验。
 3. `sbt -batch testFull` 成功。
 4. `RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull` 成功。

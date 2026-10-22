@@ -18,7 +18,7 @@ import {
 import { useConnection } from '@/lib/connection';
 import { AdminApiError, adminApi } from '@/lib/adminClient';
 import { formatCount, formatInstant } from '@/lib/format';
-import type { AdminRunEventView, RunSummaryView } from '@/types/admin';
+import type { AdminRunEventView, ErrorResponse, RunSummaryView } from '@/types/admin';
 import { Badge, Button, EmptyState, FOCUS_RING, Mono, Panel } from '@/components/ui';
 
 const MAX_EVENTS = 500;
@@ -113,14 +113,18 @@ export function RunEventStream({ run }: { run: RunSummaryView }) {
     intentionalStopRef.current = false;
     setFailure(null);
 
-    const initialAfter = fromBeginning ? undefined : events[events.length - 1]?.sequence;
-    lastSequenceRef.current = initialAfter;
-    setLastSequence(initialAfter);
+    const initialSequence = fromBeginning
+      ? -1
+      : events.length > 0
+        ? events[events.length - 1].sequence
+        : Math.max(-1, run.lastEventSequence - RECENT_WINDOW);
+    lastSequenceRef.current = initialSequence;
+    setLastSequence(fromBeginning ? undefined : initialSequence >= 0 ? initialSequence : undefined);
     if (fromBeginning) {
       setEvents([]);
     }
 
-    connectWithBackoff(initialAfter, 0);
+    connectWithBackoff(initialSequence, 0);
   }
 
   function connectWithBackoff(afterSequence: number | undefined, attempt: number) {
@@ -129,16 +133,38 @@ export function RunEventStream({ run }: { run: RunSummaryView }) {
 
     const controller = new AbortController();
     controllerRef.current = controller;
+    let delivered = false;
 
     adminApi
       .streamRunEvents(config, run.runId, {
         afterSequence,
         signal: controller.signal,
         onMessage: (msg) => {
+          if (msg.event === 'stream_error') {
+            let streamError: ErrorResponse = { category: 'stream', message: '事件流在服务端中断' };
+            try {
+              streamError = JSON.parse(msg.data) as ErrorResponse;
+            } catch {
+              // 使用本地兜底，不显示无法验证的原始响应。
+            }
+            throw new AdminApiError(503, streamError.category, streamError.message);
+          }
+
           setStatus('live');
           setFailure(null);
+          delivered = true;
           try {
             const parsed = parseEvent(msg.data);
+            if (parsed.runId !== run.runId) {
+              throw new AdminApiError(0, 'event-run-mismatch', '事件流返回了其他 Run 的事件');
+            }
+            if (
+              lastSequenceRef.current !== undefined &&
+              lastSequenceRef.current !== -1 &&
+              parsed.sequence !== lastSequenceRef.current + 1
+            ) {
+              throw new AdminApiError(0, 'event-sequence-gap', '事件序号不连续，已停止显示以避免误判');
+            }
             lastSequenceRef.current = parsed.sequence;
             setLastSequence(parsed.sequence);
             setEvents((prev) => {
@@ -148,6 +174,7 @@ export function RunEventStream({ run }: { run: RunSummaryView }) {
             });
           } catch (error) {
             setFailure(errorMessage(error));
+            throw error;
           }
         },
       })
@@ -157,13 +184,15 @@ export function RunEventStream({ run }: { run: RunSummaryView }) {
         }
       })
       .catch((error: unknown) => {
-        if (intentionalStopRef.current) return;
-        setStatus('error');
-        setFailure(errorMessage(error));
+        if (controller.signal.aborted || intentionalStopRef.current) return;
+        controller.abort();
+        const retryAttempt = delivered ? 0 : attempt;
+        const delay = Math.min(1000 * Math.pow(2, retryAttempt), MAX_RETRY_DELAY_MS);
+        setStatus('retrying');
+        setFailure(`${errorMessage(error)} ${Math.round(delay / 1000)} 秒后重试。`);
 
-        const delay = Math.min(1000 * Math.pow(2, attempt), MAX_RETRY_DELAY_MS);
         retryTimerRef.current = setTimeout(() => {
-          connectWithBackoff(lastSequenceRef.current, attempt + 1);
+          connectWithBackoff(lastSequenceRef.current ?? afterSequence, retryAttempt + 1);
         }, delay);
       });
   }

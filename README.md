@@ -10,8 +10,8 @@ Service、Agent、Harness 或 Durable Workflow。
         → 暂停/恢复/取消 → 低敏 Inspector、Trace 与 Eval
 ```
 
-当前唯一版本线是 `0.9.0`，只支持全新数据库与重新摄入知识文档。完整操作见
-[0.9.0 全新安装](docs/fresh-install-0.9.0.md)。
+当前唯一版本线是 `0.10.0`，只支持全新数据库与重新摄入知识文档。完整操作见
+[0.10.0 全新安装](docs/fresh-install-0.10.0.md)。
 
 ## 什么时候使用哪一层
 
@@ -36,7 +36,7 @@ Harness 不是第二套模型循环；Workflow 也不替代普通函数。多 Ag
 - OpenAI Responses、Anthropic Messages、Gemini Interactions，以及可配置的 OpenAI-compatible Provider/中转站
   （含 DeepSeek、Qwen、GLM、Kimi 一级档案）
 
-`0.9.0` 的书籍问答入口是 `KnowledgeQaHost`；客户支持与审批写工具仍走 `ProductionSupportHost`。二者都需要 PostgreSQL、可信身份头和 ZIO HTTP。`AgentQuickstart` 已删除。
+`0.10.0` 的书籍问答入口是 `KnowledgeQaHost`；客户支持与审批写工具仍走 `ProductionSupportHost`。二者都需要 PostgreSQL、可信身份头和 ZIO HTTP。`AgentQuickstart` 已删除。
 
 ```bash
 export ZYBLW_AGENT_JDBC_URL=jdbc:postgresql://127.0.0.1:5432/zyblw_agent
@@ -59,14 +59,14 @@ smoke 命令见 [Provider 与能力协商](docs/providers.md#中转站与多端�
 
 创建 Run 返回 `202`：HTTP 只提交耐久命令，Worker 随后推进。调用方用 `Idempotency-Key`、`X-Tenant-Id`、`X-User-Id` 和 runId 查询 `/api/v1/runs/{runId}`。退款工具会停在 `WaitingForApproval`，必须由可信身份调用审批接口。
 
-业务项目固定引入精确版本 `0.9.0`。它是全新安装基线，不能从已发布的 `0.8.0` 原地升级数据库。Maven Central 以 annotated tag `v0.9.0` 的发布工作流在 Central Portal 显示 Published 为准；在此之前从 Central 解析会失败，应使用本仓库该 tag 的源码，或仅在本机使用 `0.9.0-local`。
+业务项目固定引入精确版本 `0.10.0`。它是全新安装基线，不能从已发布的旧版本原地升级数据库。Maven Central 以 annotated tag `v0.10.0` 的发布工作流在 Central Portal 显示 Published 为准；在此之前从 Central 解析会失败，应使用本仓库该 tag 的源码，或仅在本机使用 `0.10.0-local`。
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.zyblw" %% "zyblw-agent-core"      % "0.9.0",
-  "io.github.zyblw" %% "zyblw-agent-providers" % "0.9.0",
-  "io.github.zyblw" %% "zyblw-agent-postgres"  % "0.9.0",
-  "io.github.zyblw" %% "zyblw-agent-zio-http"  % "0.9.0"
+  "io.github.zyblw" %% "zyblw-agent-core"      % "0.10.0",
+  "io.github.zyblw" %% "zyblw-agent-providers" % "0.10.0",
+  "io.github.zyblw" %% "zyblw-agent-postgres"  % "0.10.0",
+  "io.github.zyblw" %% "zyblw-agent-zio-http"  % "0.10.0"
 )
 ```
 
@@ -157,17 +157,17 @@ flowchart TB
 
 | 领域 | 当前可用能力 | 成熟度与主要缺口 |
 |---|---|---|
-| Agent Runtime | typed error、预算、审批、恢复、取消、流式事件 | Foundation；仍需长运行故障与负载证据 |
-| Tool / Side Effect | typed schema、scope、风险、冲突、幂等、outbox/inbox、补偿 | Foundation/Experimental；需要更多真实写业务 |
+| Agent Runtime | typed error、预算、审批、恢复、取消、流式事件、-Wnonunit-statement 效应纪律 | Foundation；仍需长运行故障与负载证据 |
+| Tool / Side Effect | typed schema strict 硬约束、数组 items 补齐、流式 ID 累加、双轮探活、outbox/inbox、补偿 | Foundation/Experimental；需要更多真实写业务 |
 | Durable Control | command queue、有界 Run 并发、lease、heartbeat、generation fencing、低敏 queue snapshot | Foundation；短时三实例 drain、中断重领、独立 JVM `SIGKILL`/数据库 restart，以及正式 Runtime 的 3 Worker/6 lane 有界 soak 回归阈值已验证；仍需业务长时 soak、节点/主备故障与生产 SLO |
 | Workflow | 静态图校验、循环预算、fan-out、checkpoint、execution ledger、低敏 timeline/wake queue、durable wait/signal、受监督 wake worker | Experimental；独立 JVM `SIGKILL` + PostgreSQL restart 后双 generation 接管及 3 Worker/126 Run 有界 wake soak 已验证；仍需数据库 failover、节点丢失、长时 soak、人工任务与子图 |
-| Context / Memory | 分区预算、压缩、可信来源、长期记忆治理 | Beta；需要真实长会话质量趋势 |
-| RAG | 目录/PDF 摄取、Markdown+JSON、page/bbox lineage、结构切分、hybrid、rerank、相邻/同父级扩展、citation、eval | Beta；真实 OCR/恶意 PDF/大规模容量待验收 |
-| Provider | OpenAI-compatible/中转站（DeepSeek/Qwen/GLM/Kimi）、Responses、Anthropic、Gemini、逐模型 capability 与 live smoke | Beta；每个实际 endpoint/model/profile 需要真实证据 |
-| 管理面 / 运维控制台 | scope fail-closed、能力探测、keyset 目录、CAS 配置覆盖与审计、Run SSE 调试器、七个面板 | Beta；跨 Run 成本聚合与嵌入式部署待完成 |
-| 模型治理 | 目录 fail-closed 校验、运行时 Provider/模型切换、探活、脱敏 HTTP 失败分类、价目表成本估算 | Beta；按 Agent 粒度覆盖与自动降级链待完成 |
-| HTTP / Ops | 异步 v1 API、耐久 SSE、OpenAPI、健康检查、Inspector、OTLP/Langfuse | Foundation/Beta；CLI、告警与事故演练待完成 |
-| MCP / Sandbox / Eval | MCP client、Workspace/OCI 边界、趋势门禁 | Beta/Experimental；OAuth、真实隔离和人工校准待完成 |
+| Context / Memory / 安全 | 分区预算、四维长效记忆体系、UntrustedContentMonitor 零宽字符与对抗注入拦截（Unicode 空白归一化、Locale.ROOT 转换） | Beta；需要真实长会话质量趋势 |
+| RAG / 知识大纲 | 结构大纲（StructureOutline）、对比检索意图规划（comparisonParts）、双路召回（Hybrid + Phrase）、Profile 蓝绿平滑迁移、Qwen rerank 细粒度降级跟踪 | Beta；真实 OCR/恶意 PDF/大规模容量待验收 |
+| Provider / 模型发现 | OpenAI-compatible（中转 developer 角色映射、4sAPI 端点规整）、Responses、Anthropic、Gemini、OpenRouter / OpenAI 目录发现 | Beta；每个实际 endpoint/model/profile 需要真实证据 |
+| 模型治理与计费规则 | LiveModelRegistry 连接增量热重载（换 Key 不重启进程）、BillingTariff 规则引擎（互斥条件与确定性估算）、原币报价与冻结价目表 | Beta；按 Agent 粒度覆盖与自动降级链待完成 |
+| 管理面 / 运维控制台 | 双向导航侧边栏工作区、POST /api/v1/admin/runs/{runId}/approval 审批闭环、CAS 配置覆盖、Run SSE 调试器 | Beta；跨 Run 成本聚合与嵌入式部署待完成 |
+| HTTP / 构建基线 | 异步 v1 API、耐久 SSE、OpenAPI 1.0.0、sbt 2.x Bare Settings、Scala 3 字节码优化与受控内联、OTLP/Langfuse | Foundation/Beta；CLI、告警与事故演练待完成 |
+| MCP / Sandbox / Eval | MCP client、Workspace/OCI 边界、趋势门禁、中医经典离线评测集 | Beta/Experimental；OAuth、真实隔离和人工校准待完成 |
 
 逐项证据和下一验收条件以 [成熟度与路线](docs/maturity-and-roadmap.md) 为准，不以 README 的宣传文字为准。
 
@@ -228,7 +228,7 @@ PDF/Markdown
 → Rerank / 有界谱系扩展 / Citation / Context Budget
 ```
 
-本地测试可用 `InMemoryKnowledgeIndexStore.knowledge`；`0.9.0` 生产参考路径使用
+本地测试可用 `InMemoryKnowledgeIndexStore.knowledge`；`0.10.0` 生产参考路径使用
 `PostgresAgentPersistence.migratedKnowledge1024()`（应用启动时自动迁移），或由部署任务先调用
 `AgentPostgresMigrations.migrateKnowledge1024` 后使用 `PostgresAgentPersistence.knowledge(1024)`。知识对象与 Flyway history
 位于 `zyblw_agent_knowledge` 专属 schema。详细代码见
@@ -294,9 +294,9 @@ ZIO HTTP Adapter 使用 `Routes` 组合业务路由，并用声明式 `Endpoint`
 
 ## 安装契约与故障定位
 
-`0.9.0` 空库只执行 core V001 与独立 1024 knowledge V001。应用不提供旧 schema、旧向量维度或旧状态的升级入口；
+`0.10.0` 空库只执行 core V001 与独立 1024 knowledge V001。应用不提供旧 schema、旧向量维度或旧状态的升级入口；
 探测到非当前基线时直接拒绝启动。完整边界见[兼容性契约](docs/compatibility.md)与
-[0.9.0 全新安装](docs/fresh-install-0.9.0.md)。
+[0.10.0 全新安装](docs/fresh-install-0.10.0.md)。
 
 常见问题先按边界定位：
 
@@ -338,8 +338,8 @@ RUN_POSTGRES_INTEGRATION=1 sbt --batch postgres/testFull
 ./integration-tests/workflow-wake-worker-kill-recovery.sh --restart-postgres
 ./integration-tests/durable-worker-soak.sh
 ./integration-tests/workflow-wake-worker-soak.sh
-sbt --batch 'set version := "0.9.0-local"; publishM2'
-cd integration-tests/maven-consumer && ZYBLW_AGENT_VERSION=0.9.0-local sbt --batch compile
+sbt --batch 'set version := "0.10.0-local"; publishM2'
+cd integration-tests/maven-consumer && ZYBLW_AGENT_VERSION=0.10.0-local sbt --batch compile
 ```
 
 生产打包与字节码优化验证（开启 Scala 3 Optimizer 与领域受控内联）：

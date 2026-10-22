@@ -104,9 +104,9 @@ test('检查面板渲染冻结/现场对照、漂移字段和账本', async ({ p
   await page.goto('/?tab=inspect');
   await page.getByLabel('Run ID').fill('11111111-1111-1111-1111-111111111111');
   await expect(page.getByText('abcd1234abcd1234')).toBeVisible();
-  await expect(page.getByText('requires-revalidation')).toBeVisible();
+  await expect(page.getByText('requires-revalidation').first()).toBeVisible();
   await expect(page.getByText('Context/profileId')).toBeVisible();
   await expect(page.getByText('stub-model')).toBeVisible();
-  await expect(page.getByText('timer')).toBeVisible();
+  await expect(page.getByText('timer', { exact: true })).toBeVisible();
   await expect(page.getByText('prompt', { exact: true })).toHaveCount(0);
 });

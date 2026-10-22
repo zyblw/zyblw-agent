@@ -10,7 +10,7 @@
 
 1. [总体使用手册](usage-guide.md)
 2. [快速开始](getting-started.md)
-3. [Docker 可执行配置与命令](../deploy/docker/README.md)、[PostgreSQL 生产接入](postgres-quickstart.md)、[Docker + 自管 PostgreSQL](operations-docker-vm.md) 与 [升级到 0.9.0](fresh-install-0.9.0.md)
+3. [Docker 可执行配置与命令](../deploy/docker/README.md)、[PostgreSQL 生产接入](postgres-quickstart.md)、[Docker + 自管 PostgreSQL](operations-docker-vm.md) 与 [升级到 0.10.0](fresh-install-0.10.0.md)
 4. [AgentApplication 与 Builder](application-builder.md)
 5. [Provider 与能力协商](providers.md)
 6. [真实 Provider / 中转站 smoke](provider-live-smoke.md)
@@ -74,7 +74,7 @@
 - [模块与依赖选择](modules.md)
 - [版本、Maven Central 发布与回滚](releasing.md)
 - [兼容性契约与版本边界](compatibility.md)
-- [0.9.0 全新安装基线与知识问答](fresh-install-0.9.0.md)
+- [0.10.0 全新安装基线与知识问答](fresh-install-0.10.0.md)
 - [宿主数据库迁移](database-migrations.md)
 - [PostgreSQL 生产接入与运维](postgres-quickstart.md)
 - [Docker/VM 安装、升级与恢复](operations-docker-vm.md)

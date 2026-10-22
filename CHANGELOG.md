@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased — 首版 0.9.0 空库基线
+## 0.10.0 - 2026-10-22
 
-本站与当前框架候选尚未发布。当前所有能力构成同一个首次发布候选，不提供旧候选升级或兼容读取路径。Git 历史中的候选记录不参与当前构建；远端既有 tag/制品不改写。
+`0.10.0` 是稳定演进安装基线，包含自 `0.9.0` 发布以来的全部架构加固与新特性。核心与 1024 知识各有一份 V001 基线（含结构检索与大纲快照）。执行内核为 `AgentKernel` + `AgentRuntimeDriver`。稳定业务 HTTP 契约维持 OpenAPI `1.0.0`。全部十一项 Maven 制品保持同一精确版本发布。
 
 - 工具协议加固：补齐知识检索数组元素类型；发网前校验可移植 Schema 与 strict 硬约束；所有适配器和 Runtime 验证工具身份/参数，旧非法计划恢复收口为 Failed。OpenAI-compatible 忽略正常空身份分片、拒绝身份冲突，保留通用中转 reasoning_content 与按 call id 关联的 Gemini opaque extra_content。ModelProbeConfig 增加可选 ToolRoundTrip 模式，覆盖流式工具调用与结果回填；默认基本探活不变。
 - 注入监测补齐 Unicode 空白归一化，并固定 Locale.ROOT 大小写转换，避免宿主区域设置影响现有词表；不扩大匹配词或做 NFKC 转换。
