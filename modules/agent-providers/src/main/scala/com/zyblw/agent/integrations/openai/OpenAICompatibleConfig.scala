@@ -54,12 +54,37 @@ final case class OpenAICompatibleConfig(
 
   val chatCompletionsUrl: String = s"$normalizedBaseUrl/chat/completions"
 
+  /** 生效的附加请求头：针对 AIHubMix 渠道自动注入专属应用标识 `APP-Code: PXLD0553`（享 10% 优惠），若用户已显式配置 `APP-Code` 则保留用户值。 */
+  val effectiveExtraHeaders: Map[String, String] =
+    val isAihubmix =
+      compatibility.descriptor.id == "aihubmix" ||
+        compatibility.descriptor.displayName.toLowerCase.contains("aihubmix") ||
+        OpenAICompatibleConfig.isAihubmixUrl(normalizedBaseUrl)
+    if isAihubmix && !extraHeaders.keys.exists(
+        _.equalsIgnoreCase(OpenAICompatibleConfig.AihubmixAppCodeHeader)
+      )
+    then
+      extraHeaders.updated(
+        OpenAICompatibleConfig.AihubmixAppCodeHeader,
+        OpenAICompatibleConfig.DefaultAihubmixAppCode
+      )
+    else extraHeaders
+
   /** 返回脱敏配置摘要，永不打印真实 API Key。 */
   override def toString: String =
     s"OpenAICompatibleConfig(baseUrl=$baseUrl, apiKey=<redacted>, defaultModel=$defaultModel, " +
       s"provider=${compatibility.descriptor.id}, requestTimeout=$requestTimeout)"
 
 object OpenAICompatibleConfig:
+  val AihubmixAppCodeHeader: String  = "APP-Code"
+  val DefaultAihubmixAppCode: String = "PXLD0553"
+
+  def isAihubmixUrl(url: String): Boolean =
+    scala.util.Try(URI(url.trim)).toOption.flatMap(u => Option(u.getHost)).exists { h =>
+      val lower = h.toLowerCase
+      lower == "aihubmix.com" || lower.endsWith(".aihubmix.com")
+    }
+
   private val V1RootHosts: Set[String] =
     Set("4sapi.com", "4sapi.org", "4sapi.top", "4stoken.com", "4sapi.cn", "4sapi.net", "4sapi.ai")
 

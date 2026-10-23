@@ -73,9 +73,13 @@ object ModelDiscovery:
       url: String = AihubmixModelsUrl,
       timeout: Duration = 20.seconds
   ): IO[AgentError, Chunk[DiscoveredModel]] =
-    fetch(client, url, None, Map.empty, timeout).flatMap(body =>
-      ZIO.fromEither(parseAihubmix(body)).mapError(AgentError.InvalidConfiguration(_))
-    )
+    fetch(
+      client,
+      url,
+      None,
+      Map(OpenAICompatibleConfig.AihubmixAppCodeHeader -> OpenAICompatibleConfig.DefaultAihubmixAppCode),
+      timeout
+    ).flatMap(body => ZIO.fromEither(parseAihubmix(body)).mapError(AgentError.InvalidConfiguration(_)))
 
   /** 读取 OpenAI-compatible 网关的 `/models`。 */
   def openAICompatible(
@@ -94,7 +98,16 @@ object ModelDiscovery:
       else clean
     if !ProviderEndpointUrl.isAllowed(rootUrl) then ZIO.fail(AgentError.InvalidConfiguration("baseUrl 不被允许"))
     else
-      fetch(client, s"$rootUrl/models", Some(apiKey), extraHeaders, timeout).flatMap(body =>
+      val effectiveHeaders =
+        if OpenAICompatibleConfig.isAihubmixUrl(rootUrl) &&
+          !extraHeaders.keys.exists(_.equalsIgnoreCase(OpenAICompatibleConfig.AihubmixAppCodeHeader))
+        then
+          extraHeaders.updated(
+            OpenAICompatibleConfig.AihubmixAppCodeHeader,
+            OpenAICompatibleConfig.DefaultAihubmixAppCode
+          )
+        else extraHeaders
+      fetch(client, s"$rootUrl/models", Some(apiKey), effectiveHeaders, timeout).flatMap(body =>
         ZIO.fromEither(parseOpenAIModels(body)).mapError(AgentError.InvalidConfiguration(_))
       )
 

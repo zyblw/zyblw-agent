@@ -74,6 +74,10 @@ final case class OpenAICompatibleEmbeddingConfig(
   /** 标准 embeddings 创建端点。 */
   val embeddingsUrl: String = s"${baseUrl.stripSuffix("/")}/embeddings"
 
+  /** 针对 AIHubMix 端点自动携带应用标识 `APP-Code: PXLD0553`。 */
+  val isAihubmix: Boolean =
+    providerId == "aihubmix" || OpenAICompatibleConfig.isAihubmixUrl(baseUrl)
+
   /** 日志摘要永远不包含 API Key 或默认选项正文。 */
   override def toString: String =
     s"OpenAICompatibleEmbeddingConfig(providerId=$providerId, baseUrl=$baseUrl, apiKey=<redacted>, " +
@@ -281,13 +285,19 @@ final class OpenAICompatibleEmbeddingService(
   private def callBatch(texts: Chunk[String]): IO[RetrievalError, EmbeddingBatchResult] =
     for
       requestJson <- ZIO.fromEither(encodeRequest(texts))
-      response    <- client
-        .batched(
-          Request
-            .post(config.embeddingsUrl, Body.fromString(requestJson.toJson))
-            .addHeader(Header.Authorization.Bearer(config.apiKey))
-            .addHeader(Header.ContentType(MediaType.application.json))
-        )
+      baseReq = Request
+        .post(config.embeddingsUrl, Body.fromString(requestJson.toJson))
+        .addHeader(Header.Authorization.Bearer(config.apiKey))
+        .addHeader(Header.ContentType(MediaType.application.json))
+      httpRequest =
+        if config.isAihubmix then
+          baseReq.addHeader(
+            OpenAICompatibleConfig.AihubmixAppCodeHeader,
+            OpenAICompatibleConfig.DefaultAihubmixAppCode
+          )
+        else baseReq
+      response <- client
+        .batched(httpRequest)
         .timeoutFail(timeoutError)(config.requestTimeout)
         .mapError(mapTransportError)
       body   <- response.body.asString.mapError(mapTransportError)

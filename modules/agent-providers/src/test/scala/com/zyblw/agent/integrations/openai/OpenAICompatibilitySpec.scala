@@ -257,6 +257,13 @@ object OpenAICompatibilitySpec extends ZIOSpecDefault:
           OpenAICompatibility.aihubmix()
         )
         .map(_.toString)
+      val defaultConfig = OpenAICompatibleConfig(
+        baseUrl = "https://aihubmix.com/v1",
+        apiKey = "sk-test",
+        defaultModel = "gemini-2.5-flash",
+        compatibility = OpenAICompatibility.aihubmix()
+      )
+      val customConfig = defaultConfig.copy(extraHeaders = Map("APP-Code" -> "CUSTOM99"))
       assertTrue(
         encoded.exists(_.contains("\"role\":\"system\"")),
         encoded.forall(!_.contains("\"role\":\"developer\"")),
@@ -268,7 +275,9 @@ object OpenAICompatibilitySpec extends ZIOSpecDefault:
         qwenNone.exists(_.contains("\"enable_thinking\":false")),
         deepSeekNone.exists(_.contains("\"thinking\":{\"type\":\"disabled\"}")),
         gemini3None.exists(_.contains("\"reasoning_effort\":\"low\"")),
-        claudeNone.forall(!_.contains("reasoning_effort"))
+        claudeNone.forall(!_.contains("reasoning_effort")),
+        defaultConfig.effectiveExtraHeaders.get("APP-Code").contains("PXLD0553"),
+        customConfig.effectiveExtraHeaders.get("APP-Code").contains("CUSTOM99")
       )
     },
     test("OpenAI keeps strict schema and uses max_completion_tokens") {
