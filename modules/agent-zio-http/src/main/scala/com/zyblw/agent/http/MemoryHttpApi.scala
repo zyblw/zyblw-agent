@@ -28,7 +28,7 @@ final case class MemoryCorrectionRequest(
     expiresAtEpochMilli: Option[Long] = None
 ) derives JsonCodec
 
-/** 不暴露 sourceRunId 的用户治理视图；版本用于后续 CAS 纠正。 */
+/** 不暴露 sourceRunId 的用户治理视图；版本用于后续 CAS 纠正，extractorVersion 用于标识是否为用户手动锁定 (`user-correction-v1`)。 */
 final case class MemoryView(
     key: String,
     value: Json,
@@ -40,7 +40,8 @@ final case class MemoryView(
     version: Long,
     createdAtEpochMilli: Long,
     updatedAtEpochMilli: Long,
-    expiresAtEpochMilli: Option[Long]
+    expiresAtEpochMilli: Option[Long],
+    extractorVersion: Option[String] = None
 ) derives JsonCodec
 
 /** 删除 API 的稳定幂等结果。 */
@@ -220,7 +221,8 @@ final class MemoryHttpApi(
     entry.version,
     entry.createdAtEpochMilli,
     entry.updatedAtEpochMilli,
-    entry.expiresAtEpochMilli
+    entry.expiresAtEpochMilli,
+    Some(entry.extractorVersion)
   )
 
 object MemoryHttpApi:

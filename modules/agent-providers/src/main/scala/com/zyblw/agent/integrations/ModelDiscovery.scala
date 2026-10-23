@@ -51,8 +51,9 @@ final case class DiscoveredModel(
   * 解析对单条坏数据宽容(跳过),对整体结构错误严格(失败),因为上游目录里偶有字段缺失的条目,而它们不应该让整张目录不可用。
   */
 object ModelDiscovery:
-  val OpenRouterBaseUrl: String = "https://openrouter.ai/api/v1"
-  val AihubmixModelsUrl: String = "https://aihubmix.com/api/v1/models"
+  val OpenRouterBaseUrl: String       = "https://openrouter.ai/api/v1"
+  val AihubmixModelsUrl: String       = "https://aihubmix.com/api/v1/models"
+  val AihubmixBackupModelsUrl: String = "https://api.inferera.com/api/v1/models"
 
   private val MaxBodyBytes: Int = 16 * 1024 * 1024
 
@@ -67,19 +68,23 @@ object ModelDiscovery:
       ZIO.fromEither(parseOpenRouter(body)).mapError(AgentError.InvalidConfiguration(_))
     )
 
-  /** 读取 AIHubMix 公共富目录（包含能力、上下文窗口与每百万 token 美元定价）。 */
+  /** 读取 AIHubMix 公共富目录（包含能力、上下文窗口与每百万 token 美元定价；优先走国内免阻断域名 api.inferera.com 并回退主域名）。 */
   def aihubmix(
       client: Client,
       url: String = AihubmixModelsUrl,
       timeout: Duration = 20.seconds
   ): IO[AgentError, Chunk[DiscoveredModel]] =
-    fetch(
-      client,
-      url,
-      None,
-      Map(OpenAICompatibleConfig.AihubmixAppCodeHeader -> OpenAICompatibleConfig.DefaultAihubmixAppCode),
-      timeout
-    ).flatMap(body => ZIO.fromEither(parseAihubmix(body)).mapError(AgentError.InvalidConfiguration(_)))
+    val headers = Map(
+      OpenAICompatibleConfig.AihubmixAppCodeHeader -> OpenAICompatibleConfig.DefaultAihubmixAppCode
+    )
+    val rawEffect =
+      if url == AihubmixModelsUrl then
+        fetch(client, AihubmixBackupModelsUrl, None, headers, timeout)
+          .orElse(fetch(client, url, None, headers, timeout))
+      else fetch(client, url, None, headers, timeout)
+    rawEffect.flatMap(body =>
+      ZIO.fromEither(parseAihubmix(body)).mapError(AgentError.InvalidConfiguration(_))
+    )
 
   /** 读取 OpenAI-compatible 网关的 `/models`。 */
   def openAICompatible(

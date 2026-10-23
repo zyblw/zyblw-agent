@@ -263,6 +263,12 @@ object OpenAICompatibilitySpec extends ZIOSpecDefault:
         defaultModel = "gemini-2.5-flash",
         compatibility = OpenAICompatibility.aihubmix()
       )
+      val infereraConfig = OpenAICompatibleConfig(
+        baseUrl = "https://api.inferera.com/v1",
+        apiKey = "sk-test",
+        defaultModel = "gemini-2.5-flash",
+        compatibility = OpenAICompatibility.openAI
+      )
       val customConfig = defaultConfig.copy(extraHeaders = Map("APP-Code" -> "CUSTOM99"))
       assertTrue(
         encoded.exists(_.contains("\"role\":\"system\"")),
@@ -277,6 +283,7 @@ object OpenAICompatibilitySpec extends ZIOSpecDefault:
         gemini3None.exists(_.contains("\"reasoning_effort\":\"low\"")),
         claudeNone.forall(!_.contains("reasoning_effort")),
         defaultConfig.effectiveExtraHeaders.get("APP-Code").contains("PXLD0553"),
+        infereraConfig.effectiveExtraHeaders.get("APP-Code").contains("PXLD0553"),
         customConfig.effectiveExtraHeaders.get("APP-Code").contains("CUSTOM99")
       )
     },

@@ -1,8 +1,12 @@
 # Changelog
 
-## 0.10.0 - 2026-10-22
+## 0.10.0 - 2026-10-23
 
 `0.10.0` 是稳定演进安装基线，包含自 `0.9.0` 发布以来的全部架构加固与新特性。核心与 1024 知识各有一份 V001 基线（含结构检索与大纲快照）。执行内核为 `AgentKernel` + `AgentRuntimeDriver`。稳定业务 HTTP 契约维持 OpenAPI `1.0.0`。全部十一项 Maven 制品保持同一精确版本发布。
+
+- 记忆治理与四大认知支柱演进：`MemoryGovernance` 与 `MemoryLifecycle` 支持 `expectedVersion = 0` 的用户显式新建（`UserStated`）及删除墓碑（tombstone）后的显式重建，`Episodic` 记忆缺省自动补齐 30 天安全 TTL；用户手动锁定记忆（`user-correction-v1`）免受后台 `ModelInferred` 覆盖，同等级推断认知可随时间演进，迟到 `ModelInferred` 遇到 tombstone 静默跳过而不中断同批其他候选。`LlmMemoryExtractor` 升级四大认知维度（`preference` / `semantic` / `procedural` / `episodic`）提炼规约与医疗隐私隔离边界。
+- 运行时取证韧性与持久层事务加固：`AgentRuntimeDriver` 与 `RunTerminator` 在已成功获取有效检索证据/引用但后续生成模型连接或超时失败时支持优雅降级（`degradeModelFailureWithEvidence`），保留已核验引用而不丢弃整轮证据；`PostgresMemoryStore`、`PostgresWorkflowCheckpointStore`、`PostgresRunCommandStore`、`PostgresRunSubmissionStore` 统一使用 `ZIO.uninterruptibleMask` 保护事务，确保 Fiber 中断、缺陷或 `commit` 失败时强制先 `rollback` 再恢复原始 `autoCommit`，消除 JDBC `setAutoCommit(true)` 隐式提交半截事务的风险。
+- AIHubMix 渠道协议与富目录对齐：`OpenAICompatibleConfig` 对 `aihubmix.com` 端点自动注入 `APP-Code: PXLD0553` 请求头（覆盖对话、流式、向量与模型发现），`ModelDiscovery` 支持解析 AIHubMix 富目录单价与能力元数据。
 
 - 工具协议加固：补齐知识检索数组元素类型；发网前校验可移植 Schema 与 strict 硬约束；所有适配器和 Runtime 验证工具身份/参数，旧非法计划恢复收口为 Failed。OpenAI-compatible 忽略正常空身份分片、拒绝身份冲突，保留通用中转 reasoning_content 与按 call id 关联的 Gemini opaque extra_content。ModelProbeConfig 增加可选 ToolRoundTrip 模式，覆盖流式工具调用与结果回填；默认基本探活不变。
 - 注入监测补齐 Unicode 空白归一化，并固定 Locale.ROOT 大小写转换，避免宿主区域设置影响现有词表；不扩大匹配词或做 NFKC 转换。

@@ -112,18 +112,62 @@ final class MemoryLifecycle(
             case Some(reason) =>
               ZIO.succeed(report.copy(rejected = report.rejected :+ (incoming.key -> reason)))
             case None =>
-              store.get(scope, incoming.key).flatMap {
-                case None =>
-                  store.compareAndSet(scope, 0L, incoming).as(report.copy(written = report.written + 1))
-                case Some(existing) =>
-                  merge(existing, incoming) match
-                    case None         => ZIO.succeed(report.copy(ignored = report.ignored + 1))
-                    case Some(merged) =>
-                      store
-                        .compareAndSet(scope, existing.version, merged)
-                        .as(report.copy(written = report.written + 1))
-              }
+              upsertWithRetry(scope, incoming, report, retriesRemaining = 1)
     }
+
+  /** 执行单条候选的读取、合并与 CAS 写入：
+    *   - 若并发修改导致 CAS 冲突，自动重读最新快照并重试一次合并；
+    *   - 若 key 曾被删除（存在 tombstone 使 expectedVersion=0 冲突）：当新候选属于 `UserStated`（用户在新对话中再次明确表达）时使用最新 tombstone
+    *     版本重建；若仅为 `ModelInferred` 则尊重用户的删除意愿记为 `ignored`，不中断同批次其他候选。
+    */
+  private def upsertWithRetry(
+      scope: MemoryScope,
+      incoming: MemoryEntry,
+      report: MemoryApplyReport,
+      retriesRemaining: Int
+  ): IO[StoreError, MemoryApplyReport] =
+    store.get(scope, incoming.key).flatMap {
+      case None =>
+        store
+          .compareAndSet(scope, 0L, incoming)
+          .as(report.copy(written = report.written + 1))
+          .catchSome {
+            case AgentError.MemoryVersionConflict(_, _, 0L, actualVersion) if retriesRemaining > 0 =>
+              store.get(scope, incoming.key).flatMap {
+                case Some(concurrent) =>
+                  mergeAndSet(scope, concurrent, incoming, report, retriesRemaining - 1)
+                case None =>
+                  if incoming.evidence == MemoryEvidence.UserStated && actualVersion > 0L then
+                    store
+                      .compareAndSet(scope, actualVersion, incoming)
+                      .as(report.copy(written = report.written + 1))
+                      .catchSome { case _: AgentError.MemoryVersionConflict =>
+                        ZIO.succeed(report.copy(ignored = report.ignored + 1))
+                      }
+                  else ZIO.succeed(report.copy(ignored = report.ignored + 1))
+              }
+          }
+      case Some(existing) =>
+        mergeAndSet(scope, existing, incoming, report, retriesRemaining)
+    }
+
+  private def mergeAndSet(
+      scope: MemoryScope,
+      existing: MemoryEntry,
+      incoming: MemoryEntry,
+      report: MemoryApplyReport,
+      retriesRemaining: Int
+  ): IO[StoreError, MemoryApplyReport] =
+    merge(existing, incoming) match
+      case None         => ZIO.succeed(report.copy(ignored = report.ignored + 1))
+      case Some(merged) =>
+        store
+          .compareAndSet(scope, existing.version, merged)
+          .as(report.copy(written = report.written + 1))
+          .catchSome {
+            case _: AgentError.MemoryVersionConflict if retriesRemaining > 0 =>
+              upsertWithRetry(scope, incoming, report, retriesRemaining - 1)
+          }
 
   /** 返回稳定拒绝码；不把正文写入错误或遥测。 */
   private def validateEntry(entry: MemoryEntry): Option[String] =
@@ -147,22 +191,34 @@ final class MemoryLifecycle(
         case MemoryEvidence.UserStated | MemoryEvidence.ToolObserved => None
         case _                                                       => Some("delete-evidence-not-authorized")
 
-  /** 确定性合并：证据等级优先，其次 confidence，再其次更新时间。 新候选胜出时保留原 createdAt，并取较高 importance；旧事实更强时返回 None 避免无意义版本增长。
+  /** 确定性合并：
+    *   1. 用户显式修正/新增并锁定的记忆 (`user-correction-v1`) 不被后台自动提炼覆盖；
+    *   2. 内容与类别完全相同时跳过，避免无意义版本递增；
+    *   3. 证据等级优先；同等级下若新候选时间更新且达到高置信门槛，允许顺应用户最新认知演进更新，否则取更高置信度。
+    * 新候选胜出时保留原 createdAt，并取较高 importance。
     */
   private def merge(existing: MemoryEntry, incoming: MemoryEntry): Option[MemoryEntry] =
-    val existingRank = evidenceRank(existing.evidence)
-    val incomingRank = evidenceRank(incoming.evidence)
-    val incomingWins = incomingRank > existingRank ||
-      (incomingRank == existingRank && incoming.confidence > existing.confidence) ||
-      (incomingRank == existingRank && incoming.confidence == existing.confidence &&
-        incoming.updatedAtEpochMilli > existing.updatedAtEpochMilli)
-    Option.when(incomingWins)(
-      incoming.copy(
-        createdAtEpochMilli = existing.createdAtEpochMilli,
-        importance = Math.max(existing.importance, incoming.importance),
-        version = existing.version
+    val isUserLocked =
+      existing.extractorVersion == MemoryGovernanceService.UserCorrectionVersion &&
+        incoming.extractorVersion != MemoryGovernanceService.UserCorrectionVersion
+    if isUserLocked || (existing.value == incoming.value && existing.kind == incoming.kind) then None
+    else
+      val existingRank = evidenceRank(existing.evidence)
+      val incomingRank = evidenceRank(incoming.evidence)
+      val incomingWins =
+        if incomingRank > existingRank then true
+        else if incomingRank < existingRank then false
+        else if incoming.updatedAtEpochMilli > existing.updatedAtEpochMilli &&
+          incoming.confidence >= policy.minimumModelConfidence
+        then true
+        else incoming.confidence > existing.confidence
+      Option.when(incomingWins)(
+        incoming.copy(
+          createdAtEpochMilli = existing.createdAtEpochMilli,
+          importance = Math.max(existing.importance, incoming.importance),
+          version = existing.version
+        )
       )
-    )
 
   /** 用户明确陈述 > 工具观察 > 受控导入 > 模型推断。 */
   private def evidenceRank(value: MemoryEvidence): Int = value match

@@ -86,7 +86,11 @@ final private case class ExtractionCandidate(
   * @param config
   *   模型选择、上下文、输出、超时和敏感数据策略
   */
-final class LlmMemoryExtractor(model: ChatModel, config: LlmMemoryExtractorConfig) extends MemoryExtractor:
+final class LlmMemoryExtractor(
+    model: ChatModel,
+    config: LlmMemoryExtractorConfig,
+    existingMemories: Chunk[MemoryEntry] = Chunk.empty
+) extends MemoryExtractor:
   import LlmMemoryExtractor.*
 
   /** 从有限 User/Assistant 窗口提炼候选。
@@ -292,7 +296,7 @@ final class LlmMemoryExtractor(model: ChatModel, config: LlmMemoryExtractorConfi
         other.retryable
       )
 
-  /** 把来源包装为单个 JSON 数据消息，减少来源文本与控制指令混淆。 */
+  /** 把来源包装为单个 JSON 数据消息，减少来源文本与控制指令混淆；若传入已有记忆快照，附带 key 索引供模型对齐归并。 */
   private def promptMessages(sources: Chunk[(Int, AgentMessage)]): Chunk[AgentMessage] =
     val records = sources.map { case (index, message) =>
       Json.Obj(
@@ -303,9 +307,27 @@ final class LlmMemoryExtractor(model: ChatModel, config: LlmMemoryExtractorConfi
         )
       )
     }
+    val existingField =
+      if existingMemories.isEmpty then Chunk.empty
+      else
+        val items = existingMemories.take(40).map { entry =>
+          val rawSummary = entry.value match
+            case Json.Str(str) => str
+            case other         => other.toJson
+          val summary = if rawSummary.length > 160 then rawSummary.take(160) + "..." else rawSummary
+          Json.Obj(
+            Chunk(
+              "key"    -> Json.Str(entry.key),
+              "kind"   -> Json.Str(entry.kind.toString.toLowerCase),
+              "locked" -> Json.Bool(entry.extractorVersion == MemoryGovernanceService.UserCorrectionVersion),
+              "value"  -> Json.Str(summary)
+            )
+          )
+        }
+        Chunk("existingMemories" -> Json.Arr(items))
     Chunk(
       AgentMessage.system(systemInstruction),
-      AgentMessage.user(Json.Obj(Chunk("sourceMessages" -> Json.Arr(records))).toJson)
+      AgentMessage.user(Json.Obj(Chunk("sourceMessages" -> Json.Arr(records)) ++ existingField).toJson)
     )
 
 object LlmMemoryExtractor:
@@ -320,6 +342,8 @@ object LlmMemoryExtractor:
       "2.【见解感悟】(semantic: 对经典医理的独到体悟、读书感悟、个人学术观点与核心认知)；" +
       "3.【思维习惯】(procedural: 思考推导路径、求索论证习惯、评论习惯与交流互动风格)；" +
       "4.【近期探索】(episodic: 正在深入钻研的课题、阶段性阅读随感、未决学术疑问，带有时效性)。" +
+      "【键名归并与防碎片化】：若输入包含 existingMemories（用户已有记忆摘要），当新信息是对已有未锁定条目(locked=false)的补充或演进时，请优先复用该既有 key 进行归并更新，切勿创造同义重复 key；若已有条目已包含相同意思或 locked=true，则无需重复提交。" +
+      "【角色边界】：只能从 role=\"user\" 的用户本人言论、文章、评注或提问中提炼其个人见解与偏好；切勿将 role=\"assistant\" 的 AI 客观解答当作用户的个人学术感悟。" +
       "【伦理与隐私红线】：严禁保存闲聊、完整对话、密钥凭证，更严禁将用户的急性个人病状、就诊病情、处方剂量私自沉淀为长期病历档案。" +
       "非敏感的学术讨论、经典感悟、读书评注与思维风格应敏锐捕捉。必须恰好调用 submit_memory_candidates；没有候选时提交空数组。" +
       "每条候选必须引用同一 sourceMessageIndex 中真实存在的短 evidenceQuote，不能提出删除。"

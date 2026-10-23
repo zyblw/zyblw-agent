@@ -2,7 +2,7 @@ package com.zyblw.agent.runtime
 
 import com.zyblw.agent.core.*
 import com.zyblw.agent.guardrails.{GuardrailContext, GuardrailEngine}
-import com.zyblw.agent.memory.RunStore
+import com.zyblw.agent.memory.{ModelCallWrite, RunStore}
 import zio.*
 
 /** Run 终态的收口：完成、暂停、失败与取消。
@@ -74,20 +74,83 @@ final private[agent] class RunTerminator(
       current <- store.load(runId)
       now     <- RunClock.instant
       _       <- ZIO.foreachDiscard(AgentKernel.fail(current, error, now))(
-        committer.commitBestEffort(current, _)
+        commitTerminalWithOpenCall(current, _, now.toEpochMilli, Some(error.category.toString))
       )
-    yield ()).ignore
+    yield ())
+      .retry(
+        Schedule.recurs(2) && Schedule.recurWhile[AgentError] {
+          case _: AgentError.OptimisticLock => true
+          case _                            => false
+        }
+      )
+      .ignore
 
   /** 将 Fiber 中断或外部取消请求收敛为幂等耐久终态。
     *
-    * 并发取消可能与完成提交竞争；乐观锁失败会被忽略，最终状态始终由数据库中先成功的终态决定。
+    * 并发取消可能与非终态检查点提交竞争；遇到 OptimisticLock 时自动重读重试，若已被其他终态先行写入则由 AgentKernel 幂等跳过。
     */
   def markCancelled(runId: RunId): UIO[Unit] =
     (for
       state <- store.load(runId)
       now   <- RunClock.instant
-      _     <- ZIO.foreachDiscard(AgentKernel.cancel(state, now))(committer.commitBestEffort(state, _))
-    yield ()).ignore
+      _     <- ZIO.foreachDiscard(AgentKernel.cancel(state, now))(
+        commitTerminalWithOpenCall(state, _, now.toEpochMilli, Some(ErrorCategory.Conflict.toString))
+      )
+    yield ())
+      .retry(
+        Schedule.recurs(2) && Schedule.recurWhile[AgentError] {
+          case _: AgentError.OptimisticLock => true
+          case _                            => false
+        }
+      )
+      .ignore
+
+  /** 终态落盘时若仍存在悬挂的 Prepared/Dispatched 模型调用或 Prepared/Running 工具调用，一并收敛为 Unknown，绝不遗留孤儿进行中记录。 */
+  private def commitTerminalWithOpenCall(
+      current: AgentState,
+      transition: AgentKernel.Transition,
+      nowMs: Long,
+      errorCategory: Option[String]
+  ): IO[AgentError, Unit] =
+    for
+      calls <- store.getModelCalls(current.runId).orElseSucceed(Chunk.empty)
+      openRecord = current.pendingModelCall
+        .flatMap(pending => calls.find(_.requestId == pending.requestId))
+        .orElse(calls.find(c => AgentKernel.openModelCall(c.status)))
+        .filter(c => AgentKernel.openModelCall(c.status))
+      modelWrite = openRecord.map { record =>
+        ModelCallWrite.Transition(
+          record.status,
+          record.attempt,
+          record.copy(
+            status = ModelCallStatus.Unknown,
+            errorCategory = errorCategory.orElse(record.errorCategory),
+            updatedAtEpochMilli = nowMs
+          )
+        )
+      }
+      events = openRecord.fold(transition.events) { record =>
+        AgentEvent.ModelCallUnknown(current.runId, record.requestId.asString, nowMs) +: transition.events
+      }
+      cleanedTransition = transition.copy(
+        state = transition.state.copy(pendingModelCall = None, pendingToolPlan = None),
+        events = events
+      )
+      _     <- committer.commitTransition(current, cleanedTransition, modelWrite)
+      tools <- store.listToolExecutions(current.runId).orElseSucceed(Chunk.empty)
+      openTools = tools.filter(t =>
+        t.status == ToolExecutionStatus.Prepared || t.status == ToolExecutionStatus.Running
+      )
+      _ <- ZIO.foreachDiscard(openTools) { tool =>
+        store
+          .transitionToolExecution(
+            tool.status,
+            tool.attempt,
+            tool.copy(status = ToolExecutionStatus.Unknown, updatedAtEpochMilli = nowMs)
+          )
+          .ignore
+      }
+    yield ()
 
   /** 构造各阶段 Guardrail 共用的只读可信上下文。 */
   private def guardrailContext(state: AgentState): GuardrailContext =

@@ -598,15 +598,25 @@ final class PostgresRunCommandStore(dataSource: DataSource) extends RunCommandSt
       if result.next() then decodeRecord(result) else throw MissingCommand(commandId)
     finally statement.close()
 
-  /** JDBC 事务只包裹队列状态变化，失败回滚，成功提交。 */
+  /** JDBC 事务只包裹队列状态变化，失败或中断均先回滚再恢复 autoCommit，成功则提交。 */
   private def withTransaction[A](use: Connection => Task[A]): IO[StoreError, A] = withConnection { connection =>
-    ZIO.attemptBlocking(connection.setAutoCommit(false)) *>
-      use(connection)
-        .tapBoth(
-          _ => ZIO.attemptBlocking(connection.rollback()).orDie,
-          _ => ZIO.attemptBlocking(connection.commit()).orDie
-        )
-        .ensuring(ZIO.attemptBlocking(connection.setAutoCommit(true)).orDie)
+    for
+      previous <- ZIO.attemptBlocking(connection.getAutoCommit)
+      _        <- ZIO.attemptBlocking(connection.setAutoCommit(false))
+      result   <- ZIO
+        .uninterruptibleMask { restore =>
+          restore(use(connection)).exit.flatMap {
+            case Exit.Success(value) =>
+              ZIO
+                .attemptBlocking(connection.commit())
+                .tapError(_ => ZIO.attemptBlocking(connection.rollback()).ignore)
+                .as(value)
+            case Exit.Failure(cause) =>
+              ZIO.attemptBlocking(connection.rollback()).ignore *> ZIO.refailCause(cause)
+          }
+        }
+        .ensuring(ZIO.attemptBlocking(connection.setAutoCommit(previous)).ignore)
+    yield result
   }
 
   /** 从宿主连接池借还连接；阻塞 JDBC 不占用 ZIO 计算线程。 */

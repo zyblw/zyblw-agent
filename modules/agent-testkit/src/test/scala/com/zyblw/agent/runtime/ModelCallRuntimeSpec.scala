@@ -792,6 +792,83 @@ object ModelCallRuntimeSpec extends ZIOSpecDefault:
         result._3.usage.inputTokens == 9L,
         result._4 == 1
       )
+    },
+    test("重启或重部署导致运行组合漂移时，恢复仍优先收口 Dispatched 模型调用并把 Run 标为 Failed") {
+      for
+        calls   <- Ref.make(0)
+        started <- Promise.make[Nothing, Unit]
+        model = hangingModel(calls, started)
+        inner   <- ZIO.service[RunStore].provideLayer(RunStore.inMemory)
+        tracker <- InjectingRunStore.make(inner, (_, _) => false)
+        runId   <- (for
+          runtime <- ZIO.service[AgentRuntime]
+          fiber   <- runtime.run(agent, RunRequest(ThreadId("drift-open-call"), AgentMessage.user("你好"))).fork
+          _       <- started.await
+          id      <- tracker.lastRunId.get.someOrFail(AgentError.Unexpected("缺少注入提交的 RunId"))
+          _       <- fiber.interrupt
+        yield id).provideLayer(
+          TestAgentRuntime.inMemory(
+            model,
+            profile = RuntimeProfile(capturePolicy = CapturePolicy.MetadataOnly),
+            store = ZLayer.succeed(tracker),
+            modelPolicies = ModelPolicySource.static(ModelPolicy.default, ModelPriceBook.empty)
+          )
+        )
+        recovered <- ZIO
+          .serviceWithZIO[AgentRuntime](_.recover(runId))
+          .exit
+          .provideLayer(
+            TestAgentRuntime.inMemory(
+              model,
+              profile = RuntimeProfile(capturePolicy = CapturePolicy.MetadataOnly),
+              store = ZLayer.succeed(tracker),
+              modelPolicies = ModelPolicySource.static(
+                ModelPolicy(provider = Some("drifted-provider"), model = Some("drifted-model")),
+                ModelPriceBook.empty
+              )
+            )
+          )
+        after  <- inner.load(runId)
+        ledger <- inner.getModelCalls(runId)
+        count  <- calls.get
+      yield assertTrue(
+        recovered.causeOption.flatMap(_.failureOption).exists(_.isInstanceOf[AgentError.ModelCallUncertain]),
+        after.status == RunStatus.Failed,
+        after.pendingModelCall.isEmpty,
+        ledger.length == 1,
+        ledger.head.status == ModelCallStatus.Unknown,
+        count == 1
+      )
+    },
+    test("在 Dispatched 窗口内外部取消 Run 时，同一事务把模型调用收敛为 Unknown 且清空 pendingModelCall") {
+      for
+        calls   <- Ref.make(0)
+        started <- Promise.make[Nothing, Unit]
+        model = hangingModel(calls, started)
+        inner   <- ZIO.service[RunStore].provideLayer(RunStore.inMemory)
+        tracker <- InjectingRunStore.make(inner, (_, _) => false)
+        result  <- (for
+          runtime <- ZIO.service[AgentRuntime]
+          fiber  <- runtime.run(agent, RunRequest(ThreadId("cancel-open-call"), AgentMessage.user("你好"))).fork
+          _      <- started.await
+          runId  <- tracker.lastRunId.get.someOrFail(AgentError.Unexpected("缺少注入提交的 RunId"))
+          _      <- runtime.cancel(runId)
+          _      <- fiber.interrupt
+          after  <- inner.load(runId)
+          ledger <- inner.getModelCalls(runId)
+          events <- inner.events(runId)
+        yield (after, ledger, events)).provideLayer(
+          layers(model, CapturePolicy.MetadataOnly, ZLayer.succeed(tracker))
+        )
+        (after, ledger, events) = result
+      yield assertTrue(
+        after.status == RunStatus.Cancelled,
+        after.pendingModelCall.isEmpty,
+        ledger.length == 1,
+        ledger.head.status == ModelCallStatus.Unknown,
+        events.exists(_.event.isInstanceOf[AgentEvent.ModelCallUnknown]),
+        events.exists(_.event.isInstanceOf[AgentEvent.RunCancelled])
+      )
     }
   )
 

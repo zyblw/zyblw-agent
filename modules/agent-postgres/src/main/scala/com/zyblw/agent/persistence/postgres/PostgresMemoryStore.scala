@@ -250,7 +250,10 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
     else
       Clock.currentTime(java.util.concurrent.TimeUnit.MILLISECONDS).flatMap { now =>
         validateValue(entry) *> withTransaction { connection =>
-          updateExpected(connection, scope, expectedVersion, entry, now).flatMap {
+          val write =
+            if expectedVersion == 0L then insertOrReviveForGovernance(connection, scope, entry, now)
+            else updateExpected(connection, scope, expectedVersion, entry, now)
+          write.flatMap {
             case Some(updated) =>
               insertAudit(
                 connection,
@@ -401,6 +404,38 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
          | version, status, created_at, updated_at, expires_at, deleted_at)
          |VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?, NULL)
          |ON CONFLICT DO NOTHING
+         |RETURNING $returningColumns""".stripMargin
+    )
+    try
+      bindEntry(statement, scope, entry, now)
+      val result = statement.executeQuery()
+      if result.next() then Some(readEntry(result)) else None
+    finally statement.close()
+  }
+
+  /** 用户在治理界面显式创建记忆 (expectedVersion = 0)：若不存在则新建，若原先已删除或已过期则重新激活并递增版本；若当前仍为未过期的 active 则返回 None 触发版本冲突。 */
+  private def insertOrReviveForGovernance(
+      connection: Connection,
+      scope: MemoryScope,
+      entry: MemoryEntry,
+      now: Long
+  ): IO[StoreError, Option[MemoryEntry]] = jdbc("insert or revive governed memory") {
+    val statement = connection.prepareStatement(
+      s"""INSERT INTO zyblw_agent_core.agent_memories
+         |(scope_kind, scope_key, tenant_id, user_id, session_id, memory_key, value_json, search_text,
+         | memory_kind, importance, confidence, sensitivity, evidence, extractor_version, source_run_id,
+         | version, status, created_at, updated_at, expires_at, deleted_at)
+         |VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?, NULL)
+         |ON CONFLICT (scope_kind, scope_key, memory_key) DO UPDATE SET
+         |value_json = EXCLUDED.value_json, search_text = EXCLUDED.search_text,
+         |memory_kind = EXCLUDED.memory_kind, importance = EXCLUDED.importance,
+         |confidence = EXCLUDED.confidence, sensitivity = EXCLUDED.sensitivity,
+         |evidence = EXCLUDED.evidence, extractor_version = EXCLUDED.extractor_version,
+         |source_run_id = EXCLUDED.source_run_id, version = zyblw_agent_core.agent_memories.version + 1,
+         |status = 'active', created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at,
+         |expires_at = EXCLUDED.expires_at, deleted_at = NULL
+         |WHERE zyblw_agent_core.agent_memories.status = 'deleted'
+         |   OR (zyblw_agent_core.agent_memories.expires_at IS NOT NULL AND zyblw_agent_core.agent_memories.expires_at <= EXCLUDED.updated_at)
          |RETURNING $returningColumns""".stripMargin
     )
     try
@@ -630,19 +665,25 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
     */
   private def withTransaction[A](use: Connection => IO[StoreError, A]): IO[StoreError, A] =
     withConnection { connection =>
-      ZIO.uninterruptibleMask { restore =>
-        for
-          _     <- jdbc("begin memory governance transaction")(connection.setAutoCommit(false))
-          exit  <- restore(use(connection)).exit
-          value <- exit match
-            case Exit.Success(result) =>
-              jdbc("commit memory governance transaction")(connection.commit()).as(result)
-            case Exit.Failure(cause) =>
-              jdbc("rollback memory governance transaction")(connection.rollback()).ignore *> ZIO.refailCause(
-                cause
-              )
-        yield value
-      }
+      for
+        previous <- jdbc("read memory auto commit")(connection.getAutoCommit)
+        _        <- jdbc("begin memory governance transaction")(connection.setAutoCommit(false))
+        value    <- ZIO
+          .uninterruptibleMask { restore =>
+            restore(use(connection)).exit.flatMap {
+              case Exit.Success(result) =>
+                jdbc("commit memory governance transaction")(connection.commit())
+                  .tapError(_ => jdbc("rollback memory governance transaction")(connection.rollback()).ignore)
+                  .as(result)
+              case Exit.Failure(cause) =>
+                jdbc("rollback memory governance transaction")(connection.rollback()).ignore *> ZIO
+                  .refailCause(
+                    cause
+                  )
+            }
+          }
+          .ensuring(jdbc("restore memory auto commit")(connection.setAutoCommit(previous)).ignore)
+      yield value
     }
 
   /** 在 blocking executor 执行 JDBC，并按 SQLSTATE 分类是否可重试。 */

@@ -96,6 +96,7 @@ final class AgentRuntimeDriver(
       input <- ZIO
         .fromOption(initial.messages.headOption)
         .orElseFail(AgentError.InvalidConfiguration(s"Run ${initial.runId.asString} 缺少首条输入消息"))
+        .tapError(error => terminator.markFailed(initial.runId, error))
       outcome <- (for
         inputDecisions <- guardrails.checkInput(input, guardrailContext(initial))
         _              <- publisher.emitGuardrails(initial.runId, "input", inputDecisions)
@@ -184,6 +185,9 @@ final class AgentRuntimeDriver(
             AgentEvent.RunResumed(state.runId, now.toEpochMilli)
           )
           next <- processToolPlan(approved, grant)
+            .timeoutFail(
+              AgentError.BudgetExceeded("durationMillis", approved.budget.limits.maxDuration.toMillis)
+            )(approved.budget.limits.maxDuration)
         yield next
     }
 
@@ -208,7 +212,12 @@ final class AgentRuntimeDriver(
       ),
       target.batch,
       Chunk(target.item -> result)
-    ).flatMap(next => processToolPlan(next))
+    ).flatMap(next =>
+      processToolPlan(next)
+        .timeoutFail(
+          AgentError.BudgetExceeded("durationMillis", next.budget.limits.maxDuration.toMillis)
+        )(next.budget.limits.maxDuration)
+    )
 
   /** 依据状态与执行账本恢复，而不是重新从用户输入开始。 */
   def recover(runId: RunId): IO[AgentError, RunOutcome] =
@@ -223,16 +232,23 @@ final class AgentRuntimeDriver(
           case AgentKernel.RecoveryDecision.RecoverSuspended        =>
             guard.ensureCompatible(state) *> recoverPending(state)
           case AgentKernel.RecoveryDecision.StartCreated   => startCreated(state)
-          case AgentKernel.RecoveryDecision.RecoverRunning =>
-            guard.ensureCompatible(state) *> recoverRunning(state)
+          case AgentKernel.RecoveryDecision.RecoverRunning => recoverRunning(state)
       yield result
     }
 
   private def closeModelFailure[A](runId: RunId)(effect: IO[AgentError, A]): IO[AgentError, A] =
     effect.tapError {
-      case error: ModelError    => terminator.markFailed(runId, error)
-      case error: ProviderError => terminator.markFailed(runId, error)
-      case _                    => ZIO.unit
+      case error: ModelError                         => terminator.markFailed(runId, error)
+      case error: ProviderError                      => terminator.markFailed(runId, error)
+      case error: GuardrailError                     => terminator.markFailed(runId, error)
+      case error: AgentError.BudgetExceeded          => terminator.markFailed(runId, error)
+      case error: AgentError.SuspensionExpired       => terminator.markFailed(runId, error)
+      case error: ContextError if !error.retryable   => terminator.markFailed(runId, error)
+      case error: RetrievalError if !error.retryable => terminator.markFailed(runId, error)
+      case error: ToolError if !error.retryable      => terminator.markFailed(runId, error)
+      case error: AgentError.ExternalProtocolFailure if !error.retryable =>
+        terminator.markFailed(runId, error)
+      case _ => ZIO.unit
     }
 
   /** 旧计划也经过同一边界，避免重启后再次执行已落库的非法模型调用。 */
@@ -752,7 +768,7 @@ final class AgentRuntimeDriver(
       next       <- committer.commitTransition(state, transition)
     yield next
 
-  /** Running 恢复：未结算模型优先于工具游标；已结算的最终助手消息直接 Complete，禁止再调 Provider。 */
+  /** Running 恢复：未结算模型优先于工具游标与组合漂移检查；已结算的最终助手消息直接 Complete，禁止再调 Provider。 */
   private def recoverRunning(state: AgentState): IO[AgentError, RunOutcome] =
     modelCalls.findOpen(state).flatMap {
       case Some(pending) => modelCalls.closeUncertain(state, pending)
@@ -760,12 +776,17 @@ final class AgentRuntimeDriver(
         ZIO.fromEither(AgentKernel.validateUsage(state.budget.limits, state.usage)).tapError {
           terminator.markFailed(state.runId, _)
         } *>
-          (state.pendingToolPlan match
-            case Some(_) => recoverToolPlan(state)
-            case None    =>
-              AgentKernel.settledFinalAnswer(state) match
-                case Some(answer) => terminator.complete(state, answer)
-                case None         => loop(state))
+          (AgentKernel.settledFinalAnswer(state) match
+            case Some(answer) if state.pendingToolPlan.isEmpty => terminator.complete(state, answer)
+            case _                                             =>
+              guard.ensureCompatible(state) *>
+                (state.pendingToolPlan match
+                  case Some(_) => recoverToolPlan(state)
+                  case None    => loop(state)
+                )
+                  .timeoutFail(
+                    AgentError.BudgetExceeded("durationMillis", state.budget.limits.maxDuration.toMillis)
+                  )(state.budget.limits.maxDuration))
     }
 
   /** Failed 终态若仍有未结算模型账本，先收口 Unknown，禁止把它当成可忽略的普通终态。 */

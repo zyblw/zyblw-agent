@@ -208,13 +208,17 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
         )
     },
     test("recover closes fresh model and provider failures instead of leaving a Running run") {
-      val failures: Chunk[AgentError] = Chunk(
-        AgentError.InvalidModelResponse("invalid response"),
-        AgentError.InvalidConfiguration("invalid schema"),
-        AgentError.UnsupportedModelCapability("provider", "strict", "unsupported")
+      val failures: Chunk[(AgentError, RunStatus)] = Chunk(
+        AgentError.InvalidModelResponse("invalid response")                        -> RunStatus.Failed,
+        AgentError.InvalidConfiguration("invalid schema")                          -> RunStatus.Failed,
+        AgentError.UnsupportedModelCapability("provider", "strict", "unsupported") -> RunStatus.Failed,
+        AgentError.GuardrailRejected("output", "blocked")                          -> RunStatus.Failed,
+        AgentError.ContextBuildFailed("context-limit")                             -> RunStatus.Failed,
+        AgentError.RetrievalFailed("index-missing", retryable = false)             -> RunStatus.Failed,
+        AgentError.BudgetExceeded("steps", 1L)                                     -> RunStatus.BudgetExceeded
       )
       ZIO
-        .foreach(failures) { failure =>
+        .foreach(failures) { case (failure, expectedStatus) =>
           val model = new ChatModel:
             val provider                                                     = "test-provider"
             def complete(request: ChatRequest): IO[AgentError, ChatResponse] = ZIO.fail(failure)
@@ -236,11 +240,11 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
             claimed <- host.claimOnce
             after   <- runs.load(accepted.runId)
             command <- commands.get(accepted.commandId)
-          yield (claimed, after, command)).provideLayer(durableControlLayers(model))
+          yield (claimed, after, command, expectedStatus)).provideLayer(durableControlLayers(model))
         }
         .map(results =>
-          assertTrue(results.forall { case (claimed, state, command) =>
-            claimed && state.status == RunStatus.Failed && command.status == RunCommandStatus.DeadLetter
+          assertTrue(results.forall { case (claimed, state, command, expectedStatus) =>
+            claimed && state.status == expectedStatus && command.status == RunCommandStatus.DeadLetter
           })
         )
     },

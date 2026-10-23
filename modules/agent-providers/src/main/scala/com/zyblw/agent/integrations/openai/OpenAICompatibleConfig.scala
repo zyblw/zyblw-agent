@@ -82,7 +82,8 @@ object OpenAICompatibleConfig:
   def isAihubmixUrl(url: String): Boolean =
     scala.util.Try(URI(url.trim)).toOption.flatMap(u => Option(u.getHost)).exists { h =>
       val lower = h.toLowerCase
-      lower == "aihubmix.com" || lower.endsWith(".aihubmix.com")
+      lower == "aihubmix.com" || lower.endsWith(".aihubmix.com") ||
+      lower == "inferera.com" || lower.endsWith(".inferera.com")
     }
 
   private val V1RootHosts: Set[String] =

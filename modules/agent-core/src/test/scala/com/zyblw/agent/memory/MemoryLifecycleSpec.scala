@@ -133,5 +133,130 @@ object MemoryLifecycleSpec extends ZIOSpecDefault:
         ),
         absent.isEmpty
       )).provide(MemoryStore.inMemory)
+    },
+    test("用户手动修正锁定项不被后台提炼覆盖，同证据等级的新认知可随时间演进") {
+      (for
+        store <- ZIO.service[MemoryStore]
+        scope     = MemoryScope.User(TenantId("tenant-a"), UserId("user-a"))
+        lifecycle = MemoryLifecycle(
+          new MemoryExtractor:
+            def extract(messages: Chunk[AgentMessage], sourceRunId: RunId): UIO[Chunk[MemoryCandidate]] =
+              ZIO.succeed(Chunk.empty)
+          ,
+          store,
+          MemoryGovernancePolicy()
+        )
+        _ <- store.compareAndSet(
+          scope,
+          0L,
+          entry("scholarly.locked", "只读伤寒论原文").copy(
+            extractorVersion = MemoryGovernanceService.UserCorrectionVersion,
+            updatedAtEpochMilli = 10L
+          )
+        )
+        _ <- store.compareAndSet(
+          scope,
+          0L,
+          entry("scholarly.evolving", "早期偏好温病条辨").copy(
+            extractorVersion = "llm-tool-v1",
+            confidence = 0.95,
+            updatedAtEpochMilli = 10L
+          )
+        )
+        report <- lifecycle.applyCandidates(
+          scope,
+          Chunk(
+            MemoryCandidate(
+              0,
+              MemoryMutation.Upsert(
+                entry("scholarly.locked", "AI自动覆盖尝试").copy(
+                  extractorVersion = "llm-tool-v1",
+                  confidence = 1.0,
+                  updatedAtEpochMilli = 20L
+                )
+              )
+            ),
+            MemoryCandidate(
+              1,
+              MemoryMutation.Upsert(
+                entry("scholarly.evolving", "近期转向伤寒与温病汇通").copy(
+                  extractorVersion = "llm-tool-v1",
+                  confidence = 0.90,
+                  updatedAtEpochMilli = 20L
+                )
+              )
+            )
+          )
+        )
+        locked   <- store.get(scope, "scholarly.locked")
+        evolving <- store.get(scope, "scholarly.evolving")
+      yield assertTrue(
+        report.written == 1,
+        report.ignored == 1,
+        locked.exists(_.value == Json.Str("只读伤寒论原文")),
+        locked.exists(_.version == 1L),
+        evolving.exists(_.value == Json.Str("近期转向伤寒与温病汇通")),
+        evolving.exists(_.version == 2L)
+      )).provide(MemoryStore.inMemory)
+    },
+    test("删除后的 tombstone 对 ModelInferred 保持静默跳过且不中断同批写入，对新 UserStated 支持重建") {
+      (for
+        store <- ZIO.service[MemoryStore]
+        scope     = MemoryScope.User(TenantId("tenant-a"), UserId("user-a"))
+        lifecycle = MemoryLifecycle(
+          new MemoryExtractor:
+            def extract(messages: Chunk[AgentMessage], sourceRunId: RunId): UIO[Chunk[MemoryCandidate]] =
+              ZIO.succeed(Chunk.empty)
+          ,
+          store,
+          MemoryGovernancePolicy()
+        )
+        _       <- store.put(scope, entry("deleted.topic", "旧内容"))
+        _       <- store.delete(scope, "deleted.topic")
+        report1 <- lifecycle.applyCandidates(
+          scope,
+          Chunk(
+            MemoryCandidate(
+              0,
+              MemoryMutation.Upsert(
+                entry("deleted.topic", "模型猜测不应复活已删键").copy(
+                  evidence = MemoryEvidence.ModelInferred,
+                  confidence = 0.92
+                )
+              )
+            ),
+            MemoryCandidate(
+              1,
+              MemoryMutation.Upsert(
+                entry("fresh.topic", "同批其他新键正常落库")
+              )
+            )
+          )
+        )
+        afterInferred <- store.get(scope, "deleted.topic")
+        fresh         <- store.get(scope, "fresh.topic")
+        report2       <- lifecycle.applyCandidates(
+          scope,
+          Chunk(
+            MemoryCandidate(
+              0,
+              MemoryMutation.Upsert(
+                entry("deleted.topic", "用户再次明确表达的新偏好").copy(
+                  evidence = MemoryEvidence.UserStated,
+                  confidence = 1.0
+                )
+              )
+            )
+          )
+        )
+        afterUserStated <- store.get(scope, "deleted.topic")
+      yield assertTrue(
+        report1.written == 1,
+        report1.ignored == 1,
+        afterInferred.isEmpty,
+        fresh.exists(_.value == Json.Str("同批其他新键正常落库")),
+        report2.written == 1,
+        afterUserStated.exists(_.value == Json.Str("用户再次明确表达的新偏好"))
+      )).provide(MemoryStore.inMemory)
     }
   )

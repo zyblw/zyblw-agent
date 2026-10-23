@@ -1709,16 +1709,25 @@ final class PostgresWorkflowCheckpointStore[S: JsonCodec](
         .flatMap(use)
     }
 
-  /** execution ledger 与 checkpoint 必须共享同一短事务；任何 fenced 校验或解码失败都会回滚。 */
+  /** execution ledger 与 checkpoint 必须共享同一短事务；任何 fenced 校验、中断或解码失败都会先回滚再恢复 autoCommit。 */
   private def withTransaction[A](use: Connection => IO[StoreError, A]): IO[StoreError, A] =
     withConnection { connection =>
-      jdbc("begin-transaction")(connection.setAutoCommit(false)) *>
-        use(connection)
-          .tapBoth(
-            _ => ZIO.attemptBlocking(connection.rollback()).orDie,
-            _ => ZIO.attemptBlocking(connection.commit()).orDie
-          )
-          .ensuring(ZIO.attemptBlocking(connection.setAutoCommit(true)).orDie)
+      for
+        previous <- jdbc("read-auto-commit")(connection.getAutoCommit)
+        _        <- jdbc("begin-transaction")(connection.setAutoCommit(false))
+        result   <- ZIO
+          .uninterruptibleMask { restore =>
+            restore(use(connection)).exit.flatMap {
+              case Exit.Success(value) =>
+                jdbc("commit-transaction")(connection.commit())
+                  .tapError(_ => jdbc("rollback-transaction")(connection.rollback()).ignore)
+                  .as(value)
+              case Exit.Failure(cause) =>
+                jdbc("rollback-transaction")(connection.rollback()).ignore *> ZIO.refailCause(cause)
+            }
+          }
+          .ensuring(jdbc("restore-auto-commit")(connection.setAutoCommit(previous)).ignore)
+      yield result
     }
 
   private def jdbc[A](operation: String)(effect: => A): IO[StoreError, A] =

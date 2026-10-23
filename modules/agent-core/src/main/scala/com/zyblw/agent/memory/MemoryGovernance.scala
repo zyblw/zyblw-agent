@@ -149,7 +149,7 @@ final case class MemoryCorrection(
     expiresAtEpochMilli: Option[Long]
 ):
   require(key.trim.nonEmpty && key.length <= 200, "Memory correction key 长度必须位于 1..200")
-  require(expectedVersion > 0L, "Memory correction expectedVersion 必须大于零")
+  require(expectedVersion >= 0L, "Memory correction expectedVersion 不能为负数")
   require(
     java.lang.Double.isFinite(importance) && importance >= 0.0 && importance <= 1.0,
     "importance 必须位于 [0,1]"
@@ -249,10 +249,10 @@ final class MemoryGovernanceService(
         _       <- auditRead(actor, scope, MemoryAuditAction.Search, None, result.length.toLong)
       yield result
 
-  /** 用用户确认值 CAS 纠正一条现有记忆。
+  /** 用用户确认值 CAS 纠正一条现有记忆，或当 expectedVersion == 0 时由用户显式新增记忆。
     *
-    * 先读取当前记录是为了保留 createdAt/sourceRunId，并拒绝凭空创建新事实；真正并发安全仍由 Repository 的 expectedVersion 条件保证。读后到提交前若发生修改，事务性
-    * Repository 会返回 MemoryVersionConflict。
+    * 编辑现有记忆时保留 createdAt/sourceRunId；当用户编辑或新增 Episodic（近期探索）记忆而未传过期时间时， 默认赋予 30 天有效期，避免前端省略过期时间时触发 400。并发安全由
+    * Repository 的 expectedVersion 条件保证。
     */
   def correct(
       actor: RunContext,
@@ -260,48 +260,103 @@ final class MemoryGovernanceService(
       correction: MemoryCorrection
   ): IO[AgentError, MemoryEntry] =
     for
-      _       <- authorize(actor, scope, write = true)
-      current <- store
-        .get(scope, correction.key)
-        .someOrFail(AgentError.MemoryNotFound(scope.diagnostic, correction.key))
+      _ <- authorize(actor, scope, write = true)
       _ <- ZIO
-        .fail(
-          AgentError.MemoryVersionConflict(
-            scope.diagnostic,
-            correction.key,
-            correction.expectedVersion,
-            current.version
-          )
-        )
-        .unless(current.version == correction.expectedVersion)
+        .fail(AgentError.MemoryPolicyRejected(correction.key, "invalid-memory-key"))
+        .unless(correction.key.matches("[a-z][a-z0-9_.-]{0,199}"))
+        .unit
       now     <- Clock.instant
-      _       <- validateCorrection(correction, current, now)
       auditId <- Random.nextUUID
-      entry = current.copy(
-        value = correction.value,
-        importance = correction.importance,
-        expiresAtEpochMilli = correction.expiresAtEpochMilli,
-        kind = correction.kind,
-        confidence = 1.0,
-        sensitivity = correction.sensitivity,
-        evidence = MemoryEvidence.UserStated,
-        extractorVersion = UserCorrectionVersion,
-        version = current.version,
-        updatedAtEpochMilli = now.toEpochMilli
-      )
-      audit = MemoryAuditRecord(
-        auditId,
-        MemoryAuditAction.Correct,
-        auditActor(actor),
-        scope,
-        Some(hashKey(correction.key)),
-        Some(correction.expectedVersion),
-        Some(correction.expectedVersion + 1L),
-        1L,
-        Some("user-confirmed"),
-        now
-      )
-      result <- repository.correct(scope, correction.expectedVersion, entry, audit)
+      result  <-
+        if correction.expectedVersion == 0L then
+          for
+            existing <- store.get(scope, correction.key)
+            _        <- ZIO.foreachDiscard(existing) { active =>
+              ZIO.fail(
+                AgentError.MemoryVersionConflict(
+                  scope.diagnostic,
+                  correction.key,
+                  0L,
+                  active.version
+                )
+              )
+            }
+            effectiveExpiry = resolveEpisodicExpiry(correction, None, now)
+            normalized      = correction.copy(expiresAtEpochMilli = effectiveExpiry)
+            _ <- validateCorrection(normalized, now.toEpochMilli, now)
+            entry = MemoryEntry(
+              key = normalized.key,
+              value = normalized.value,
+              importance = normalized.importance,
+              sourceRunId = None,
+              createdAtEpochMilli = now.toEpochMilli,
+              expiresAtEpochMilli = normalized.expiresAtEpochMilli,
+              kind = normalized.kind,
+              confidence = 1.0,
+              sensitivity = normalized.sensitivity,
+              evidence = MemoryEvidence.UserStated,
+              extractorVersion = UserCorrectionVersion,
+              version = 0L,
+              updatedAtEpochMilli = now.toEpochMilli
+            )
+            audit = MemoryAuditRecord(
+              auditId,
+              MemoryAuditAction.Correct,
+              auditActor(actor),
+              scope,
+              Some(hashKey(normalized.key)),
+              Some(0L),
+              Some(1L),
+              1L,
+              Some("user-created"),
+              now
+            )
+            created <- repository.correct(scope, 0L, entry, audit)
+          yield created
+        else
+          for
+            current <- store
+              .get(scope, correction.key)
+              .someOrFail(AgentError.MemoryNotFound(scope.diagnostic, correction.key))
+            _ <- ZIO
+              .fail(
+                AgentError.MemoryVersionConflict(
+                  scope.diagnostic,
+                  correction.key,
+                  correction.expectedVersion,
+                  current.version
+                )
+              )
+              .unless(current.version == correction.expectedVersion)
+            effectiveExpiry = resolveEpisodicExpiry(correction, Some(current), now)
+            normalized      = correction.copy(expiresAtEpochMilli = effectiveExpiry)
+            _ <- validateCorrection(normalized, current.createdAtEpochMilli, now)
+            entry = current.copy(
+              value = normalized.value,
+              importance = normalized.importance,
+              expiresAtEpochMilli = normalized.expiresAtEpochMilli,
+              kind = normalized.kind,
+              confidence = 1.0,
+              sensitivity = normalized.sensitivity,
+              evidence = MemoryEvidence.UserStated,
+              extractorVersion = UserCorrectionVersion,
+              version = current.version,
+              updatedAtEpochMilli = now.toEpochMilli
+            )
+            audit = MemoryAuditRecord(
+              auditId,
+              MemoryAuditAction.Correct,
+              auditActor(actor),
+              scope,
+              Some(hashKey(normalized.key)),
+              Some(normalized.expectedVersion),
+              Some(normalized.expectedVersion + 1L),
+              1L,
+              Some("user-confirmed"),
+              now
+            )
+            updated <- repository.correct(scope, normalized.expectedVersion, entry, audit)
+          yield updated
     yield result
 
   /** 删除一条记忆；不存在时保持幂等，但仍审计 affectedCount=0。 */
@@ -397,22 +452,46 @@ final class MemoryGovernanceService(
     if limit >= 1 && limit <= MaxPageSize then ZIO.succeed(limit)
     else ZIO.fail(AgentError.MemoryPolicyRejected("page", s"limit-must-be-1..$MaxPageSize"))
 
+  /** 当用户新增或编辑 Episodic（近期探索）记忆且未显式传入过期时间时，自动沿用原未过期时间或默认顺延 30 天。 */
+  private def resolveEpisodicExpiry(
+      correction: MemoryCorrection,
+      current: Option[MemoryEntry],
+      now: Instant
+  ): Option[Long] =
+    if correction.kind == MemoryKind.Episodic then
+      correction.expiresAtEpochMilli
+        .orElse(current.flatMap(_.expiresAtEpochMilli).filter(_ > now.toEpochMilli))
+        .orElse {
+          val baseMillis =
+            current.fold(now.toEpochMilli)(c => Math.max(now.toEpochMilli, c.createdAtEpochMilli))
+          Some(baseMillis + DefaultEpisodicExpiryMillis)
+        }
+    else correction.expiresAtEpochMilli
+
   /** 复用生命周期核心约束，并额外要求 Episodic 纠正存在未来过期时间。 */
   private def validateCorrection(
       correction: MemoryCorrection,
-      current: MemoryEntry,
+      createdAtEpochMilli: Long,
       now: Instant
   ): IO[AgentError, Unit] =
-    val jsonLength = correction.value.toJson.length
+    val jsonText   = correction.value.toJson
+    val jsonLength = jsonText.length
     if jsonLength > policy.maxValueCharacters then
       ZIO.fail(AgentError.MemoryPolicyRejected(correction.key, "value-too-large"))
+    else if containsCredentialShape(jsonText) then
+      ZIO.fail(AgentError.MemoryPolicyRejected(correction.key, "credential-shaped-content"))
     else if correction.kind == MemoryKind.Episodic && policy.requireEpisodicExpiry && correction.expiresAtEpochMilli.isEmpty
     then ZIO.fail(AgentError.MemoryPolicyRejected(correction.key, "episodic-expiry-required"))
     else if correction.expiresAtEpochMilli.exists(value =>
-        value <= now.toEpochMilli || value <= current.createdAtEpochMilli
+        value <= now.toEpochMilli || value <= createdAtEpochMilli
       )
     then ZIO.fail(AgentError.MemoryPolicyRejected(correction.key, "expiry-must-be-in-future"))
     else ZIO.unit
+
+  private def containsCredentialShape(value: String): Boolean =
+    val normalized = value.toLowerCase
+    normalized.contains("api_key") || normalized.contains("password") || normalized.contains("bearer ") ||
+    normalized.matches(".*sk-[a-z0-9_-]{12,}.*")
 
 object MemoryGovernanceService:
   /** 跨用户读取记忆所需的管理员 scope。 */
@@ -432,6 +511,9 @@ object MemoryGovernanceService:
 
   /** 用户纠正写入的固定策略版本。 */
   val UserCorrectionVersion: String = "user-correction-v1"
+
+  /** 用户编辑或创建近期探索 (Episodic) 未指定过期时间时的默认有效期（30天）。 */
+  val DefaultEpisodicExpiryMillis: Long = 30L * 24L * 60L * 60L * 1000L
 
   /** 从 ZIO 环境装配治理服务。 */
   val layer
@@ -466,7 +548,19 @@ final class InMemoryMemoryGovernanceRepository private (
       entry: MemoryEntry,
       audit: MemoryAuditRecord
   ): IO[StoreError, MemoryEntry] = gate.withPermit {
-    store.compareAndSet(scope, expectedVersion, entry).flatMap { updated =>
+    val writeEffect =
+      if expectedVersion == 0L then
+        store.get(scope, entry.key).flatMap {
+          case Some(active) =>
+            ZIO.fail(AgentError.MemoryVersionConflict(scope.diagnostic, entry.key, 0L, active.version))
+          case None =>
+            store.compareAndSet(scope, 0L, entry).catchSome {
+              case AgentError.MemoryVersionConflict(_, _, 0L, actual) =>
+                store.compareAndSet(scope, actual, entry)
+            }
+        }
+      else store.compareAndSet(scope, expectedVersion, entry)
+    writeEffect.flatMap { updated =>
       audits.update(_ :+ audit.copy(resultingVersion = Some(updated.version), affectedCount = 1L)).as(updated)
     }
   }

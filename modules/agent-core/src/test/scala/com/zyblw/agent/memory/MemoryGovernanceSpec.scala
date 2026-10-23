@@ -159,5 +159,75 @@ object MemoryGovernanceSpec extends ZIOSpecDefault:
           !audits.head.toString.contains(secretQuery)
         )
       }
+    },
+    test("expectedVersion=0 支持用户显式新增记忆与删除后重建，Episodic 缺省自动补齐 30 天有效期") {
+      withService { (_, _, service) =>
+        for
+          created <- service.correct(
+            actor,
+            ownScope,
+            MemoryCorrection(
+              key = "exploration.active_topic",
+              expectedVersion = 0L,
+              value = Json.Str("近期集中研读伤寒论少阳篇"),
+              importance = 0.85,
+              kind = MemoryKind.Episodic,
+              sensitivity = MemorySensitivity.Personal,
+              expiresAtEpochMilli = None
+            )
+          )
+          conflictOnActive <- service
+            .correct(
+              actor,
+              ownScope,
+              MemoryCorrection(
+                key = "exploration.active_topic",
+                expectedVersion = 0L,
+                value = Json.Str("重复创建应冲突"),
+                importance = 0.85,
+                kind = MemoryKind.Episodic,
+                sensitivity = MemorySensitivity.Personal,
+                expiresAtEpochMilli = None
+              )
+            )
+            .exit
+          editedWithoutExpiry <- service.correct(
+            actor,
+            ownScope,
+            MemoryCorrection(
+              key = "exploration.active_topic",
+              expectedVersion = created.version,
+              value = Json.Str("近期集中研读伤寒论少阳篇与厥阴篇"),
+              importance = 0.9,
+              kind = MemoryKind.Episodic,
+              sensitivity = MemorySensitivity.Personal,
+              expiresAtEpochMilli = None
+            )
+          )
+          _       <- service.delete(actor, ownScope, "exploration.active_topic")
+          revived <- service.correct(
+            actor,
+            ownScope,
+            MemoryCorrection(
+              key = "exploration.active_topic",
+              expectedVersion = 0L,
+              value = Json.Str("删除后再次手动新建"),
+              importance = 0.8,
+              kind = MemoryKind.Preference,
+              sensitivity = MemorySensitivity.Personal,
+              expiresAtEpochMilli = None
+            )
+          )
+        yield assertTrue(
+          created.version == 1L,
+          created.expiresAtEpochMilli.nonEmpty,
+          created.extractorVersion == MemoryGovernanceService.UserCorrectionVersion,
+          conflictOnActive.isFailure,
+          editedWithoutExpiry.version == 2L,
+          editedWithoutExpiry.expiresAtEpochMilli.nonEmpty,
+          revived.value == Json.Str("删除后再次手动新建"),
+          revived.version > editedWithoutExpiry.version
+        )
+      }
     }
   )

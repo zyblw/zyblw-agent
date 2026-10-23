@@ -215,7 +215,7 @@ final class PostgresRunSubmissionStore(dataSource: DataSource) extends RunSubmis
       instant(result, "updated_at")
     )
 
-  /** 在 Scope 中借还连接，并把事务成功/失败分别映射为 commit/rollback。 */
+  /** 在 Scope 中借还连接，并把事务成功/失败/中断分别映射为 commit/rollback，防止中断时 setAutoCommit(true) 隐式提交。 */
   private def withTransaction[A](use: Connection => Task[A]): IO[StoreError, A] =
     ZIO
       .scoped {
@@ -224,13 +224,23 @@ final class PostgresRunSubmissionStore(dataSource: DataSource) extends RunSubmis
             ZIO.attemptBlocking(connection.close()).orDie
           )
           .flatMap { connection =>
-            ZIO.attemptBlocking(connection.setAutoCommit(false)) *>
-              use(connection)
-                .tapBoth(
-                  _ => ZIO.attemptBlocking(connection.rollback()).orDie,
-                  _ => ZIO.attemptBlocking(connection.commit()).orDie
-                )
-                .ensuring(ZIO.attemptBlocking(connection.setAutoCommit(true)).ignore)
+            for
+              previous <- ZIO.attemptBlocking(connection.getAutoCommit)
+              _        <- ZIO.attemptBlocking(connection.setAutoCommit(false))
+              result   <- ZIO
+                .uninterruptibleMask { restore =>
+                  restore(use(connection)).exit.flatMap {
+                    case Exit.Success(value) =>
+                      ZIO
+                        .attemptBlocking(connection.commit())
+                        .tapError(_ => ZIO.attemptBlocking(connection.rollback()).ignore)
+                        .as(value)
+                    case Exit.Failure(cause) =>
+                      ZIO.attemptBlocking(connection.rollback()).ignore *> ZIO.refailCause(cause)
+                  }
+                }
+                .ensuring(ZIO.attemptBlocking(connection.setAutoCommit(previous)).ignore)
+            yield result
           }
       }
       .mapError(error => databaseError("执行 Run 创建事务失败", error))
