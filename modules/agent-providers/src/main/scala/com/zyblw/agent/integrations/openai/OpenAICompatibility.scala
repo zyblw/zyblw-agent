@@ -88,6 +88,7 @@ object OpenAICompatibility:
         reasoningEfforts = Set(
           com.zyblw.agent.core.ReasoningEffort.None,
           com.zyblw.agent.core.ReasoningEffort.Low,
+          com.zyblw.agent.core.ReasoningEffort.Medium,
           com.zyblw.agent.core.ReasoningEffort.High,
           com.zyblw.agent.core.ReasoningEffort.Max
         )
@@ -123,7 +124,7 @@ object OpenAICompatibility:
 
   /** Alibaba Cloud Model Studio 的 Qwen OpenAI Chat Completions 兼容档案。
     *
-    * Qwen 的具体能力随模型变化。这里仅声明兼容端点共同具备、且已被本 Adapter 契约覆盖的保守能力；视觉、思考等能力应在 `ProviderEndpointDeclaration.models`
+    * Qwen 的具体能力随模型变化。这里声明兼容端点共同具备的能力及 `enable_thinking` 推理开关；视觉等能力可在 `ProviderEndpointDeclaration.models`
     * 中按部署模型显式覆盖。
     */
   val qwen: OpenAICompatibility = OpenAICompatibility(
@@ -137,7 +138,13 @@ object OpenAICompatibility:
         specificToolChoice = true,
         developerRole = false,
         streaming = true,
-        usageReporting = true
+        usageReporting = true,
+        reasoningEfforts = Set(
+          com.zyblw.agent.core.ReasoningEffort.None,
+          com.zyblw.agent.core.ReasoningEffort.Low,
+          com.zyblw.agent.core.ReasoningEffort.Medium,
+          com.zyblw.agent.core.ReasoningEffort.High
+        )
       )
     ),
     DeveloperRoleMode.MapToSystem,
@@ -174,6 +181,50 @@ object OpenAICompatibility:
     reasoningWireMode = ReasoningWireMode.ThinkingObjectToggle
   )
 
+  /** AIHubMix 聚合中转平台兼容档案。
+    *
+    * 汇聚 Claude、Gemini、OpenAI、DeepSeek、Qwen 等主流模型。
+    *   1. 角色映射：使用 `DeveloperRoleMode.MapToSystem`，因为非 OpenAI 模型（Claude、Gemini、DeepSeek 等）不接受 `developer` 角色。
+    *   2. 工具 Schema：使用 `StrictToolSchemaMode.Omit`，避免多厂商上游在 `strict: true` 下报错。
+    *   3. 工具选择：`ToolChoiceMode.Full`，支持 auto、none 及命名函数选择。
+    *   4. 字段兼容：使用 `outputTokenField = "max_tokens"`，广泛兼容多厂商模型。
+    *   5. 推理控制：使用 `ReasoningWireMode.StandardEffort`，直接向顶层透传
+    *      `"reasoning_effort": "none" | "low" | "medium" | "high"`。 AIHubMix 在 Gemini 模型上会将此字段映射为 1K/8K/24K
+    *      token 思考预算，并在 "none" 时彻底关闭思考； 在 Claude / OpenAI / DeepSeek 模型上也会按需转换。
+    *   6. 多轮工具链：`preserveReasoningContent = true`，保留 Gemini / DeepSeek / Claude 在多轮工具调用中的思考签名与推理上下文。
+    */
+  def aihubmix(id: String = "aihubmix", displayName: String = "AIHubMix"): OpenAICompatibility =
+    require(id.matches("[a-z][a-z0-9_-]{0,31}"), "AIHubMix Provider id 必须是 1..32 的小写标识")
+    OpenAICompatibility(
+      ProviderDescriptor(
+        id,
+        displayName,
+        "openai-chat-completions",
+        ModelCapabilities(
+          toolCalls = true,
+          strictToolSchema = false,
+          specificToolChoice = true,
+          developerRole = false,
+          thinking = true,
+          vision = true,
+          streaming = true,
+          usageReporting = true,
+          reasoningEfforts = Set(
+            com.zyblw.agent.core.ReasoningEffort.None,
+            com.zyblw.agent.core.ReasoningEffort.Low,
+            com.zyblw.agent.core.ReasoningEffort.Medium,
+            com.zyblw.agent.core.ReasoningEffort.High
+          )
+        )
+      ),
+      DeveloperRoleMode.MapToSystem,
+      StrictToolSchemaMode.Omit,
+      ToolChoiceMode.Full,
+      outputTokenField = "max_tokens",
+      preserveReasoningContent = true,
+      reasoningWireMode = ReasoningWireMode.StandardEffort
+    )
+
   /** 通用中转站档案：任意本地 Provider id，协议仍走 OpenAI Chat Completions。
     *
     * 模型名原样发送到网关；能力默认保守（工具 + 流式），宿主应通过 `ProviderEndpointsConfig` 为每个模型填写更精确的 `ModelCapabilities`。
@@ -185,7 +236,18 @@ object OpenAICompatibility:
         id,
         displayName,
         "openai-chat-completions",
-        ModelCapabilities(toolCalls = true, streaming = true, usageReporting = true)
+        ModelCapabilities(
+          toolCalls = true,
+          streaming = true,
+          usageReporting = true,
+          thinking = true,
+          reasoningEfforts = Set(
+            com.zyblw.agent.core.ReasoningEffort.None,
+            com.zyblw.agent.core.ReasoningEffort.Low,
+            com.zyblw.agent.core.ReasoningEffort.Medium,
+            com.zyblw.agent.core.ReasoningEffort.High
+          )
+        )
       ),
       // Generic relays commonly expose the Chat Completions system/user role set.
       // Mapping developer to system keeps the request valid for gateways that do
@@ -194,5 +256,6 @@ object OpenAICompatibility:
       DeveloperRoleMode.MapToSystem,
       StrictToolSchemaMode.Omit,
       ToolChoiceMode.Full,
-      preserveReasoningContent = true
+      preserveReasoningContent = true,
+      reasoningWireMode = ReasoningWireMode.StandardEffort
     )

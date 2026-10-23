@@ -52,6 +52,7 @@ final case class DiscoveredModel(
   */
 object ModelDiscovery:
   val OpenRouterBaseUrl: String = "https://openrouter.ai/api/v1"
+  val AihubmixModelsUrl: String = "https://aihubmix.com/api/v1/models"
 
   private val MaxBodyBytes: Int = 16 * 1024 * 1024
 
@@ -64,6 +65,16 @@ object ModelDiscovery:
   ): IO[AgentError, Chunk[DiscoveredModel]] =
     fetch(client, s"${baseUrl.stripSuffix("/")}/models", apiKey, Map.empty, timeout).flatMap(body =>
       ZIO.fromEither(parseOpenRouter(body)).mapError(AgentError.InvalidConfiguration(_))
+    )
+
+  /** 读取 AIHubMix 公共富目录（包含能力、上下文窗口与每百万 token 美元定价）。 */
+  def aihubmix(
+      client: Client,
+      url: String = AihubmixModelsUrl,
+      timeout: Duration = 20.seconds
+  ): IO[AgentError, Chunk[DiscoveredModel]] =
+    fetch(client, url, None, Map.empty, timeout).flatMap(body =>
+      ZIO.fromEither(parseAihubmix(body)).mapError(AgentError.InvalidConfiguration(_))
     )
 
   /** 读取 OpenAI-compatible 网关的 `/models`。 */
@@ -91,13 +102,50 @@ object ModelDiscovery:
   def parseOpenRouter(body: String): Either[String, Chunk[DiscoveredModel]] =
     data(body).map(_.flatMap(openRouterModel).sortBy(_.id))
 
-  /** 解析 OpenAI `/models` 响应;只有 id 可信,用途按命名惯例推断。 */
+  /** 解析 AIHubMix `/api/v1/models` 富目录响应（包含 types、能力与每百万 token 美元价格）。 */
+  def parseAihubmix(body: String): Either[String, Chunk[DiscoveredModel]] =
+    data(body).map(_.flatMap(aihubmixModel).sortBy(_.id))
+
+  /** 解析 OpenAI `/models` 响应;只有 id 可信,用途与基本能力按通用与多厂商命名惯例推断。 */
   def parseOpenAIModels(body: String): Either[String, Chunk[DiscoveredModel]] =
     data(body).map(
       _.flatMap(entry => string(entry, "id")).distinct
-        .map(id => DiscoveredModel(id = id, name = id, kind = kindByName(id)))
+        .map { id =>
+          val kind                           = kindByName(id)
+          val (toolCalls, vision, reasoning) = inferChatCapabilities(id, kind)
+          DiscoveredModel(
+            id = id,
+            name = id,
+            kind = kind,
+            vision = vision,
+            toolCalls = toolCalls,
+            reasoning = reasoning
+          )
+        }
         .sortBy(_.id)
     )
+
+  private def inferChatCapabilities(id: String, kind: DiscoveredModelKind): (Boolean, Boolean, Boolean) =
+    if kind != DiscoveredModelKind.Chat then (false, false, false)
+    else
+      val lower          = id.toLowerCase
+      val isReasonerOnly =
+        lower.contains("deepseek-reasoner") || lower.endsWith("-r1") || lower.contains("/r1") || lower
+          .contains("o1-mini")
+      val toolCalls = !isReasonerOnly
+      val vision    = lower.contains("vision") || lower.contains("-vl") || lower.contains("4o") ||
+        lower.contains("gemini") || lower.contains("claude") || lower.contains("gpt-4") ||
+        lower.contains("gpt-5") || lower.contains("omni") || lower.contains("qwen-vl") ||
+        lower.contains("qwen3.6") || lower.contains("qwen3.7") || lower.contains("qwen3.8")
+      val reasoning = lower.contains("reasoner") || lower.contains("r1") || lower.contains("thinking") ||
+        lower.contains("o1") || lower.contains("o3") || lower.contains("o4") ||
+        lower.contains("gemini-2") || lower.contains("gemini-3") || lower.contains("gemini-4") ||
+        lower.contains("claude-3-7") || lower.contains("claude-sonnet-4") || lower.contains(
+          "claude-sonnet-5"
+        ) ||
+        lower.contains("claude-opus-4") || lower.contains("claude-opus-5") ||
+        lower.contains("deepseek-v3.2") || lower.contains("deepseek-v4") || lower.contains("qwen3")
+      (toolCalls, vision, reasoning)
 
   private def data(body: String): Either[String, Chunk[Json.Obj]] =
     body.fromJson[Json] match
@@ -135,6 +183,43 @@ object ModelDiscovery:
       )
     }
 
+  private def aihubmixModel(entry: Json.Obj): Option[DiscoveredModel] =
+    string(entry, "model_id").orElse(string(entry, "id")).flatMap { id =>
+      val types   = csv(entry, "types")
+      val kindOpt =
+        if types.isEmpty then Some(kindByName(id))
+        else if types.contains("rerank") then Some(DiscoveredModelKind.Rerank)
+        else if types.contains("embedding") || types.contains("embeddings") then
+          Some(DiscoveredModelKind.Embedding)
+        else if types.contains("llm") || types.contains("chat") then Some(DiscoveredModelKind.Chat)
+        else None
+      kindOpt.map { kind =>
+        val inputs                                          = csv(entry, "input_modalities")
+        val features                                        = csv(entry, "features")
+        val (inferredTools, inferredVision, inferredReason) = inferChatCapabilities(id, kind)
+        val pricing                                         = obj(entry, "pricing")
+        val isChat                                          = kind == DiscoveredModelKind.Chat
+        DiscoveredModel(
+          id = id,
+          name = string(entry, "model_name").orElse(string(entry, "name")).getOrElse(id),
+          kind = kind,
+          contextLength = long(Some(entry), "context_length").filter(_ > 0L),
+          maxOutputTokens =
+            long(Some(entry), "max_output").orElse(long(Some(entry), "max_completion_tokens")).filter(_ > 0L),
+          vision = isChat && (if inputs.nonEmpty then inputs.contains("image") else inferredVision),
+          toolCalls = isChat && boolean(entry, "tool_call").getOrElse(
+            features.contains("tools") || features.contains("function_calling") || inferredTools
+          ),
+          reasoning = isChat && boolean(entry, "reasoning").getOrElse(
+            features.contains("thinking") || features.contains("reasoning") || inferredReason
+          ),
+          inputPerMillionUsd = directPerMillion(pricing, "input"),
+          outputPerMillionUsd = directPerMillion(pricing, "output"),
+          cachedInputPerMillionUsd = directPerMillion(pricing, "cache_read")
+        )
+      }
+    }
+
   private def kindByName(id: String): DiscoveredModelKind =
     val lower = id.toLowerCase
     if lower.contains("rerank") then DiscoveredModelKind.Rerank
@@ -154,11 +239,32 @@ object ModelDiscovery:
       .map(value => (value * 1_000_000).bigDecimal.stripTrailingZeros)
       .map(BigDecimal(_))
 
+  /** 已是每百万 token 美元单价（如 AIHubMix `/api/v1/models`）。 */
+  private def directPerMillion(pricing: Option[Json.Obj], field: String): Option[BigDecimal] =
+    pricing
+      .flatMap(_.get(field))
+      .flatMap {
+        case Json.Str(value) => Try(BigDecimal(value.trim)).toOption
+        case Json.Num(value) => Some(BigDecimal(value))
+        case _               => None
+      }
+      .filter(_ >= 0)
+      .map(_.bigDecimal.stripTrailingZeros)
+      .map(BigDecimal(_))
+
   private def obj(entry: Json.Obj, field: String): Option[Json.Obj] =
     entry.get(field).collect { case value: Json.Obj => value }
 
   private def string(entry: Json.Obj, field: String): Option[String] =
     entry.get(field).collect { case Json.Str(value) if value.trim.nonEmpty => value.trim }
+
+  private def boolean(entry: Json.Obj, field: String): Option[Boolean] =
+    entry.get(field).collect { case Json.Bool(value) => value }
+
+  private def csv(entry: Json.Obj, field: String): Set[String] =
+    string(entry, field)
+      .map(_.split(',').iterator.map(_.trim.toLowerCase).filter(_.nonEmpty).toSet)
+      .getOrElse(Set.empty)
 
   private def strings(entry: Option[Json.Obj], field: String): Set[String] =
     entry

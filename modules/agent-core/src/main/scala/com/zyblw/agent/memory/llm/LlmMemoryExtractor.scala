@@ -354,6 +354,7 @@ object LlmMemoryExtractor:
           ),
           "value" -> Json.Obj(
             Chunk(
+              "type"        -> Json.Str("string"),
               "description" -> Json.Str("结构化事实内容或摘要字符串")
             )
           ),

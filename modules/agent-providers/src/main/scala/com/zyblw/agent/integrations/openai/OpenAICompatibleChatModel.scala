@@ -249,8 +249,9 @@ private[openai] object OpenAIWire:
       compatibility: OpenAICompatibility,
       options: Map[String, Json]
   ): Json =
+    val model    = request.settings.model.getOrElse(defaultModel)
     val required = List(
-      "model"    -> Json.Str(request.settings.model.getOrElse(defaultModel)),
+      "model"    -> Json.Str(model),
       "messages" -> arr(request.messages.map(message => encodeMessage(message, compatibility)))
     )
     val tools = Option.when(request.tools.nonEmpty)(
@@ -259,7 +260,7 @@ private[openai] object OpenAIWire:
     val temperature = request.settings.temperature.map(value => "temperature" -> Json.Num(value))
     val maxTokens   =
       request.settings.maxOutputTokens.map(value => compatibility.outputTokenField -> Json.Num(value))
-    val reasoning = request.settings.reasoningEffort.toList.flatMap(reasoningFields(_, compatibility))
+    val reasoning = request.settings.reasoningEffort.toList.flatMap(reasoningFields(_, model, compatibility))
     val controlledReasoningKeys = reasoning.map(_._1).toSet
     val safeOptions             = options.toList
       .filterNot(option => controlledReasoningKeys.contains(option._1))
@@ -274,13 +275,14 @@ private[openai] object OpenAIWire:
   /** 把稳定档位投影到当前兼容档案的最小 wire 字段集。 */
   private def reasoningFields(
       effort: ReasoningEffort,
+      model: String,
       compatibility: OpenAICompatibility
   ): List[(String, Json)] = compatibility.reasoningWireMode match
     case ReasoningWireMode.Unsupported  => Nil
     case ReasoningWireMode.OpenAIEffort =>
       List("reasoning_effort" -> Json.Str(openAIReasoningEffort(effort)))
     case ReasoningWireMode.StandardEffort =>
-      List("reasoning_effort" -> Json.Str(standardReasoningEffort(effort)))
+      standardReasoningFields(effort, model)
     case ReasoningWireMode.ThinkingObjectEffort =>
       effort match
         case ReasoningEffort.None => List("thinking" -> thinking(enabled = false))
@@ -293,6 +295,35 @@ private[openai] object OpenAIWire:
       List("enable_thinking" -> Json.Bool(effort != ReasoningEffort.None))
     case ReasoningWireMode.ThinkingObjectToggle =>
       List("thinking" -> thinking(enabled = effort != ReasoningEffort.None))
+
+  /** 在聚合中转网关（AIHubMix / OpenRouter / 通用中转）上按目标模型家族自动适配推理字段：
+    *   - Qwen 系列使用 `"enable_thinking": true | false`，避免 `"reasoning_effort": "none"` 被忽略或报错
+    *   - DeepSeek V3/V4 系列使用 `"thinking": {"type": ...}` 与 `"low" | "high" | "max"` 档位
+    *   - Claude 系列默认关闭思考且不支持 `"none"`，因此在 `None` 时省略字段
+    *   - Gemini 2.5 Pro / Gemini 3 / Gemini 4 系列不支持关闭思考（最小档位为 `"low"`），在 `None` 时降级为 `"low"`（1K 预算）
+    */
+  private def standardReasoningFields(effort: ReasoningEffort, model: String): List[(String, Json)] =
+    val lower = model.toLowerCase
+    if lower.contains("qwen") || lower.contains("qwq") || lower.contains("qvq") then
+      List("enable_thinking" -> Json.Bool(effort != ReasoningEffort.None))
+    else if lower.contains("deepseek") then
+      if lower.contains("reasoner") || lower.endsWith("-r1") || lower.contains("/r1") then Nil
+      else
+        effort match
+          case ReasoningEffort.None => List("thinking" -> thinking(enabled = false))
+          case value                =>
+            List(
+              "thinking"         -> thinking(enabled = true),
+              "reasoning_effort" -> Json.Str(deepSeekReasoningEffort(value))
+            )
+    else if lower.contains("claude") then
+      effort match
+        case ReasoningEffort.None => Nil
+        case value                => List("reasoning_effort" -> Json.Str(standardReasoningEffort(value)))
+    else if effort == ReasoningEffort.None &&
+      (lower.contains("gemini-2.5-pro") || lower.contains("gemini-3") || lower.contains("gemini-4"))
+    then List("reasoning_effort" -> Json.Str("low"))
+    else List("reasoning_effort" -> Json.Str(standardReasoningEffort(effort)))
 
   private def thinking(enabled: Boolean): Json.Obj =
     obj("type" -> Json.Str(if enabled then "enabled" else "disabled"))

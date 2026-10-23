@@ -202,6 +202,75 @@ object OpenAICompatibilitySpec extends ZIOSpecDefault:
         encoded.forall(!_.contains("reasoning_effort"))
       )
     },
+    test(
+      "AIHubMix maps developer to system, uses max_tokens, omits strict schema and projects standard reasoning_effort"
+    ) {
+      val request = ChatRequest(
+        Chunk(AgentMessage.developer("system prompt"), AgentMessage.user("question")),
+        Chunk(tool),
+        ModelSettings(
+          maxOutputTokens = Some(2048),
+          reasoningEffort = Some(ReasoningEffort.Medium),
+          toolChoice = ToolChoice.Specific("lookup")
+        )
+      )
+      val encoded = OpenAIWire
+        .encodeRequest(request, "gemini-2.5-flash", OpenAICompatibility.aihubmix())
+        .map(_.toString)
+      val qwenNone = OpenAIWire
+        .encodeRequest(
+          ChatRequest(
+            Chunk(AgentMessage.user("q")),
+            settings = ModelSettings(reasoningEffort = Some(ReasoningEffort.None))
+          ),
+          "qwen3.8-flash",
+          OpenAICompatibility.aihubmix()
+        )
+        .map(_.toString)
+      val deepSeekNone = OpenAIWire
+        .encodeRequest(
+          ChatRequest(
+            Chunk(AgentMessage.user("q")),
+            settings = ModelSettings(reasoningEffort = Some(ReasoningEffort.None))
+          ),
+          "deepseek-v4.1-flash",
+          OpenAICompatibility.aihubmix()
+        )
+        .map(_.toString)
+      val gemini3None = OpenAIWire
+        .encodeRequest(
+          ChatRequest(
+            Chunk(AgentMessage.user("q")),
+            settings = ModelSettings(reasoningEffort = Some(ReasoningEffort.None))
+          ),
+          "gemini-3.8-flash",
+          OpenAICompatibility.aihubmix()
+        )
+        .map(_.toString)
+      val claudeNone = OpenAIWire
+        .encodeRequest(
+          ChatRequest(
+            Chunk(AgentMessage.user("q")),
+            settings = ModelSettings(reasoningEffort = Some(ReasoningEffort.None))
+          ),
+          "claude-sonnet-5-5",
+          OpenAICompatibility.aihubmix()
+        )
+        .map(_.toString)
+      assertTrue(
+        encoded.exists(_.contains("\"role\":\"system\"")),
+        encoded.forall(!_.contains("\"role\":\"developer\"")),
+        encoded.exists(_.contains("\"max_tokens\":2048")),
+        encoded.forall(!_.contains("max_completion_tokens")),
+        encoded.forall(!_.contains("\"strict\"")),
+        encoded.exists(_.contains("\"reasoning_effort\":\"medium\"")),
+        encoded.exists(_.contains("\"name\":\"lookup\"")),
+        qwenNone.exists(_.contains("\"enable_thinking\":false")),
+        deepSeekNone.exists(_.contains("\"thinking\":{\"type\":\"disabled\"}")),
+        gemini3None.exists(_.contains("\"reasoning_effort\":\"low\"")),
+        claudeNone.forall(!_.contains("reasoning_effort"))
+      )
+    },
     test("OpenAI keeps strict schema and uses max_completion_tokens") {
       val request = ChatRequest(
         Chunk(AgentMessage.user("question")),

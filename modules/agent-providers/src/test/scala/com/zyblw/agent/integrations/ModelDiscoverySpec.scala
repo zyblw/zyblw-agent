@@ -52,7 +52,35 @@ object ModelDiscoverySpec extends ZIOSpecDefault:
           "qwen-plus"         -> DiscoveredModelKind.Chat,
           "text-embedding-v4" -> DiscoveredModelKind.Embedding
         ),
+        parsed.toOption.get.find(_.id == "qwen-plus").exists(_.toolCalls),
         invalid == Left("模型目录缺少 data 数组")
+      )
+    },
+    test("AIHubMix 富目录解析能力、百万 token 美元定价并过滤非聊天/向量/重排模型") {
+      val aihubmixBody =
+        """{"success":true,"data":[
+          |{"model_id":"gemini-3.8-flash","model_name":"Gemini 3.8 Flash","types":"llm","input_modalities":"text,image,pdf","features":"thinking,tools,function_calling","tool_call":true,"reasoning":true,"context_length":1048576,"max_output":65536,"pricing":{"input":0.35,"output":2.8,"cache_read":0.035}},
+          |{"model_id":"deepseek-v4.1-flash","model_name":"DeepSeek V4.1 Flash","types":"llm","input_modalities":"text","features":"thinking,tools","tool_call":null,"reasoning":true,"context_length":1024000,"max_output":65536,"pricing":{"input":0.16,"output":0.64,"cache_read":0.032}},
+          |{"model_id":"text-embedding-3-large","model_name":"Embedding 3 Large","types":"embedding","pricing":{"input":0.13,"output":0}},
+          |{"model_id":"flux-2-max","model_name":"Flux 2 Max","types":"image_generation","pricing":{"input":0,"output":0}}
+          |]}""".stripMargin
+      val models = ModelDiscovery.parseAihubmix(aihubmixBody).toOption.get
+      val byId   = models.map(m => m.id -> m).toMap
+      val gemini = byId("gemini-3.8-flash")
+      val ds     = byId("deepseek-v4.1-flash")
+      assertTrue(
+        models.length == 3,
+        !byId.contains("flux-2-max"),
+        gemini.vision,
+        gemini.toolCalls,
+        gemini.reasoning,
+        gemini.inputPerMillionUsd.contains(BigDecimal("0.35")),
+        gemini.outputPerMillionUsd.contains(BigDecimal("2.8")),
+        gemini.cachedInputPerMillionUsd.contains(BigDecimal("0.035")),
+        ds.toolCalls,
+        ds.reasoning,
+        !ds.vision,
+        byId("text-embedding-3-large").kind == DiscoveredModelKind.Embedding
       )
     },
     test("通过 HTTP 读取网关目录并携带 Bearer 与额外请求头;401 归类为凭据错误") {

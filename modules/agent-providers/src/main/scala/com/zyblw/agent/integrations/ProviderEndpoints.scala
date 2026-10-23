@@ -64,7 +64,17 @@ final case class ProviderEndpointCapabilities(
       reasoningTokens = reasoningTokens,
       maxInputTokens = maxInputTokens,
       maxOutputTokens = maxOutputTokens,
-      reasoningEfforts = if reasoningEfforts.isEmpty then base.reasoningEfforts else reasoningEfforts
+      reasoningEfforts =
+        if reasoningEfforts.nonEmpty then reasoningEfforts
+        else if base.reasoningEfforts.nonEmpty then base.reasoningEfforts
+        else if thinking then
+          Set(
+            ReasoningEffort.None,
+            ReasoningEffort.Low,
+            ReasoningEffort.Medium,
+            ReasoningEffort.High
+          )
+        else Set.empty
     )
 
 /** 配置声明的单个模型能力与可选计价标签。价格数字不进日志。 */
@@ -156,7 +166,7 @@ object ProviderEndpointsConfig:
 /** 把声明转换成可路由的 `ChatModel` 与 `ProviderRegistry`。 */
 object ProviderEndpoints:
   val SupportedCompatibilityProfiles: Set[String] =
-    Set("openai", "deepseek", "glm", "qwen", "kimi", "generic")
+    Set("openai", "deepseek", "glm", "qwen", "kimi", "aihubmix", "generic")
 
   /** 严格校验运维声明的端点根 URL。
     *
@@ -226,6 +236,7 @@ object ProviderEndpoints:
       case "glm"      => OpenAICompatibility.glm
       case "qwen"     => OpenAICompatibility.qwen
       case "kimi"     => OpenAICompatibility.kimi
+      case "aihubmix" => OpenAICompatibility.aihubmix(declaration.providerId)
       case _          => OpenAICompatibility.relay(declaration.providerId)
     if base.descriptor.id == declaration.providerId then base
     else base.copy(descriptor = base.descriptor.copy(id = declaration.providerId))
