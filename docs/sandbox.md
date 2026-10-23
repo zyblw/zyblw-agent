@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-10-24
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -40,7 +40,8 @@
 - 拒绝根目录和已有路径段中的符号链接；
 - 只读取普通文件；
 - 对单文件、Workspace 总容量和单次列举条数设置上限；
-- 使用同目录临时文件和原子 move 写入，防止读到半个文件；
+- 使用同目录临时文件（`.zyblw-write-*.tmp`）和原子 move 写入，并在 `list` 与 `totalBytes()` 统计中统一加锁过滤临时文件，防止读到半个文件或重复计入配额；
+- `WorkspaceEdit` 基于同一受控边界提供行范围读取、统一 Diff 预览与精确出现次数替换，支持多字节 Unicode 码点切分与 UTF-8 BOM 保护；
 - 只删除普通文件或空目录，不递归删除目录树。
 
 ```scala

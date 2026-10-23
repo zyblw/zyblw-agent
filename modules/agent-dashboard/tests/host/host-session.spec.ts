@@ -2,6 +2,10 @@ import { expect, test } from '@playwright/test';
 
 test('宿主会话不读取 Bearer token，并通过同源 BFF 携带 CSRF 标记', async ({ page }) => {
   let capabilitiesRequests = 0;
+  await page.addInitScript(() => {
+    localStorage.setItem('zyblw-agent-dashboard.base-url', 'https://obsolete.agent.invalid');
+    sessionStorage.setItem('zyblw-agent-dashboard.token', 'obsolete-bearer');
+  });
 
   await page.route('**/api/backend/api/v1/admin/**', async (route) => {
     const request = route.request();

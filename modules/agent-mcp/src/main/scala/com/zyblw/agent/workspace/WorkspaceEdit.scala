@@ -42,13 +42,9 @@ object WorkspaceEdit:
       patch: WorkspacePatch
   ): IO[AgentError, WorkspaceAppliedEdit] =
     ZIO.fromEither(validate(inspection, patch)).mapError(AgentError.PermissionDenied("workspace.edit", _)) *>
-      workspace.read(patch.path, math.max(inspection.byteSize, 1L)).flatMap { previous =>
-        workspace
-          .write(patch.path, patch.bytes, overwrite = true)
-          .as(
-            WorkspaceAppliedEdit(patch.path, previous, ArtifactBlobStore.digest(patch.bytes))
-          )
+      workspace.replace(patch.path, patch.expectedSha256, patch.bytes).map { previous =>
+        WorkspaceAppliedEdit(patch.path, previous, ArtifactBlobStore.digest(patch.bytes))
       }
 
   def rollback(workspace: Workspace, applied: WorkspaceAppliedEdit): IO[AgentError, Unit] =
-    workspace.write(applied.path, applied.previous, overwrite = true)
+    workspace.replace(applied.path, applied.nextSha256, applied.previous).unit

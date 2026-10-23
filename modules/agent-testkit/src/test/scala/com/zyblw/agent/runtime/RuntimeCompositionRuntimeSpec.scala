@@ -36,7 +36,7 @@ object RuntimeCompositionRuntimeSpec extends ZIOSpecDefault:
       model: ChatModel,
       modelPolicies: ModelPolicySource,
       tools: Iterable[RegisteredTool] = Nil,
-      toolPolicy: ToolPolicyConfig = ToolPolicyConfig.secureDefault
+      toolPolicy: ToolPolicyConfig = ToolPolicyConfig(allowedTools = Set(ToolName("echo")))
   ) =
     TestAgentRuntime.inMemory(model, tools, modelPolicies = modelPolicies, toolPolicy = toolPolicy)
 

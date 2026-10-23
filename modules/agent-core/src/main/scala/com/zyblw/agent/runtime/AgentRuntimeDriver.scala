@@ -541,8 +541,13 @@ final class AgentRuntimeDriver(
   ): PlannedCall =
     resolved match
       case Right(tool) =>
+        val toolName = ToolName(call.name)
+        val allowed  =
+          state.definition.allowedTools.contains(call.name) &&
+            policy.allowedTools.contains(toolName) &&
+            !policy.deniedTools.contains(toolName)
         val metadata =
-          AgentKernel.planningMetadata(tool.metadata, policy, state.runContext.scopes)
+          AgentKernel.planningMetadata(tool.metadata, policy, state.runContext.scopes, allowed)
         val contract = com.zyblw.agent.composition.ToolContractFingerprint.registered(tool)
         PlannedCall(
           PlannedToolInvocation(ordinal, call, planningView(tool, metadata)),
@@ -723,7 +728,7 @@ final class AgentRuntimeDriver(
       now    <- RunClock.millis
       active <- toolLedger.begin(existing, now)
       _      <- publisher.emit(AgentEvent.ToolExecutionStarted(state.runId, call.id, now))
-      executor = toolExecutor.narrowed(Set(ToolName(call.name)))
+      executor = toolExecutor.narrowed(state.definition.allowedTools.map(ToolName(_)), toolPolicies.current())
       context  = executionContext(state, call)
       result <- executor
         .execute(tool, call, context)

@@ -27,7 +27,7 @@ export function HarnessPanel() {
   const enabled = goalId.trim().length >= 8;
 
   const goal = useQuery({
-    queryKey: ['admin', 'harness', goalId],
+    queryKey: ['admin', 'harness', config.baseUrl, goalId],
     queryFn: () => adminApi.harnessGoal(config, goalId.trim()),
     enabled,
   });

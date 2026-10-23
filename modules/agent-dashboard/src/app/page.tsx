@@ -56,7 +56,7 @@ function Console() {
   const activeTab: DashboardTab = tabs.find((tab) => tab.id === picked)?.id ?? tabs[0]?.id ?? 'runs';
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-slate-50 text-slate-900 font-sans selection:bg-indigo-500 selection:text-white">
+    <div className="flex h-dvh w-full overflow-hidden bg-slate-50 text-slate-900 font-sans selection:bg-indigo-500 selection:text-white">
       {/* 现代智能体左侧导航栏 */}
       <Sidebar
         activeTab={activeTab}

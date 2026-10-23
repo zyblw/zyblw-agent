@@ -1,9 +1,11 @@
 package com.zyblw.agent.workspace
 
+import com.zyblw.agent.artifacts.ArtifactBlobStore
 import com.zyblw.agent.core.*
 import java.io.ByteArrayOutputStream
 import java.nio.file.*
 import java.nio.file.attribute.BasicFileAttributes
+import java.util.concurrent.ConcurrentHashMap
 import scala.jdk.CollectionConverters.*
 import zio.*
 
@@ -61,6 +63,29 @@ trait Workspace:
   /** 删除一个普通文件或空目录；不会递归删除目录树。 */
   def delete(path: WorkspacePath): IO[AgentError, Unit]
 
+  /** 仅当目标文件当前内容哈希等于 expectedSha256 时原子替换为新字节，并返回替换前字节。 */
+  def replace(
+      path: WorkspacePath,
+      expectedSha256: String,
+      bytes: Chunk[Byte]
+  ): IO[AgentError, Chunk[Byte]] =
+    if !expectedSha256.matches("[0-9a-f]{64}") then
+      ZIO.fail(AgentError.InvalidConfiguration("workspace replace expectedSha256 must be SHA-256"))
+    else
+      read(path, Long.MaxValue).flatMap { current =>
+        if ArtifactBlobStore.digest(current) != expectedSha256 then
+          ZIO.fail(AgentError.PermissionDenied("workspace.edit", "workspace-edit-stale-base"))
+        else write(path, bytes, overwrite = true).as(current)
+      }
+
+private object LocalWorkspaceLocks:
+  private val locks = new ConcurrentHashMap[Path, AnyRef]()
+
+  def lockFor(normalizedRoot: Path): AnyRef =
+    locks.computeIfAbsent(normalizedRoot, _ => new AnyRef)
+
+  final class StaleBaseException(message: String) extends RuntimeException(message)
+
 /** 防路径逃逸、拒绝 symlink 且带配额的本地 Workspace。
   *
   * 该实现适合受信业务文件与测试，不等于容器 Sandbox。它在每次操作前检查已有路径段没有符号链接，并用 `NOFOLLOW_LINKS` 打开属性；但通用 Path API 仍无法完全消除恶意本地进程参与的
@@ -68,31 +93,14 @@ trait Workspace:
   */
 final class LocalWorkspace(root: Path, policy: WorkspacePolicy = WorkspacePolicy()) extends Workspace:
   private val normalizedRoot = root.toAbsolutePath.normalize()
+  private val writeLock      = LocalWorkspaceLocks.lockFor(normalizedRoot)
 
   def read(path: WorkspacePath, maxBytes: Long): IO[AgentError, Chunk[Byte]] =
     val limit = math.min(maxBytes, policy.maxFileBytes)
     if limit <= 0L then ZIO.fail(AgentError.InvalidConfiguration("workspace read maxBytes must be positive"))
     else
       resolve(path, requireExisting = true).flatMap { target =>
-        blocking("read", s"读取 workspace 文件失败") {
-          val attributes =
-            Files.readAttributes(target, classOf[BasicFileAttributes], LinkOption.NOFOLLOW_LINKS)
-          if !attributes.isRegularFile then throw SecurityException("workspace 只允许读取普通文件")
-          if attributes.size() > limit then throw IllegalArgumentException(s"workspace 文件超过 $limit bytes")
-          val input  = Files.newInputStream(target, LinkOption.NOFOLLOW_LINKS)
-          val output = new ByteArrayOutputStream(math.min(attributes.size(), limit).toInt)
-          try
-            val buffer = Array.ofDim[Byte](8192)
-            var total  = 0L
-            var read   = input.read(buffer)
-            while read >= 0 do
-              total += read
-              if total > limit then throw IllegalArgumentException(s"workspace 文件超过 $limit bytes")
-              output.write(buffer, 0, read)
-              read = input.read(buffer)
-            Chunk.fromArray(output.toByteArray)
-          finally input.close()
-        }
+        blocking("read", s"读取 workspace 文件失败")(readBoundedBytes(target, limit))
       }
 
   def write(path: WorkspacePath, bytes: Chunk[Byte], overwrite: Boolean): IO[AgentError, Unit] =
@@ -101,45 +109,72 @@ final class LocalWorkspace(root: Path, policy: WorkspacePolicy = WorkspacePolicy
     else
       resolve(path, requireExisting = false).flatMap { target =>
         blocking("write", "写入 workspace 文件失败") {
-          val parent = Option(target.getParent).getOrElse(throw SecurityException("workspace 目标没有父目录"))
-          Files.createDirectories(parent)
-          verifyNoSymlink(parent)
-          if Files.exists(target, LinkOption.NOFOLLOW_LINKS) then
-            if Files.isSymbolicLink(target) then throw SecurityException("workspace 目标是符号链接")
-            if !overwrite then throw FileAlreadyExistsException(target.toString)
-          val existingSize =
-            if Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) then Files.size(target) else 0L
-          val projected = totalBytes() - existingSize + bytes.length.toLong
-          if projected > policy.maxTotalBytes then throw IllegalArgumentException("workspace 总容量配额已耗尽")
-          val temporary = Files.createTempFile(parent, ".zyblw-write-", ".tmp")
-          try
-            Files.write(temporary, bytes.toArray, StandardOpenOption.TRUNCATE_EXISTING)
-            val options =
-              if overwrite then Array(StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-              else Array(StandardCopyOption.ATOMIC_MOVE)
-            Files.move(temporary, target, options*)
-            ()
-          finally
-            Files.deleteIfExists(temporary)
-            ()
+          writeLock.synchronized {
+            val parent = Option(target.getParent).getOrElse(throw SecurityException("workspace 目标没有父目录"))
+            Files.createDirectories(parent)
+            verifyNoSymlink(parent)
+            if Files.exists(target, LinkOption.NOFOLLOW_LINKS) then
+              if Files.isSymbolicLink(target) then throw SecurityException("workspace 目标是符号链接")
+              if !overwrite then throw FileAlreadyExistsException(target.toString)
+            val existingSize =
+              if Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) then Files.size(target) else 0L
+            val projected = totalBytes() - existingSize + bytes.length.toLong
+            if projected > policy.maxTotalBytes then throw IllegalArgumentException("workspace 总容量配额已耗尽")
+            writeAtomically(parent, target, bytes, overwrite)
+          }
+        }
+      }
+
+  override def replace(
+      path: WorkspacePath,
+      expectedSha256: String,
+      bytes: Chunk[Byte]
+  ): IO[AgentError, Chunk[Byte]] =
+    if !expectedSha256.matches("[0-9a-f]{64}") then
+      ZIO.fail(AgentError.InvalidConfiguration("workspace replace expectedSha256 must be SHA-256"))
+    else if bytes.length.toLong > policy.maxFileBytes then
+      ZIO.fail(AgentError.PermissionDenied("workspace.write", s"单文件超过 ${policy.maxFileBytes} bytes"))
+    else
+      resolve(path, requireExisting = true).flatMap { target =>
+        blocking("replace", "条件更新 workspace 文件失败") {
+          writeLock.synchronized {
+            val parent = Option(target.getParent).getOrElse(throw SecurityException("workspace 目标没有父目录"))
+            verifyNoSymlink(target)
+            if !Files.exists(target, LinkOption.NOFOLLOW_LINKS) then
+              throw NoSuchFileException(target.toString)
+            val current = readBoundedBytes(target, policy.maxFileBytes)
+            if ArtifactBlobStore.digest(current) != expectedSha256 then
+              throw LocalWorkspaceLocks.StaleBaseException("workspace-edit-stale-base")
+            val projected = totalBytes() - current.length.toLong + bytes.length.toLong
+            if projected > policy.maxTotalBytes then throw IllegalArgumentException("workspace 总容量配额已耗尽")
+            writeAtomically(parent, target, bytes, overwrite = true)
+            current
+          }
         }
       }
 
   def list(path: WorkspacePath): IO[AgentError, Chunk[WorkspacePath]] =
     resolve(path, requireExisting = true).flatMap { target =>
       blocking("list", "列出 workspace 目录失败") {
-        if !Files.isDirectory(target, LinkOption.NOFOLLOW_LINKS) then
-          throw IllegalArgumentException("workspace 路径不是目录")
-        val stream = Files.list(target)
-        try
-          val values = stream.limit(policy.maxEntries.toLong + 1L).iterator().asScala.toList
-          if values.length > policy.maxEntries then throw IllegalArgumentException("workspace 目录条目超过上限")
-          Chunk.fromIterable(
-            values.map(item =>
-              WorkspacePath(normalizedRoot.relativize(item).iterator().asScala.mkString("/"))
+        writeLock.synchronized {
+          if !Files.isDirectory(target, LinkOption.NOFOLLOW_LINKS) then
+            throw IllegalArgumentException("workspace 路径不是目录")
+          val stream = Files.list(target)
+          try
+            val values = stream
+              .iterator()
+              .asScala
+              .filterNot(isTransientWriteFile)
+              .take(policy.maxEntries + 1)
+              .toList
+            if values.length > policy.maxEntries then throw IllegalArgumentException("workspace 目录条目超过上限")
+            Chunk.fromIterable(
+              values.map(item =>
+                WorkspacePath(normalizedRoot.relativize(item).iterator().asScala.mkString("/"))
+              )
             )
-          )
-        finally stream.close()
+          finally stream.close()
+        }
       }
     }
 
@@ -149,11 +184,45 @@ final class LocalWorkspace(root: Path, policy: WorkspacePolicy = WorkspacePolicy
     else
       resolve(path, requireExisting = true).flatMap { target =>
         blocking("delete", "删除 workspace 路径失败") {
-          if Files.isSymbolicLink(target) then throw SecurityException("不能删除 workspace 符号链接")
-          Files.delete(target)
-          ()
+          writeLock.synchronized {
+            if Files.isSymbolicLink(target) then throw SecurityException("不能删除 workspace 符号链接")
+            Files.delete(target)
+            ()
+          }
         }
       }
+
+  private def readBoundedBytes(target: Path, limit: Long): Chunk[Byte] =
+    val attributes =
+      Files.readAttributes(target, classOf[BasicFileAttributes], LinkOption.NOFOLLOW_LINKS)
+    if !attributes.isRegularFile then throw SecurityException("workspace 只允许读取普通文件")
+    if attributes.size() > limit then throw IllegalArgumentException(s"workspace 文件超过 $limit bytes")
+    val input  = Files.newInputStream(target, LinkOption.NOFOLLOW_LINKS)
+    val output = new ByteArrayOutputStream(math.min(attributes.size(), limit).toInt)
+    try
+      val buffer = Array.ofDim[Byte](8192)
+      var total  = 0L
+      var read   = input.read(buffer)
+      while read >= 0 do
+        total += read
+        if total > limit then throw IllegalArgumentException(s"workspace 文件超过 $limit bytes")
+        output.write(buffer, 0, read)
+        read = input.read(buffer)
+      Chunk.fromArray(output.toByteArray)
+    finally input.close()
+
+  private def writeAtomically(parent: Path, target: Path, bytes: Chunk[Byte], overwrite: Boolean): Unit =
+    val temporary = Files.createTempFile(parent, ".zyblw-write-", ".tmp")
+    try
+      Files.write(temporary, bytes.toArray, StandardOpenOption.TRUNCATE_EXISTING)
+      val options =
+        if overwrite then Array(StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        else Array(StandardCopyOption.ATOMIC_MOVE)
+      Files.move(temporary, target, options*)
+      ()
+    finally
+      Files.deleteIfExists(temporary)
+      ()
 
   /** 完成词法根目录检查和全部已存在路径段的 symlink 检查。
     * @param requireExisting
@@ -183,12 +252,18 @@ final class LocalWorkspace(root: Path, policy: WorkspacePolicy = WorkspacePolicy
         throw SecurityException("workspace 路径包含符号链接")
     }
 
+  private def isTransientWriteFile(path: Path): Boolean =
+    Option(path.getFileName)
+      .map(_.toString)
+      .exists(name => name.startsWith(".zyblw-write-") && name.endsWith(".tmp"))
+
   /** 统计普通文件字节数；不跟随 symlink，遇到 symlink 直接拒绝。 */
   private def totalBytes(): Long =
     val stream = Files.walk(normalizedRoot)
     try
       stream.iterator().asScala.foldLeft(0L) { (total, path) =>
-        if Files.isSymbolicLink(path) then throw SecurityException("workspace 包含符号链接")
+        if isTransientWriteFile(path) then total
+        else if Files.isSymbolicLink(path) then throw SecurityException("workspace 包含符号链接")
         else if Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) then
           Math.addExact(total, Files.size(path))
         else total
@@ -198,8 +273,11 @@ final class LocalWorkspace(root: Path, policy: WorkspacePolicy = WorkspacePolicy
   /** 将 Java I/O 异常映射成不包含文件正文的 typed protocol failure。 */
   private def blocking[A](operation: String, message: String)(effect: => A): IO[AgentError, A] =
     ZIO.attemptBlocking(effect).mapError {
-      case error: SecurityException => AgentError.PermissionDenied(s"workspace.$operation", error.getMessage)
-      case error                    =>
+      case error: LocalWorkspaceLocks.StaleBaseException =>
+        AgentError.PermissionDenied("workspace.edit", error.getMessage)
+      case error: SecurityException =>
+        AgentError.PermissionDenied(s"workspace.$operation", error.getMessage)
+      case error =>
         AgentError.ExternalProtocolFailure(
           "workspace",
           operation,

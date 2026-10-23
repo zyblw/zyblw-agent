@@ -102,7 +102,14 @@ final class ToolExecutor private (
 
   /** 同一并行许可池上收窄白名单，避免每个工具调用重建执行器。 */
   def narrowed(allowed: Set[ToolName]): ToolExecutor =
-    ToolExecutor(semaphore, policy.copy(allowedTools = allowed), artifacts)
+    narrowed(allowed, policy)
+
+  private[agent] def narrowed(allowed: Set[ToolName], currentPolicy: ToolPolicyConfig): ToolExecutor =
+    ToolExecutor(
+      semaphore,
+      currentPolicy.copy(allowedTools = currentPolicy.allowedTools.intersect(allowed)),
+      artifacts
+    )
 
   /** 阈值以上把 Inline 全文外置为 Run 域 Artifact；已外置或未超阈值的结果原样返回。 */
   def externalize(

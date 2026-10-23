@@ -219,6 +219,13 @@ object AgentKernelSpec extends ZIOSpecDefault:
           )
           .isEmpty,
         budgetFailure.exists(_.state.status == RunStatus.BudgetExceeded),
+        AgentKernel
+          .fail(
+            running.copy(messages = running.messages :+ AgentMessage.assistant("blocked")),
+            AgentError.GuardrailRejected("output", "blocked"),
+            now
+          )
+          .exists(_.state.status == RunStatus.Failed),
         AgentKernel.cancel(running, now).exists(_.state.status == RunStatus.Cancelled),
         AgentKernel.cancel(state(status = RunStatus.Completed), now).isEmpty,
         AgentKernel
@@ -446,9 +453,10 @@ object AgentKernelSpec extends ZIOSpecDefault:
         conflictAccesses = Set(ToolConflictAccess("docs", ToolAccessMode.Read)),
         requiredScopes = Set("docs:read")
       )
-      val granted   = Set("docs:read")
-      val demoted   = AgentKernel.planningMetadata(parallel, policy, Set.empty)
-      val approving = AgentKernel.planningMetadata(
+      val granted    = Set("docs:read")
+      val demoted    = AgentKernel.planningMetadata(parallel, policy, Set.empty)
+      val disallowed = AgentKernel.planningMetadata(parallel, policy, granted, allowed = false)
+      val approving  = AgentKernel.planningMetadata(
         parallel.copy(risk = ToolRisk.ApprovalWrite, sideEffect = SideEffect.NonIdempotentWrite),
         policy,
         granted
@@ -456,9 +464,11 @@ object AgentKernelSpec extends ZIOSpecDefault:
       assertTrue(
         // 声明完整且 scope 齐备：保留真实元数据。
         AgentKernel.planningMetadata(parallel, policy, granted) == parallel,
-        // 缺少 scope：降级为串行并清空冲突声明。
+        // 缺少 scope 或不在白名单：降级为串行并清空冲突声明。
         demoted.parallelism == ToolParallelism.SequentialOnly,
         demoted.conflictAccesses.isEmpty,
+        disallowed.parallelism == ToolParallelism.SequentialOnly,
+        disallowed.conflictAccesses.isEmpty,
         // 需要审批的工具永不并行，即使它声明了 ConflictAware。
         approving.parallelism == ToolParallelism.SequentialOnly,
         // 未声明并行的工具保持串行。

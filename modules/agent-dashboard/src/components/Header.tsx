@@ -6,7 +6,7 @@
  * 负责展示当前工作区面包屑、环境连接指示灯、主机安全会话标识与凭据设置弹窗。
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import {
   ArrowLeft,
   ExternalLink,
@@ -82,7 +82,9 @@ const TAB_DESCRIPTIONS: Record<DashboardTab, { section: string; title: string; s
 
 export function Header({
   activeTab,
+  onTabChange,
   capabilities,
+  showTabs = true,
   connectionOpen,
   onToggleConnection,
 }: {
@@ -94,6 +96,8 @@ export function Header({
   onToggleConnection: (open: boolean) => void;
 }) {
   const { config, hasToken, setBaseUrl, setToken, clearToken } = useConnection();
+  const [draftBaseUrl, setDraftBaseUrl] = useState(config.baseUrl);
+  const [draftToken, setDraftToken] = useState(config.token ?? '');
   const info = TAB_DESCRIPTIONS[activeTab] ?? {
     section: '控制台',
     title: '智能体管理台',
@@ -105,10 +109,10 @@ export function Header({
 
   return (
     <header className="sticky top-0 z-30 flex flex-col border-b border-slate-200 bg-white/95 backdrop-blur-md">
-      <div className="flex items-center justify-between px-6 py-3">
+      <div className="flex flex-col gap-3 px-4 py-3 lg:flex-row lg:items-center lg:justify-between lg:px-6">
         {/* 当前模块面包屑与副标题 */}
         <div className="flex flex-col min-w-0">
-          <div className="flex items-center gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
             <a
               href="/admin"
               className="inline-flex items-center gap-1 font-medium text-indigo-600 hover:text-indigo-800 transition-colors"
@@ -125,8 +129,17 @@ export function Header({
           <p className="mt-0.5 text-xs text-slate-500 truncate max-w-2xl">{info.subtitle}</p>
         </div>
 
+        {showTabs && <select
+          aria-label="控制台模块"
+          value={activeTab}
+          onChange={(event) => onTabChange(event.target.value as DashboardTab)}
+          className={`min-h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-900 md:hidden ${FOCUS_RING}`}
+        >
+          {visibleTabs(capabilities).map((tab) => <option key={tab.id} value={tab.id}>{tab.label}</option>)}
+        </select>}
+
         {/* 顶部右侧状态与操作 */}
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2">
           {/* 会话指示器：严格保留宿主会话标识与断言支持 */}
           {config.authMode === 'host-session' ? (
             <div
@@ -196,7 +209,13 @@ export function Header({
           {/* 凭据设置展开按钮 */}
           <button
             type="button"
-            onClick={() => onToggleConnection(!connectionOpen)}
+            onClick={() => {
+              if (!connectionOpen) {
+                setDraftBaseUrl(config.baseUrl);
+                setDraftToken(config.token ?? '');
+              }
+              onToggleConnection(!connectionOpen);
+            }}
             className={`inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 transition shadow-xs ${FOCUS_RING}`}
           >
             <KeyRound className="h-3.5 w-3.5 text-indigo-600" />
@@ -216,6 +235,7 @@ export function Header({
               </div>
               <button
                 type="button"
+                aria-label="关闭连接设置"
                 onClick={() => onToggleConnection(false)}
                 className="text-slate-400 hover:text-slate-700 transition p-1 rounded-md hover:bg-slate-100"
               >
@@ -223,32 +243,47 @@ export function Header({
               </button>
             </div>
 
+            {config.authMode === 'host-session' ? (
+              <p className="text-sm text-slate-600">管理请求固定通过本站 BFF，复用站点安全会话；请在主站管理账号权限。</p>
+            ) : <form onSubmit={(event) => {
+              event.preventDefault();
+              setBaseUrl(draftBaseUrl.trim());
+              setToken(draftToken);
+            }} className="space-y-4">
             <div className="grid gap-4 md:grid-cols-2">
               <TextInput
                 label="后端服务地址 (Base URL)"
-                value={config.baseUrl}
-                onChange={setBaseUrl}
+                value={draftBaseUrl}
+                onChange={setDraftBaseUrl}
                 placeholder="http://127.0.0.1:8080"
               />
               <TextInput
                 label="管理令牌 (Bearer Token)"
-                value={config.token ?? ''}
-                onChange={setToken}
+                value={draftToken}
+                onChange={setDraftToken}
                 placeholder="填写包含 agent:admin:read/write 的令牌"
                 type="password"
               />
             </div>
 
-            <div className="flex items-center justify-between text-xs text-slate-500 pt-1">
+            <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500 pt-1">
               <span>
                 Token 仅安全留存在当前浏览器标签页 Session，关闭后自动失效；基地址将保存在本地 LocalStorage。
               </span>
               {hasToken && (
-                <Button variant="danger" onClick={clearToken}>
+                <Button
+                  variant="danger"
+                  onClick={() => {
+                    clearToken();
+                    setDraftToken('');
+                  }}
+                >
                   清除当前凭据
                 </Button>
               )}
+              <Button type="submit">保存连接</Button>
             </div>
+            </form>}
           </div>
         </div>
       )}

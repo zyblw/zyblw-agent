@@ -449,11 +449,12 @@ private[agent] object AgentKernel:
               )
             ))
 
-  /** 最终答案已经结算时保留它；预算失败除外，因为预算是不可绕过的硬终态。 */
+  /** 最终答案已经结算时保留它；预算和输出护栏拒绝仍必须写入失败终态。 */
   def fail(state: AgentState, error: AgentError, at: Instant): Option[Transition] =
     Option.when(
       !terminalStatus(state.status) &&
-        (settledFinalAnswer(state).isEmpty || error.isInstanceOf[AgentError.BudgetExceeded])
+        (settledFinalAnswer(state).isEmpty || error.isInstanceOf[AgentError.BudgetExceeded] ||
+          error.isInstanceOf[GuardrailError])
     ) {
       val event = error match
         case _: AgentError.Cancelled => AgentEvent.RunCancelled(state.runId, at.toEpochMilli)
@@ -672,10 +673,12 @@ private[agent] object AgentKernel:
   def planningMetadata(
       metadata: ToolMetadata,
       policy: ToolPolicyConfig,
-      grantedScopes: Set[String]
+      grantedScopes: Set[String],
+      allowed: Boolean = true
   ): ToolMetadata =
     val safeToParallelize =
-      metadata.conflictAwareParallel &&
+      allowed &&
+        metadata.conflictAwareParallel &&
         metadata.mayReplayAfterCrash &&
         approvalReason(policy, metadata.risk).isEmpty &&
         metadata.requiredScopes.subsetOf(grantedScopes)

@@ -182,7 +182,7 @@ export function Sidebar({
   const langfuseUrl = capabilities?.observability.langfuseBaseUrl ?? null;
 
   return (
-    <aside className="flex h-screen w-64 shrink-0 flex-col border-r border-slate-200 bg-white text-slate-800 select-none">
+    <aside className="hidden h-dvh w-64 shrink-0 flex-col border-r border-slate-200 bg-white text-slate-800 select-none md:flex">
       {/* 品牌标识 */}
       <div className="flex items-center gap-3 border-b border-slate-100 px-5 py-4">
         <div className="relative flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-indigo-600 text-sm font-extrabold text-white shadow-xs">

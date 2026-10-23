@@ -11,8 +11,16 @@ test('检查面板渲染冻结/现场对照、漂移字段和账本', async ({ p
     { backendUrl: backend },
   );
 
-  await page.route(`${backend}/api/v1/admin/**`, async (route) => {
-    const path = new URL(route.request().url()).pathname;
+  let forbiddenRequests = 0;
+  await page.route('http://mock*.agent/api/v1/admin/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const secondBackend = url.hostname === 'mock-b.agent';
+    if (route.request().headers().authorization === 'Bearer denied-token') {
+      forbiddenRequests += 1;
+      await route.fulfill({ status: 403, json: { category: 'forbidden', message: 'permission-revoked' } });
+      return;
+    }
     if (path.endsWith('/capabilities')) {
       await route.fulfill({
         json: {
@@ -73,7 +81,7 @@ test('检查面板渲染冻结/现场对照、漂移字段和账本', async ({ p
             requestId: 'req-1',
             status: 'Succeeded',
             provider: 'openai',
-            model: 'stub-model',
+            model: secondBackend ? 'stub-model-b' : 'stub-model',
             capturePolicy: 'MetadataOnly',
             fingerprintPrefix: 'call-prefix',
             inputTokens: 4,
@@ -109,4 +117,22 @@ test('检查面板渲染冻结/现场对照、漂移字段和账本', async ({ p
   await expect(page.getByText('stub-model')).toBeVisible();
   await expect(page.getByText('timer', { exact: true })).toBeVisible();
   await expect(page.getByText('prompt', { exact: true })).toHaveCount(0);
+
+  await page.setViewportSize({ width: 375, height: 812 });
+  await expect(page.getByRole('combobox', { name: '控制台模块' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '连接设置', exact: true })).toBeInViewport();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
+  await page.getByRole('button', { name: '连接设置', exact: true }).click();
+  await page.getByLabel('后端服务地址 (Base URL)').fill('http://mock-b.agent');
+  await page.getByRole('button', { name: '保存连接', exact: true }).click();
+  await expect(page.getByRole('cell', { name: 'openai/stub-model-b', exact: true })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'openai/stub-model', exact: true })).toHaveCount(0);
+
+  await page.getByRole('button', { name: '连接设置', exact: true }).click();
+  await page.getByLabel('管理令牌 (Bearer Token)').fill('denied-token');
+  await page.getByRole('button', { name: '保存连接', exact: true }).click();
+  await expect.poll(() => forbiddenRequests).toBeGreaterThan(0);
+  await expect(page.getByText('permission-revoked', { exact: false }).first()).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'openai/stub-model-b', exact: true })).toHaveCount(0);
 });

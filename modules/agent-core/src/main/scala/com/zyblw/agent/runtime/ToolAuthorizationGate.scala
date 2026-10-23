@@ -9,7 +9,7 @@ import zio.json.ast.Json
 
 /** 工具批次在副作用发生前必须满足的全部授权判定。
   *
-  * 门禁顺序是固定的安全语义，不能重排：未知工具 → 缺少 scope → 扩展拒绝 → 需要人工审批。前三项都会降级为单调用错误 结果，最后一项会让 Run 暂停。
+  * 门禁顺序是固定的安全语义，不能重排：未知工具 → 白名单/拒绝名单与 scope → 扩展拒绝 → 需要人工审批。拒绝不会执行工具，多调用批次的权限拒绝直接终止，人工审批会让 Run 暂停。
   *
   * 审批判定在这里重新计算现场 [[ApprovalSubject]]：规划时冻结的审批要求不会因为策略事后放宽而消失，而历史批准只有在 主体逐字段相同时才继续有效。
   */
@@ -38,12 +38,13 @@ final private[agent] class ToolAuthorizationGate(
       case Some((item, error)) =>
         singleton(state.runId, batch, "未知工具").as(rejected(item, error.message))
       case None =>
-        val tools = resolved.map { case (item, value) => item -> value.toOption.get }
-        missingScope(state, tools) match
+        val tools  = resolved.map { case (item, value) => item -> value.toOption.get }
+        val policy = toolPolicies.current()
+        missingPermission(state, tools, policy) match
           case Some((item, reason)) =>
-            singleton(state.runId, batch, "权限不足工具").as(rejected(item, reason))
+            if batch.items.length > 1 then ZIO.fail(AgentError.PermissionDenied(item.call.name, reason))
+            else ZIO.succeed(rejected(item, reason))
           case None =>
-            val policy = toolPolicies.current()
             deniedByExtension(state, plan, tools, policy).flatMap {
               case Some((item, reason)) =>
                 singleton(state.runId, batch, "扩展拒绝的工具").as(rejected(item, reason))
@@ -82,6 +83,7 @@ final private[agent] class ToolAuthorizationGate(
           case Right(tool) =>
             val live = liveSubject(state, policy, call, tool)
             if live == frozen then Right(replay.copy(approvedSubjects = Set(frozen)))
+            else if !isAuthorized(state, policy, call.name, tool.metadata) then Right(replay)
             else
               Left(
                 Revalidation(
@@ -160,11 +162,28 @@ final private[agent] class ToolAuthorizationGate(
       case _ => false
     }
 
-  private def missingScope(
+  private def isAuthorized(
       state: AgentState,
-      tools: Chunk[(DurableToolPlanItem, RegisteredTool)]
+      policy: ToolPolicyConfig,
+      toolName: String,
+      metadata: ToolMetadata
+  ): Boolean =
+    state.definition.allowedTools.contains(toolName) &&
+      policy.allowedTools.contains(ToolName(toolName)) &&
+      !policy.deniedTools.contains(ToolName(toolName)) &&
+      metadata.requiredScopes.subsetOf(state.runContext.scopes)
+
+  private def missingPermission(
+      state: AgentState,
+      tools: Chunk[(DurableToolPlanItem, RegisteredTool)],
+      policy: ToolPolicyConfig
   ): Option[(DurableToolPlanItem, String)] =
     tools.collectFirst {
+      case (item, _)
+          if !state.definition.allowedTools.contains(item.call.name) ||
+            !policy.allowedTools.contains(ToolName(item.call.name)) ||
+            policy.deniedTools.contains(ToolName(item.call.name)) =>
+        item -> "工具未进入当前 Agent 与部署策略的显式白名单"
       case (item, tool) if !tool.metadata.requiredScopes.subsetOf(state.runContext.scopes) =>
         val missing = tool.metadata.requiredScopes -- state.runContext.scopes
         item -> s"缺少工具权限 scope: ${missing.toList.sorted.mkString(",")}"

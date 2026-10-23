@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-10-11
+> 最后核验：2026-10-24
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -62,7 +62,7 @@ ToolMetadata(
 
 1. `parallelism = ConflictAware` 且至少声明一个冲突组；
 2. `mayReplayAfterCrash`（`ReplaySafe` 或 `Idempotent`，对应 `None` / `IdempotentWrite` / `TransactionalOutboxWrite`）；
-3. 当前策略不要求审批；
+3. 当前策略不要求审批，且该工具同时通过 Agent 与部署 `ToolExecutionPolicy` 白名单/拒绝名单校验（未获准工具在 `AgentKernel.planningMetadata` 中自动降级为 `SequentialOnly` 单例批次并转化为工具错误，不污染同批次其他只读工具）；
 4. 调用者已具备工具要求的全部 scope；
 5. 与同批其他调用不存在读写冲突。
 
@@ -77,7 +77,7 @@ ToolMetadata(
 
 v6 计划另以 `approvalSubjects` 冻结每个需要审批调用的 `ApprovalSubject`：capability、callId、工具契约指纹、规范化输入
 摘要、`ExecutionEnvironmentId`、权限剖面、授权上下文摘要、生效审批策略摘要与 risk/sideEffect。批准只授权这一个主体，副作用发生前
-Runtime 会重算现场主体并逐字段比较；不一致时带新主体重新请求授权，并刷新 `approvalId` 使旧页面提交的决定失效。当前
+Runtime 会重算现场主体并逐字段比较；若挂起期间工具已被当前策略撤权（移出白名单或进入拒绝名单），收到 `Approve` 后直接进入 `gate` 并以 `missingPermission` 拒绝，不再触发无意义的二次人工挂起；若工具仍获准但主体不一致，则带新主体重新请求授权，并刷新 `approvalId` 使旧页面提交的决定失效。当前
 策略变严可追加审批，变松不能撤销历史要求（`frozenApprovalCallIds` 是唯一判定入口）。`None` 只代表 v5 及更早快照，v6
 若缺少完整摘要/审批主体会 fail-closed。主体只保存摘要，工具参数正文不会因审批链路二次落盘。
 

@@ -68,8 +68,10 @@ interface ConnectionContextValue {
 const ConnectionContext = createContext<ConnectionContextValue | null>(null);
 
 export function ConnectionProvider({ children }: { children: React.ReactNode }) {
-  const baseUrl = usePersistedValue('local', BASE_URL_KEY, DEFAULT_BASE_URL);
-  const token = usePersistedValue('session', TOKEN_KEY, '');
+  const storedBaseUrl = usePersistedValue('local', BASE_URL_KEY, DEFAULT_BASE_URL);
+  const storedToken = usePersistedValue('session', TOKEN_KEY, '');
+  const baseUrl = AUTH_MODE === 'host-session' ? DEFAULT_BASE_URL : storedBaseUrl;
+  const token = AUTH_MODE === 'host-session' ? '' : storedToken;
 
   const setBaseUrl = useCallback((value: string) => {
     window.localStorage.setItem(BASE_URL_KEY, value);

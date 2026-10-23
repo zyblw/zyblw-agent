@@ -39,17 +39,17 @@ export function InspectPanel() {
   const enabled = runId.trim().length >= 8;
 
   const composition = useQuery({
-    queryKey: ['admin', 'composition', runId],
+    queryKey: ['admin', 'composition', config.baseUrl, runId],
     queryFn: () => adminApi.runComposition(config, runId.trim()),
     enabled,
   });
   const calls = useQuery({
-    queryKey: ['admin', 'model-calls', runId],
+    queryKey: ['admin', 'model-calls', config.baseUrl, runId],
     queryFn: () => adminApi.runModelCalls(config, runId.trim()),
     enabled,
   });
   const suspension = useQuery({
-    queryKey: ['admin', 'suspension', runId],
+    queryKey: ['admin', 'suspension', config.baseUrl, runId],
     queryFn: () => adminApi.runSuspension(config, runId.trim()),
     enabled,
   });

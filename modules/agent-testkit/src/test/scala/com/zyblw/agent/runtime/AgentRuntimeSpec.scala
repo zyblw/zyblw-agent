@@ -101,7 +101,7 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
       guardrailEngine: GuardrailEngine = GuardrailEngine(
         ConfiguredGuardrails(Chunk.empty, Chunk.empty, Chunk.empty, Chunk.empty)
       ),
-      toolPolicy: ToolPolicyConfig = ToolPolicyConfig.secureDefault,
+      toolPolicy: ToolPolicyConfig = ToolPolicyConfig(allowedTools = Set(ToolName("echo"))),
       modelPolicies: ModelPolicySource = ModelPolicySource.default
   ) =
     TestAgentRuntime.inMemory(
@@ -163,6 +163,109 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
 
   /** 定义耐久状态机、审批和崩溃恢复的核心回归用例。 */
   def spec: Spec[TestEnvironment & Scope, Any] = suite("AgentRuntime")(
+    test("模型不能扩大 Agent 或部署白名单，也不能越过显式拒绝") {
+      val allowEcho = ToolPolicyConfig(allowedTools = Set(ToolName("echo")))
+      ZIO
+        .foreach(
+          List(
+            agent     -> allowEcho,
+            echoAgent -> ToolPolicyConfig.secureDefault,
+            echoAgent -> allowEcho.copy(deniedTools = Set(ToolName("echo")))
+          )
+        ) { case (definition, policy) =>
+          for
+            executions <- Ref.make(0)
+            tool       <- registeredEcho(ToolRisk.ReadOnly, SideEffect.None, executions)
+            model      <- ScriptedChatModel.make(Chunk(toolResponse("forbidden", "secret"), finalResponse()))
+            _          <- ZIO
+              .serviceWithZIO[AgentRuntime](
+                _.run(
+                  definition,
+                  RunRequest(ThreadId("allowlist-denied"), AgentMessage.user("lookup"))
+                )
+              )
+              .provideLayer(layers(model, List(tool), toolPolicy = policy))
+            count <- executions.get
+          yield count
+        }
+        .map(counts => assertTrue(counts.forall(_ == 0)))
+    },
+    test("最终输出护栏拒绝写入 Failed，恢复不会再次调用模型") {
+      val rejecting = new OutputGuardrail:
+        val name = "reject-output"
+        def evaluate(
+            message: AgentMessage,
+            context: GuardrailContext
+        ): IO[GuardrailError, GuardrailDecision] =
+          ZIO.succeed(GuardrailDecision(allowed = false, reason = Some("blocked")))
+      val engine = GuardrailEngine(
+        ConfiguredGuardrails(
+          Chunk.empty,
+          Chunk(rejecting -> GuardrailMode.Blocking),
+          Chunk.empty,
+          Chunk.empty
+        )
+      )
+      for
+        model  <- ScriptedChatModel.make(Chunk(finalResponse("blocked")))
+        result <- (for
+          runtime <- ZIO.service[AgentRuntime]
+          store   <- ZIO.service[RunStore]
+          created <- Promise.make[Nothing, RunId]
+          exit    <- runtime
+            .runEvents(agent, RunRequest(ThreadId("output-reject"), AgentMessage.user("answer")))
+            .tap {
+              case AgentEvent.RunCreated(id, _, _) => created.succeed(id).unit
+              case _                               => ZIO.unit
+            }
+            .runDrain
+            .exit
+          id       <- created.await
+          state    <- store.load(id)
+          _        <- runtime.recover(id).exit
+          requests <- model.recordedRequests
+        yield (exit, state, requests)).provideLayer(layers(model, Nil, engine))
+      yield assertTrue(result._1.isFailure, result._2.status == RunStatus.Failed, result._3.length == 1)
+    },
+    test("下一次工具执行使用管理面最新的拒绝名单和结果上限") {
+      val base = ToolPolicyConfig(allowedTools = Set(ToolName("echo")))
+      ZIO
+        .foreach(
+          List(
+            base.copy(deniedTools = Set(ToolName("echo")))             -> 0,
+            base.copy(maxResultBytes = 64, externalizeAboveBytes = 64) -> 1
+          )
+        ) { case (updated, expectedExecutions) =>
+          val live     = new java.util.concurrent.atomic.AtomicReference(base)
+          val policies = new ToolPolicySource:
+            def current(): ToolPolicyConfig = live.get()
+          for
+            executions <- Ref.make(0)
+            tool       <- registeredEcho(ToolRisk.ReadOnly, SideEffect.None, executions)
+            scripted <- ScriptedChatModel.make(Chunk(toolResponse("live-limit", "x" * 128), finalResponse()))
+            model = new ChatModel:
+              val provider                                                     = scripted.provider
+              def complete(request: ChatRequest): IO[AgentError, ChatResponse] =
+                ZIO.succeed(live.set(updated)) *> scripted.complete(request)
+            result <- (for
+              runtime <- ZIO.service[AgentRuntime]
+              store   <- ZIO.service[RunStore]
+              outcome <- runtime
+                .run(echoAgent, RunRequest(ThreadId("live-tool-policy"), AgentMessage.user("lookup")))
+              state <- store.load(runIdOf(outcome))
+              count <- executions.get
+            yield assertTrue(
+              state.status == RunStatus.Completed,
+              count == expectedExecutions,
+              state.steps.exists {
+                case AgentStep.ToolStep(_, _, result, _) => result.isError
+                case _                                   => false
+              }
+            )).provideLayer(TestAgentRuntime.inMemoryWithToolPolicySource(model, List(tool), policies))
+          yield result
+        }
+        .map(results => results.reduce(_ && _))
+    },
     test("malformed model tool calls fail the run before any tool executes") {
       val malformed = Chunk(
         toolResponse("", "private-input"),
@@ -734,7 +837,7 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
           ledger    <- store.getToolExecution(runId, "read-crash")
           count     <- executions.get
         yield (recovered, ledger, count)).provideLayer(
-          layers(model, List(tool), toolPolicy = ToolPolicyConfig.secureDefault)
+          layers(model, List(tool), toolPolicy = ToolPolicyConfig(allowedTools = Set(ToolName("echo"))))
         )
       yield assertTrue(
         result._1.isInstanceOf[RunOutcome.Completed],
@@ -869,7 +972,7 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
             layers(
               model,
               List(tool),
-              toolPolicy = ToolPolicyConfig.secureDefault.copy(maxCallsPerRun = 1)
+              toolPolicy = ToolPolicyConfig(allowedTools = Set(ToolName("echo"))).copy(maxCallsPerRun = 1)
             )
           )
         count <- executions.get
@@ -909,7 +1012,8 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
           layers(
             model,
             List(tool),
-            toolPolicy = ToolPolicyConfig.secureDefault.copy(maxCallsPerStep = 3, maxCallsPerRun = 128)
+            toolPolicy = ToolPolicyConfig(allowedTools = Set(ToolName("echo")))
+              .copy(maxCallsPerStep = 3, maxCallsPerRun = 128)
           )
         )
       yield assertTrue(

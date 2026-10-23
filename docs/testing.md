@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-10-24
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -351,7 +351,8 @@ Embedding 治理用例另外验证 0.9 V001 中的三张治理表、REAL[] 批�
 requestId/hash 幂等冲突与窗口清理级联释放。
 Eval 趋势用例验证低敏表、跨 Store 并发 `ON CONFLICT` 仲裁、同 ID 内容冲突、kind 隔离、精确时间排序、最近成功
 部分索引语义、TEXT/JSONB 双表示一致性、checksum 篡改拒绝和原始 grade details 不落库。
-- 工具空白名单默认拒绝。
+- 工具空白名单默认拒绝；模型提议不能扩大 Agent 或当前部署白名单，显式拒绝仍优先。运行中撤权与结果字节上限变化必须到达下一次实际执行。
+- 最终模型答案已结算但输出护栏拒绝时，Run 写入 Failed；恢复不能再次调用模型。
 - Workflow 声明式边的启动校验、不可达/缺失目标诊断、循环访问上限、完成/暂停 checkpoint 恢复、
   definition/session identity、单调写冲突、未声明动态路由拒绝，以及 `AllSucceeded` fan-out 失败时的兄弟 Fiber 中断和
   join checkpoint 隔离；durable 模式另覆盖 lease generation/fencing 和 Prepared outcome 故障恢复。

@@ -137,5 +137,32 @@ object ApprovalSubjectRuntimeSpec extends ZIOSpecDefault:
         completed.isInstanceOf[RunOutcome.Completed],
         afterFinal == Chunk("draft")
       )
+    },
+    test("批准前工具被部署策略禁用时，批准恢复直接以权限错误收口而不再重复请求审批") {
+      val script = Chunk(toolResponse("call-revoked", "draft"), finalResponse)
+      for
+        executed <- Ref.make(Chunk.empty[String])
+        tool     <- recordingEcho(executed)
+        model    <- ScriptedChatModel.make(script)
+        policies = SwitchableToolPolicy(basePolicy)
+        result <- (for
+          runtime   <- ZIO.service[AgentRuntime]
+          store     <- ZIO.service[RunStore]
+          suspended <- runtime.run(agent, RunRequest(ThreadId("policy-revoked"), AgentMessage.user("写入")))
+          runId = runIdOf(suspended)
+          _         <- policies.set(basePolicy.copy(deniedTools = Set(ToolName("echo"))))
+          completed <- runtime.resume(runId, ApprovalDecision.Approve)
+          state     <- store.load(runId)
+          calls     <- executed.get
+        yield (completed, state, calls))
+          .provideLayer(layers(model, tool, policies))
+        (completed, state, calls) = result
+        toolStep                  = state.steps.collectFirst { case step: AgentStep.ToolStep => step }
+      yield assertTrue(
+        completed.isInstanceOf[RunOutcome.Completed],
+        calls.isEmpty,
+        toolStep.exists(_.result.isError),
+        toolStep.exists(_.result.toJson.contains("显式白名单"))
+      )
     }
   )

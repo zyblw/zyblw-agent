@@ -9,11 +9,25 @@
 
 import React, { useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { ConnectionProvider } from '@/lib/connection';
+import { ConnectionProvider, useConnection } from '@/lib/connection';
 import { ToastProvider } from '@/lib/toast';
 import { shouldRetry } from '@/lib/queries';
 
 export function Providers({ children }: { children: React.ReactNode }) {
+  return <ConnectionProvider><ConnectionQueries>{children}</ConnectionQueries></ConnectionProvider>;
+}
+
+function ConnectionQueries({ children }: { children: React.ReactNode }) {
+  const { config } = useConnection();
+  const [scope, setScope] = useState({ config, generation: 0 });
+  if (scope.config !== config) {
+    setScope({ config, generation: scope.generation + 1 });
+  }
+  // Remount observers and local projections together; credentials never enter query keys.
+  return <QuerySession key={scope.generation}>{children}</QuerySession>;
+}
+
+function QuerySession({ children }: { children: React.ReactNode }) {
   const [client] = useState(
     () =>
       new QueryClient({
@@ -30,9 +44,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   return (
     <QueryClientProvider client={client}>
-      <ConnectionProvider>
-        <ToastProvider>{children}</ToastProvider>
-      </ConnectionProvider>
+      <ToastProvider>{children}</ToastProvider>
     </QueryClientProvider>
   );
 }
