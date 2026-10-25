@@ -90,8 +90,42 @@ object AgentError:
     def unapply(error: ModelHttpFailure): (String, Int, Option[String]) =
       (error.provider, error.status, error.providerCode)
 
-  final case class InvalidModelResponse(message: String) extends ModelError:
+  final class InvalidModelResponse private (
+      val message: String,
+      val reportedUsage: Option[TokenUsage],
+      val providerRequestId: Option[String]
+  ) extends ModelError
+      with Product
+      with Serializable:
     val category = ErrorCategory.Validation
+
+    /** 当 Provider HTTP 响应已包含可核验 usage，但响应内容或工具参数解码失败时，保留已报告用量供计费层落账。 */
+    def withReportedUsage(
+        usage: Option[TokenUsage],
+        requestId: Option[String] = None
+    ): InvalidModelResponse =
+      new InvalidModelResponse(
+        message,
+        usage.orElse(reportedUsage),
+        requestId.map(_.trim).filter(_.nonEmpty).orElse(providerRequestId)
+      )
+
+    override def canEqual(that: Any): Boolean = that.isInstanceOf[InvalidModelResponse]
+    override def productArity: Int            = 1
+    override def productElement(n: Int): Any  =
+      if n == 0 then message else throw new IndexOutOfBoundsException(n.toString)
+    override def equals(that: Any): Boolean = that match
+      case other: InvalidModelResponse => message == other.message
+      case _                           => false
+    override def hashCode(): Int  = message.hashCode
+    override def toString: String = s"InvalidModelResponse($message)"
+
+  object InvalidModelResponse:
+    def apply(message: String): InvalidModelResponse =
+      new InvalidModelResponse(message, None, None)
+
+    def unapply(error: InvalidModelResponse): Option[String] =
+      Some(error.message)
 
   final case class ProviderNotFound(provider: String) extends ProviderError:
     val message  = s"Model provider not found: $provider"

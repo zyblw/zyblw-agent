@@ -140,6 +140,14 @@ trait ChatModel:
   def capabilities(model: Option[String]): IO[AgentError, ModelCapabilities] =
     ZIO.succeed(descriptor.capabilitiesFor(model))
 
+  /** 查询指定 Provider 与模型的能力快照；单 Provider 实现默认忽略 `provider` 参数。 */
+  def capabilities(
+      provider: Option[String],
+      model: Option[String]
+  ): IO[AgentError, ModelCapabilities] =
+    val _ = provider
+    capabilities(model)
+
   /** 完成一次非流式调用。
     * @param request
     *   厂商无关请求
@@ -211,6 +219,15 @@ final class RoutedChatModel private (
   override val descriptor: ProviderDescriptor =
     ProviderDescriptor(provider, "Routed model", "router", ModelCapabilities())
 
+  override def capabilities(model: Option[String]): IO[AgentError, ModelCapabilities] =
+    capabilities(None, model)
+
+  override def capabilities(
+      provider: Option[String],
+      model: Option[String]
+  ): IO[AgentError, ModelCapabilities] =
+    selectForCapabilities(provider, model).flatMap(_.capabilities(model))
+
   /** 选择 Provider、执行能力校验，再转发完整请求。 */
   def complete(request: ChatRequest): IO[AgentError, ChatResponse] =
     select(request).flatMap(model =>
@@ -233,6 +250,25 @@ final class RoutedChatModel private (
   private def select(request: ChatRequest): IO[AgentError, ChatModel] =
     val selected = request.settings.provider.getOrElse(defaultProvider)
     ZIO.fromOption(providers.get(selected)).orElseFail(AgentError.ProviderNotFound(selected))
+
+  private def selectForCapabilities(
+      provider: Option[String],
+      model: Option[String]
+  ): IO[AgentError, ChatModel] =
+    provider.map(_.trim).filter(_.nonEmpty) match
+      case Some(explicit) =>
+        ZIO.fromOption(providers.get(explicit)).orElseFail(AgentError.ProviderNotFound(explicit))
+      case None =>
+        val normalizedModel = model.map(_.trim).filter(_.nonEmpty)
+        val matched         = normalizedModel.flatMap { modelId =>
+          providers
+            .get(defaultProvider)
+            .filter(_.descriptor.models.contains(modelId))
+            .orElse(providers.values.find(_.descriptor.models.contains(modelId)))
+        }
+        ZIO
+          .fromOption(matched.orElse(providers.get(defaultProvider)))
+          .orElseFail(AgentError.ProviderNotFound(defaultProvider))
 
 object RoutedChatModel:
   /** 构建多 Provider 路由器并校验名称唯一性及默认 Provider。

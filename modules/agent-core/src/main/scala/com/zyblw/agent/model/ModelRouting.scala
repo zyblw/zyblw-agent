@@ -4,6 +4,7 @@ import com.zyblw.agent.composition.CanonicalDigest
 import com.zyblw.agent.core.*
 import zio.*
 import zio.json.*
+import zio.stream.ZStream
 
 /** 能力/成本档；任务角色继续由 ModelRole 表达。 */
 enum ModelProfile derives JsonCodec:
@@ -110,8 +111,38 @@ object ModelRouter:
         .toRight(AgentError.ProviderNotFound(ref.provider))
         .flatMap(adapter(_, ref))
     case _: FallbackChatModel => Left(AgentError.InvalidConfiguration("耐久路由不能嵌套 FallbackChatModel"))
-    case leaf if leaf.provider == ref.provider || leaf.provider == "router" => Right(leaf)
-    case _ => Left(AgentError.ProviderNotFound(ref.provider))
+    case leaf if leaf.provider == ref.provider => Right(leaf)
+    case leaf if leaf.provider == "router"     => Right(pinnedRouterAdapter(leaf, ref))
+    case _                                     => Left(AgentError.ProviderNotFound(ref.provider))
+
+  private def pinnedRouterAdapter(router: ChatModel, ref: ModelRef): ChatModel =
+    new ChatModel:
+      val provider: String                        = ref.provider
+      override val descriptor: ProviderDescriptor =
+        router.descriptor.copy(id = ref.provider)
+
+      override def capabilities(model: Option[String]): IO[AgentError, ModelCapabilities] =
+        router.capabilities(Some(ref.provider), model.orElse(Some(ref.model)))
+
+      override def capabilities(
+          provider: Option[String],
+          model: Option[String]
+      ): IO[AgentError, ModelCapabilities] =
+        router.capabilities(provider.orElse(Some(ref.provider)), model.orElse(Some(ref.model)))
+
+      def complete(request: ChatRequest): IO[AgentError, ChatResponse] =
+        router.complete(pinRequest(request))
+
+      override def stream(request: ChatRequest): ZStream[Any, AgentError, ModelStreamEvent] =
+        router.stream(pinRequest(request))
+
+      private def pinRequest(request: ChatRequest): ChatRequest =
+        request.copy(
+          settings = request.settings.copy(
+            provider = request.settings.provider.orElse(Some(ref.provider)),
+            model = request.settings.model.orElse(Some(ref.model))
+          )
+        )
 
   /** 请求内容与显式要求共同过滤；能力声明仍以 ModelCapabilities 为权威。 */
   def rejectionCodes(

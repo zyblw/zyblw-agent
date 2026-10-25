@@ -107,17 +107,31 @@ final class LlmMemoryExtractor(
     else
       for
         _            <- validateSources(sources)
-        capabilities <- model.capabilities(config.modelSettings.model).mapError(mapModelError)
-        _            <- ZIO
+        capabilities <- model
+          .capabilities(config.modelSettings.provider, config.modelSettings.model)
+          .mapError(mapModelError)
+        _ <- ZIO
           .fail(AgentError.MemoryExtractionFailed("memory-extractor-model-does-not-support-tools"))
           .unless(capabilities.toolCalls)
           .unit
         toolChoice =
           if capabilities.specificToolChoice then ToolChoice.Specific(toolName) else ToolChoice.Required
+        desiredEffort    = config.modelSettings.reasoningEffort.orElse(Some(ReasoningEffort.None))
+        normalizedEffort = desiredEffort.flatMap { effort =>
+          if capabilities.reasoningEfforts.contains(effort) then Some(effort)
+          else if effort == ReasoningEffort.None && capabilities.reasoningEfforts.contains(
+              ReasoningEffort.Low
+            )
+          then Some(ReasoningEffort.Low)
+          else None
+        }
         request = ChatRequest(
           messages = promptMessages(sources),
           tools = Chunk(toolDefinition.copy(strict = capabilities.strictToolSchema)),
-          settings = config.modelSettings.copy(toolChoice = toolChoice)
+          settings = config.modelSettings.copy(
+            toolChoice = toolChoice,
+            reasoningEffort = normalizedEffort
+          )
         )
         candidates <- callAndDecode(request, sources.toMap, sourceRunId, config.maxSchemaRepairs)
       yield candidates

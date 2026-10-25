@@ -232,10 +232,15 @@ final private[agent] class ModelCallCoordinator(
       val now    = at.toEpochMilli
       val status = AgentKernel
         .interruptedModelCallStatus(cause.isInterrupted, record.routeDecision.nonEmpty)
-      val event =
+      val invalidReported = cause.failureOption.collect { case err: AgentError.InvalidModelResponse =>
+        (err.reportedUsage, err.providerRequestId)
+      }
+      val reportedUsage     = invalidReported.flatMap(_._1)
+      val providerRequestId = invalidReported.flatMap(_._2).orElse(record.providerRequestId)
+      val event             =
         if status == ModelCallStatus.Unknown then
           AgentEvent.ModelCallUnknown(state.runId, record.requestId.asString, now)
-        else AgentEvent.ModelCallCompleted(state.runId, TokenUsage(), now)
+        else AgentEvent.ModelCallCompleted(state.runId, reportedUsage.getOrElse(TokenUsage()), now)
       committer
         .commitAll(
           state,
@@ -247,6 +252,8 @@ final private[agent] class ModelCallCoordinator(
               record.attempt,
               record.copy(
                 status = status,
+                usage = reportedUsage.orElse(record.usage),
+                providerRequestId = providerRequestId,
                 errorCategory = cause.failureOption.map(_.category.toString),
                 updatedAtEpochMilli = now
               )

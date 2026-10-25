@@ -40,7 +40,8 @@ final class OpenAIResponsesChatModel(client: Client, config: OpenAIResponsesConf
         .mapError(mapTransportError)
       body    <- response.body.asString.mapError(mapTransportError)
       decoded <-
-        if response.status.isSuccess then OpenAIResponsesWire.decodeResponse(body)
+        if response.status.isSuccess then
+          OpenAIResponsesWire.decodeResponse(body).mapError(enrichError(_, request))
         else ZIO.fail(httpError(response.status.code, body))
     yield enrich(decoded, request)
 
@@ -68,7 +69,7 @@ final class OpenAIResponsesChatModel(client: Client, config: OpenAIResponsesConf
                 response.body.asString.flatMap(body => ZIO.fail(httpError(response.status.code, body)))
               )
           }
-          .mapError(mapTransportError)
+          .mapError(error => enrichError(mapTransportError(error), request))
           .timeoutFail(timeoutError)(config.requestTimeout)
           .map {
             case ModelStreamEvent.Completed(response) =>
@@ -98,6 +99,20 @@ final class OpenAIResponsesChatModel(client: Client, config: OpenAIResponsesConf
         "protocol" -> descriptor.protocol
       )
     )
+
+  private def enrichError(error: AgentError, request: ChatRequest): AgentError = error match
+    case err: AgentError.InvalidModelResponse if err.reportedUsage.nonEmpty =>
+      err.withReportedUsage(
+        err.reportedUsage.map(
+          ProviderBilling.options(
+            _,
+            config.defaultOptions ++ request.settings.providerOptions,
+            request
+          )
+        ),
+        err.providerRequestId
+      )
+    case other => other
 
   /** 把网络库异常映射成稳定的 Provider typed error；已有 AgentError 不重复包装。 */
   private def mapTransportError(error: Throwable): AgentError = error match
@@ -242,19 +257,6 @@ private[openai] object OpenAIResponsesWire:
       dto <- ZIO
         .fromEither(json.toJson.fromJson[ResponseDto])
         .mapError(details => AgentError.InvalidModelResponse(details))
-      _ <- dto.error match
-        case Some(error) =>
-          ZIO.fail(AgentError.InvalidModelResponse(s"Responses API failure: ${error.toJson.take(1000)}"))
-        case None => ZIO.unit
-      calls <- ZIO.foreach(dto.output.filter(item => stringField(item, "type").contains("function_call"))) {
-        item => decodeToolCall(item)
-      }
-      _ <- ZIO.fromEither(ToolCall.validateAll(calls))
-      text = dto.output.flatMap(outputText).mkString
-      raw  = Json.Arr(dto.output).toJson
-      base =
-        if calls.nonEmpty then AgentMessage.assistantToolCalls(calls, text) else AgentMessage.assistant(text)
-      message = base.copy(metadata = base.metadata.updated(RawOutputItemsMetadata, raw))
       usage <- dto.usage match
         case None => ZIO.succeed(TokenUsage())
         case Some(value)
@@ -287,7 +289,31 @@ private[openai] object OpenAIResponsesWire:
               s"response.usage token 用量无效: input=${value.input_tokens}, output=${value.output_tokens}"
             )
           )
-      reason = finishReason(dto.status, dto.incomplete_details.flatMap(_.reason), calls.nonEmpty)
+      reportedUsage = Option.when(dto.usage.nonEmpty)(ProviderBilling.reported(usage, json))
+      _ <- dto.error match
+        case Some(error) =>
+          ZIO.fail(
+            AgentError
+              .InvalidModelResponse(s"Responses API failure: ${error.toJson.take(1000)}")
+              .withReportedUsage(reportedUsage, dto.id)
+          )
+        case None => ZIO.unit
+      calls <- ZIO.foreach(dto.output.filter(item => stringField(item, "type").contains("function_call"))) {
+        item =>
+          decodeToolCall(item).mapError {
+            case err: AgentError.InvalidModelResponse => err.withReportedUsage(reportedUsage, dto.id)
+            case other                                => other
+          }
+      }
+      _ <- ZIO
+        .fromEither(ToolCall.validateAll(calls))
+        .mapError(_.withReportedUsage(reportedUsage, dto.id))
+      text = dto.output.flatMap(outputText).mkString
+      raw  = Json.Arr(dto.output).toJson
+      base =
+        if calls.nonEmpty then AgentMessage.assistantToolCalls(calls, text) else AgentMessage.assistant(text)
+      message = base.copy(metadata = base.metadata.updated(RawOutputItemsMetadata, raw))
+      reason  = finishReason(dto.status, dto.incomplete_details.flatMap(_.reason), calls.nonEmpty)
     yield ChatResponse(
       message,
       reason,

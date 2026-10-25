@@ -294,5 +294,42 @@ object ModelRoutingSpec extends ZIOSpecDefault:
         RuntimeComposition.modelSettingsFingerprint(base) !=
           RuntimeComposition.modelSettingsFingerprint(base.pinModel("first", "reasoning"))
       )
+    },
+    test("router 外壳与 RoutedChatModel 透传选中 Provider+Model 的真实能力与 reasoningEfforts") {
+      val relayCaps = ModelCapabilities(
+        toolCalls = true,
+        reasoningEfforts = Set(ReasoningEffort.None, ReasoningEffort.Low, ReasoningEffort.High)
+      )
+      val relayProvider = new ChatModel:
+        val provider            = "relay"
+        override val descriptor = ProviderDescriptor(
+          "relay",
+          "Relay",
+          "relay",
+          relayCaps,
+          models = Map("qwen3.8-flash" -> relayCaps)
+        )
+        def complete(request: ChatRequest): IO[AgentError, ChatResponse] =
+          ZIO.succeed(ChatResponse(AgentMessage.assistant("ok"), FinishReason.Stop, TokenUsage(10, 5)))
+      for
+        routed <- RoutedChatModel.make("relay", List(relayProvider))
+        routerShell = new ChatModel:
+          val provider                                                                        = "router"
+          override def capabilities(model: Option[String]): IO[AgentError, ModelCapabilities] =
+            routed.capabilities(model)
+          override def capabilities(
+              provider: Option[String],
+              model: Option[String]
+          ): IO[AgentError, ModelCapabilities] =
+            routed.capabilities(provider, model)
+          def complete(request: ChatRequest): IO[AgentError, ChatResponse] =
+            routed.complete(request)
+        adapted <- ZIO.fromEither(ModelRouter.adapter(routerShell, ModelRef("relay", "qwen3.8-flash")))
+        caps    <- adapted.capabilities(Some("qwen3.8-flash"))
+      yield assertTrue(
+        adapted.provider == "relay",
+        caps.reasoningEfforts.contains(ReasoningEffort.None),
+        caps.toolCalls
+      )
     }
   )

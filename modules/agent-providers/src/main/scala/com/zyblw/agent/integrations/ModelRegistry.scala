@@ -260,6 +260,15 @@ final class LiveModelRegistry private (
     override val descriptor: ProviderDescriptor =
       ProviderDescriptor(provider, "Live model registry", "router", ModelCapabilities())
 
+    override def capabilities(model: Option[String]): IO[AgentError, ModelCapabilities] =
+      routed.flatMap(_.capabilities(model))
+
+    override def capabilities(
+        provider: Option[String],
+        model: Option[String]
+    ): IO[AgentError, ModelCapabilities] =
+      routed.flatMap(_.capabilities(provider, model))
+
     def complete(request: ChatRequest): IO[AgentError, ChatResponse] =
       routed.flatMap(_.complete(request))
 

@@ -47,7 +47,22 @@ final class OpenAICompatibleChatModel(client: Client, config: OpenAICompatibleCo
       result <-
         (
           if response.status.code >= 200 && response.status.code < 300 then
-            OpenAIWire.decodeResponse(responseBody, config.compatibility)
+            OpenAIWire
+              .decodeResponse(responseBody, config.compatibility)
+              .mapError {
+                case err: AgentError.InvalidModelResponse if err.reportedUsage.nonEmpty =>
+                  err.withReportedUsage(
+                    err.reportedUsage.map(
+                      ProviderBilling.options(
+                        _,
+                        config.defaultOptions ++ request.settings.providerOptions,
+                        request
+                      )
+                    ),
+                    err.providerRequestId
+                  )
+                case other => other
+              }
           else ZIO.fail(httpError(response.status.code, responseBody))
         )
     yield result.copy(
@@ -99,6 +114,17 @@ final class OpenAICompatibleChatModel(client: Client, config: OpenAICompatibleCo
                 )
             }
             .mapError {
+              case err: AgentError.InvalidModelResponse if err.reportedUsage.nonEmpty =>
+                err.withReportedUsage(
+                  err.reportedUsage.map(
+                    ProviderBilling.options(
+                      _,
+                      config.defaultOptions ++ request.settings.providerOptions,
+                      request
+                    )
+                  ),
+                  err.providerRequestId
+                )
               case error: AgentError => error
               case error             =>
                 AgentError.ModelFailure(provider, "transport failure", retryable = true, Some(error))
@@ -277,24 +303,35 @@ private[openai] object OpenAIWire:
       effort: ReasoningEffort,
       model: String,
       compatibility: OpenAICompatibility
-  ): List[(String, Json)] = compatibility.reasoningWireMode match
-    case ReasoningWireMode.Unsupported  => Nil
-    case ReasoningWireMode.OpenAIEffort =>
-      List("reasoning_effort" -> Json.Str(openAIReasoningEffort(effort)))
-    case ReasoningWireMode.StandardEffort =>
-      standardReasoningFields(effort, model)
-    case ReasoningWireMode.ThinkingObjectEffort =>
-      effort match
-        case ReasoningEffort.None => List("thinking" -> thinking(enabled = false))
-        case value                =>
-          List(
-            "thinking"         -> thinking(enabled = true),
-            "reasoning_effort" -> Json.Str(deepSeekReasoningEffort(value))
-          )
-    case ReasoningWireMode.EnableThinking =>
-      List("enable_thinking" -> Json.Bool(effort != ReasoningEffort.None))
-    case ReasoningWireMode.ThinkingObjectToggle =>
-      List("thinking" -> thinking(enabled = effort != ReasoningEffort.None))
+  ): List[(String, Json)] =
+    val lower           = model.toLowerCase
+    val isQwenModel     = lower.contains("qwen") || lower.contains("qwq") || lower.contains("qvq")
+    val isDeepSeekModel = lower.contains("deepseek")
+    val isClaudeModel   = lower.contains("claude")
+    val isGeminiModel   = lower.contains("gemini")
+    compatibility.reasoningWireMode match
+      case ReasoningWireMode.Unsupported  => Nil
+      case ReasoningWireMode.OpenAIEffort =>
+        List("reasoning_effort" -> Json.Str(openAIReasoningEffort(effort)))
+      case ReasoningWireMode.StandardEffort =>
+        standardReasoningFields(effort, model)
+      case ReasoningWireMode.ThinkingObjectEffort =>
+        if isQwenModel || isClaudeModel || isGeminiModel then standardReasoningFields(effort, model)
+        else
+          effort match
+            case ReasoningEffort.None => List("thinking" -> thinking(enabled = false))
+            case value                =>
+              List(
+                "thinking"         -> thinking(enabled = true),
+                "reasoning_effort" -> Json.Str(deepSeekReasoningEffort(value))
+              )
+      case ReasoningWireMode.EnableThinking =>
+        if isDeepSeekModel || isClaudeModel || isGeminiModel then standardReasoningFields(effort, model)
+        else List("enable_thinking" -> Json.Bool(effort != ReasoningEffort.None))
+      case ReasoningWireMode.ThinkingObjectToggle =>
+        if isQwenModel || isDeepSeekModel || isClaudeModel || isGeminiModel then
+          standardReasoningFields(effort, model)
+        else List("thinking" -> thinking(enabled = effort != ReasoningEffort.None))
 
   /** 在聚合中转网关（AIHubMix / OpenRouter / 通用中转）上按目标模型家族自动适配推理字段：
     *   - Qwen 系列使用 `"enable_thinking": true | false`，避免 `"reasoning_effort": "none"` 被忽略或报错
@@ -355,16 +392,44 @@ private[openai] object OpenAIWire:
       decoded <- ZIO
         .fromEither(body.fromJson[ResponseDto])
         .mapError(details => AgentError.InvalidModelResponse(details))
+      rawJson = body.fromJson[Json].toOption.getOrElse(Json.Null)
+      usage <- decoded.usage.fold[IO[AgentError, TokenUsage]](ZIO.succeed(TokenUsage()))(value =>
+        validatedUsage(
+          value.prompt_tokens,
+          value.completion_tokens,
+          value.prompt_tokens_details
+            .flatMap(_.cached_tokens)
+            .orElse(value.prompt_cache_hit_tokens)
+            .getOrElse(0L),
+          value.completion_tokens_details.flatMap(_.reasoning_tokens).getOrElse(0L),
+          value.prompt_tokens_details.flatMap(_.cache_write_tokens).getOrElse(0L),
+          value.prompt_tokens_details.flatMap(_.cached_tokens).zip(value.prompt_cache_hit_tokens).forall {
+            case (a, b) => a == b
+          },
+          "response.usage"
+        )
+      )
+      reportedUsage = Option.when(decoded.usage.nonEmpty)(ProviderBilling.reported(usage, rawJson))
       choice <- ZIO
         .fromOption(decoded.choices.headOption)
-        .orElseFail(AgentError.InvalidModelResponse("response contained no choices"))
+        .orElseFail(
+          AgentError
+            .InvalidModelResponse("response contained no choices")
+            .withReportedUsage(reportedUsage, decoded.id)
+        )
       calls <- ZIO.foreach(Chunk.fromIterable(choice.message.tool_calls.getOrElse(Chunk.empty))) { call =>
         ZIO
           .fromEither(call.function.arguments.fromJson[Json])
-          .mapError(details => AgentError.InvalidModelResponse(s"invalid tool arguments: $details"))
+          .mapError(details =>
+            AgentError
+              .InvalidModelResponse(s"invalid tool arguments: $details")
+              .withReportedUsage(reportedUsage, decoded.id)
+          )
           .map(arguments => ToolCall(call.id, call.function.name, arguments))
       }
-      _ <- ZIO.fromEither(ToolCall.validateAll(calls))
+      _ <- ZIO
+        .fromEither(ToolCall.validateAll(calls))
+        .mapError(_.withReportedUsage(reportedUsage, decoded.id))
       baseMessage =
         if calls.nonEmpty then AgentMessage.assistantToolCalls(calls, choice.message.content.getOrElse(""))
         else AgentMessage.assistant(choice.message.content.getOrElse(""))
@@ -382,26 +447,10 @@ private[openai] object OpenAIWire:
         message,
         choice.message.tool_calls.getOrElse(Chunk.empty).flatMap(call => call.extra_content.map(call.id -> _))
       )
-      usage <- decoded.usage.fold[IO[AgentError, TokenUsage]](ZIO.succeed(TokenUsage()))(value =>
-        validatedUsage(
-          value.prompt_tokens,
-          value.completion_tokens,
-          value.prompt_tokens_details
-            .flatMap(_.cached_tokens)
-            .orElse(value.prompt_cache_hit_tokens)
-            .getOrElse(0L),
-          value.completion_tokens_details.flatMap(_.reasoning_tokens).getOrElse(0L),
-          value.prompt_tokens_details.flatMap(_.cache_write_tokens).getOrElse(0L),
-          value.prompt_tokens_details.flatMap(_.cached_tokens).zip(value.prompt_cache_hit_tokens).forall {
-            case (a, b) => a == b
-          },
-          "response.usage"
-        )
-      )
     yield ChatResponse(
       withToolMetadata,
       finishReason(choice.finish_reason),
-      ProviderBilling.reported(usage, body.fromJson[Json].toOption.getOrElse(Json.Null)),
+      ProviderBilling.reported(usage, rawJson),
       decoded.id,
       usageReported = decoded.usage.nonEmpty
     )
@@ -781,18 +830,31 @@ private[openai] object OpenAISse:
       state: State,
       compatibility: OpenAICompatibility
   ): IO[AgentError, (State, Chunk[ModelStreamEvent])] =
+    val reportedUsage = Option.when(state.usageReported)(state.usage)
     if state.completed then ZIO.succeed(state -> Chunk.empty)
-    else if state.text.isEmpty && state.tools.isEmpty then ZIO.fail(AgentError.InvalidModelResponse("模型流为空"))
+    else if state.text.isEmpty && state.tools.isEmpty then
+      ZIO.fail(
+        AgentError
+          .InvalidModelResponse("模型流为空")
+          .withReportedUsage(reportedUsage, state.requestId)
+      )
     else
       ZIO
         .foreach(Chunk.fromIterable(state.tools.toList.sortBy(_._1).map(_._2))) { tool =>
           ZIO
             .fromEither(tool.arguments.fromJson[Json])
-            .mapError(details => AgentError.InvalidModelResponse(s"流式工具参数不是合法 JSON: $details"))
+            .mapError(details =>
+              AgentError
+                .InvalidModelResponse(s"流式工具参数不是合法 JSON: $details")
+                .withReportedUsage(reportedUsage, state.requestId)
+            )
             .map(arguments => ToolCall(tool.id, tool.name, arguments))
         }
         .flatMap { calls =>
-          ZIO.fromEither(ToolCall.validateAll(calls)).as(calls)
+          ZIO
+            .fromEither(ToolCall.validateAll(calls))
+            .mapError(_.withReportedUsage(reportedUsage, state.requestId))
+            .as(calls)
         }
         .map { calls =>
           val base =

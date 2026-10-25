@@ -41,9 +41,12 @@ final private[agent] class ModelRouterGateway(
                 )
                 .isEmpty
             )
-          capabilities <- model.capabilities(request.settings.model)
-          bounded      <- boundDirectRequest(state, request, estimatedInputTokens, prices, capabilities)
-          _            <- CapabilityValidator.validate(bounded, capabilities)
+          capabilities <- model.capabilities(
+            request.settings.provider,
+            request.settings.model
+          )
+          bounded <- boundDirectRequest(state, request, estimatedInputTokens, prices, capabilities)
+          _       <- CapabilityValidator.validate(bounded, capabilities)
         yield Routing(bounded, model, capabilities, None)
       case Some(policy) => routeWithin(policy, state, request, estimatedInputTokens, prices)
 

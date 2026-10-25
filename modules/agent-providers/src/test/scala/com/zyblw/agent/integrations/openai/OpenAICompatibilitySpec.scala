@@ -437,5 +437,61 @@ object OpenAICompatibilitySpec extends ZIOSpecDefault:
       val encoded =
         OpenAIWire.encodeRequest(request, ProviderPresets.DeepSeekDefaultModel, OpenAICompatibility.deepSeek)
       assertTrue(encoded.left.exists(_.isInstanceOf[AgentError.UnsupportedModelCapability]))
+    },
+    test(
+      "cross-family DeepSeek model on Qwen profile emits thinking disabled and malformed tool JSON preserves reported usage"
+    ) {
+      val base          = OpenAICompatibility.qwen.descriptor.capabilities
+      val compatibility = OpenAICompatibility.qwen.copy(
+        descriptor = OpenAICompatibility.qwen.descriptor.copy(
+          models = Map(
+            "deepseek-v4.1-flash" -> base.copy(
+              reasoningEfforts = Set(ReasoningEffort.None, ReasoningEffort.Low, ReasoningEffort.High)
+            )
+          )
+        )
+      )
+      val encoded = OpenAIWire
+        .encodeRequest(
+          ChatRequest(
+            Chunk(AgentMessage.user("extract")),
+            settings = ModelSettings(
+              model = Some("deepseek-v4.1-flash"),
+              reasoningEffort = Some(ReasoningEffort.None)
+            )
+          ),
+          "qwen3.8-flash",
+          compatibility
+        )
+        .map(_.toString)
+      val malformedBody =
+        """{"id":"chatcmpl-123","choices":[{"message":{"content":"","tool_calls":[{"id":"call_1","function":{"name":"submit_memory_candidates","arguments":"{unclosed"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1741,"completion_tokens":698,"prompt_tokens_details":{"cached_tokens":1664}}}"""
+      val malformedResponsesBody =
+        """{"id":"resp_456","status":"completed","output":[{"type":"function_call","call_id":"call_2","name":"submit_memory_candidates","arguments":"{unclosed"}],"usage":{"input_tokens":512,"output_tokens":128,"input_tokens_details":{"cached_tokens":256}}}"""
+      for
+        exit          <- OpenAIWire.decodeResponse(malformedBody, compatibility).exit
+        responsesExit <- OpenAIResponsesWire.decodeResponse(malformedResponsesBody).exit
+        invalid = exit.causeOption.flatMap(_.failureOption).collect {
+          case err: AgentError.InvalidModelResponse => err
+        }
+        responsesFailure = responsesExit.causeOption.flatMap(_.failureOption).collect {
+          case err: AgentError.InvalidModelResponse => err
+        }
+      yield assertTrue(
+        encoded.exists(_.contains("\"thinking\":{\"type\":\"disabled\"}")),
+        encoded.forall(!_.contains("enable_thinking")),
+        invalid.exists(
+          _.reportedUsage.exists(u =>
+            u.inputTokens == 1741L && u.outputTokens == 698L && u.cachedInputTokens == 1664L
+          )
+        ),
+        invalid.exists(_.providerRequestId.contains("chatcmpl-123")),
+        responsesFailure.exists(
+          _.reportedUsage.exists(u =>
+            u.inputTokens == 512L && u.outputTokens == 128L && u.cachedInputTokens == 256L
+          )
+        ),
+        responsesFailure.exists(_.providerRequestId.contains("resp_456"))
+      )
     }
   )
