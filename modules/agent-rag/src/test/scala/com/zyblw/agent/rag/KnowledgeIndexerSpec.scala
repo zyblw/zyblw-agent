@@ -220,5 +220,100 @@ object KnowledgeIndexerSpec extends ZIOSpecDefault:
           .exit
         manifest <- store.find(KnowledgeDocumentKey(TenantId("tenant-a"), "doc-e"), "e-1")
       yield assertTrue(result.isFailure, manifest.exists(_.status == KnowledgeIndexStatus.Failed))
+    },
+    test("局部编辑、追加章节与权限变更按 denseSha256 增量复用已有块向量，不重算未改块") {
+      val tenant = TenantId("tenant-a")
+      val key    = KnowledgeDocumentKey(tenant, "doc-inc")
+      for
+        store         <- InMemoryKnowledgeIndexStore.make
+        embeddedTexts <- Ref.make(Chunk.empty[String])
+        embedding = EmbeddingModel.stub(
+          provider = "inc-embedding",
+          model = "text-embedding-v4",
+          onEmbed = texts =>
+            embeddedTexts.update(_ ++ texts) *>
+              ZIO.succeed(texts.map(text => Embedding(Chunk(text.hashCode.toFloat, text.length.toFloat))))
+        )
+        indexer = KnowledgeIndexer(MarkdownStructureChunker(), embedding, store)
+        v1Text  =
+          """# 浮脉
+            |
+            |浮脉主表，轻取即得，按之稍减而不空。
+            |
+            |# 沉脉
+            |
+            |沉脉主里，轻取不应，重按始得。
+            |
+            |# 迟脉
+            |
+            |迟脉主寒，一息三至，去来极慢。""".stripMargin
+        first <- indexer.index(
+          SourceDocument("doc-inc", v1Text, "doc://inc", Map("title" -> "脉学要义")),
+          tenant,
+          Set("public"),
+          "inc-v1",
+          provenance = IngestionProvenance(Some(SourceRevision("src-inc", "rev-1")))
+        )
+        afterV1 <- embeddedTexts.get
+        _       <- embeddedTexts.set(Chunk.empty)
+        // 仅修改第二章的一个标点符号：只有「沉脉」这一块重算 Embedding，其余两块直接复用
+        v2Text = v1Text.replace("重按始得。", "重按始得！")
+        second <- indexer.index(
+          SourceDocument("doc-inc", v2Text, "doc://inc", Map("title" -> "脉学要义")),
+          tenant,
+          Set("public"),
+          "inc-v2",
+          provenance = IngestionProvenance(Some(SourceRevision("src-inc", "rev-2")))
+        )
+        afterV2 <- embeddedTexts.get
+        _       <- embeddedTexts.set(Chunk.empty)
+        // 在末尾追加第四章「数脉」：前三个章节块全部复用，仅新增块调用 Embedding
+        v3Text = v2Text + "\n\n# 数脉\n\n数脉主热，一息六至，脉流薄疾。"
+        third <- indexer.index(
+          SourceDocument("doc-inc", v3Text, "doc://inc", Map("title" -> "脉学要义")),
+          tenant,
+          Set("public"),
+          "inc-v3",
+          provenance = IngestionProvenance(Some(SourceRevision("src-inc", "rev-3")))
+        )
+        afterV3 <- embeddedTexts.get
+        _       <- embeddedTexts.set(Chunk.empty)
+        // 仅变更权限与摘要元数据，或删除最后一个章节：100% 复用已有向量，0 次远程 Embedding 调用
+        fourth <- indexer.index(
+          SourceDocument("doc-inc", v2Text, "doc://inc", Map("title" -> "脉学要义", "summary" -> "新增摘要")),
+          tenant,
+          Set("members"),
+          "inc-v4",
+          provenance = IngestionProvenance(Some(SourceRevision("src-inc", "rev-4")))
+        )
+        afterV4   <- embeddedTexts.get
+        published <- store.published(key)
+        ordered = published.map(_.chunk).sortBy(_.lineage.fold(0)(_.ordinal))
+      yield assertTrue(
+        first.manifest.chunkCount == 3,
+        first.reusedChunkCount == 0,
+        first.embeddedChunkCount == 3,
+        afterV1.length == 3,
+        second.manifest.chunkCount == 3,
+        second.reusedChunkCount == 2,
+        second.embeddedChunkCount == 1,
+        afterV2.length == 1,
+        afterV2.head.contains("重按始得！"),
+        third.manifest.chunkCount == 4,
+        third.reusedChunkCount == 3,
+        third.embeddedChunkCount == 1,
+        afterV3.length == 1,
+        afterV3.head.contains("数脉主热"),
+        fourth.manifest.chunkCount == 3,
+        fourth.reusedChunkCount == 3,
+        fourth.embeddedChunkCount == 0,
+        afterV4.isEmpty,
+        ordered.length == 3,
+        ordered.forall(_.permissions == Set("members")),
+        ordered.map(_.lineage.map(_.ordinal)) == Chunk(Some(0), Some(1), Some(2)),
+        ordered(0).lineage.flatMap(_.nextChunkId).contains(ordered(1).id),
+        ordered(1).lineage.flatMap(_.previousChunkId).contains(ordered(0).id),
+        ordered(1).lineage.flatMap(_.nextChunkId).contains(ordered(2).id)
+      )
     }
   )

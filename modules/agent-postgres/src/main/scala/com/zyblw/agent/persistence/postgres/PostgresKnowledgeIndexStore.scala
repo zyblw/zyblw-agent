@@ -435,6 +435,79 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
           yield ()
         }
 
+  override def reusableEmbeddings(
+      build: KnowledgeIndexBuild,
+      denseHashes: Set[String]
+  ): IO[RetrievalError, Map[String, Embedding]] =
+    val validHashes = denseHashes.filter(_.matches("[0-9a-f]{64}")).toVector
+    if validHashes.isEmpty then ZIO.succeed(Map.empty)
+    else
+      withConnection { connection =>
+        ZIO.foldLeft(validHashes.grouped(1000).toVector)(Map.empty[String, Embedding]) { (acc, batch) =>
+          query(
+            connection,
+            "select reusable chunk embeddings",
+            s"""SELECT DISTINCT ON (c.dense_sha256) c.dense_sha256, c.embedding::text
+               |FROM $Chunks c
+               |JOIN $Profiles p
+               |  ON p.tenant_id = c.tenant_id
+               | AND p.knowledge_space_id = c.knowledge_space_id
+               | AND p.profile_id = c.profile_id
+               |WHERE c.tenant_id = ?
+               |  AND c.knowledge_space_id = ?
+               |  AND c.document_id = ?
+               |  AND c.dense_sha256 = ANY(?::text[])
+               |  AND p.embedding_provider = ?
+               |  AND p.embedding_model = ?
+               |  AND p.embedding_dimension = ?
+               |  AND COALESCE(p.build_spec ->> 'distance', 'cosine') = ?
+               |  AND COALESCE(p.build_spec ->> 'documentInstruction', '') = ?
+               |ORDER BY c.dense_sha256, (c.profile_id = ?) DESC, c.index_version DESC""".stripMargin
+          ) { statement =>
+            statement.setString(1, build.key.tenantId.value)
+            statement.setString(2, build.key.knowledgeSpaceId.value)
+            statement.setString(3, build.key.documentId)
+            statement.setArray(4, textArray(connection, batch))
+            statement.setString(5, build.buildSpec.embeddingProvider)
+            statement.setString(6, build.buildSpec.embeddingModel)
+            statement.setInt(7, build.buildSpec.embeddingDimension)
+            statement.setString(8, build.buildSpec.distance)
+            statement.setString(9, build.buildSpec.documentInstruction.getOrElse(""))
+            statement.setString(10, build.profileId.value)
+          } { result =>
+            val builder = Map.newBuilder[String, Embedding]
+            while result.next() do
+              val sha = result.getString(1)
+              parseVectorLiteral(result.getString(2), build.embeddingDimension).foreach { embedding =>
+                builder += sha -> embedding
+              }
+            acc ++ builder.result()
+          }
+        }
+      }
+
+  private def parseVectorLiteral(raw: String, expectedDimension: Int): Option[Embedding] =
+    Option(raw)
+      .map(_.trim)
+      .filter(value => value.startsWith("[") && value.endsWith("]"))
+      .flatMap { bracketed =>
+        val body = bracketed.substring(1, bracketed.length - 1).trim
+        if body.isEmpty then None
+        else
+          val parts  = body.split(",")
+          val floats = new Array[Float](parts.length)
+          var index  = 0
+          var valid  = parts.length == expectedDimension
+          while valid && index < parts.length do
+            try
+              val parsed = java.lang.Float.parseFloat(parts(index).trim)
+              if java.lang.Float.isFinite(parsed) then floats(index) = parsed
+              else valid = false
+            catch case _: NumberFormatException => valid = false
+            index += 1
+          Option.when(valid)(Embedding(Chunk.fromArray(floats)))
+      }
+
   /** 在文档级 advisory lock 下校验 active 前置条件、决定写入 Profile 并插入 Building manifest。 */
   private def createBuild(
       connection: Connection,

@@ -225,6 +225,18 @@ trait KnowledgeIndexStore:
     val _ = (key, sourceRevisionId)
     ZIO.fail(AgentError.RetrievalFailed("KnowledgeIndexStore 未实现 withdraw"))
 
+  /** 查询同一租户、同一知识空间、同一文档下可安全复用的已发布向量（按 `dense_sha256` 寻址）。
+    *
+    * 仅当存量块所属 Profile 的 Embedding 契约（provider、model、dimension、normalized）与当前 `build.buildSpec` 完全一致时才允许复用。
+    * 这使小幅修订、段落增删、权限/元数据变更以及纯切块策略升级均可跳过未变块的远程 Embedding 调用，且不受短期缓存 TTL 限制。
+    */
+  def reusableEmbeddings(
+      build: KnowledgeIndexBuild,
+      denseHashes: Set[String]
+  ): IO[RetrievalError, Map[String, Embedding]] =
+    val _ = (build, denseHashes)
+    ZIO.succeed(Map.empty)
+
 /** 知识空间的 active Profile 指针快照。 */
 final case class KnowledgeSpaceProfileState(activeProfileId: Option[IndexProfileId], revision: Long)
 
@@ -241,7 +253,9 @@ final case class KnowledgeIndexResult(
     extraction: Option[ExtractionReport] = None,
     extractedMarkdown: Option[String] = None,
     extractedOutline: Chunk[ExtractedHeading] = Chunk.empty,
-    structureStatus: StructurePublicationStatus = StructurePublicationStatus.Disabled
+    structureStatus: StructurePublicationStatus = StructurePublicationStatus.Disabled,
+    reusedChunkCount: Int = 0,
+    embeddedChunkCount: Int = 0
 )
 
 /** 组合 Chunker、EmbeddingModel 与 KnowledgeIndexStore 的高层摄取服务。
@@ -406,7 +420,7 @@ final class KnowledgeIndexer(
       quarantined.set(true) *> checkpoint(IngestCheckpoint.Quarantined) *>
         ZIO.fail(AgentError.RetrievalFailed(s"knowledge ingestion 已被隔离: $reason"))
     val embedBatchSize = math.min(stageBatchSize, embeddings.descriptor.denseDescriptor.maxBatchSize)
-    def embedAndStage(batch: Chunk[DocumentChunk], ordinal: Int) =
+    def embedMissingBatch(batch: Chunk[DocumentChunk], ordinal: Int) =
       for
         detailed <- embeddings.embed(
           EmbeddingRequest(
@@ -428,11 +442,7 @@ final class KnowledgeIndexer(
             )
           )
           .unless(detailed.denseEmbeddings.length == batch.length)
-        _ <- store.stage(
-          build,
-          batch.zip(detailed.denseEmbeddings).map((chunk, vector) => IndexedChunk(chunk, vector))
-        )
-      yield detailed.usage
+      yield batch.map(_.representations.denseSha256).zip(detailed.denseEmbeddings) -> detailed.usage
     for
       _ <- checkpoint(IngestCheckpoint.Resolved)
       _ <-
@@ -474,10 +484,35 @@ final class KnowledgeIndexer(
       structureStatus <- structureIndexing.fold[IO[RetrievalError, StructurePublicationStatus]](
         ZIO.succeed(StructurePublicationStatus.Disabled)
       )(_.stage(document, build, lexicalized))
-      usages <- ZIO.foreach(Chunk.fromIterable(lexicalized.grouped(embedBatchSize).toList).zipWithIndex) {
-        case (batch, ordinal) => embedAndStage(batch, ordinal)
+      reused <- store.reusableEmbeddings(build, lexicalized.map(_.representations.denseSha256).toSet)
+      reusedChunkCount = lexicalized.count(chunk => reused.contains(chunk.representations.denseSha256))
+      missingUnique    = Chunk.fromIterable(
+        lexicalized
+          .foldLeft((Set.empty[String], Vector.empty[DocumentChunk])) { case ((seen, acc), chunk) =>
+            val sha = chunk.representations.denseSha256
+            if reused.contains(sha) || seen.contains(sha) then (seen, acc)
+            else (seen + sha, acc :+ chunk)
+          }
+          ._2
+      )
+      embeddedBatches <- ZIO.foreach(
+        Chunk.fromIterable(missingUnique.grouped(embedBatchSize).toList).zipWithIndex
+      ) { case (batch, ordinal) =>
+        embedMissingBatch(batch, ordinal)
       }
-      _     <- checkpoint(IngestCheckpoint.Embedded)
+      freshEmbeddings = embeddedBatches.flatMap(_._1).toMap
+      usages          = embeddedBatches.map(_._2)
+      allEmbeddings   = reused ++ freshEmbeddings
+      indexedChunks <- ZIO.foreach(lexicalized) { chunk =>
+        ZIO
+          .fromOption(allEmbeddings.get(chunk.representations.denseSha256))
+          .orElseFail(AgentError.RetrievalFailed(s"chunk 向量缺失: ${chunk.id}"))
+          .map(vector => IndexedChunk(chunk, vector))
+      }
+      _ <- checkpoint(IngestCheckpoint.Embedded)
+      _ <- ZIO.foreachDiscard(Chunk.fromIterable(indexedChunks.grouped(stageBatchSize).toList)) { stageBatch =>
+        store.stage(build, stageBatch)
+      }
       _     <- checkpoint(IngestCheckpoint.Staged)
       _     <- checkpoint(IngestCheckpoint.Validated)
       _     <- store.activate(build, digest)
@@ -488,7 +523,9 @@ final class KnowledgeIndexer(
     yield KnowledgeIndexResult(
       ready.copy(checkpoint = IngestCheckpoint.Ready),
       KnowledgeIndexer.sumUsage(usages),
-      structureStatus = structureStatus
+      structureStatus = structureStatus,
+      reusedChunkCount = reusedChunkCount,
+      embeddedChunkCount = missingUnique.length
     )
 
 object KnowledgeIndexer:

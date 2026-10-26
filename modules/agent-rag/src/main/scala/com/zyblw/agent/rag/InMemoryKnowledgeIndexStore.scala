@@ -574,6 +574,35 @@ final class InMemoryKnowledgeIndexStore private (
           }
         }
 
+  override def reusableEmbeddings(
+      build: KnowledgeIndexBuild,
+      denseHashes: Set[String]
+  ): UIO[Map[String, Embedding]] =
+    if denseHashes.isEmpty then ZIO.succeed(Map.empty)
+    else
+      state.get.map { current =>
+        val targetSpec                                            = build.buildSpec
+        def compatibleProfile(profileId: IndexProfileId): Boolean =
+          current.profiles.get(ProfileKey(build.key, profileId)).exists { record =>
+            record.spec.dense == targetSpec.dense &&
+            record.spec.documentInstruction == targetSpec.documentInstruction
+          }
+        val candidates = current.published
+          .getOrElse(build.key, Chunk.empty)
+          .filter { indexed =>
+            denseHashes.contains(indexed.chunk.representations.denseSha256) &&
+            indexed.embedding.values.length == build.embeddingDimension &&
+            indexed.chunk.profileId.exists(id => id == build.profileId || compatibleProfile(id))
+          }
+          .sortBy(indexed =>
+            (!indexed.chunk.profileId.contains(build.profileId), -indexed.chunk.indexVersion)
+          )
+        candidates.foldLeft(Map.empty[String, Embedding]) { (acc, indexed) =>
+          val sha = indexed.chunk.representations.denseSha256
+          if acc.contains(sha) then acc else acc.updated(sha, indexed.embedding)
+        }
+      }
+
   /** 返回某文档最近一次发布的确定性块快照，仅供测试断言和本地调试。 */
   def published(key: KnowledgeDocumentKey): UIO[Chunk[IndexedChunk]] =
     state.get.map(_.published.getOrElse(key, Chunk.empty))
