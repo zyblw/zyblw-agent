@@ -149,43 +149,25 @@ final class MarkdownStructureChunker(
 
   /** 把 ATX headings 分解为章节。代码围栏内的 heading-like 行保持普通正文。 */
   private def parseSections(markdown: String): Vector[Section] =
-    val sections              = mutable.ArrayBuffer.empty[Section]
-    val blocks                = mutable.ArrayBuffer.empty[Block]
-    val currentLines          = mutable.ArrayBuffer.empty[(String, Int)]
-    var headingPath           = Vector.empty[String]
-    var fence: Option[String] = None
+    val parsed   = MarkdownStructureChunker.parseRawUnits(markdown, config.maxHeadingDepth)
+    val sections = mutable.ArrayBuffer.empty[Section]
+    val blocks   = mutable.ArrayBuffer.empty[Block]
+    var stack    = Vector.empty[(Int, String)]
 
-    def flushBlock(): Unit =
-      if currentLines.nonEmpty then
-        val text = currentLines.map(_._1).mkString("\n").trim
-        if text.nonEmpty then
-          blocks += Block(text, currentLines.head._2, currentLines.last._2, blockKind(currentLines.map(_._1)))
-        currentLines.clear()
+    def headingPath: Vector[String] = stack.map(_._2)
 
     def flushSection(): Unit =
-      flushBlock()
       if blocks.nonEmpty then sections += Section(headingPath, blocks.toVector)
       blocks.clear()
 
-    markdown.split("\n", -1).iterator.zipWithIndex.foreach { case (line, zeroBasedLine) =>
-      val lineNumber = zeroBasedLine + 1
-      val trimmed    = line.trim
-      fence match
-        case Some(marker) =>
-          currentLines += line -> lineNumber
-          if trimmed.startsWith(marker) then fence = None
-        case None =>
-          fenceMarker(trimmed) match
-            case Some(marker) =>
-              currentLines += line -> lineNumber
-              fence = Some(marker)
-            case None =>
-              heading(trimmed) match
-                case Some((level, title)) =>
-                  flushSection()
-                  headingPath = headingPath.take(level - 1) :+ takeCodePoints(title, 300)
-                case None if trimmed.isEmpty => flushBlock()
-                case None                    => currentLines += line -> lineNumber
+    parsed.foreach {
+      case Left((level, title, _)) =>
+        flushSection()
+        val prefix     = stack.takeWhile(_._1 < level)
+        val clampedLvl = prefix.lastOption.fold(1)(_._1 + 1).min(level).max(1)
+        stack = prefix :+ (clampedLvl -> takeCodePoints(title, 300))
+      case Right(block) =>
+        blocks += Block(block.text, block.startLine, block.endLine, block.kind)
     }
     flushSection()
     sections.toVector
@@ -281,11 +263,352 @@ final class MarkdownStructureChunker(
       .toVector
 
   private def normalize(value: String): String =
+    MarkdownStructureChunker.normalizeText(value)
+
+  private def codePointLength(value: String): Int = value.codePointCount(0, value.length)
+
+  private def sliceCodePoints(value: String, start: Int, end: Int): String =
+    val startOffset = value.offsetByCodePoints(0, start)
+    val endOffset   = value.offsetByCodePoints(0, end)
+    value.substring(startOffset, endOffset)
+
+  private def takeCodePoints(value: String, limit: Int): String =
+    if codePointLength(value) <= limit then value else sliceCodePoints(value, 0, limit)
+
+  private type BlockKind = MarkdownStructureChunker.BlockKind
+  private val BlockKind = MarkdownStructureChunker.BlockKind
+
+  final private case class Block(text: String, startLine: Int, endLine: Int, kind: BlockKind)
+  final private case class Section(headingPath: Vector[String], blocks: Vector[Block])
+  final private case class DraftChunk(
+      headingPath: Vector[String],
+      kind: Option[String],
+      body: String,
+      startLine: Int,
+      endLine: Int
+  )
+  final private case class PreparedChunk(id: String, draft: DraftChunk, ordinal: Int)
+
+object MarkdownStructureChunker:
+  val layer: ULayer[Chunker] = ZLayer.succeed(MarkdownStructureChunker(): Chunker)
+
+  def configured(config: MarkdownStructureChunkerConfig): ULayer[Chunker] =
+    ZLayer.succeed(MarkdownStructureChunker(config): Chunker)
+
+  private[rag] enum BlockKind:
+    case Prose, Table, Code
+
+  final private[rag] case class RawBlock(
+      text: String,
+      startLine: Int,
+      endLine: Int,
+      kind: BlockKind
+  )
+
+  private val IntroHeadingPattern =
+    """^(?:引言|前言|导言|导读|绪论|序言)(?:[：:\s—\-|｜].*)?$""".r
+  private val MajorHeadingPattern =
+    """^(?:[一二三四五六七八九十百零〇]+[、.．]|第[一二三四五六七八九十百零〇\d]+[章节部分篇回])\s*\S+.*$""".r
+  private val PlainMajorLinePattern =
+    """^[一二三四五六七八九十百零〇]+、[^\n。！？；]{2,60}$""".r
+  private val SubHeadingPattern =
+    """^[（(][一二三四五六七八九十百零〇\d]+[）)]\s*\S+.*$""".r
+  private val ArabicHeadingPattern =
+    """^\d+[、.．]\s*\S+.*$""".r
+  private val PlainArabicLinePattern =
+    """^\d+\.\s+[^\n*。！？；]{2,50}$""".r
+  private val AppendixOrConclusionPattern =
+    """^(?:附[录记]?[：:\s|｜].*|结语(?:[：:\s—\-|｜].*)?|总结(?:[：:\s—\-|｜].*)?|小结(?:[：:\s—\-|｜].*)?|主要文献.*|参考文献.*)$""".r
+  private val WeChatPromoLinkLine =
+    """^\s*\[[^\]]*https?://mp\.weixin\.qq\.com/s/[^\]]*\]\((?:<https?://mp\.weixin\.qq\.com/s/[^>]+>|https?://mp\.weixin\.qq\.com/s/[^)\s]+)(?:\s+"[^"]*")?\)\s*$""".r
+  private val PromoHeadingPattern =
+    """^(?:往期回顾|往期推荐|热门阅读|延伸阅读|相关阅读|推荐阅读)$""".r
+
+  /** 从 Markdown 文档提取规范的章节树与结构块，保留 Table/Code/Paragraph 类型并归一化失衡标题层级。 */
+  def extractStructure(
+      document: SourceDocument,
+      maxHeadingDepth: Int = 6
+  ): Option[DocumentStructure] =
+    val normalized      = normalizeText(document.text)
+    val pageBreakMarker = document.metadata.get("pageBreakMarker").map(_.trim).filter(_.nonEmpty)
+    val pageByLine      = pageNumbersByLine(normalized, pageBreakMarker)
+    val chunkingText    = removePageBreakMarkers(normalized, pageBreakMarker)
+    if chunkingText.trim.isEmpty then None
+    else
+      val units     = parseRawUnits(chunkingText, maxHeadingDepth)
+      val rawBlocks = units.collect { case Right(b) => b }
+      if rawBlocks.isEmpty then None
+      else
+        val docTitle = document.metadata
+          .get("title")
+          .map(_.trim)
+          .filter(_.nonEmpty)
+          .getOrElse(document.id)
+          .take(300)
+        val sections = mutable.ArrayBuffer.empty[DocumentSection]
+        val blocks   = mutable.ArrayBuffer.empty[DocumentBlock]
+        var stack    = Vector.empty[(Int, String, String)] // (level, id, title)
+        var secSeq   = 0
+        var blkSeq   = 0
+
+        def pageForRange(startLine: Int, endLine: Int): Vector[Int] =
+          pageBreakMarker.fold(Vector.empty[Int])(_ =>
+            pageByLine
+              .slice((startLine - 1).max(0), endLine.min(pageByLine.length))
+              .distinct
+          )
+
+        def openSection(targetLevel: Int, rawTitle: String, startLine: Int): String =
+          val cleanTitle = takeCodePoints(rawTitle.trim, 300)
+          val prefix     = stack.takeWhile(_._1 < targetLevel)
+          val level      = prefix.lastOption.fold(1)(_._1 + 1).min(targetLevel).max(1)
+          val parentId   = prefix.lastOption.map(_._2)
+          val id         = s"md-sec-$secSeq"
+          secSeq += 1
+          val pages = pageForRange(startLine, startLine)
+          sections += DocumentSection(
+            id = id,
+            parentId = parentId,
+            ordinal = sections.length,
+            level = level,
+            title = if cleanTitle.nonEmpty then cleanTitle else docTitle,
+            pageStart = pages.headOption,
+            pageEnd = pages.lastOption
+          )
+          stack = prefix :+ (level, id, if cleanTitle.nonEmpty then cleanTitle else docTitle)
+          id
+
+        val hasExplicitHeadings = units.exists(_.isLeft)
+        val firstUnitIsBlock    = units.headOption.exists(_.isRight)
+        val firstHeadingMinLvl  = units.collect { case Left((lvl, _, _)) => lvl }.minOption.getOrElse(1)
+
+        if !hasExplicitHeadings || firstUnitIsBlock then
+          val _ = openSection(1, docTitle, 1)
+
+        units.foreach {
+          case Left((rawLvl, title, lineNum)) =>
+            val shiftedLvl =
+              if firstUnitIsBlock && firstHeadingMinLvl == 1 then math.min(6, rawLvl + 1)
+              else rawLvl
+            val _ = openSection(shiftedLvl, title, lineNum)
+          case Right(raw) =>
+            val currentSecId = stack.lastOption.map(_._2).getOrElse(openSection(1, docTitle, raw.startLine))
+            val path         = Chunk.fromIterable(stack.map(_._3))
+            val pages        = pageForRange(raw.startLine, raw.endLine)
+            val origins      = Chunk.fromIterable(pages.map(p => DocumentOrigin(p)))
+            val docKind      = raw.kind match
+              case BlockKind.Table => DocumentBlockKind.Table
+              case BlockKind.Code  => DocumentBlockKind.Code
+              case BlockKind.Prose => DocumentBlockKind.Paragraph
+            val blockId = s"md-blk-$blkSeq"
+            blkSeq += 1
+            blocks += DocumentBlock(
+              id = blockId,
+              parentId = Some(currentSecId),
+              ordinal = blocks.length,
+              kind = docKind,
+              text = raw.text,
+              headingPath = path,
+              origins = origins
+            )
+        }
+
+        val prunedSections = pruneAndRangeSections(sections.toVector, blocks.toVector)
+        if prunedSections.isEmpty || blocks.isEmpty then None
+        else
+          Some(
+            DocumentStructure(
+              schemaName = "markdown-sections",
+              schemaVersion = Some("1"),
+              blocks = Chunk.fromIterable(blocks),
+              sections = Chunk.fromIterable(prunedSections)
+            )
+          )
+
+  private def pruneAndRangeSections(
+      sections: Vector[DocumentSection],
+      blocks: Vector[DocumentBlock]
+  ): Vector[DocumentSection] =
+    val directBlocks = blocks.groupBy(_.parentId)
+    val childrenById = sections.groupBy(_.parentId)
+
+    def hasSubtreeBlocks(id: String, seen: Set[String]): Boolean =
+      if seen.contains(id) then false
+      else
+        directBlocks.get(Some(id)).exists(_.nonEmpty) ||
+        childrenById.getOrElse(Some(id), Vector.empty).exists(c => hasSubtreeBlocks(c.id, seen + id))
+
+    val kept         = sections.filter(s => hasSubtreeBlocks(s.id, Set.empty))
+    val keptChildren = kept.groupBy(_.parentId)
+
+    def pagesOf(id: String, seen: Set[String]): List[Int] =
+      if seen.contains(id) then Nil
+      else
+        val own = directBlocks.getOrElse(Some(id), Vector.empty).flatMap(_.origins.map(_.pageNumber)).toList
+        val nested =
+          keptChildren.getOrElse(Some(id), Vector.empty).flatMap(c => pagesOf(c.id, seen + id)).toList
+        own ++ nested
+
+    kept.zipWithIndex.map { case (section, idx) =>
+      val pages = pagesOf(section.id, Set.empty)
+      val start = (section.pageStart.toList ++ pages).minOption
+      val end   = (section.pageEnd.toList ++ pages).maxOption.orElse(start)
+      section.copy(ordinal = idx, pageStart = start, pageEnd = end)
+    }
+
+  private[rag] def parseRawUnits(
+      markdown: String,
+      maxHeadingDepth: Int
+  ): Vector[Either[(Int, String, Int), RawBlock]] =
+    val lines       = markdown.split("\n", -1).toVector
+    val hasMajorAtx = lines.exists { line =>
+      heading(line.trim, maxHeadingDepth).exists((_, t) =>
+        MajorHeadingPattern.matches(t.trim) || SubHeadingPattern.matches(t.trim)
+      )
+    }
+    val hasArabicAtx = lines.exists { line =>
+      heading(line.trim, maxHeadingDepth).exists((_, t) => ArabicHeadingPattern.matches(t.trim))
+    }
+    val rawUnits     = mutable.ArrayBuffer.empty[Either[(Int, String, Int), RawBlock]]
+    val currentLines = mutable.ArrayBuffer.empty[(String, Int)]
+    var fence        = Option.empty[String]
+    var inPromoSec   = false
+
+    def flushBlock(): Unit =
+      if currentLines.nonEmpty then
+        val nonEmptyLines = currentLines.map(_._1).filter(_.trim.nonEmpty)
+        val filteredLines = nonEmptyLines.filterNot(line => WeChatPromoLinkLine.matches(line.trim))
+        val text          = currentLines
+          .map(_._1)
+          .filterNot(line => WeChatPromoLinkLine.matches(line.trim))
+          .mkString("\n")
+          .trim
+        if text.nonEmpty && filteredLines.nonEmpty && !inPromoSec then
+          rawUnits += Right(
+            RawBlock(
+              text,
+              currentLines.head._2,
+              currentLines.last._2,
+              blockKind(currentLines.map(_._1))
+            )
+          )
+        currentLines.clear()
+
+    lines.zipWithIndex.foreach { case (line, zeroBasedLine) =>
+      val lineNumber = zeroBasedLine + 1
+      val trimmed    = line.trim
+      fence match
+        case Some(marker) =>
+          currentLines += line -> lineNumber
+          if trimmed.startsWith(marker) then fence = None
+        case None =>
+          fenceMarker(trimmed) match
+            case Some(marker) =>
+              currentLines += line -> lineNumber
+              fence = Some(marker)
+            case None =>
+              val prevEmpty       = zeroBasedLine == 0 || lines(zeroBasedLine - 1).trim.isEmpty
+              val nextEmpty       = zeroBasedLine + 1 >= lines.length || lines(zeroBasedLine + 1).trim.isEmpty
+              val detectedHeading = heading(trimmed, maxHeadingDepth).orElse {
+                if hasMajorAtx && currentLines.isEmpty && prevEmpty && nextEmpty && PlainMajorLinePattern
+                    .matches(trimmed)
+                then Some(2 -> trimmed)
+                else if hasArabicAtx && currentLines.isEmpty && prevEmpty && nextEmpty && PlainArabicLinePattern
+                    .matches(trimmed)
+                then Some(3 -> trimmed)
+                else None
+              }
+              detectedHeading match
+                case Some((level, title)) =>
+                  flushBlock()
+                  if PromoHeadingPattern.matches(title.trim) then inPromoSec = true
+                  else
+                    inPromoSec = false
+                    rawUnits += Left((level, title.trim, lineNumber))
+                case None if trimmed.isEmpty => flushBlock()
+                case None                    => currentLines += line -> lineNumber
+    }
+    flushBlock()
+    normalizeHeadingUnits(rawUnits.toVector)
+
+  /** 当文章同时包含中文主章号（一、二、三…）但井号深度失衡（如 `# 引言` 后跟 `## 一、` 或 `## 二、` 后跟 `### 三、`）时， 将同级结构序号对齐到一致的层级。普通无序号 Markdown
+    * 保持原井号不变。
+    */
+  private def normalizeHeadingUnits(
+      units: Vector[Either[(Int, String, Int), RawBlock]]
+  ): Vector[Either[(Int, String, Int), RawBlock]] =
+    val headings = units.collect { case Left(h) => h }
+    val majors   = headings.filter((_, title, _) => MajorHeadingPattern.matches(title))
+    if majors.isEmpty then units
+    else
+      val firstIsDocTitle = headings.headOption.exists { case (lvl, title, _) =>
+        lvl == 1 &&
+        !IntroHeadingPattern.matches(title) &&
+        !MajorHeadingPattern.matches(title) &&
+        !SubHeadingPattern.matches(title) &&
+        !ArabicHeadingPattern.matches(title) &&
+        !AppendixOrConclusionPattern.matches(title) &&
+        majors.forall(_._1 >= 2)
+      }
+      val hasIntroH1 = headings.headOption.exists { case (lvl, title, _) =>
+        lvl == 1 && IntroHeadingPattern.matches(title)
+      }
+      val majorLevels        = majors.map(_._1).distinct
+      val hasParenSubs       = headings.exists((_, t, _) => SubHeadingPattern.matches(t))
+      val arabicOffset       = if hasParenSubs then 2 else 1
+      val needsNormalization =
+        hasIntroH1 || majorLevels.length > 1 ||
+          headings.exists((_, t, _) =>
+            AppendixOrConclusionPattern.matches(t) || ArabicHeadingPattern.matches(t)
+          )
+      if !needsNormalization then units
+      else
+        val baseMajor          = if firstIsDocTitle then 2 else 1
+        var seenMajor          = false
+        var currentMajorRawLvl = majors.head._1
+        units.map {
+          case Right(block)             => Right(block)
+          case Left((lvl, title, line)) =>
+            val normLvl =
+              if firstIsDocTitle && line == headings.head._3 then 1
+              else if IntroHeadingPattern.matches(title) then baseMajor
+              else if MajorHeadingPattern.matches(title) then
+                seenMajor = true
+                currentMajorRawLvl = lvl
+                baseMajor
+              else if AppendixOrConclusionPattern.matches(title) && seenMajor then baseMajor
+              else if SubHeadingPattern.matches(title) then math.min(6, baseMajor + 1)
+              else if ArabicHeadingPattern.matches(title) then math.min(6, baseMajor + arabicOffset)
+              else if seenMajor && lvl > currentMajorRawLvl then
+                math.min(6, baseMajor + (lvl - currentMajorRawLvl))
+              else lvl
+            Left((normLvl, title, line))
+        }
+
+  private def normalizeText(value: String): String =
     value.replace("\r\n", "\n").replace('\r', '\n').replace("\u0000", "")
 
-  private def heading(value: String): Option[(Int, String)] =
+  private def pageNumbersByLine(markdown: String, marker: Option[String]): Vector[Int] =
+    var page = 1
+    markdown
+      .split("\n", -1)
+      .iterator
+      .map { line =>
+        val current = page
+        if marker.exists(value => line.trim == value) then page += 1
+        current
+      }
+      .toVector
+
+  private def removePageBreakMarkers(markdown: String, marker: Option[String]): String =
+    marker match
+      case None        => markdown
+      case Some(value) =>
+        markdown.split("\n", -1).map(line => if line.trim == value then "" else line).mkString("\n")
+
+  private def heading(value: String, maxHeadingDepth: Int): Option[(Int, String)] =
     val hashes = value.takeWhile(_ == '#').length
-    if hashes >= 1 && hashes <= config.maxHeadingDepth && value.drop(hashes).startsWith(" ") then
+    if hashes >= 1 && hashes <= maxHeadingDepth && value.drop(hashes).startsWith(" ") then
       val title = value
         .drop(hashes)
         .trim
@@ -308,32 +631,7 @@ final class MarkdownStructureChunker(
       BlockKind.Table
     else BlockKind.Prose
 
-  private def codePointLength(value: String): Int = value.codePointCount(0, value.length)
-
-  private def sliceCodePoints(value: String, start: Int, end: Int): String =
-    val startOffset = value.offsetByCodePoints(0, start)
-    val endOffset   = value.offsetByCodePoints(0, end)
-    value.substring(startOffset, endOffset)
-
   private def takeCodePoints(value: String, limit: Int): String =
-    if codePointLength(value) <= limit then value else sliceCodePoints(value, 0, limit)
-
-  private enum BlockKind:
-    case Prose, Table, Code
-
-  final private case class Block(text: String, startLine: Int, endLine: Int, kind: BlockKind)
-  final private case class Section(headingPath: Vector[String], blocks: Vector[Block])
-  final private case class DraftChunk(
-      headingPath: Vector[String],
-      kind: Option[String],
-      body: String,
-      startLine: Int,
-      endLine: Int
-  )
-  final private case class PreparedChunk(id: String, draft: DraftChunk, ordinal: Int)
-
-object MarkdownStructureChunker:
-  val layer: ULayer[Chunker] = ZLayer.succeed(MarkdownStructureChunker(): Chunker)
-
-  def configured(config: MarkdownStructureChunkerConfig): ULayer[Chunker] =
-    ZLayer.succeed(MarkdownStructureChunker(config): Chunker)
+    val len = value.codePointCount(0, value.length)
+    if len <= limit then value
+    else value.substring(0, value.offsetByCodePoints(0, limit))

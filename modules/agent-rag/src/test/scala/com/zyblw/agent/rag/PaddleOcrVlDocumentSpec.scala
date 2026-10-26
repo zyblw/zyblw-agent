@@ -264,5 +264,50 @@ object PaddleOcrVlDocumentSpec extends ZIOSpecDefault:
         PaddleOcrVlDocument.decode(missingPage).left.exists(_.contains("页面未完整识别")),
         PaddleOcrVlDocument.decode(longTitle).left.exists(_.contains("单个标题超过上限"))
       )
+    },
+    test("完整方剂标题不吞掉后续药味行，误标为标题的陈述句和药味行退回正文，且还原卷/篇/方层级") {
+      val json =
+        """[{
+          |  "prunedResult": {
+          |    "parsing_res_list": [
+          |      {"block_label":"doc_title","block_content":"# 桂林古本伤寒杂病论","block_order":1},
+          |      {"block_label":"paragraph_title","block_content":"# 伤寒杂病论卷第三","block_order":2},
+          |      {"block_label":"text","block_content":"六气主客第三","block_order":3},
+          |      {"block_label":"paragraph_title","block_content":"## 辨太阳病脉证并治上","block_order":4},
+          |      {"block_label":"paragraph_title","block_content":"# 调胃承气汤方","block_order":5},
+          |      {"block_label":"text","block_content":"甘草二两（炙） 芒硝半斤 大黄四两（酒洗）","block_order":6},
+          |      {"block_label":"text","block_content":"右三味，以水三升，煮取一升。","block_order":7},
+          |      {"block_label":"paragraph_title","block_content":"此段讲痈疽脉症。","block_order":8},
+          |      {"block_label":"paragraph_title","block_content":"麻仁一升 白蜜六合","block_order":9},
+          |      {"block_label":"text","block_content":"$$白术二两 \\quad 桂枝三两$$","block_order":10}
+          |    ]
+          |  }
+          |}]""".stripMargin
+      val md =
+        """# 桂林古本伤寒杂病论
+          |
+          |# 伤寒杂病论卷第三
+          |
+          |六气主客第三
+          |
+          |## 辨太阳病脉证并治上
+          |
+          |# 调胃承气汤方
+          |
+          |甘草二两（炙） 芒硝半斤 大黄四两（酒洗）
+          |""".stripMargin
+      val parsed = PaddleOcrVlDocument.decode(json, Some(md)).toOption.get
+      assertTrue(
+        parsed.sections.exists(s => s.title == "伤寒杂病论卷第三" && s.level == 2),
+        parsed.sections.exists(s => s.title == "辨太阳病脉证并治上" && s.level == 3),
+        parsed.sections.exists(s => s.title == "调胃承气汤方" && s.level == 4),
+        !parsed.sections.exists(_.title.contains("甘草二两")),
+        !parsed.sections.exists(_.title == "此段讲痈疽脉症。"),
+        !parsed.sections.exists(_.title == "麻仁一升 白蜜六合"),
+        parsed.blocks.exists(_.text == "甘草二两（炙） 芒硝半斤 大黄四两（酒洗）"),
+        parsed.blocks.exists(_.text == "此段讲痈疽脉症。"),
+        parsed.blocks.exists(_.text == "麻仁一升 白蜜六合"),
+        parsed.blocks.exists(_.text == "白术二两 桂枝三两")
+      )
     }
   )

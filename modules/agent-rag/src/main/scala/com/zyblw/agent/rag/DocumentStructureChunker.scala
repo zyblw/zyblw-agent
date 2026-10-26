@@ -48,14 +48,26 @@ final class DocumentStructureChunker(
       permissions: Set[String]
   ): IO[RetrievalError, Chunk[DocumentChunk]] =
     document.structure match
+      case None if fallback.isInstanceOf[MarkdownStructureChunker] =>
+        MarkdownStructureChunker.extractStructure(document) match
+          case Some(structure) =>
+            ZIO
+              .attempt(build(document, structure, tenantId, permissions))
+              .mapError(_ => AgentError.RetrievalFailed("Markdown 文本无法满足切分预算"))
+          case None =>
+            ZIO.succeed(Chunk.empty)
       case None =>
         fallback.split(document, tenantId, permissions).flatMap { initial =>
           val blocks = initial.zipWithIndex.map { case (chunk, index) =>
+            val kind =
+              if chunk.denseText.contains("类型：Table") then DocumentBlockKind.Table
+              else if chunk.denseText.contains("类型：Code") then DocumentBlockKind.Code
+              else DocumentBlockKind.Paragraph
             DocumentBlock(
               chunk.id,
               chunk.lineage.flatMap(_.parentId),
               index,
-              DocumentBlockKind.Paragraph,
+              kind,
               chunk.displayText,
               chunk.lineage.fold(Chunk.empty[String])(_.headingPath),
               chunk.lineage.fold(Chunk.empty[DocumentOrigin])(_.origins)
@@ -143,8 +155,24 @@ final class DocumentStructureChunker(
           result += fromBlocks(Vector(block))
         else result ++= splitOversized(title, block)
       else if !fits(title, block.headingPath, Some(block.kind), block.text) then
-        flush()
-        result ++= splitOversized(title, block)
+        if config.mergePeers && pending.nonEmpty &&
+          pending.last.parentId == block.parentId &&
+          pending.last.headingPath == block.headingPath &&
+          codePoints(pending.last.text) <= 24
+        then
+          val leadBlock = pending.last
+          if pending.length >= 2 then result += fromBlocks(pending.init.toVector)
+          pending.clear()
+          val combinedBlock = block.copy(
+            text = leadBlock.text + "\n\n" + block.text,
+            origins = (leadBlock.origins ++ block.origins).distinct
+          )
+          result ++= splitOversized(title, combinedBlock).map(
+            _.copy(blockIds = Chunk(leadBlock.id, block.id))
+          )
+        else
+          flush()
+          result ++= splitOversized(title, block)
       else if pending.isEmpty then pending += block
       else
         val sameContext =
@@ -153,6 +181,44 @@ final class DocumentStructureChunker(
         val mergedKind = uniformKind(pending.toVector :+ block)
         if config.mergePeers && sameContext && fits(title, block.headingPath, mergedKind, merged) then
           pending += block
+        else if config.mergePeers && sameContext && (codePoints(block.text) <= 24 || codePoints(
+            pending.last.text
+          ) <= 24)
+        then
+          if pending.length >= 2 then
+            val tailBlock = pending.last
+            result += fromBlocks(pending.init.toVector)
+            pending.clear()
+            if fits(
+                title,
+                block.headingPath,
+                uniformKind(Vector(tailBlock, block)),
+                tailBlock.text + "\n\n" + block.text
+              )
+            then
+              pending += tailBlock
+              pending += block
+            else
+              val combinedBlock = tailBlock.copy(
+                text = tailBlock.text + "\n\n" + block.text,
+                origins = (tailBlock.origins ++ block.origins).distinct
+              )
+              result ++= splitCharacters(title, combinedBlock).map(
+                _.copy(blockIds = Chunk(tailBlock.id, block.id))
+              )
+          else if pending.length == 1 then
+            val head          = pending.head
+            val combinedBlock = head.copy(
+              text = merged,
+              origins = (head.origins ++ block.origins).distinct
+            )
+            pending.clear()
+            result ++= splitCharacters(title, combinedBlock).map(
+              _.copy(blockIds = Chunk(head.id, block.id))
+            )
+          else
+            flush()
+            pending += block
         else
           flush()
           pending += block
@@ -249,10 +315,72 @@ final class DocumentStructureChunker(
           low = mid + 1
         else high = mid - 1
       require(size > 0, "prefix or character exceeds token budget")
-      result += draftOf(block, slice(block.text, start, start + size))
-      if start + size >= total then start = total
-      else start += size - config.overlapCharacters.min(size / 2)
+      val actualSize =
+        if start + size >= total then size
+        else snapSliceSize(block.text, start, size, total)
+      result += draftOf(block, slice(block.text, start, start + actualSize))
+      if start + actualSize >= total then start = total
+      else if config.overlapCharacters <= 0 then start += actualSize
+      else
+        val rawNext = start + actualSize - config.overlapCharacters.min(actualSize / 2)
+        start = snapOverlapStart(block.text, rawNext, start + actualSize).max(start + 1)
     result.result()
+
+  private val SentenceBreakChars = "。！？；!?; \n"
+  private val ClauseBreakChars   = "，、：,:）)"
+  private val ClosingQuoteChars  = "”’）)》」】"
+  private val LeadingSkipChars   = "，。！？；：、）》」】”’ \t\n"
+
+  /** 在窗口后 30% 区间内回退到最近的句末/换行或分句标点；若剩余尾部过短（<=28 字），适当提前切点避免 4~5 字碎块。 */
+  private def snapSliceSize(text: String, start: Int, maxSize: Int, total: Int): Int =
+    val window    = slice(text, start, start + maxSize)
+    val cps       = window.codePoints().toArray
+    val remaining = total - (start + maxSize)
+    val searchMax =
+      if remaining > 0 && remaining <= 28 && maxSize >= 64 then (maxSize - 28).max(maxSize / 2)
+      else maxSize
+    val minSentencePos = (searchMax * 65 / 100).max(1)
+    val minClausePos   = (searchMax * 80 / 100).max(1)
+
+    def findBreak(minPos: Int, maxPos: Int, chars: String): Option[Int] =
+      var pos   = maxPos - 1
+      var found = -1
+      while pos >= minPos && found < 0 do
+        val cp = cps(pos)
+        if cp < Char.MaxValue && chars.indexOf(cp) >= 0 then
+          var endPos = pos + 1
+          while endPos < maxPos && cps(endPos) < Char.MaxValue && ClosingQuoteChars.indexOf(cps(endPos)) >= 0
+          do endPos += 1
+          found = endPos
+        pos -= 1
+      Option.when(found >= minPos)(found)
+
+    findBreak(minSentencePos, searchMax, "\n")
+      .orElse(findBreak(minSentencePos, searchMax, "。！？；!?;"))
+      .orElse(findBreak(minClausePos, searchMax, ClauseBreakChars))
+      .getOrElse(maxSize)
+
+  /** 滑动 overlap 的起点向后对齐到句首/分句首，避免新块以标点或半个词开头。 */
+  private def snapOverlapStart(text: String, rawNext: Int, sliceEnd: Int): Int =
+    val maxAdvance = (rawNext + config.overlapCharacters.min((sliceEnd - rawNext) / 2)).min(sliceEnd - 1)
+    if maxAdvance <= rawNext then rawNext
+    else
+      val span       = slice(text, rawNext, sliceEnd)
+      val cps        = span.codePoints().toArray
+      val limit      = (maxAdvance - rawNext).min(cps.length - 1)
+      var idx        = 0
+      var breakAfter = -1
+      while idx < limit && breakAfter < 0 do
+        val cp = cps(idx)
+        if cp < Char.MaxValue && (SentenceBreakChars.indexOf(cp) >= 0 || ClauseBreakChars.indexOf(cp) >= 0)
+        then breakAfter = idx + 1
+        idx += 1
+      var candidate = if breakAfter > 0 then breakAfter else 0
+      while candidate < cps.length - 1 && cps(candidate) < Char.MaxValue && LeadingSkipChars.indexOf(
+          cps(candidate)
+        ) >= 0
+      do candidate += 1
+      (rawNext + candidate).min(sliceEnd - 1)
 
   private def draftOf(block: DocumentBlock, text: String): Draft =
     Draft(block.parentId, block.headingPath, Some(block.kind), text, block.origins, Chunk(block.id))

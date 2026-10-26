@@ -279,5 +279,31 @@ object DocumentStructureChunkerSpec extends ZIOSpecDefault:
         chunks.filter(_.text.contains("桂枝")).forall(_.text.contains("桂枝 9g")),
         chunks.filter(_.text.contains("白芍")).forall(_.text.contains("白芍 9g"))
       )
+    },
+    test("无预置 structure 的 Markdown 表格超长时按行切分并重复表头，且超长段落按句读边界切分") {
+      val row   = "| 古代概念 | " + "现代生理学映射机制与临床意义说明".repeat(8) + " |"
+      val table = "| 维度 | 阐释 |\n| --- | --- |\n" + row + "\n" + row
+      val prose = ("太阳之为病，脉浮，头项强痛而恶寒。太阳病，发热，汗出，恶风，脉缓者，名为中风。" * 6)
+      val md    = s"# 一、总论\n\n$prose\n\n## （一）对照表\n\n$table"
+      val doc   = SourceDocument(
+        "md-table-prose",
+        md,
+        "knowledge://md-table-prose",
+        Map("title" -> "命门"),
+        representation = DocumentRepresentation.Markdown
+      )
+      val chunker = DocumentStructureChunker(
+        DocumentStructureChunkerConfig(maxCharacters = 220, overlapCharacters = 32, maxTokens = None)
+      )
+      for chunks <- chunker.split(doc, tenant, scope)
+      yield
+        val tableChunks = chunks.filter(_.denseText.contains("类型：Table"))
+        val proseChunks = chunks.filter(_.denseText.contains("类型：Paragraph"))
+        assertTrue(
+          tableChunks.length >= 2,
+          tableChunks.forall(_.text.startsWith("| 维度 | 阐释 |\n| --- | --- |")),
+          proseChunks.length >= 2,
+          proseChunks.forall(c => c.text.endsWith("。") && !c.text.startsWith("，") && !c.text.startsWith("。"))
+        )
     }
   )

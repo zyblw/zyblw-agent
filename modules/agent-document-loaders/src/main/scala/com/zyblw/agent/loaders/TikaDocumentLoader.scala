@@ -226,16 +226,23 @@ final class TikaDocumentLoader(config: TikaDocumentLoaderConfig = TikaDocumentLo
       val representation =
         if input.declaredMediaType == "text/markdown" then DocumentRepresentation.Markdown
         else DocumentRepresentation.PlainText
-      ZIO.succeed(
-        SourceDocument(
-          input.id,
-          parsed.text,
-          input.sourceUri,
-          parsed.metadata,
-          representation,
-          parsed.structure
-        )
+      val baseDocument = SourceDocument(
+        input.id,
+        parsed.text,
+        input.sourceUri,
+        parsed.metadata,
+        representation,
+        parsed.structure
       )
+      val withStructure =
+        if representation == DocumentRepresentation.Markdown && baseDocument.structure.isEmpty then
+          baseDocument.copy(
+            structure = MarkdownStructureChunker.extractStructure(
+              baseDocument.copy(metadata = input.metadata ++ parsed.metadata)
+            )
+          )
+        else baseDocument
+      ZIO.succeed(withStructure)
 
   /** MIME 参数不参与比较；只允许少量有明确语义的等价检测结果。 */
   private def compatible(declared: String, detected: String): Boolean =

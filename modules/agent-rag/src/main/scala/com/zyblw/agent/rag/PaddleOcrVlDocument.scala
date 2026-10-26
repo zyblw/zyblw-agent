@@ -252,7 +252,7 @@ object PaddleOcrVlDocument:
                   )
                   openSection(level, origin, cleaned, page.number): Unit
               case Some(Right(kind)) =>
-                val text = title
+                val text = stripNonMathLatex(title)
                 if text.nonEmpty && !ImageOnly.matches(text) then
                   val blockId = s"p${page.number}-b$ordinal"
                   if kind == DocumentBlockKind.Picture then rememberFigure(page.number, blockId, source)
@@ -283,10 +283,20 @@ object PaddleOcrVlDocument:
     val inferred = inferHeadingLevel(title)
     val chosen   =
       (origin, inferred) match
-        case (Some(level), Some(rank)) if outlineCollapsed(level, rank, outlineSources) => rank
-        case (Some(level), _)                                                           => level
-        case (None, Some(rank))                                                         => rank
-        case _                                                                          => defaultLevel
+        case (Some(level), Some(rank))
+            if outlineCollapsed(level, rank, outlineSources) ||
+              (rank <= 3 && outlineSources.get(rank).exists(_.size > 1)) =>
+          rank
+        case (Some(level), _) =>
+          level
+        case (None, Some(rank)) =>
+          outlineSources.get(rank) match
+            case Some(levels) if levels.size == 1 && !outlineCollapsed(levels.head, rank, outlineSources) =>
+              levels.head
+            case _ =>
+              rank
+        case _ =>
+          defaultLevel
     clampLevel(chosen) -> origin
 
   /** 章、节、一、（一）若被同一级井号盖住，改用编号。井号本身已经逐级变深时保持原样。 */
@@ -318,15 +328,19 @@ object PaddleOcrVlDocument:
           val (hashLevel, title) = splitHeading(source.text)
           if !(source.label == "content" && title.nonEmpty && !ImageOnly.matches(title)) then
             classify(source.label, title) match
-              case Some(Left(_)) =>
+              case Some(Left(defaultLevel)) =>
                 val cleaned = clampTitle(title)
                 if cleaned.nonEmpty then
                   val matched = matchHeading(cleaned, headings, cursor, next => cursor = next)
-                  val origin  = matched.orElse(hashLevel).orElse(source.levelHint)
-                  (origin, inferHeadingLevel(cleaned)) match
-                    case (Some(level), Some(rank)) =>
-                      val prior = observed.getOrElse(rank, Set.empty)
-                      observed = observed.updated(rank, prior + level)
+                  val origin  = matched
+                    .orElse(hashLevel)
+                    .orElse(source.levelHint)
+                    .orElse(Option.when(defaultLevel == 1)(1))
+                  val rank = inferHeadingLevel(cleaned).orElse(Option.when(defaultLevel == 1)(1))
+                  (origin, rank) match
+                    case (Some(level), Some(r)) =>
+                      val prior = observed.getOrElse(r, Set.empty)
+                      observed = observed.updated(r, prior + level)
                     case _ => ()
               case _ => ()
         index += advance
@@ -359,12 +373,24 @@ object PaddleOcrVlDocument:
         setCursor(found + 1)
         Some(headings(found)._1)
 
+  private val VolumeOrPartPattern =
+    """^(?:第[一二三四五六七八九十百零〇\d]+[卷篇部编册集].*|.{1,20}卷第[一二三四五六七八九十百零〇\d]+|[上下中]\s*[篇卷部编册].*|[四七]\s*言\s*诀|总\s*论|各\s*论)$""".r
+  private val ClassicalChapterPattern =
+    """^(?:辨.{1,24}脉证并治.*|.{1,24}脉证并治第[一二三四五六七八九十百零〇\d]+.*|(?:平脉法|六气主客|伤寒例|杂病例|痉湿暍病|百合狐惑阴阳毒病|疟病|中风历节病|血痹虚劳病|肺痿肺痈咳嗽上气病|奔豚气病|胸痹心痛短气病|腹满寒疝宿食病|五脏风寒积聚病|惊悸吐衄下血胸满瘀血病|痰饮咳嗽病|消渴小便利淋病|水气病|黄疸病|妇人妊娠病|妇人产后病|妇人杂病).*第[一二三四五六七八九十百零〇\d]+.*)$""".r
+  private val ClassicalFormulaPattern =
+    """^[\p{IsHan}]{1,20}(?:[汤散丸煎丹膏饮酒洗导塞粉汁姜]方|[汤散丸煎丹膏])(?:[（(].*[)）])?$""".r
+  private val HerbDosageTokenPattern =
+    """^[\p{IsHan}]{1,8}[一二三四五六七八九十百千万半两钱分寸尺升合斗枚斤字个粒丸片剂]+(?:[（(][^）)]*[）)])?$""".r
+
   /** 井号能分出层级时以井号为准。井号把不同编号压成同一级，或 Markdown 缺失时，再按中文目录编号恢复层级。章、节后面可以没有空格。 */
   private def inferHeadingLevel(title: String): Option[Int] =
     val value = splitHeading(title)._2.trim
-    if value.matches("""^第[一二三四五六七八九十百零〇\d]+章.*""") then Some(2)
-    else if value.matches("""^第[一二三四五六七八九十百零〇\d]+节.*""") then Some(3)
-    else if value.matches("""^[一二三四五六七八九十百零〇]+[、.．]\s*.*""") then Some(4)
+    if VolumeOrPartPattern.matches(value) then Some(2)
+    else if value.matches("""^第[一二三四五六七八九十百零〇\d]+[章回].*""") then Some(2)
+    else if value.matches("""^第[一二三四五六七八九十百零〇\d]+节.*""") || ClassicalChapterPattern.matches(value) then
+      Some(3)
+    else if value.matches("""^[一二三四五六七八九十百零〇]+[、.．]\s*.*""") || ClassicalFormulaPattern.matches(value) then
+      Some(4)
     else if value.matches("""^[（(][一二三四五六七八九十百零〇\d]+[）)]\s*.*""") then Some(5)
     else if value.matches("""^\d+[、.．]\s*.*""") then Some(5)
     else None
@@ -483,11 +509,16 @@ object PaddleOcrVlDocument:
   private def httpsUrl(value: Option[String]): Option[String] =
     value.map(_.trim).filter(url => url.startsWith("https://") && url.length <= 2000)
 
-  /** 标题返回层级，正文返回块类型；噪声和空图片返回 None。 */
+  /** 标题返回层级，正文返回块类型；噪声和空图片返回 None。
+    *
+    * 被 OCR 误标为 `paragraph_title` 的无编号陈述句或单纯药味剂量行退回普通正文段，避免打断当前章节或吞掉后续正文。
+    */
   private def classify(label: String, text: String): Option[Either[Int, DocumentBlockKind]] =
     label match
-      case "doc_title" | "title"      => Some(Left(1))
-      case "paragraph_title"          => Some(Left(2))
+      case "doc_title" | "title" => Some(Left(1))
+      case "paragraph_title"     =>
+        if isDemotedParagraphTitle(text) then Some(Right(DocumentBlockKind.Paragraph))
+        else Some(Left(2))
       case "table"                    => Some(Right(DocumentBlockKind.Table))
       case "formula"                  => Some(Right(DocumentBlockKind.Formula))
       case "list"                     => Some(Right(DocumentBlockKind.ListItem))
@@ -499,6 +530,38 @@ object PaddleOcrVlDocument:
         Some(Right(DocumentBlockKind.Paragraph))
       case _ =>
         if text.nonEmpty then Some(Right(DocumentBlockKind.Paragraph)) else None
+
+  private def isDemotedParagraphTitle(raw: String): Boolean =
+    val clean = stripNonMathLatex(splitHeading(raw)._2).trim
+    if clean.isEmpty || inferHeadingLevel(clean).isDefined then false
+    else if clean.contains('。') then true
+    else looksLikeHerbIngredientLine(clean)
+
+  private def looksLikeHerbIngredientLine(text: String): Boolean =
+    val clean = stripNonMathLatex(text).trim
+    if clean.isEmpty || ClassicalFormulaPattern.matches(clean) then false
+    else
+      val tokens = clean.split("\\s+").map(_.trim).filter(_.nonEmpty)
+      tokens.length >= 1 &&
+      tokens.forall(token => HerbDosageTokenPattern.matches(token)) &&
+      (tokens.length >= 2 || clean.length >= 4)
+
+  private val NonMathLatexPattern = """(?s)^\$\$(.+?)\$\$$""".r
+
+  /** OCR 有时把药味分栏或双列短句包进 `$$ ... \quad ... $$`；若包含汉字且无数学算符，还原为普通文本。 */
+  private def stripNonMathLatex(value: String): String =
+    val trimmed = value.trim
+    trimmed match
+      case NonMathLatexPattern(inner)
+          if inner.exists(ch => Character.UnicodeScript.of(ch.toInt) == Character.UnicodeScript.HAN) &&
+            !inner.contains("\\frac") && !inner.contains("\\sum") && !inner.contains("\\int") =>
+        inner
+          .replace("\\qquad", " ")
+          .replace("\\quad", " ")
+          .replaceAll("""\\text\{([^}]*)\}""", "$1")
+          .replaceAll("\\s+", " ")
+          .trim
+      case _ => value
 
   private def fillRanges(sections: Vector[Section], blocks: Vector[DocumentBlock]): Vector[Section] =
     val own                                               = blocks.groupBy(_.parentId)
@@ -803,7 +866,33 @@ object PaddleOcrVlDocument:
   ): Boolean =
     val joined = normalizeTitle(heading + line)
     val spaced = normalizeTitle(heading + " " + line)
-    continuations.contains(normalizeTitle(line)) || titles.exists(title => title == joined || title == spaced)
+    titles.exists(title => title == joined || title == spaced) ||
+    (continuations.contains(normalizeTitle(line)) && looksLikeIncompleteHeading(heading, line))
+
+  /** 仅当上一行标题在虚词/连词或未闭合括号处折行，且下一行是紧凑的短词尾时，才将下一行 text 视作折行标题续接。 避免把方剂药味行、编著者署名行或子章节标题误吞入上一级标题。
+    */
+  private def looksLikeIncompleteHeading(heading: String, line: String): Boolean =
+    val h = splitHeading(heading)._2.trim
+    val l = splitHeading(line)._2.trim
+    if h.isEmpty || l.isEmpty then false
+    else
+      val incompleteEnd =
+        "的之与和及或对于在从向以为把被".contains(h.last) || hasUnclosedBracket(h)
+      val cleanTail =
+        l.codePointCount(0, l.length) <= 12 &&
+          !l.exists(_.isWhitespace) &&
+          !l.endsWith("：") &&
+          !l.endsWith(":") &&
+          !"编著撰译注校辑".contains(l.last) &&
+          inferHeadingLevel(l).isEmpty &&
+          !looksLikeHerbIngredientLine(l)
+      incompleteEnd && cleanTail
+
+  private def hasUnclosedBracket(value: String): Boolean =
+    val pairs = List(('（', '）'), ('(', ')'), ('《', '》'), ('“', '”'), ('「', '」'), ('【', '】'))
+    pairs.exists { case (open, close) =>
+      value.count(_ == open) > value.count(_ == close)
+    }
 
   private def splitHeading(text: String): (Option[Int], String) =
     text.linesIterator.map(_.trim).find(_.nonEmpty) match

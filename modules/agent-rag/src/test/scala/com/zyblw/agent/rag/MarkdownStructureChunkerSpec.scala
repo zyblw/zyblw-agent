@@ -168,5 +168,50 @@ object MarkdownStructureChunkerSpec extends ZIOSpecDefault:
         chunks(1).lineage.flatMap(_.previousChunkId).contains(chunks.head.id),
         chunks.forall(_.lineage.flatMap(_.parentId).nonEmpty)
       )
+    },
+    test("归一化失衡的引言/中文序号标题层级，恢复无井号主标题并过滤公众号推广外链") {
+      val markdown =
+        """# 引言：追寻生命的原动力
+          |
+          |引言正文。
+          |
+          |一、早期解剖与藏象的铺垫
+          |
+          |第一章正文。
+          |
+          |## 二、明代命门学说的巅峰
+          |
+          |### （一）赵献可
+          |
+          |赵氏正文。
+          |
+          |#### （二）张景岳
+          |
+          |张氏正文。
+          |
+          |### 三、命门的核心生理功能
+          |
+          |第三章正文。
+          |
+          |### 结语
+          |
+          |结语正文。
+          |
+          |[ 命门和命门学说 https://mp.weixin.qq.com/s/V_75POd5SFEHy5Q-AkX9fA](https://mp.weixin.qq.com/s/V_75POd5SFEHy5Q-AkX9fA " 命门和命门学说")
+          |""".stripMargin
+      val doc        = document(markdown)
+      val structure  = MarkdownStructureChunker.extractStructure(doc).get
+      val secByTitle = structure.sections.map(s => s.title -> s).toMap
+      assertTrue(
+        secByTitle("引言：追寻生命的原动力").level == 1,
+        secByTitle("一、早期解剖与藏象的铺垫").level == 1,
+        secByTitle("二、明代命门学说的巅峰").level == 1,
+        secByTitle("（一）赵献可").level == 2,
+        secByTitle("（二）张景岳").level == 2,
+        secByTitle("（二）张景岳").parentId.contains(secByTitle("二、明代命门学说的巅峰").id),
+        secByTitle("三、命门的核心生理功能").level == 1,
+        secByTitle("结语").level == 1,
+        !structure.blocks.exists(_.text.contains("mp.weixin.qq.com"))
+      )
     }
   )
