@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-10-24
+> 最后核验：2026-10-28
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -22,6 +22,7 @@
   `Idempotent`，普通写为 `NeverReplay`，破坏性操作为 `RequiresApproval`。部署 `ToolRetryPolicy.Never`
   不会禁止 ReplaySafe 工具在进程死后用同一 callId 再执行。
 - 输出超过 `maxResultBytes` 时失败；后续可接对象存储引用策略。
+- 本地 JSON Schema 实例校验与敏感字段脱敏：`JsonSchemaInstanceValidator` 在执行前递归校验 Schema 支持边界（`validateSchemaSupport`），任何嵌套于 `not`、`anyOf`、`oneOf`、`allOf` 内的未知关键字一律 Fail-Closed，绝不因 `not` 取反放行，并完整识别 `anyOf`/`oneOf`/`allOf` 中的显式 `null` 许可；`RegisteredTool.make` 先对 `encodeRawOutput` 原始输出执行 `outputSchema` 校验，通过后再执行 `ToolMetadata.redactJson` 敏感字段脱敏，避免非字符串敏感字段（如 `integer`）被脱敏为 `"[REDACTED]"` 后误触类型校验失败。
 
 ## 内置示例
 

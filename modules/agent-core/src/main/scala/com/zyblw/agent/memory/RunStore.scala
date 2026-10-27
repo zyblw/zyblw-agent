@@ -202,12 +202,35 @@ object RunStore:
         status = SuspensionIndexStatus.Pending
       )
 
-  /** 按权威状态同步到期索引：没有挂起就删除；Expired 且仍是同一条挂起则保留 lease，避免把正在处置的行打回 Pending。 */
+  /** 按权威状态同步到期索引并原子收敛终态悬挂工具与模型调用账本：没有挂起就删除；Expired 且仍是同一条挂起则保留 lease，避免把正在处置的行打回 Pending。 */
   private def syncSuspensionIndex(current: InMemoryData, state: AgentState): InMemoryData =
+    val settledTools =
+      if !RunStatus.isTerminal(state.status) then current.toolExecutions
+      else
+        val nowMs = state.updatedAt.toEpochMilli
+        current.toolExecutions.map {
+          case (key @ (storedRunId, _), record)
+              if storedRunId == state.runId &&
+                (record.status == ToolExecutionStatus.Prepared || record.status == ToolExecutionStatus.Running) =>
+            key -> record.copy(status = ToolExecutionStatus.Unknown, updatedAtEpochMilli = nowMs)
+          case other => other
+        }
+    val settledModelCalls =
+      if !RunStatus.isTerminal(state.status) then current.modelCalls
+      else
+        val nowMs = state.updatedAt.toEpochMilli
+        current.modelCalls.map {
+          case (key @ (storedRunId, _), record)
+              if storedRunId == state.runId &&
+                (record.status == ModelCallStatus.Prepared || record.status == ModelCallStatus.Dispatched) =>
+            key -> record.copy(status = ModelCallStatus.Unknown, updatedAtEpochMilli = nowMs)
+          case other => other
+        }
+    val withSettledTools = current.copy(toolExecutions = settledTools, modelCalls = settledModelCalls)
     state.suspension match
-      case None         => current.copy(suspensions = current.suspensions - state.runId)
+      case None         => withSettledTools.copy(suspensions = withSettledTools.suspensions - state.runId)
       case Some(record) =>
-        val next = current.suspensions.get(state.runId) match
+        val next = withSettledTools.suspensions.get(state.runId) match
           case Some(existing)
               if existing.status == SuspensionIndexStatus.Expired && existing.createdAt == record.createdAt =>
             existing.copy(
@@ -216,7 +239,7 @@ object RunStore:
               expiryOutcome = record.expiryOutcome
             )
           case _ => MemorySuspension.pending(record)
-        current.copy(suspensions = current.suspensions.updated(state.runId, next))
+        withSettledTools.copy(suspensions = withSettledTools.suspensions.updated(state.runId, next))
 
   /** 校验状态快照与非空事件批次的基本不变量，防止 Adapter 把错误 runId、乱序或有缺口的事件写进数据库。
     *
@@ -457,45 +480,57 @@ object RunStore:
             else ZIO.fail(AgentError.RunNotFound(runId))
           }
 
-        /** 在单个同步 Ref 临界区验证并插入整批 Prepared 记录。 */
+        /** 在单个同步 Ref 临界区验证并插入整批 Prepared 记录；已进入终态的 Run 拒绝新增 Prepared 工具账本。 */
         def prepareToolExecutions(records: NonEmptyChunk[ToolExecutionRecord]): IO[StoreError, Unit] =
           validateToolBatch(records) *> data.modifyZIO { current =>
             val runId = records.head.runId
-            if !current.states.contains(runId) then ZIO.fail(AgentError.RunNotFound(runId))
-            else
-              records.collectFirst {
-                case expected
-                    if current.toolExecutions
-                      .get(expected.runId -> expected.callId)
-                      .exists(existing => !sameToolExecutionIdentity(existing, expected)) =>
-                  expected
-              } match
-                case Some(conflicting) =>
-                  ZIO.fail(
-                    AgentError.PersistenceFailure(
-                      s"工具 callId ${conflicting.callId} 已属于其他批次或 ordinal，拒绝错误复用账本"
-                    )
+            current.states.get(runId) match
+              case None => ZIO.fail(AgentError.RunNotFound(runId))
+              case Some(state) if RunStatus.isTerminal(state.status) =>
+                ZIO.fail(
+                  AgentError.ToolExecutionConflict(
+                    runId,
+                    records.head.callId,
+                    ToolExecutionStatus.Prepared.toString,
+                    0
                   )
-                case None =>
-                  val next = records.foldLeft(current.toolExecutions) { (all, record) =>
-                    all.updatedWith(record.runId -> record.callId) {
-                      case existing @ Some(_) => existing
-                      case None               => Some(record)
+                )
+              case Some(_) =>
+                records.collectFirst {
+                  case expected
+                      if current.toolExecutions
+                        .get(expected.runId -> expected.callId)
+                        .exists(existing => !sameToolExecutionIdentity(existing, expected)) =>
+                    expected
+                } match
+                  case Some(conflicting) =>
+                    ZIO.fail(
+                      AgentError.PersistenceFailure(
+                        s"工具 callId ${conflicting.callId} 已属于其他批次或 ordinal，拒绝错误复用账本"
+                      )
+                    )
+                  case None =>
+                    val next = records.foldLeft(current.toolExecutions) { (all, record) =>
+                      all.updatedWith(record.runId -> record.callId) {
+                        case existing @ Some(_) => existing
+                        case None               => Some(record)
+                      }
                     }
-                  }
-                  ZIO.succeed(() -> current.copy(toolExecutions = next))
+                    ZIO.succeed(() -> current.copy(toolExecutions = next))
           }
 
-        /** status+attempt 同时匹配才允许推进，模拟 PostgreSQL 条件 UPDATE。 */
+        /** status+attempt 同时匹配才允许推进，模拟 PostgreSQL 条件 UPDATE；Run 已终结时禁止迟到工具推进非 Unknown 状态。 */
         def transitionToolExecution(
             expectedStatus: ToolExecutionStatus,
             expectedAttempt: Int,
             next: ToolExecutionRecord
         ): IO[StoreError, ToolExecutionRecord] =
           data.modifyZIO { current =>
+            val runTerminal = current.states.get(next.runId).exists(s => RunStatus.isTerminal(s.status))
             current.toolExecutions.get(next.runId -> next.callId) match
               case Some(existing)
-                  if existing.status == expectedStatus &&
+                  if (!runTerminal || next.status == ToolExecutionStatus.Unknown) &&
+                    existing.status == expectedStatus &&
                     existing.attempt == expectedAttempt &&
                     sameToolExecutionIdentity(existing, next) =>
                 ZIO.succeed(

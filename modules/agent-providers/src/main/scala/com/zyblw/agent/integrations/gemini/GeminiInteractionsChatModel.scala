@@ -40,7 +40,7 @@ final class GeminiInteractionsChatModel(client: Client, config: GeminiInteractio
       body    <- response.body.asString.mapError(mapTransportError)
       decoded <-
         if response.status.isSuccess then GeminiInteractionsWire.decodeResponse(body)
-        else ZIO.fail(httpError(response.status.code, body))
+        else ZIO.fail(httpError(response, body))
     yield enrich(decoded, request)
 
   /** 执行 typed SSE interaction。
@@ -60,7 +60,7 @@ final class GeminiInteractionsChatModel(client: Client, config: GeminiInteractio
             if response.status.isSuccess then GeminiInteractionsSse.events(response.body.asStream)
             else
               ZStream.fromZIO(
-                response.body.asString.flatMap(body => ZIO.fail(httpError(response.status.code, body)))
+                response.body.asString.flatMap(body => ZIO.fail(httpError(response, body)))
               )
           }
           .mapError(mapTransportError)
@@ -97,9 +97,15 @@ final class GeminiInteractionsChatModel(client: Client, config: GeminiInteractio
     case value: AgentError => value
     case other => AgentError.ModelFailure(provider, "Gemini transport failure", retryable = true, Some(other))
 
-  /** HTTP 错误只保留状态与 Google error status，永不保存完整 response body。 */
-  private def httpError(status: Int, body: String): AgentError.ModelHttpFailure =
-    AgentError.ModelHttpFailure(provider, status, GeminiInteractionsWire.errorStatus(body))
+  /** HTTP 错误只保留状态、Google error status 与上游 request-id，永不保存完整 response body。 */
+  private def httpError(response: Response, body: String): AgentError.ModelHttpFailure =
+    val reqId = response.rawHeader("x-goog-request-id").orElse(response.rawHeader("x-request-id"))
+    AgentError.ModelHttpFailure(
+      provider,
+      response.status.code,
+      GeminiInteractionsWire.errorStatus(body),
+      reqId
+    )
 
   /** 完整请求或流超过部署预算时使用的稳定、可重试错误。 */
   private def timeoutError: AgentError =

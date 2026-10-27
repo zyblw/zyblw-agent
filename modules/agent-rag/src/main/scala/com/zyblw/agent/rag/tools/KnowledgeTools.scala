@@ -107,6 +107,12 @@ object KnowledgeTools:
       conflictAccesses = KnowledgeIndexRead
     )
 
+  final case class ExcerptSource(
+      documentId: String,
+      chunkId: String,
+      sourceUri: Option[String] = None
+  ) derives JsonCodec
+
   final case class SearchOutput(
       status: String,
       excerpts: Chunk[String],
@@ -118,7 +124,8 @@ object KnowledgeTools:
       degradedStages: Chunk[String] = Chunk.empty,
       recipe: Option[String] = None,
       strategy: Option[String] = None,
-      guidance: Option[String] = None
+      guidance: Option[String] = None,
+      excerptSources: Chunk[ExcerptSource] = Chunk.empty
   ) derives JsonCodec
 
   def layer: ZLayer[RagApplication, AgentError, Chunk[RegisteredTool]] =
@@ -188,23 +195,34 @@ object KnowledgeTools:
             if neighborIds.nonEmpty then
               rag
                 .fetch(neighborIds.take(4), scope, filter)
-                .map { neighbors =>
-                  val combinedHits  = (result.hits ++ neighbors.hits).distinctBy(_.chunk.id)
-                  val combinedCites = (result.citations ++ neighbors.citations).distinctBy(_.id)
-                  result.copy(
-                    hits = combinedHits,
-                    citations = combinedCites,
-                    evidence = result.evidence.copy(
-                      candidateCount = combinedHits.length,
-                      acceptedCount = combinedHits.length
-                    )
-                  )
-                }
+                .map(neighbors => mergePairedResults(result, neighbors))
                 .catchAll(_ => ZIO.succeed(result))
             else ZIO.succeed(result)
           else ZIO.succeed(result)
       yield toOutput(expandedResult, includeFullChunkText = true, isFetch = true)
     }
+
+  /** 成对合并两次检索/取回结果的 `(hit, citation)`，按 `(documentId, chunkId)` 去重并统一重编 `cite-1..N`，防止单列去重导致引用错位。 */
+  def mergePairedResults(
+      primary: RetrievalResult,
+      secondary: RetrievalResult,
+      overrideStatus: Option[RetrievalEvidenceStatus] = None
+  ): RetrievalResult =
+    val pairs = (primary.hits.zip(primary.citations) ++ secondary.hits.zip(secondary.citations))
+      .distinctBy { case (hit, _) => hit.chunk.documentId -> hit.chunk.id }
+    val combinedHits  = pairs.map(_._1)
+    val combinedCites = pairs.zipWithIndex.map { case ((_, citation), index) =>
+      citation.copy(id = s"cite-${index + 1}")
+    }
+    primary.copy(
+      hits = combinedHits,
+      citations = combinedCites,
+      evidence = primary.evidence.copy(
+        status = overrideStatus.getOrElse(primary.evidence.status),
+        candidateCount = combinedHits.length,
+        acceptedCount = combinedHits.length
+      )
+    )
 
   def outlineTool(
       store: StructureStore,
@@ -376,6 +394,13 @@ object KnowledgeTools:
         if isFetch then Some("细读获得的知识块置信度较低。建议核验上下文，或使用精准关键词重新检索。")
         else Some("检索到的证据置信度较低（低于接受门槛）。建议使用更精准的概念关键词重新检索，或调用 knowledge_fetch 校验相关块。")
       else None
+    val excerptSources = result.hits.map(hit =>
+      ExcerptSource(
+        documentId = hit.chunk.documentId,
+        chunkId = hit.chunk.id,
+        sourceUri = hit.chunk.metadata.get("sourceUri").orElse(hit.chunk.metadata.get("uri"))
+      )
+    )
     SearchOutput(
       status,
       excerpts,
@@ -387,7 +412,8 @@ object KnowledgeTools:
       result.diagnostics.degradedStages,
       result.diagnostics.recipe,
       result.diagnostics.strategy,
-      guidance
+      guidance,
+      excerptSources
     )
 
   private def toOutput(

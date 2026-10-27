@@ -92,5 +92,30 @@ object AdminInspectionSpec extends ZIOSpecDefault:
         subject.exists(_.toolName == "delete_account"),
         !pending.fold("")(_.toJson).contains("需要人工确认")
       )).provide(RunStore.inMemory)
+    },
+    test("inspection、trajectory 与 incidentPack 直接从同一存储导出且不泄漏审批原因") {
+      val request = ApprovalRequest(
+        id = "approval-2",
+        runId = runId,
+        toolCall = ToolCall("call-2", "delete_account", Json.Obj()),
+        risk = ToolRisk.ApprovalWrite,
+        reason = "敏感内部审批理由",
+        requestedAtEpochMilli = 0L
+      )
+      (for
+        store <- ZIO.service[RunStore]
+        _     <- persist(state(RunStatus.WaitingForApproval, Some(SuspensionRecord.of(request))))
+        admin = RunInspectionAdmin.fromStore(store)
+        insp    <- admin.inspection(runId)
+        traj    <- admin.trajectory(runId)
+        pack    <- admin.incidentPack(runId)
+        missing <- admin.incidentPack(RunId(UUID.fromString("99999999-9999-9999-9999-999999999999")))
+      yield assertTrue(
+        insp.exists(_.runId == runId),
+        traj.exists(_.run.runId == runId.asString),
+        pack.exists(_.runId == runId.asString),
+        !pack.fold("")(_.toJson).contains("敏感内部审批理由"),
+        missing.isEmpty
+      )).provide(RunStore.inMemory)
     }
   )

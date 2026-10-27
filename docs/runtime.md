@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-16
+> 最后核验：2026-10-28
 >
 > 事实来源：对应模块源码、测试与构建定义
 
@@ -61,7 +61,7 @@
 `GuardrailEngine`、`RegisteredToolRegistry`、`ToolExecutor`、审批和工具执行账本放入同一状态机。
 `recover(runId)` 根据 Prepared/Running/Unknown/Succeeded/Failed 与 `ToolRecoveryPolicy` 决定复用、崩溃重放或暂停人工核对；
 同一次在线执行的 429/timeout 由部署 `ToolRetryPolicy` 单独控制。主模型若 Intent 已提交但未结算，恢复为 `Unknown` 且不重放
-Provider；若助手消息已结算但 Run 尚未 `Completed`，恢复直接收口，不再次调用模型。已计入的预算不会在恢复时清零。
+Provider；若助手消息已结算但 Run 尚未 `Completed`，恢复直接收口，不再次调用模型。已计入的预算不会在恢复时清零；`recoverRunning` 在写入 `RunResumed` 前若检测到模型或工具账本存在早于恢复时刻的活跃时间戳，会先行提交 `UsageUpdated` 闭合崩溃前活跃窗口，且 `consumedActiveMillis` 按 `(callId, attempt)` 追踪所有尝试的活跃打点，确保可重放工具跨多次崩溃恢复仍精确累加崩溃前活跃耗时。
 组合不兼容时恢复返回 `CompositionIncompatible`，Run 保持原状态，命令进入 DeadLetter。
 
 ## 部分成功后的恢复语义

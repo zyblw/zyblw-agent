@@ -42,7 +42,7 @@ final class OpenAIResponsesChatModel(client: Client, config: OpenAIResponsesConf
       decoded <-
         if response.status.isSuccess then
           OpenAIResponsesWire.decodeResponse(body).mapError(enrichError(_, request))
-        else ZIO.fail(httpError(response.status.code, body))
+        else ZIO.fail(httpError(response, body))
     yield enrich(decoded, request)
 
   /** 执行 typed SSE 流式请求。
@@ -66,7 +66,7 @@ final class OpenAIResponsesChatModel(client: Client, config: OpenAIResponsesConf
             if response.status.isSuccess then OpenAIResponsesSse.events(response.body.asStream)
             else
               ZStream.fromZIO(
-                response.body.asString.flatMap(body => ZIO.fail(httpError(response.status.code, body)))
+                response.body.asString.flatMap(body => ZIO.fail(httpError(response, body)))
               )
           }
           .mapError(error => enrichError(mapTransportError(error), request))
@@ -119,9 +119,10 @@ final class OpenAIResponsesChatModel(client: Client, config: OpenAIResponsesConf
     case value: AgentError => value
     case other => AgentError.ModelFailure(provider, "OpenAI transport failure", retryable = true, Some(other))
 
-  /** 只保留 HTTP 状态与 OpenAI 风格 envelope 的低基数 code/type；原始响应正文不进入错误。 */
-  private def httpError(status: Int, body: String): AgentError.ModelHttpFailure =
-    AgentError.ModelHttpFailure(provider, status, OpenAIHttpError.code(body))
+  /** 只保留 HTTP 状态、OpenAI 风格 envelope 的低基数 code/type 与上游 request-id；原始响应正文不进入错误。 */
+  private def httpError(response: Response, body: String): AgentError.ModelHttpFailure =
+    val reqId = response.rawHeader("x-request-id").orElse(response.rawHeader("request-id"))
+    AgentError.ModelHttpFailure(provider, response.status.code, OpenAIHttpError.code(body), reqId)
 
   /** 单次请求或完整流超过部署预算时使用的统一错误。 */
   private def timeoutError: AgentError =

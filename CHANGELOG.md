@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- 长期记忆删除屏障与并发安全闭环：新增 `MemoryDeletionBarrier(scopeGeneration, keyVersions, deletedAtEpochMilli, activeVersions)` 与 4 参数原子接口 `MemoryStore.compareAndSet(scope, expectedVersion, entry, barrier)`；`PostgresMemoryStore` 通过保留行 `__scope_barrier__` 与 `pg_advisory_xact_lock` 在同一数据库事务内原子复核代次与单键历史删除时间；`MemoryStore.ScopeBarrierKey` 全入口禁止业务读写；4 参数默认兼容路径仅在确认刚写入版本仍为当前活跃版本且未被更新墓碑超越时才执行补偿删除。
+- 检索上下文裁剪对齐与中途撤回全载体清洗：`KnowledgeTools.SearchOutput` 新增 `excerptSources` 为每条摘录（含扩展邻块）绑定 `documentId/chunkId/sourceUri`；`DefaultContextManager.scrubWithdrawnJson` 按来源成对清洗 `excerpts`、`citations` 与 `results` 并重算 `acceptedCount`；`ContextSummaryCheckpoint` 记录 `sourceDocumentIds`，当存在撤回文档时自动失效旧摘要并从已清洗历史重算；`PreparedContext.deliveredDocumentDisplayIds` 与 `ContextAssembler.deliveredSources` 共享 `ContextDocument.displayIdFor` / `alignCitationId` 映射，确保纯数字、`cite-N`、`evidence-N` 在模型提示词与持久引用间严格一致。
+- 运行时取证门禁与跨崩溃活跃耗时核算：`AgentRuntimeDriver.hasDeliveredToolEvidence` 要求非错误工具消息显式满足 `status == "ok"` 且包含有效引用/结果项；`recoverRunning` 在写入 `RunResumed` 前若存在崩溃前活跃账本时间戳则先行追加 `UsageUpdated` 闭合崩溃前活跃窗口，`consumedActiveMillis` 按 `(callId, attempt)` 完整核算多次崩溃重放下的已消耗活跃时长。
+- 工具 Schema 严密预检与输出脱敏顺序：`JsonSchemaInstanceValidator` 在入口递归执行 `validateSchemaSupport`，任何嵌套于 `not`/`anyOf`/`oneOf`/`allOf` 内的未知关键字一律 Fail-Closed，并补齐 `allOf` 显式 `null` 识别；`RegisteredTool.make` 先对 `encodeRawOutput` 原始输出执行 `outputSchema` 校验再执行 `ToolMetadata.redactJson` 脱敏；`McpRegisteredTool` 新增 `redactMcpInlineEnvelope`，将 `content[].text` 与脱敏后的 `structuredContent` 同步重写，缺少 `structuredContent` 且 `content` 非结构化 JSON 对象时对声明敏感字段的工具直接 Fail-Closed。
+- 结构化观测日志注解：`RunObserver.logging` 与 `Telemetry` 统一注入 `run_id`、`session_id`、`component`、`operation`、`error_kind` 等结构化 `LogAnnotation`，并对含空白、引号、等号或逗号的值做安全转义。
 - 工具执行与审批前同时核对 Agent 和当前部署白名单、拒绝名单；收窄执行器不再扩大权限，下一次调用使用最新超时与结果上限；未获准工具在并发规划中自动降级为 `SequentialOnly` 单例批次，`WaitingForApproval` 挂起期间被策略撤权的工具收到 `Approve` 后直接进入门禁拒绝（`missingPermission`），不触发无效的二次人工审批。
 - 最终答案通过模型结算但被输出护栏拒绝时，耐久 Run 收口为 Failed，保留完成提交失败后的恢复能力。
 - 本地工作区 `LocalWorkspace` 原子写入时在 `list` 与 `totalBytes()` 中过滤 `.zyblw-write-*.tmp` 临时文件并加锁同步；`WorkspaceEdit` 支持安全行范围读取、统一 Diff 预览、精确出现次数替换与 UTF-8 BOM 保护。

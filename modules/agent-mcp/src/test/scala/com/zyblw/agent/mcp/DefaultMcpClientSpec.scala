@@ -1,7 +1,9 @@
 package com.zyblw.agent.mcp
 
 import com.zyblw.agent.core.*
+import com.zyblw.agent.tools.*
 import zio.*
+import zio.json.*
 import zio.json.ast.Json
 import zio.test.*
 
@@ -291,6 +293,92 @@ object DefaultMcpClientSpec extends ZIOSpecDefault:
           case Json.Arr(values) => values.toString.contains("file:///srv/knowledge")
           case _                => false
         }
+      )
+    },
+    test("McpRegisteredTool 在本地统一执行输入 Schema 校验与敏感输出字段脱敏") {
+      val descriptor = McpToolDescriptor(
+        name = "remote_secret_lookup",
+        description = "远端敏感工具",
+        inputSchema = Json.Obj(
+          "type"                 -> Json.Str("object"),
+          "additionalProperties" -> Json.Bool(false),
+          "required"             -> Json.Arr(Json.Str("count")),
+          "properties"           -> Json.Obj(
+            "count" -> Json.Obj("type" -> Json.Str("integer"), "minimum" -> Json.Num(1))
+          )
+        ),
+        outputSchema = Some(
+          Json.Obj(
+            "type"       -> Json.Str("object"),
+            "required"   -> Json.Arr(Json.Str("apiToken")),
+            "properties" -> Json.Obj("apiToken" -> Json.Obj("type" -> Json.Str("string")))
+          )
+        )
+      )
+      val callResult = Json.Obj(
+        "content" -> Json.Arr(
+          Json.Obj(
+            "type" -> Json.Str("text"),
+            "text" -> Json.Str("""{"apiToken":"mcp-secret-token-999"}""")
+          )
+        ),
+        "structuredContent" -> Json.Obj("apiToken" -> Json.Str("mcp-secret-token-999")),
+        "isError"           -> Json.Bool(false)
+      )
+      val nonJsonCallResult = Json.Obj(
+        "content" -> Json.Arr(
+          Json.Obj(
+            "type" -> Json.Str("text"),
+            "text" -> Json.Str("plain text containing mcp-secret-token-999 without structuredContent")
+          )
+        ),
+        "isError" -> Json.Bool(false)
+      )
+      val context = ToolExecutionContext(
+        RunId(java.util.UUID.randomUUID()),
+        ThreadId("mcp-governed"),
+        "call-mcp-1",
+        RunContext()
+      )
+      for
+        transport <- ScriptedMcpTransport.successful(
+          Map(
+            "initialize" -> Chunk(initializeResult(Json.Obj("tools" -> Json.Obj()))),
+            "tools/call" -> Chunk(callResult, nonJsonCallResult)
+          )
+        )
+        result <- ZIO.scoped {
+          for
+            client <- DefaultMcpClient.scoped(transport, config)
+            mcpTool = McpRegisteredTool(
+              client,
+              descriptor,
+              ToolMetadata(
+                ToolRisk.ReadOnly,
+                SideEffect.None,
+                sensitiveOutputFields = Set("apiToken")
+              )
+            )
+            badInput    <- mcpTool.invoke(Json.Obj("count" -> Json.Num(0)), context).exit
+            goodOut     <- mcpTool.invoke(Json.Obj("count" -> Json.Num(2)), context)
+            nonJsonExit <- McpRegisteredTool(
+              client,
+              descriptor.copy(outputSchema = None),
+              ToolMetadata(
+                ToolRisk.ReadOnly,
+                SideEffect.None,
+                sensitiveOutputFields = Set("apiToken")
+              )
+            ).invoke(Json.Obj("count" -> Json.Num(2)), context).exit
+          yield (badInput, goodOut, nonJsonExit)
+        }
+        requests <- transport.requests
+      yield assertTrue(
+        result._1.isFailure,
+        requests.count(_.method == "tools/call") == 2,
+        result._2.toJson.contains("[REDACTED]"),
+        !result._2.toJson.contains("mcp-secret-token-999"),
+        result._3.isFailure
       )
     }
   )

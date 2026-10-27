@@ -207,7 +207,7 @@ final class MemoryHttpApi(
 
   /** 集中把领域错误转换为 Agent HTTP 已有的稳定状态与脱敏 JSON。 */
   private def respond(effect: IO[AgentError, Response]): UIO[Response] =
-    effect.catchAll(error => ZIO.succeed(HttpErrorResponse.from(error)))
+    HttpErrorResponse.respond("memory-http-api")(effect)
 
   /** 领域实体到用户治理 DTO 的唯一投影。 */
   private def toView(entry: MemoryEntry): MemoryView = MemoryView(
@@ -246,3 +246,23 @@ private[http] object HttpErrorResponse:
     val message = if error.safeToExpose then error.message else "智能体服务暂时无法完成请求"
     Response(status = status, body = Body.fromString(ErrorResponse(error.category.toString, message).toJson))
       .addHeader(Header.ContentType(MediaType.application.json))
+
+  /** 记录脱敏服务端诊断日志并返回稳定 HTTP 错误响应。 */
+  def respond(component: String)(effect: IO[AgentError, Response]): UIO[Response] =
+    effect.catchAll { error =>
+      val response  = from(error)
+      val diagPairs = error.diagnostic.toList
+        .sortBy(_._1)
+        .take(5)
+        .map { case (k, v) =>
+          val safeV = v.replaceAll("[\\r\\n\\t]+", " ").take(80)
+          s"$k=$safeV"
+        }
+      val diagSuffix = if diagPairs.isEmpty then "" else s" ${diagPairs.mkString(" ")}"
+      val logMsg     =
+        s"agent.http.error component=$component status=${response.status.code} category=${error.category} retryable=${error.retryable}$diagSuffix"
+      val logEffect =
+        if response.status.code >= 500 then ZIO.logError(logMsg)
+        else ZIO.logWarning(logMsg)
+      logEffect.as(response)
+    }

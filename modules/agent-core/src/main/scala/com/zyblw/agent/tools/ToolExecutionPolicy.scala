@@ -79,26 +79,55 @@ final class ToolExecutor private (
     val denied = policy.deniedTools.contains(name) || !policy.allowedTools.contains(name)
     if denied then ZIO.fail(AgentError.PermissionDenied(call.name, "工具未进入显式白名单"))
     else
-      semaphore.withPermit {
-        val invocation = tool.invoke(call.arguments, context)
-        val resilient  = policy.retryPolicy match
-          case ToolRetryPolicy.Never                                                     => invocation
-          case ToolRetryPolicy.IdempotentOnly(settings) if tool.metadata.onlineRetryable =>
-            val backoff = Schedule
-              .exponential(settings.initialDelay)
-              .modifyDelay((_, delay) => delay.min(settings.maxDelay))
-              .jittered(1.0 - settings.jitter, 1.0 + settings.jitter)
-            val bounded = backoff &&
-              Schedule.recurs((settings.maxAttempts - 1).toLong) &&
-              Schedule.elapsed.whileOutput(_ <= settings.maxElapsed)
-            invocation.retry(bounded.whileInput[AgentError](_.retryable))
-          case ToolRetryPolicy.IdempotentOnly(_) => invocation
-        resilient
-          .timeoutFail(AgentError.ToolExecutionFailed(call.name, "工具执行超时", retryable = false))(
-            policy.defaultTimeout
+      ZIO
+        .fromEither(
+          JsonSchemaInstanceValidator
+            .validate(tool.definition.inputSchema, call.arguments)
+            .left
+            .map(AgentError.ToolInputInvalid(call.name, _))
+        ) *>
+        semaphore.withPermit {
+          val invocation = tool.invoke(call.arguments, context)
+          val resilient  = policy.retryPolicy match
+            case ToolRetryPolicy.Never                                                     => invocation
+            case ToolRetryPolicy.IdempotentOnly(settings) if tool.metadata.onlineRetryable =>
+              val backoff = Schedule
+                .exponential(settings.initialDelay)
+                .modifyDelay((_, delay) => delay.min(settings.maxDelay))
+                .jittered(1.0 - settings.jitter, 1.0 + settings.jitter)
+              val bounded = backoff &&
+                Schedule.recurs((settings.maxAttempts - 1).toLong) &&
+                Schedule.elapsed.whileOutput(_ <= settings.maxElapsed)
+              invocation.retry(bounded.whileInput[AgentError](_.retryable))
+            case ToolRetryPolicy.IdempotentOnly(_) => invocation
+          resilient
+            .timeoutFail(AgentError.ToolExecutionFailed(call.name, "工具执行超时", retryable = false))(
+              policy.defaultTimeout
+            )
+            .flatMap(redactToolResult(call.name, tool, _))
+            .flatMap(enforceHardLimit(call.name, _))
+        }
+
+  private def redactToolResult(
+      toolName: String,
+      tool: RegisteredTool,
+      result: ToolResult
+  ): IO[AgentError, ToolResult] =
+    if tool.metadata.sensitiveOutputFields.isEmpty then ZIO.succeed(result)
+    else
+      result match
+        case inline: ToolResult.Inline =>
+          ZIO.succeed(
+            inline.copy(value = ToolMetadata.redactJson(inline.value, tool.metadata.sensitiveOutputFields))
           )
-          .flatMap(enforceHardLimit(call.name, _))
-      }
+        case _: ToolResult.Externalized =>
+          ZIO.fail(
+            AgentError.ToolExecutionFailed(
+              toolName,
+              "声明了敏感输出字段的工具不允许直接返回未脱敏的 Externalized 引用",
+              retryable = false
+            )
+          )
 
   /** 同一并行许可池上收窄白名单，避免每个工具调用重建执行器。 */
   def narrowed(allowed: Set[ToolName]): ToolExecutor =

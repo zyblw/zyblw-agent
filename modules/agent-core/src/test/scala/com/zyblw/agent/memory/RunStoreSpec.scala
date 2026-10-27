@@ -267,5 +267,65 @@ object RunStoreSpec extends ZIOSpecDefault:
         listed.map(_.callId) == Chunk("call-a", "call-b"),
         listed.map(_.batchId) == Chunk("plan-a:0", "plan-b:0")
       )).provide(RunStore.inMemory)
+    },
+    test("Run 进入终态时原子将未结算 Prepared/Running 工具账本收口为 Unknown，且终态后拒绝迟到 Succeeded 覆盖") {
+      (for
+        store     <- ZIO.service[RunStore]
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        eventId   <- EventId.random
+        doneId    <- EventId.random
+        created = PersistedAgentEvent(eventId, runId, 0L, AgentEvent.RunCreated(runId, sessionId, 0L), 0L)
+        initial = state(runId, sessionId).copy(lastEventSequence = 0L, status = RunStatus.Running)
+        _ <- store.createWithEvents(initial, NonEmptyChunk(created))
+        prepared = ToolExecutionRecord(
+          runId,
+          "plan-t:0",
+          0,
+          "call-prep",
+          "lookup",
+          None,
+          ToolExecutionStatus.Prepared,
+          None,
+          0,
+          0L
+        )
+        running = ToolExecutionRecord(
+          runId,
+          "plan-t:0",
+          1,
+          "call-run",
+          "write",
+          None,
+          ToolExecutionStatus.Prepared,
+          None,
+          0,
+          0L
+        )
+        _ <- store.prepareToolExecutions(NonEmptyChunk(prepared, running))
+        _ <- store.transitionToolExecution(
+          ToolExecutionStatus.Prepared,
+          0,
+          running.copy(status = ToolExecutionStatus.Running, attempt = 1, updatedAtEpochMilli = 1L)
+        )
+        _ <- store.commit(
+          Version.initial,
+          initial.copy(status = RunStatus.Cancelled, lastEventSequence = 1L),
+          NonEmptyChunk(
+            PersistedAgentEvent(doneId, runId, 1L, AgentEvent.RunCancelled(runId, 2L), 2L)
+          )
+        )
+        afterTerminal <- store.listToolExecutions(runId)
+        lateWrite     <- store
+          .transitionToolExecution(
+            ToolExecutionStatus.Unknown,
+            1,
+            running.copy(status = ToolExecutionStatus.Succeeded, attempt = 1, updatedAtEpochMilli = 3L)
+          )
+          .exit
+      yield assertTrue(
+        afterTerminal.map(_.status) == Chunk(ToolExecutionStatus.Unknown, ToolExecutionStatus.Unknown),
+        lateWrite.isFailure
+      )).provide(RunStore.inMemory)
     }
   )

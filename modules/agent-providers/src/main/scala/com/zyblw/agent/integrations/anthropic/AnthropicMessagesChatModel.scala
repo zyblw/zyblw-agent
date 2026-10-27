@@ -33,7 +33,7 @@ final class AnthropicMessagesChatModel(client: Client, config: AnthropicMessages
       body    <- response.body.asString.mapError(mapTransportError)
       decoded <-
         if response.status.isSuccess then AnthropicMessagesWire.decodeResponse(body)
-        else ZIO.fail(httpError(response.status.code, body))
+        else ZIO.fail(httpError(response, body))
     yield enrich(decoded, request)
 
   /** 发送 Anthropic typed SSE，并让 HTTP Body Scope 与下游 ZStream 生命周期一致。 消费者中断时 ZIO HTTP 会关闭连接，ProviderContract 的
@@ -50,7 +50,7 @@ final class AnthropicMessagesChatModel(client: Client, config: AnthropicMessages
             if response.status.isSuccess then AnthropicMessagesSse.events(response.body.asStream)
             else
               ZStream.fromZIO(
-                response.body.asString.flatMap(body => ZIO.fail(httpError(response.status.code, body)))
+                response.body.asString.flatMap(body => ZIO.fail(httpError(response, body)))
               )
           }
           .mapError(mapTransportError)
@@ -87,9 +87,10 @@ final class AnthropicMessagesChatModel(client: Client, config: AnthropicMessages
     case other             =>
       AgentError.ModelFailure(provider, "Anthropic transport failure", retryable = true, Some(other))
 
-  /** HTTP 错误只记录状态与 Anthropic error type，不保存可能包含敏感请求片段的完整 body。 */
-  private def httpError(status: Int, body: String): AgentError.ModelHttpFailure =
-    AgentError.ModelHttpFailure(provider, status, AnthropicMessagesWire.errorType(body))
+  /** HTTP 错误只记录状态、Anthropic error type 与上游 request-id，不保存可能包含敏感请求片段的完整 body。 */
+  private def httpError(response: Response, body: String): AgentError.ModelHttpFailure =
+    val reqId = response.rawHeader("request-id").orElse(response.rawHeader("x-request-id"))
+    AgentError.ModelHttpFailure(provider, response.status.code, AnthropicMessagesWire.errorType(body), reqId)
 
   /** 单次请求超过部署预算后的稳定错误。 */
   private def timeoutError: AgentError =

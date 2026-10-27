@@ -534,6 +534,18 @@ final class InMemoryKnowledgeIndexStore private (
   ): UIO[ProfileCorpusDiff] =
     state.get.map(_.corpusDiff(tenantId, spaceId, target))
 
+  override def registeredProfiles: UIO[Chunk[(IndexProfileId, IndexBuildSpec)]] =
+    state.get.map { current =>
+      Chunk.fromIterable(
+        current.profiles.iterator
+          .filterNot { case (_, record) =>
+            InMemoryKnowledgeIndexStore.SealedStatuses.contains(record.status)
+          }
+          .map { case (key, record) => key.profileId -> record.spec }
+          .toMap
+      )
+    }
+
   override def withdraw(key: KnowledgeDocumentKey, sourceRevisionId: String): IO[RetrievalError, Unit] =
     Option(sourceRevisionId).map(_.trim).filter(_.nonEmpty) match
       case None           => ZIO.fail(AgentError.RetrievalFailed("sourceRevisionId 不能为空"))

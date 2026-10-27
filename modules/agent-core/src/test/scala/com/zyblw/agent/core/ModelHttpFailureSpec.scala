@@ -34,5 +34,21 @@ object ModelHttpFailureSpec extends ZIOSpecDefault:
         !unsafe.message.contains("sk-secret"),
         !unsafe.diagnostic.values.exists(_.contains("sk-secret"))
       )
+    },
+    test("只保留格式安全的 providerRequestId，拒绝包含凭据或空白字符的响应头") {
+      val safe =
+        AgentError.ModelHttpFailure("openai", 429, Some("rate_limit_exceeded"), Some("req_01HXYZ-987:abc"))
+      val unsafeSecret =
+        AgentError.ModelHttpFailure("openai", 429, Some("rate_limit_exceeded"), Some("sk-proj-123456"))
+      val unsafeWhitespace =
+        AgentError.ModelHttpFailure("openai", 502, None, Some("bad header\nwith newline"))
+
+      assertTrue(
+        safe.providerRequestId.contains("req_01HXYZ-987:abc"),
+        safe.diagnostic.get("providerRequestId").contains("req_01HXYZ-987:abc"),
+        unsafeSecret.providerRequestId.isEmpty,
+        !unsafeSecret.diagnostic.contains("providerRequestId"),
+        unsafeWhitespace.providerRequestId.isEmpty
+      )
     }
   )

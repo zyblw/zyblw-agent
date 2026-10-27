@@ -98,7 +98,8 @@ final case class ContextSummaryCheckpoint(
     summary: String,
     coveredMessages: Int,
     sourceDigest: String,
-    compressorVersion: String
+    compressorVersion: String,
+    sourceDocumentIds: Set[String] = Set.empty
 ) derives JsonCodec:
   require(summary.trim.nonEmpty, "Context summary 不能为空")
   require(coveredMessages > 0, "Context summary 至少覆盖一条消息")

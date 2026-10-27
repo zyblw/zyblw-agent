@@ -4,6 +4,7 @@ import com.zyblw.agent.core.*
 import com.zyblw.agent.tools.*
 import java.net.URI
 import zio.*
+import zio.json.{DecoderOps, EncoderOps}
 import zio.json.ast.Json
 import zio.stream.*
 
@@ -211,12 +212,139 @@ final class McpRegisteredTool(
   val definition: ToolDefinition =
     ToolDefinition(descriptor.name, descriptor.description, descriptor.inputSchema, descriptor.outputSchema)
 
-  /** 通过已初始化 MCP client 执行远端调用。
+  /** 通过已初始化 MCP client 执行远端调用，并在本地统一执行输入/输出 Schema 校验与敏感输出脱敏。
     *
     * `context` 仍由外层 ToolExecutor 用于授权、审批、审计和幂等；此适配器不会把该上下文发送给不可信服务端。
     */
   def invoke(arguments: Json, context: ToolExecutionContext): IO[AgentError, ToolResult] =
-    client.callTool(descriptor.name, arguments)
+    for
+      _ <- ZIO.fromEither(
+        JsonSchemaInstanceValidator
+          .validate(descriptor.inputSchema, arguments)
+          .left
+          .map(AgentError.ToolInputInvalid(descriptor.name, _))
+      )
+      raw <- client.callTool(descriptor.name, arguments)
+      out <- raw match
+        case inline: ToolResult.Inline =>
+          val validateEffect =
+            if inline.isError then ZIO.unit
+            else
+              descriptor.outputSchema match
+                case Some(schema) =>
+                  val targetJson = inline.value match
+                    case obj: Json.Obj => obj.fields.toMap.getOrElse("structuredContent", inline.value)
+                    case other         => other
+                  ZIO.fromEither(
+                    JsonSchemaInstanceValidator
+                      .validate(schema, targetJson)
+                      .left
+                      .map(AgentError.ToolExecutionFailed(descriptor.name, _))
+                  )
+                case None => ZIO.unit
+          val redactEffect =
+            if metadata.sensitiveOutputFields.isEmpty || inline.isError then
+              ZIO.succeed(
+                inline.copy(value = ToolMetadata.redactJson(inline.value, metadata.sensitiveOutputFields))
+              )
+            else redactMcpInlineEnvelope(descriptor.name, inline, metadata.sensitiveOutputFields)
+          validateEffect *> redactEffect
+        case ext: ToolResult.Externalized =>
+          if metadata.sensitiveOutputFields.isEmpty then ZIO.succeed(ext)
+          else
+            ZIO.fail(
+              AgentError.ToolExecutionFailed(
+                descriptor.name,
+                "声明了敏感输出字段的 MCP 工具不允许直接返回未脱敏的 Externalized 引用",
+                retryable = false
+              )
+            )
+    yield out
+
+  private def redactMcpInlineEnvelope(
+      toolName: String,
+      inline: ToolResult.Inline,
+      sensitiveFields: Set[String]
+  ): IO[AgentError.ToolExecutionFailed, ToolResult.Inline] =
+    inline.value match
+      case Json.Obj(fields) =>
+        val fieldMap = fields.toMap
+        fieldMap.get("structuredContent") match
+          case Some(structured) =>
+            val redactedStructured = ToolMetadata.redactJson(structured, sensitiveFields)
+            val updatedFields      = fields.map {
+              case ("structuredContent", _) => "structuredContent" -> redactedStructured
+              case ("content", _)           =>
+                "content" -> Json.Arr(
+                  Chunk(
+                    Json.Obj(
+                      "type" -> Json.Str("text"),
+                      "text" -> Json.Str(redactedStructured.toJson)
+                    )
+                  )
+                )
+              case (k, v) => k -> ToolMetadata.redactJson(v, sensitiveFields)
+            }
+            ZIO.succeed(inline.copy(value = Json.Obj(updatedFields)))
+          case None =>
+            fieldMap.get("content") match
+              case Some(Json.Arr(items)) =>
+                ZIO
+                  .foreach(items) {
+                    case Json.Obj(itemFields) =>
+                      val itemMap = itemFields.toMap
+                      itemMap.get("text") match
+                        case Some(Json.Str(rawText)) =>
+                          rawText.fromJson[Json.Obj] match
+                            case Right(parsedObj) =>
+                              val redactedObj  = ToolMetadata.redactJson(parsedObj, sensitiveFields)
+                              val rebuiltItems = itemFields.map {
+                                case ("text", _) => "text" -> Json.Str(redactedObj.toJson)
+                                case (k, v)      => k      -> ToolMetadata.redactJson(v, sensitiveFields)
+                              }
+                              ZIO.succeed(Json.Obj(rebuiltItems))
+                            case Left(_) =>
+                              ZIO.fail(
+                                AgentError.ToolExecutionFailed(
+                                  toolName,
+                                  "声明了敏感输出字段的 MCP 工具在缺少 structuredContent 时，content.text 必须是可解析的 JSON 对象",
+                                  retryable = false
+                                )
+                              )
+                        case _ =>
+                          ZIO.fail(
+                            AgentError.ToolExecutionFailed(
+                              toolName,
+                              "声明了敏感输出字段的 MCP 工具在缺少 structuredContent 时，content 项必须包含结构化 JSON 文本",
+                              retryable = false
+                            )
+                          )
+                    case _ =>
+                      ZIO.fail(
+                        AgentError.ToolExecutionFailed(
+                          toolName,
+                          "声明了敏感输出字段的 MCP 工具 content 项必须是 JSON 对象",
+                          retryable = false
+                        )
+                      )
+                  }
+                  .map { redactedItems =>
+                    val updatedFields = fields.map {
+                      case ("content", _) => "content" -> Json.Arr(redactedItems)
+                      case (k, v)         => k         -> ToolMetadata.redactJson(v, sensitiveFields)
+                    }
+                    inline.copy(value = Json.Obj(updatedFields))
+                  }
+              case _ =>
+                ZIO.succeed(inline.copy(value = ToolMetadata.redactJson(inline.value, sensitiveFields)))
+      case _ =>
+        ZIO.fail(
+          AgentError.ToolExecutionFailed(
+            toolName,
+            "声明了敏感输出字段的 MCP 工具返回值必须是 JSON 对象",
+            retryable = false
+          )
+        )
 
 /** 生产 MCP client 的默认实现。 */
 final private class DefaultMcpClient(

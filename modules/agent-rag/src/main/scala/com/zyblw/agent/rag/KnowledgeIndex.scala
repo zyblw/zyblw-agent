@@ -237,6 +237,10 @@ trait KnowledgeIndexStore:
     val _ = (build, denseHashes)
     ZIO.succeed(Map.empty)
 
+  /** 列出已持久化且未封存（active / building / superseded）的知识 Profile 及其完整构建规格，供蓝绿迁移路由绑定历史向量模型。 */
+  def registeredProfiles: IO[RetrievalError, Chunk[(IndexProfileId, IndexBuildSpec)]] =
+    ZIO.succeed(Chunk.empty)
+
 /** 知识空间的 active Profile 指针快照。 */
 final case class KnowledgeSpaceProfileState(activeProfileId: Option[IndexProfileId], revision: Long)
 

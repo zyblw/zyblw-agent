@@ -143,7 +143,7 @@ object RunTrajectorySpec extends ZIOSpecDefault:
       )
       (for
         store <- ZIO.service[RunStore]
-        _     <- store.createWithEvents(state, NonEmptyChunk(events.head))
+        _     <- store.createWithEvents(state.copy(status = RunStatus.Running), NonEmptyChunk(events.head))
         _     <- store.prepareToolExecutions(NonEmptyChunk(tool))
         built <- RunTrajectoryExporter.fromStore(store, runId)
         pack = IncidentPack.build(built, generatedAtEpochMilli = startedAt.toEpochMilli)

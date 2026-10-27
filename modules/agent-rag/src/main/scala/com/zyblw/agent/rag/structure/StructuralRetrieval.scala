@@ -187,10 +187,14 @@ object StructuralRetrieval:
         .groupBy((hit, _) => hit.chunk.documentId -> hit.chunk.id)
         .values
         .map { group =>
-          val hit = group.head._1
+          val hit           = group.head._1
+          val bestRawScore  = group.map(e => e._1.signals.getOrElse("retrievalScore", e._1.score)).max
+          val mergedSignals = group.foldLeft(Map.empty[String, Double]) { case (acc, (candidate, _)) =>
+            DefaultRetriever.mergeSignalMaps(acc, candidate.signals)
+          }
           hit.copy(
             score = group.map(_._2).sum,
-            signals = hit.signals + ("retrievalScore" -> hit.signals.getOrElse("retrievalScore", hit.score))
+            signals = mergedSignals + ("retrievalScore" -> bestRawScore)
           )
         }
         .toVector

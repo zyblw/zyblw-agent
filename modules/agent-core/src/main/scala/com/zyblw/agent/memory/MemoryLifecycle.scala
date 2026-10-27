@@ -53,12 +53,15 @@ object MemoryExtractor:
   *   是否强制情节记忆设置过期时间
   * @param allowModelInferredSensitive
   *   是否允许模型推断的 Sensitive 内容；生产默认禁止
+  * @param collectionEnabled
+  *   是否启用记忆自动采集与落库；关闭后不再发起提炼，且在途候选全部静默忽略
   */
 final case class MemoryGovernancePolicy(
     minimumModelConfidence: Double = 0.85,
     maxValueCharacters: Int = 4_000,
     requireEpisodicExpiry: Boolean = true,
-    allowModelInferredSensitive: Boolean = false
+    allowModelInferredSensitive: Boolean = false,
+    collectionEnabled: Boolean = true
 ):
   require(minimumModelConfidence >= 0.0 && minimumModelConfidence <= 1.0, "minimumModelConfidence 必须位于 [0,1]")
   require(maxValueCharacters > 0, "maxValueCharacters 必须为正数")
@@ -87,68 +90,119 @@ final class MemoryLifecycle(
     policy: MemoryGovernancePolicy
 ):
 
-  /** 从有限消息窗口提炼并应用候选。 */
+  /** 从有限消息窗口提炼并应用候选；在提炼开始前捕获删除屏障快照，防止删除前的慢提炼复活已删内容。 */
   def capture(
       scope: MemoryScope,
       messages: Chunk[AgentMessage],
       sourceRunId: RunId
   ): IO[StoreError, MemoryApplyReport] =
-    extractor.extract(messages, sourceRunId).flatMap(applyCandidates(scope, _))
+    if !policy.collectionEnabled then ZIO.succeed(MemoryApplyReport(0, 0, 0, 0, Chunk.empty))
+    else
+      store.currentBarrier(scope).flatMap { barrier =>
+        capture(scope, messages, sourceRunId, barrier)
+      }
+
+  /** 使用消息进入队列/信号缓冲区时已捕获的删除屏障快照执行提炼与落库。 */
+  def capture(
+      scope: MemoryScope,
+      messages: Chunk[AgentMessage],
+      sourceRunId: RunId,
+      capturedBarrier: MemoryDeletionBarrier
+  ): IO[StoreError, MemoryApplyReport] =
+    if !policy.collectionEnabled then ZIO.succeed(MemoryApplyReport(0, 0, 0, 0, Chunk.empty))
+    else extractor.extract(messages, sourceRunId).flatMap(applyCandidates(scope, _, capturedBarrier))
 
   /** 直接应用已经结构化的候选，便于导入工具与确定性测试复用同一治理。 */
   def applyCandidates(
       scope: MemoryScope,
       candidates: Chunk[MemoryCandidate]
   ): IO[StoreError, MemoryApplyReport] =
-    val ordered = candidates.sortBy(candidate => candidate.ordinal -> candidateKey(candidate.mutation))
-    ZIO.foldLeft(ordered)(MemoryApplyReport(candidates.length, 0, 0, 0, Chunk.empty)) { (report, candidate) =>
-      candidate.mutation match
-        case MemoryMutation.Delete(key, evidence) =>
-          validateDelete(key, evidence) match
-            case Some(reason) => ZIO.succeed(report.copy(rejected = report.rejected :+ (key -> reason)))
-            case None         => store.delete(scope, key).as(report.copy(deleted = report.deleted + 1))
-        case MemoryMutation.Upsert(incoming) =>
-          validateEntry(incoming) match
-            case Some(reason) =>
-              ZIO.succeed(report.copy(rejected = report.rejected :+ (incoming.key -> reason)))
-            case None =>
-              upsertWithRetry(scope, incoming, report, retriesRemaining = 1)
-    }
+    store.currentBarrier(scope).flatMap(applyCandidates(scope, candidates, _))
+
+  /** 携带提炼前捕获的删除屏障快照应用结构化候选。 */
+  def applyCandidates(
+      scope: MemoryScope,
+      candidates: Chunk[MemoryCandidate],
+      capturedBarrier: MemoryDeletionBarrier
+  ): IO[StoreError, MemoryApplyReport] =
+    if !policy.collectionEnabled then
+      ZIO.succeed(MemoryApplyReport(candidates.length, 0, 0, candidates.length, Chunk.empty))
+    else
+      val ordered = candidates.sortBy(candidate => candidate.ordinal -> candidateKey(candidate.mutation))
+      ZIO.foldLeft(ordered)(MemoryApplyReport(candidates.length, 0, 0, 0, Chunk.empty)) { (report, candidate) =>
+        candidate.mutation match
+          case MemoryMutation.Delete(key, evidence) =>
+            validateDelete(key, evidence) match
+              case Some(reason) => ZIO.succeed(report.copy(rejected = report.rejected :+ (key -> reason)))
+              case None         =>
+                store.currentBarrier(scope).flatMap { latestBarrier =>
+                  if wasDeletedSinceBarrier(key, capturedBarrier, latestBarrier) then
+                    ZIO.succeed(report.copy(ignored = report.ignored + 1))
+                  else store.delete(scope, key).as(report.copy(deleted = report.deleted + 1))
+                }
+          case MemoryMutation.Upsert(incoming) =>
+            validateEntry(incoming) match
+              case Some(reason) =>
+                ZIO.succeed(report.copy(rejected = report.rejected :+ (incoming.key -> reason)))
+              case None =>
+                store.currentBarrier(scope).flatMap { latestBarrier =>
+                  if wasDeletedSinceBarrier(incoming.key, capturedBarrier, latestBarrier) then
+                    ZIO.succeed(report.copy(ignored = report.ignored + 1))
+                  else upsertWithRetry(scope, incoming, report, capturedBarrier, retriesRemaining = 1)
+                }
+      }
 
   /** 执行单条候选的读取、合并与 CAS 写入：
     *   - 若并发修改导致 CAS 冲突，自动重读最新快照并重试一次合并；
-    *   - 若 key 曾被删除（存在 tombstone 使 expectedVersion=0 冲突）：当新候选属于 `UserStated`（用户在新对话中再次明确表达）时使用最新 tombstone
-    *     版本重建；若仅为 `ModelInferred` 则尊重用户的删除意愿记为 `ignored`，不中断同批次其他候选。
+    *   - 若 key 曾被删除（存在 tombstone 使 expectedVersion=0 冲突）：仅当该 tombstone 版本在提炼捕获前已存在、当前未跨越 `deleteScope`
+    *     代数，且新候选属于 `UserStated`（用户在新对话中再次明确表达）时才使用该 tombstone 版本重建；若删除发生在提炼任务捕获消息之后，或仅为
+    *     `ModelInferred`，则尊重用户的删除意愿记为 `ignored`。
     */
   private def upsertWithRetry(
       scope: MemoryScope,
       incoming: MemoryEntry,
       report: MemoryApplyReport,
+      capturedBarrier: MemoryDeletionBarrier,
       retriesRemaining: Int
   ): IO[StoreError, MemoryApplyReport] =
     store.get(scope, incoming.key).flatMap {
       case None =>
         store
-          .compareAndSet(scope, 0L, incoming)
+          .compareAndSet(scope, 0L, incoming, Some(capturedBarrier))
           .as(report.copy(written = report.written + 1))
-          .catchSome {
-            case AgentError.MemoryVersionConflict(_, _, 0L, actualVersion) if retriesRemaining > 0 =>
-              store.get(scope, incoming.key).flatMap {
-                case Some(concurrent) =>
-                  mergeAndSet(scope, concurrent, incoming, report, retriesRemaining - 1)
-                case None =>
-                  if incoming.evidence == MemoryEvidence.UserStated && actualVersion > 0L then
-                    store
-                      .compareAndSet(scope, actualVersion, incoming)
-                      .as(report.copy(written = report.written + 1))
-                      .catchSome { case _: AgentError.MemoryVersionConflict =>
-                        ZIO.succeed(report.copy(ignored = report.ignored + 1))
-                      }
-                  else ZIO.succeed(report.copy(ignored = report.ignored + 1))
-              }
+          .catchSome { case AgentError.MemoryVersionConflict(_, _, 0L, actualVersion) =>
+            store.currentBarrier(scope).zip(store.get(scope, incoming.key)).flatMap {
+              case (latestBarrier, _)
+                  if wasDeletedSinceBarrier(incoming.key, capturedBarrier, latestBarrier) =>
+                ZIO.succeed(report.copy(ignored = report.ignored + 1))
+              case (_, Some(concurrent)) if retriesRemaining > 0 =>
+                mergeAndSet(scope, concurrent, incoming, report, capturedBarrier, retriesRemaining - 1)
+              case (latestBarrier, None) if retriesRemaining > 0 =>
+                val tombstonePreexisted =
+                  !wasDeletedSinceBarrier(incoming.key, capturedBarrier, latestBarrier) &&
+                    capturedBarrier.tombstoneVersions.get(incoming.key).contains(actualVersion)
+                if incoming.evidence == MemoryEvidence.UserStated && actualVersion > 0L && tombstonePreexisted
+                then
+                  store
+                    .compareAndSet(scope, actualVersion, incoming, Some(capturedBarrier))
+                    .as(report.copy(written = report.written + 1))
+                    .catchSome { case _: AgentError.MemoryVersionConflict =>
+                      ZIO.succeed(report.copy(ignored = report.ignored + 1))
+                    }
+                else ZIO.succeed(report.copy(ignored = report.ignored + 1))
+              case (latestBarrier, _) =>
+                ZIO.fail(
+                  AgentError.MemoryVersionConflict(
+                    scope.diagnostic,
+                    incoming.key,
+                    0L,
+                    latestBarrier.conflictVersion(incoming.key, 0L)
+                  )
+                )
+            }
           }
       case Some(existing) =>
-        mergeAndSet(scope, existing, incoming, report, retriesRemaining)
+        mergeAndSet(scope, existing, incoming, report, capturedBarrier, retriesRemaining)
     }
 
   private def mergeAndSet(
@@ -156,22 +210,50 @@ final class MemoryLifecycle(
       existing: MemoryEntry,
       incoming: MemoryEntry,
       report: MemoryApplyReport,
+      capturedBarrier: MemoryDeletionBarrier,
       retriesRemaining: Int
   ): IO[StoreError, MemoryApplyReport] =
     merge(existing, incoming) match
       case None         => ZIO.succeed(report.copy(ignored = report.ignored + 1))
       case Some(merged) =>
         store
-          .compareAndSet(scope, existing.version, merged)
+          .compareAndSet(scope, existing.version, merged, Some(capturedBarrier))
           .as(report.copy(written = report.written + 1))
           .catchSome {
             case _: AgentError.MemoryVersionConflict if retriesRemaining > 0 =>
-              upsertWithRetry(scope, incoming, report, retriesRemaining - 1)
+              store.currentBarrier(scope).flatMap { latestBarrier =>
+                if wasDeletedSinceBarrier(incoming.key, capturedBarrier, latestBarrier) then
+                  ZIO.succeed(report.copy(ignored = report.ignored + 1))
+                else upsertWithRetry(scope, incoming, report, capturedBarrier, retriesRemaining - 1)
+              }
+            case _: AgentError.MemoryVersionConflict =>
+              store.currentBarrier(scope).flatMap { latestBarrier =>
+                if wasDeletedSinceBarrier(incoming.key, capturedBarrier, latestBarrier) then
+                  ZIO.succeed(report.copy(ignored = report.ignored + 1))
+                else
+                  ZIO.fail(
+                    AgentError.MemoryVersionConflict(
+                      scope.diagnostic,
+                      incoming.key,
+                      existing.version,
+                      latestBarrier.conflictVersion(incoming.key, existing.version)
+                    )
+                  )
+              }
           }
+
+  /** 判断目标 key 或整个 scope 是否在捕获屏障之后发生过删除。 */
+  private def wasDeletedSinceBarrier(
+      key: String,
+      capturedBarrier: MemoryDeletionBarrier,
+      latestBarrier: MemoryDeletionBarrier
+  ): Boolean =
+    latestBarrier.hasDeletedSince(capturedBarrier, key)
 
   /** 返回稳定拒绝码；不把正文写入错误或遥测。 */
   private def validateEntry(entry: MemoryEntry): Option[String] =
-    if entry.key.exists(_.isWhitespace) then Some("key-contains-whitespace")
+    if entry.key.trim == MemoryStore.ScopeBarrierKey then Some("reserved-memory-key")
+    else if entry.key.exists(_.isWhitespace) then Some("key-contains-whitespace")
     else if entry.value.toJson.length > policy.maxValueCharacters then Some("value-too-large")
     else if containsCredentialShape(entry.value.toJson) then Some("credential-shaped-content")
     else if entry.kind == MemoryKind.Episodic && policy.requireEpisodicExpiry && entry.expiresAtEpochMilli.isEmpty
@@ -186,6 +268,7 @@ final class MemoryLifecycle(
   /** 删除必须来自明确用户意图或可信工具事件，模型推断不能自行遗忘用户数据。 */
   private def validateDelete(key: String, evidence: MemoryEvidence): Option[String] =
     if key.trim.isEmpty then Some("empty-delete-key")
+    else if key.trim == MemoryStore.ScopeBarrierKey then Some("reserved-memory-key")
     else
       evidence match
         case MemoryEvidence.UserStated | MemoryEvidence.ToolObserved => None

@@ -486,6 +486,33 @@ final class PostgresKnowledgeIndexStore(dataSource: DataSource, dimension: Int) 
         }
       }
 
+  override def registeredProfiles: IO[RetrievalError, Chunk[(IndexProfileId, IndexBuildSpec)]] =
+    withConnection { connection =>
+      query(
+        connection,
+        "list registered knowledge profiles",
+        s"""SELECT DISTINCT profile_id, build_spec::text, build_spec_sha256
+           |FROM $Profiles
+           |WHERE status IN ('active', 'building', 'superseded')
+           |ORDER BY profile_id""".stripMargin
+      )(_ => ()) { result =>
+        val builder = ChunkBuilder.make[(IndexProfileId, IndexBuildSpec)]()
+        while result.next() do
+          val profileId = IndexProfileId(result.getString(1))
+          val spec      = result
+            .getString(2)
+            .fromJson[IndexBuildSpec]
+            .fold(
+              error => throw IllegalStateException(s"knowledge profile build_spec 解码失败: $error"),
+              identity
+            )
+          if spec.sha256 != result.getString(3) then
+            throw IllegalStateException("knowledge profile build_spec 与摘要不一致")
+          builder += (profileId -> spec)
+        builder.result()
+      }
+    }
+
   private def parseVectorLiteral(raw: String, expectedDimension: Int): Option[Embedding] =
     Option(raw)
       .map(_.trim)

@@ -42,7 +42,9 @@ final private[agent] class ModelCallCoordinator(
     effectiveCapture match
       case CapturePolicy.Disabled =>
         publisher.emit(AgentEvent.ModelCallStarted(state.runId, provider, modelName, startedAt)) *>
-          stream(state, routing.request, routing.adapter).map(Dispatched(state, _, None))
+          stream(state, routing.request, routing.adapter)
+            .tapErrorCause(cause => logModelFailure(state.runId, None, provider, modelName, None, cause))
+            .map(Dispatched(state, _, None))
       case policy =>
         persistThenInvoke(state, agent, prepared, routing, provider, modelName, startedAt, policy, prices)
 
@@ -235,32 +237,85 @@ final private[agent] class ModelCallCoordinator(
       val invalidReported = cause.failureOption.collect { case err: AgentError.InvalidModelResponse =>
         (err.reportedUsage, err.providerRequestId)
       }
+      val httpFailedRequestId = cause.failureOption.collect { case err: AgentError.ModelHttpFailure =>
+        err.providerRequestId
+      }.flatten
       val reportedUsage     = invalidReported.flatMap(_._1)
-      val providerRequestId = invalidReported.flatMap(_._2).orElse(record.providerRequestId)
-      val event             =
+      val providerRequestId =
+        invalidReported.flatMap(_._2).orElse(httpFailedRequestId).orElse(record.providerRequestId)
+      val event =
         if status == ModelCallStatus.Unknown then
           AgentEvent.ModelCallUnknown(state.runId, record.requestId.asString, now)
         else AgentEvent.ModelCallCompleted(state.runId, reportedUsage.getOrElse(TokenUsage()), now)
-      committer
-        .commitAll(
-          state,
-          state.copy(pendingModelCall = None, updatedAt = at),
-          NonEmptyChunk(event),
-          Some(
-            ModelCallWrite.Transition(
-              ModelCallStatus.Dispatched,
-              record.attempt,
-              record.copy(
-                status = status,
-                usage = reportedUsage.orElse(record.usage),
-                providerRequestId = providerRequestId,
-                errorCategory = cause.failureOption.map(_.category.toString),
-                updatedAtEpochMilli = now
+      logModelFailure(
+        state.runId,
+        Some(record.requestId),
+        record.provider,
+        record.model,
+        Some(status),
+        cause
+      ) *>
+        committer
+          .commitAll(
+            state,
+            state.copy(pendingModelCall = None, updatedAt = at),
+            NonEmptyChunk(event),
+            Some(
+              ModelCallWrite.Transition(
+                ModelCallStatus.Dispatched,
+                record.attempt,
+                record.copy(
+                  status = status,
+                  usage = reportedUsage.orElse(record.usage),
+                  providerRequestId = providerRequestId,
+                  errorCategory = cause.failureOption.map(_.category.toString),
+                  updatedAtEpochMilli = now
+                )
               )
             )
           )
-        )
-        .unit
+          .unit
+    }
+
+  private def logModelFailure(
+      runId: RunId,
+      requestId: Option[ModelRequestId],
+      provider: String,
+      model: String,
+      settlement: Option[ModelCallStatus],
+      cause: Cause[AgentError]
+  ): UIO[Unit] =
+    val baseAnnotations = List(
+      LogAnnotation("run_id", runId.asString),
+      LogAnnotation("component", "agent-runtime"),
+      LogAnnotation("operation", "model-call")
+    )
+    val annotations =
+      requestId.fold(baseAnnotations)(id => LogAnnotation("model_request_id", id.asString) :: baseAnnotations)
+    val settlementText = settlement.fold("none")(_.toString)
+    val details        = cause.failureOption match
+      case Some(err) =>
+        val diag = err.diagnostic.toList.sortBy(_._1).map { case (k, v) => s"$k=$v" }
+        val base = List(
+          s"runId=${runId.asString}",
+          s"provider=$provider",
+          s"model=$model",
+          s"settlement=$settlementText",
+          s"category=${err.category}",
+          s"retryable=${err.retryable}"
+        ) ++ requestId.map(id => s"modelRequestId=${id.asString}")
+        (base ++ diag).mkString(", ")
+      case None =>
+        val interrupted = cause.isInterrupted
+        (List(
+          s"runId=${runId.asString}",
+          s"provider=$provider",
+          s"model=$model",
+          s"settlement=$settlementText",
+          s"interrupted=$interrupted"
+        ) ++ requestId.map(id => s"modelRequestId=${id.asString}")).mkString(", ")
+    ZIO.logAnnotate(annotations.head, annotations.tail*) {
+      ZIO.logWarning(s"agent.model.call.failed: $details")
     }
 
   /** 把 Run 收口为 Failed 并解释原因；模型账本变更与状态在同一事务提交。 */

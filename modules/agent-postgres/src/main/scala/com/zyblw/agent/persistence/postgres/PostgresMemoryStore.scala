@@ -64,43 +64,72 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
       expectedVersion: Long,
       entry: MemoryEntry
   ): IO[StoreError, MemoryEntry] =
+    compareAndSet(scope, expectedVersion, entry, None)
+
+  /** 在同一数据库事务与作用域级咨询锁内原子校验删除屏障与 expectedVersion。 */
+  override def compareAndSet(
+      scope: MemoryScope,
+      expectedVersion: Long,
+      entry: MemoryEntry,
+      expectedBarrier: Option[MemoryDeletionBarrier]
+  ): IO[StoreError, MemoryEntry] =
     if expectedVersion < 0L then
       ZIO.fail(AgentError.MemoryPolicyRejected(entry.key, "negative-expected-version"))
     else
       Clock.currentTime(java.util.concurrent.TimeUnit.MILLISECONDS).flatMap { now =>
-        validateValue(entry) *> withConnection { connection =>
-          val write =
-            if expectedVersion == 0L then insertFirst(connection, scope, entry, now)
-            else updateExpected(connection, scope, expectedVersion, entry, now)
-          write.flatMap {
-            case Some(updated) => ZIO.succeed(updated)
-            case None          =>
-              currentVersion(connection, scope, entry.key).flatMap { actual =>
-                ZIO.fail(
-                  AgentError.MemoryVersionConflict(scope.diagnostic, entry.key, expectedVersion, actual)
-                )
+        validateValue(entry) *> withTransaction { connection =>
+          val db = scopeDb(scope)
+          lockScope(connection, db) *>
+            ZIO.foreachDiscard(expectedBarrier) { captured =>
+              readBarrierInConnection(connection, scope).flatMap { latest =>
+                if latest.hasDeletedSince(captured, entry.key) then
+                  ZIO.fail(
+                    AgentError.MemoryVersionConflict(
+                      scope.diagnostic,
+                      entry.key,
+                      expectedVersion,
+                      latest.conflictVersion(entry.key, expectedVersion)
+                    )
+                  )
+                else ZIO.unit
               }
-          }
+            } *> {
+              val write =
+                if expectedVersion == 0L then insertFirst(connection, scope, entry, now)
+                else updateExpected(connection, scope, expectedVersion, entry, now)
+              write.flatMap {
+                case Some(updated) => ZIO.succeed(updated)
+                case None          =>
+                  currentVersion(connection, scope, entry.key).flatMap { actual =>
+                    ZIO.fail(
+                      AgentError.MemoryVersionConflict(scope.diagnostic, entry.key, expectedVersion, actual)
+                    )
+                  }
+              }
+            }
         }
       }
 
   /** 精确读取 active 且未过期内容。 */
   def get(scope: MemoryScope, key: String): IO[StoreError, Option[MemoryEntry]] =
-    withConnection { connection =>
-      selectEntries(
-        connection,
-        s"""$entrySelect
-           |WHERE scope_kind = ? AND scope_key = ? AND memory_key = ? AND status = 'active'
-           |  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)""".stripMargin,
-        statement =>
-          val db = scopeDb(scope)
-          statement.setString(1, db.kind)
-          statement.setString(2, db.key)
-          statement.setString(3, key)
-        ,
-        limitOne = true
-      ).map(_.headOption)
-    }
+    if key.trim == MemoryStore.ScopeBarrierKey then ZIO.none
+    else
+      withConnection { connection =>
+        selectEntries(
+          connection,
+          s"""$entrySelect
+             |WHERE scope_kind = ? AND scope_key = ? AND memory_key = ? AND memory_key <> ? AND status = 'active'
+             |  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)""".stripMargin,
+          statement =>
+            val db = scopeDb(scope)
+            statement.setString(1, db.kind)
+            statement.setString(2, db.key)
+            statement.setString(3, key)
+            statement.setString(4, MemoryStore.ScopeBarrierKey)
+          ,
+          limitOne = true
+        ).map(_.headOption)
+      }
 
   /** scope 内混合 PostgreSQL FTS 与安全 substring 匹配。
     *
@@ -115,7 +144,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
           connection,
           s"""WITH q AS (SELECT websearch_to_tsquery('simple', ?) AS value)
            |$entrySelect CROSS JOIN q
-           |WHERE scope_kind = ? AND scope_key = ? AND status = 'active'
+           |WHERE scope_kind = ? AND scope_key = ? AND memory_key <> ? AND status = 'active'
            |  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
            |  AND (search_vector @@ q.value OR position(lower(?) in lower(search_text)) > 0)
            |ORDER BY (search_vector @@ q.value) DESC,
@@ -127,8 +156,9 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
             statement.setString(1, query.trim)
             statement.setString(2, db.kind)
             statement.setString(3, db.key)
-            statement.setString(4, query.trim)
-            statement.setInt(5, limit)
+            statement.setString(4, MemoryStore.ScopeBarrierKey)
+            statement.setString(5, query.trim)
+            statement.setInt(6, limit)
           ,
           limitOne = false
         )
@@ -142,7 +172,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
         selectEntries(
           connection,
           s"""$entrySelect
-           |WHERE scope_kind = ? AND scope_key = ? AND status = 'active'
+           |WHERE scope_kind = ? AND scope_key = ? AND memory_key <> ? AND status = 'active'
            |  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
            |ORDER BY updated_at DESC, memory_key ASC
            |LIMIT ?""".stripMargin,
@@ -150,49 +180,67 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
             val db = scopeDb(scope)
             statement.setString(1, db.kind)
             statement.setString(2, db.key)
-            statement.setInt(3, limit)
+            statement.setString(3, MemoryStore.ScopeBarrierKey)
+            statement.setInt(4, limit)
           ,
           limitOne = false
         )
       }
 
-  /** 单条 tombstone；重复删除不会反复增加版本。 */
-  def delete(scope: MemoryScope, key: String): IO[StoreError, Unit] = withConnection { connection =>
-    jdbc("delete memory") {
-      val statement = connection.prepareStatement(
-        """UPDATE zyblw_agent_core.agent_memories
-          |SET value_json = NULL, search_text = NULL, status = 'deleted', version = version + 1,
-          |    updated_at = CURRENT_TIMESTAMP, deleted_at = CURRENT_TIMESTAMP
-          |WHERE scope_kind = ? AND scope_key = ? AND memory_key = ? AND status = 'active'""".stripMargin
-      )
-      try
-        val db = scopeDb(scope)
-        statement.setString(1, db.kind)
-        statement.setString(2, db.key)
-        statement.setString(3, key)
-        statement.executeUpdate()
-        ()
-      finally statement.close()
-    }
-  }
+  /** 单条 tombstone；重复删除不会反复增加版本，对尚未落库的 key 预置版本 1 的 tombstone。 */
+  def delete(scope: MemoryScope, key: String): IO[StoreError, Unit] =
+    withTransaction(connection => tombstoneOne(connection, scope, key).unit)
 
-  /** 原子清空一个用户/session/tenant scope 的所有 active 内容并返回数量。 */
-  def deleteScope(scope: MemoryScope): IO[StoreError, Long] = withConnection { connection =>
-    jdbc("delete memory scope") {
+  /** 原子清空一个用户/session/tenant scope 的所有 active 内容，推进 scope 删除屏障并返回新删除数量。 */
+  def deleteScope(scope: MemoryScope): IO[StoreError, Long] =
+    withTransaction(connection => tombstoneScope(connection, scope))
+
+  /** 读取当前作用域的删除屏障快照（包含 scope 级清空代数与各 key 的 tombstone/active 版本）。 */
+  override def currentBarrier(scope: MemoryScope): IO[StoreError, MemoryDeletionBarrier] =
+    withConnection(connection => readBarrierInConnection(connection, scope))
+
+  private def readBarrierInConnection(
+      connection: Connection,
+      scope: MemoryScope
+  ): IO[StoreError, MemoryDeletionBarrier] =
+    jdbc("read memory deletion barrier") {
       val statement = connection.prepareStatement(
-        """UPDATE zyblw_agent_core.agent_memories
-          |SET value_json = NULL, search_text = NULL, status = 'deleted', version = version + 1,
-          |    updated_at = CURRENT_TIMESTAMP, deleted_at = CURRENT_TIMESTAMP
-          |WHERE scope_kind = ? AND scope_key = ? AND status = 'active'""".stripMargin
+        """SELECT memory_key, version, status, value_json::text
+          |FROM zyblw_agent_core.agent_memories
+          |WHERE scope_kind = ? AND scope_key = ?""".stripMargin
       )
       try
         val db = scopeDb(scope)
         statement.setString(1, db.kind)
         statement.setString(2, db.key)
-        statement.executeUpdate().toLong
+        val result          = statement.executeQuery()
+        var scopeGeneration = 0L
+        val tombstones      = scala.collection.mutable.Map.empty[String, Long]
+        val actives         = scala.collection.mutable.Map.empty[String, Long]
+        while result.next() do
+          val memoryKey = result.getString(1)
+          val version   = result.getLong(2)
+          val status    = result.getString(3)
+          val valueJson = Option(result.getString(4))
+          if memoryKey == MemoryStore.ScopeBarrierKey then
+            valueJson.flatMap(_.fromJson[PostgresScopeBarrierMeta].toOption) match
+              case Some(meta) =>
+                scopeGeneration = meta.scopeGeneration
+                meta.tombstones.foreach { case (k, v) =>
+                  tombstones.update(k, Math.max(tombstones.getOrElse(k, 0L), v))
+                }
+              case None =>
+                scopeGeneration = version
+          else if status == "deleted" then
+            tombstones.update(memoryKey, Math.max(tombstones.getOrElse(memoryKey, 0L), version))
+          else if status == "active" then actives.update(memoryKey, version)
+        MemoryDeletionBarrier(
+          scopeGeneration = scopeGeneration,
+          tombstoneVersions = tombstones.toMap,
+          activeVersions = actives.toMap
+        )
       finally statement.close()
     }
-  }
 
   /** 多 worker 安全地分批清理过期内容。 CTE 先以 `FOR UPDATE SKIP LOCKED` 领取稳定顺序的行，再在同一语句中 tombstone，避免清理任务互相等待。
     */
@@ -205,7 +253,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
             """WITH expired AS (
             |  SELECT scope_kind, scope_key, memory_key
             |  FROM zyblw_agent_core.agent_memories
-            |  WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?
+            |  WHERE status = 'active' AND memory_key <> ? AND expires_at IS NOT NULL AND expires_at <= ?
             |  ORDER BY expires_at, scope_kind, scope_key, memory_key
             |  FOR UPDATE SKIP LOCKED
             |  LIMIT ?
@@ -218,10 +266,11 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
           )
           try
             val now = Instant.ofEpochMilli(nowEpochMilli)
-            setInstant(statement, 1, now)
-            statement.setInt(2, limit)
-            setInstant(statement, 3, now)
+            statement.setString(1, MemoryStore.ScopeBarrierKey)
+            setInstant(statement, 2, now)
+            statement.setInt(3, limit)
             setInstant(statement, 4, now)
+            setInstant(statement, 5, now)
             statement.executeUpdate().toLong
           finally statement.close()
         }
@@ -250,21 +299,23 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
     else
       Clock.currentTime(java.util.concurrent.TimeUnit.MILLISECONDS).flatMap { now =>
         validateValue(entry) *> withTransaction { connection =>
-          val write =
-            if expectedVersion == 0L then insertOrReviveForGovernance(connection, scope, entry, now)
-            else updateExpected(connection, scope, expectedVersion, entry, now)
-          write.flatMap {
-            case Some(updated) =>
-              insertAudit(
-                connection,
-                audit.copy(resultingVersion = Some(updated.version), affectedCount = 1L)
-              ).as(updated)
-            case None =>
-              currentVersion(connection, scope, entry.key).flatMap { actual =>
-                ZIO.fail(
-                  AgentError.MemoryVersionConflict(scope.diagnostic, entry.key, expectedVersion, actual)
-                )
-              }
+          lockScope(connection, scopeDb(scope)) *> {
+            val write =
+              if expectedVersion == 0L then insertOrReviveForGovernance(connection, scope, entry, now)
+              else updateExpected(connection, scope, expectedVersion, entry, now)
+            write.flatMap {
+              case Some(updated) =>
+                insertAudit(
+                  connection,
+                  audit.copy(resultingVersion = Some(updated.version), affectedCount = 1L)
+                ).as(updated)
+              case None =>
+                currentVersion(connection, scope, entry.key).flatMap { actual =>
+                  ZIO.fail(
+                    AgentError.MemoryVersionConflict(scope.diagnostic, entry.key, expectedVersion, actual)
+                  )
+                }
+            }
           }
         }
       }
@@ -300,38 +351,166 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
 
   /** 复用单条删除 SQL，但允许治理事务在同一 Connection 上继续插入审计。 */
   private def tombstoneOne(connection: Connection, scope: MemoryScope, key: String): IO[StoreError, Long] =
-    jdbc("governed delete memory") {
-      val statement = connection.prepareStatement(
-        """UPDATE zyblw_agent_core.agent_memories
-          |SET value_json = NULL, search_text = NULL, status = 'deleted', version = version + 1,
-          |    updated_at = CURRENT_TIMESTAMP, deleted_at = CURRENT_TIMESTAMP
-          |WHERE scope_kind = ? AND scope_key = ? AND memory_key = ? AND status = 'active'""".stripMargin
-      )
+    if key.trim == MemoryStore.ScopeBarrierKey then
+      ZIO.fail(AgentError.MemoryPolicyRejected(key, "reserved-memory-key"))
+    else if key.trim.isEmpty || key.length > 200 then ZIO.succeed(0L)
+    else
+      val db = scopeDb(scope)
+      lockScope(connection, db) *>
+        jdbc("governed delete memory") {
+          val statement = connection.prepareStatement(
+            """UPDATE zyblw_agent_core.agent_memories
+              |SET value_json = NULL, search_text = NULL, status = 'deleted', version = version + 1,
+              |    updated_at = CURRENT_TIMESTAMP, deleted_at = CURRENT_TIMESTAMP
+              |WHERE scope_kind = ? AND scope_key = ? AND memory_key = ? AND status = 'active'
+              |RETURNING version""".stripMargin
+          )
+          val updatedVersionOpt =
+            try
+              statement.setString(1, db.kind)
+              statement.setString(2, db.key)
+              statement.setString(3, key)
+              val rs = statement.executeQuery()
+              if rs.next() then Some(rs.getLong(1)) else None
+            finally statement.close()
+          val (affected, deletedVersion) = updatedVersionOpt match
+            case Some(ver) => 1L -> ver
+            case None      =>
+              val insertTombstone = connection.prepareStatement(
+                """INSERT INTO zyblw_agent_core.agent_memories
+                  |(scope_kind, scope_key, tenant_id, user_id, session_id, memory_key, value_json, search_text,
+                  | memory_kind, importance, confidence, sensitivity, evidence, extractor_version, source_run_id,
+                  | version, status, created_at, updated_at, expires_at, deleted_at)
+                  |VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'semantic', 0.0, 1.0, 'personal', 'user_stated', 'tombstone-v1',
+                  |        NULL, 1, 'deleted', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, CURRENT_TIMESTAMP)
+                  |ON CONFLICT (scope_kind, scope_key, memory_key) DO NOTHING""".stripMargin
+              )
+              try
+                bindScopeColumns(insertTombstone, db)
+                insertTombstone.setString(6, key)
+                insertTombstone.executeUpdate()
+                ()
+              finally insertTombstone.close()
+              val readVer = connection.prepareStatement(
+                """SELECT version FROM zyblw_agent_core.agent_memories
+                  |WHERE scope_kind = ? AND scope_key = ? AND memory_key = ?""".stripMargin
+              )
+              val ver =
+                try
+                  readVer.setString(1, db.kind)
+                  readVer.setString(2, db.key)
+                  readVer.setString(3, key)
+                  val rs = readVer.executeQuery()
+                  if rs.next() then rs.getLong(1) else 1L
+                finally readVer.close()
+              0L -> ver
+          upsertBarrierMetaUnsafe(
+            connection,
+            db,
+            Map(key -> deletedVersion),
+            incrementScopeGeneration = false
+          )
+          affected
+        }
+
+  /** 复用 scope 删除 SQL，推进 scope 级删除屏障并返回实际转为 tombstone 的行数。 */
+  private def tombstoneScope(connection: Connection, scope: MemoryScope): IO[StoreError, Long] =
+    val db = scopeDb(scope)
+    lockScope(connection, db) *>
+      jdbc("governed delete memory scope") {
+        val statement = connection.prepareStatement(
+          """UPDATE zyblw_agent_core.agent_memories
+            |SET value_json = NULL, search_text = NULL, status = 'deleted', version = version + 1,
+            |    updated_at = CURRENT_TIMESTAMP, deleted_at = CURRENT_TIMESTAMP
+            |WHERE scope_kind = ? AND scope_key = ? AND status = 'active' AND memory_key <> ?
+            |RETURNING memory_key, version""".stripMargin
+        )
+        val deletedKeys = scala.collection.mutable.Map.empty[String, Long]
+        try
+          statement.setString(1, db.kind)
+          statement.setString(2, db.key)
+          statement.setString(3, MemoryStore.ScopeBarrierKey)
+          val rs = statement.executeQuery()
+          while rs.next() do deletedKeys.update(rs.getString(1), rs.getLong(2))
+        finally statement.close()
+        upsertBarrierMetaUnsafe(connection, db, deletedKeys.toMap, incrementScopeGeneration = true)
+        deletedKeys.size.toLong
+      }
+
+  private def lockScope(connection: Connection, db: MemoryScopeDb): IO[StoreError, Unit] =
+    jdbc("lock memory scope") {
+      val statement = connection.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))")
       try
-        val db = scopeDb(scope)
         statement.setString(1, db.kind)
         statement.setString(2, db.key)
-        statement.setString(3, key)
-        statement.executeUpdate().toLong
+        val rs = statement.executeQuery()
+        rs.close()
       finally statement.close()
     }
 
-  /** 复用 scope 删除 SQL，并返回实际转为 tombstone 的行数。 */
-  private def tombstoneScope(connection: Connection, scope: MemoryScope): IO[StoreError, Long] =
-    jdbc("governed delete memory scope") {
-      val statement = connection.prepareStatement(
-        """UPDATE zyblw_agent_core.agent_memories
-          |SET value_json = NULL, search_text = NULL, status = 'deleted', version = version + 1,
-          |    updated_at = CURRENT_TIMESTAMP, deleted_at = CURRENT_TIMESTAMP
-          |WHERE scope_kind = ? AND scope_key = ? AND status = 'active'""".stripMargin
-      )
+  private def upsertBarrierMetaUnsafe(
+      connection: Connection,
+      db: MemoryScopeDb,
+      additionalTombstones: Map[String, Long],
+      incrementScopeGeneration: Boolean
+  ): Unit =
+    val selectStmt = connection.prepareStatement(
+      """SELECT version, value_json::text
+        |FROM zyblw_agent_core.agent_memories
+        |WHERE scope_kind = ? AND scope_key = ? AND memory_key = ?""".stripMargin
+    )
+    val existingMeta =
       try
-        val db = scopeDb(scope)
-        statement.setString(1, db.kind)
-        statement.setString(2, db.key)
-        statement.executeUpdate().toLong
-      finally statement.close()
-    }
+        selectStmt.setString(1, db.kind)
+        selectStmt.setString(2, db.key)
+        selectStmt.setString(3, MemoryStore.ScopeBarrierKey)
+        val rs = selectStmt.executeQuery()
+        if rs.next() then
+          val ver     = rs.getLong(1)
+          val rawJson = Option(rs.getString(2))
+          rawJson
+            .flatMap(_.fromJson[PostgresScopeBarrierMeta].toOption)
+            .getOrElse(PostgresScopeBarrierMeta(ver, Map.empty))
+        else PostgresScopeBarrierMeta(0L, Map.empty)
+      finally selectStmt.close()
+
+    val nextGeneration =
+      if incrementScopeGeneration then existingMeta.scopeGeneration + 1L
+      else existingMeta.scopeGeneration
+    val mergedTombstones =
+      additionalTombstones.foldLeft(existingMeta.tombstones) { case (acc, (k, v)) =>
+        acc.updated(k, Math.max(acc.getOrElse(k, 0L), v))
+      }
+    val nextMetaJson = PostgresScopeBarrierMeta(nextGeneration, mergedTombstones).toJson
+    val rowVersion   = Math.max(1L, nextGeneration)
+
+    val barrierStatement = connection.prepareStatement(
+      """INSERT INTO zyblw_agent_core.agent_memories
+        |(scope_kind, scope_key, tenant_id, user_id, session_id, memory_key, value_json, search_text,
+        | memory_kind, importance, confidence, sensitivity, evidence, extractor_version, source_run_id,
+        | version, status, created_at, updated_at, expires_at, deleted_at)
+        |VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, '', 'semantic', 0.0, 1.0, 'personal', 'user_stated', 'tombstone-v1',
+        |        NULL, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL)
+        |ON CONFLICT (scope_kind, scope_key, memory_key) DO UPDATE SET
+        |value_json = EXCLUDED.value_json, search_text = '', status = 'active',
+        |version = GREATEST(zyblw_agent_core.agent_memories.version + 1, EXCLUDED.version),
+        |updated_at = CURRENT_TIMESTAMP, deleted_at = NULL""".stripMargin
+    )
+    try
+      bindScopeColumns(barrierStatement, db)
+      barrierStatement.setString(6, MemoryStore.ScopeBarrierKey)
+      barrierStatement.setString(7, nextMetaJson)
+      barrierStatement.setLong(8, rowVersion)
+      barrierStatement.executeUpdate()
+      ()
+    finally barrierStatement.close()
+
+  private def bindScopeColumns(statement: PreparedStatement, db: MemoryScopeDb): Unit =
+    statement.setString(1, db.kind)
+    statement.setString(2, db.key)
+    db.tenantId.fold(statement.setNull(3, java.sql.Types.VARCHAR))(statement.setString(3, _))
+    db.userId.fold(statement.setNull(4, java.sql.Types.VARCHAR))(statement.setString(4, _))
+    db.sessionId.fold(statement.setNull(5, java.sql.Types.OTHER))(statement.setObject(5, _))
 
   /** 插入一条不含正文的审计事实。
     *
@@ -580,11 +759,14 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
       updatedAtEpochMilli = result.getObject(13, classOf[java.time.OffsetDateTime]).toInstant.toEpochMilli
     )
 
-  /** JSON 长度防线；正文和完整对话不应进入长期记忆。 */
+  /** JSON 长度与保留 key 防线；正文和完整对话不应进入长期记忆，且不允许业务写入保留屏障键。 */
   private def validateValue(entry: MemoryEntry): IO[StoreError, Unit] =
-    val length = entry.value.toJson.length
-    if length <= maxValueCharacters then ZIO.unit
-    else ZIO.fail(AgentError.MemoryPolicyRejected(entry.key, "value-too-large"))
+    if entry.key.trim == MemoryStore.ScopeBarrierKey then
+      ZIO.fail(AgentError.MemoryPolicyRejected(entry.key, "reserved-memory-key"))
+    else
+      val length = entry.value.toJson.length
+      if length <= maxValueCharacters then ZIO.unit
+      else ZIO.fail(AgentError.MemoryPolicyRejected(entry.key, "value-too-large"))
 
   /** search_text 只含 key 与 JSON 值；删除时数据库将其清空。 */
   private def searchText(entry: MemoryEntry): String = s"${entry.key} ${entry.value.toJson}"
@@ -719,6 +901,12 @@ final private case class MemoryScopeDb(
     userId: Option[String],
     sessionId: Option[UUID]
 )
+
+/** 持久化在 `__scope_barrier__` 行中的作用域删除代数与各 key 历史最高删除版本。 */
+final private case class PostgresScopeBarrierMeta(
+    scopeGeneration: Long,
+    tombstones: Map[String, Long] = Map.empty
+) derives JsonCodec
 
 object PostgresMemoryStore:
   /** 使用默认单条值上限构造 Layer。 */

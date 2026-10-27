@@ -22,21 +22,64 @@ object ProfileEmbeddingRouter:
 
   /** 由构建模型与若干候选(通常是此前使用过、仍保留连接的模型)组成路由。
     *
-    * 候选的 Profile id 用与构建模型相同的切块策略与 enricher 计算,只替换 Embedding 身份——这与 `KnowledgeIndexer.buildSpec` 的推导 规则一致,所以旧
-    * Profile 能被准确认出。
+    * 候选的 Profile id 默认用与构建模型相同的切块策略与 enricher 计算,只替换 Embedding 身份——这与 `KnowledgeIndexer.buildSpec` 的推导
+    * 规则一致;若蓝绿迁移同时变更了切块策略、enricher 或 documentInstruction,可通过 `historicalSpecs` 或 `explicitBindings` 登记历史
+    * Profile 绑定。
     */
   def make(
       build: EmbeddingModel,
       buildSpec: IndexBuildSpec,
-      candidates: Iterable[EmbeddingModel]
+      candidates: Iterable[EmbeddingModel],
+      historicalSpecs: Iterable[(IndexBuildSpec, EmbeddingModel)] = Nil,
+      explicitBindings: Map[IndexProfileId, EmbeddingModel] = Map.empty,
+      store: Option[KnowledgeIndexStore] = None
   ): ProfileEmbeddingRouter =
-    val byProfile = candidates.iterator
+    val allModels   = Chunk(build) ++ Chunk.fromIterable(candidates)
+    val byCandidate = candidates.iterator
       .map(model => profileOf(model, buildSpec) -> model)
       .toMap
+    val byHistoricalSpec = historicalSpecs.iterator.map { case (spec, model) =>
+      IndexProfileIds.fromSpec(spec) -> model
+    }.toMap
+    val byProfile = (byCandidate ++ byHistoricalSpec ++ explicitBindings)
       .updated(IndexProfileIds.fromSpec(buildSpec), build)
     new ProfileEmbeddingRouter:
       def forProfile(profile: Option[IndexProfileId]): UIO[EmbeddingModel] =
-        ZIO.succeed(profile.flatMap(byProfile.get).getOrElse(build))
+        profile match
+          case None     => ZIO.succeed(build)
+          case Some(id) =>
+            byProfile.get(id) match
+              case Some(matched) => ZIO.succeed(matched)
+              case None          =>
+                store match
+                  case None             => ZIO.succeed(build)
+                  case Some(indexStore) =>
+                    indexStore.registeredProfiles
+                      .map { persisted =>
+                        persisted
+                          .collectFirst {
+                            case (persistedId, spec) if persistedId == id =>
+                              allModels.find(model => spec.matches(model.descriptor.denseDescriptor))
+                          }
+                          .flatten
+                          .getOrElse(build)
+                      }
+                      .orElseSucceed(build)
+
+  /** 将已持久化的 `(IndexProfileId, IndexBuildSpec)` 匹配到可用向量模型列表，并返回匹配绑定与缺失模型列表。 */
+  def bindPersistedSpecs(
+      persisted: Iterable[(IndexProfileId, IndexBuildSpec)],
+      models: Iterable[EmbeddingModel]
+  ): (Map[IndexProfileId, EmbeddingModel], Chunk[(IndexProfileId, IndexBuildSpec)]) =
+    val modelList = Chunk.fromIterable(models)
+    val bindings  = Map.newBuilder[IndexProfileId, EmbeddingModel]
+    val missing   = ChunkBuilder.make[(IndexProfileId, IndexBuildSpec)]()
+    persisted.foreach { case (profileId, spec) =>
+      modelList.find(model => spec.matches(model.descriptor.denseDescriptor)) match
+        case Some(matched) => bindings += (profileId -> matched)
+        case None          => missing += (profileId  -> spec)
+    }
+    bindings.result() -> missing.result()
 
   /** 候选模型在相同切块策略下对应的 Profile id。 */
   def profileOf(model: EmbeddingModel, buildSpec: IndexBuildSpec): IndexProfileId =

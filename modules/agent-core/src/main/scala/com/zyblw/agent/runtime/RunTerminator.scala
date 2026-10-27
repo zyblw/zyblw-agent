@@ -79,8 +79,9 @@ final private[agent] class RunTerminator(
     yield ())
       .retry(
         Schedule.recurs(2) && Schedule.recurWhile[AgentError] {
-          case _: AgentError.OptimisticLock => true
-          case _                            => false
+          case _: AgentError.OptimisticLock                   => true
+          case db: AgentError.DatabaseFailure if db.retryable => true
+          case _                                              => false
         }
       )
       .ignore
@@ -99,8 +100,9 @@ final private[agent] class RunTerminator(
     yield ())
       .retry(
         Schedule.recurs(2) && Schedule.recurWhile[AgentError] {
-          case _: AgentError.OptimisticLock => true
-          case _                            => false
+          case _: AgentError.OptimisticLock                   => true
+          case db: AgentError.DatabaseFailure if db.retryable => true
+          case _                                              => false
         }
       )
       .ignore
@@ -113,7 +115,7 @@ final private[agent] class RunTerminator(
       errorCategory: Option[String]
   ): IO[AgentError, Unit] =
     for
-      calls <- store.getModelCalls(current.runId).orElseSucceed(Chunk.empty)
+      calls <- store.getModelCalls(current.runId)
       openRecord = current.pendingModelCall
         .flatMap(pending => calls.find(_.requestId == pending.requestId))
         .orElse(calls.find(c => AgentKernel.openModelCall(c.status)))

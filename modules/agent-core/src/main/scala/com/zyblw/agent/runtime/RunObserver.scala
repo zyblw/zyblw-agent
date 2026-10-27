@@ -924,13 +924,162 @@ object MetricsRunObserver:
       case "retrieval" | "rag"       => "retrieval"
       case _                         => "other"
 
+/** 把 Runtime 关键生命周期事件输出为低敏结构化应用日志。
+  *
+  * 当外部 OTLP / Langfuse 未开启或网络不可达时，应用日志仍是生产排障与大模型智能体（AIOps） 检索定位的第一现场。本观察者严格遵守 `MetadataOnly`
+  * 纪律：不输出模型正文、工具参数/结果或未脱敏错误文本， 并在 Run 终态清理全部进程内计时状态。
+  */
+final class StructuredLogRunObserver private (
+    state: Ref.Synchronized[StructuredLogRunObserver.State]
+) extends RunObserver:
+  def emit(event: AgentEvent): UIO[Unit] =
+    state.modify(current => StructuredLogRunObserver.project(current, event)).flatMap {
+      case Some(logEffect) => logEffect
+      case None            => ZIO.unit
+    }
+
+object StructuredLogRunObserver:
+  val layer: ULayer[RunObserver] =
+    ZLayer.fromZIO(make)
+
+  def make: UIO[StructuredLogRunObserver] =
+    Ref.Synchronized.make(State()).map(StructuredLogRunObserver(_))
+
+  final private case class ToolStart(toolName: String, startedAtEpochMilli: Option[Long])
+  final private case class State(
+      runs: Map[RunId, Long] = Map.empty,
+      tools: Map[(RunId, String), ToolStart] = Map.empty
+  )
+
+  private def annotateRun[R, E, A](runId: RunId, operation: String)(effect: ZIO[R, E, A]): ZIO[R, E, A] =
+    ZIO.logAnnotate(
+      LogAnnotation("run_id", runId.asString),
+      LogAnnotation("component", "agent-runtime"),
+      LogAnnotation("operation", operation)
+    )(effect)
+
+  private def durationMs(startedAt: Option[Long], endedAt: Long): String =
+    startedAt.filter(endedAt >= _).map(s => (endedAt - s).toString).getOrElse("unknown")
+
+  private def cleanupRun(current: State, runId: RunId): State =
+    current.copy(
+      runs = current.runs.removed(runId),
+      tools = current.tools.filterNot(_._1._1 == runId)
+    )
+
+  private def project(current: State, event: AgentEvent): (Option[UIO[Unit]], State) =
+    event match
+      case AgentEvent.RunCreated(runId, _, at) =>
+        None -> current.copy(runs = current.runs.updated(runId, at))
+
+      case AgentEvent.RunStarted(runId, at) =>
+        val next =
+          if current.runs.contains(runId) then current
+          else current.copy(runs = current.runs.updated(runId, at))
+        val log = annotateRun(runId, "run.started") {
+          ZIO.logInfo(s"agent.run.started: runId=${runId.asString}")
+        }
+        Some(log) -> next
+
+      case AgentEvent.RunResumed(runId, at) =>
+        val next =
+          if current.runs.contains(runId) then current
+          else current.copy(runs = current.runs.updated(runId, at))
+        val log = annotateRun(runId, "run.resumed") {
+          ZIO.logInfo(s"agent.run.resumed: runId=${runId.asString}")
+        }
+        Some(log) -> next
+
+      case AgentEvent.ToolCallRequested(runId, call, _) =>
+        val key  = runId -> call.id
+        val prev = current.tools.getOrElse(key, ToolStart(call.name, None))
+        None -> current.copy(tools = current.tools.updated(key, prev.copy(toolName = call.name)))
+
+      case AgentEvent.ToolExecutionStarted(runId, callId, at) =>
+        val key  = runId -> callId
+        val prev = current.tools.getOrElse(key, ToolStart("unknown", None))
+        None -> current.copy(tools = current.tools.updated(key, prev.copy(startedAtEpochMilli = Some(at))))
+
+      case AgentEvent.ToolExecutionCompleted(runId, callId, _, _) =>
+        None -> current.copy(tools = current.tools.removed(runId -> callId))
+
+      case AgentEvent.ToolExecutionFailed(runId, callId, category, at) =>
+        val key      = runId -> callId
+        val toolInfo = current.tools.get(key)
+        val toolName = toolInfo.map(_.toolName).getOrElse("unknown")
+        val dur      = durationMs(toolInfo.flatMap(_.startedAtEpochMilli), at)
+        val log      = annotateRun(runId, "tool.failed") {
+          ZIO.logAnnotate(LogAnnotation("error_kind", category.toString)) {
+            ZIO.logWarning(
+              s"agent.tool.failed: runId=${runId.asString}, callId=$callId, toolName=$toolName, category=$category, durationMs=$dur"
+            )
+          }
+        }
+        Some(log) -> current.copy(tools = current.tools.removed(key))
+
+      case AgentEvent.ModelCallUnknown(runId, requestId, _) =>
+        val log = annotateRun(runId, "model.unknown") {
+          ZIO.logWarning(s"agent.model.unknown: runId=${runId.asString}, modelRequestId=$requestId")
+        }
+        Some(log) -> current
+
+      case AgentEvent.CompositionDriftDetected(runId, kind, changedFields, _) =>
+        val fields = changedFields.map(_.field).toList.sorted.mkString(",")
+        val log    = annotateRun(runId, "composition.drift") {
+          ZIO.logWarning(
+            s"agent.composition.drift: runId=${runId.asString}, kind=$kind, changedFields=$fields"
+          )
+        }
+        Some(log) -> current
+
+      case AgentEvent.GuardrailEvaluated(runId, stage, allowed, _) if !allowed =>
+        val log = annotateRun(runId, "guardrail.rejected") {
+          ZIO.logWarning(s"agent.guardrail.rejected: runId=${runId.asString}, stage=$stage")
+        }
+        Some(log) -> current
+
+      case AgentEvent.RunSuspended(runId, _, _) =>
+        val log = annotateRun(runId, "run.suspended") {
+          ZIO.logInfo(s"agent.run.suspended: runId=${runId.asString}")
+        }
+        Some(log) -> current
+
+      case AgentEvent.RunCompleted(runId, _, usage, at) =>
+        val dur = durationMs(current.runs.get(runId), at)
+        val log = annotateRun(runId, "run.completed") {
+          ZIO.logInfo(
+            s"agent.run.completed: runId=${runId.asString}, durationMs=$dur, modelCalls=${usage.modelCalls}, toolCalls=${usage.toolCalls}, inputTokens=${usage.inputTokens}, outputTokens=${usage.outputTokens}, cachedInputTokens=${usage.cachedInputTokens}, estimatedCost=${usage.estimatedCost}"
+          )
+        }
+        Some(log) -> cleanupRun(current, runId)
+
+      case AgentEvent.RunFailed(runId, category, _, at) =>
+        val dur = durationMs(current.runs.get(runId), at)
+        val log = annotateRun(runId, "run.failed") {
+          ZIO.logAnnotate(LogAnnotation("error_kind", category.toString)) {
+            ZIO.logWarning(
+              s"agent.run.failed: runId=${runId.asString}, category=$category, durationMs=$dur"
+            )
+          }
+        }
+        Some(log) -> cleanupRun(current, runId)
+
+      case AgentEvent.RunCancelled(runId, at) =>
+        val dur = durationMs(current.runs.get(runId), at)
+        val log = annotateRun(runId, "run.cancelled") {
+          ZIO.logInfo(s"agent.run.cancelled: runId=${runId.asString}, durationMs=$dur")
+        }
+        Some(log) -> cleanupRun(current, runId)
+
+      case _ => None -> current
+
 /** 生产环境推荐的统一观察者 Layer。
   *
-  * 宿主只需提供同一套 OpenTelemetry SDK 产生的 `AgentTelemetry & AgentMetrics`，本 Layer 就会创建各自独立、 并发安全的事件配对状态，并按 Trace 后
-  * Metrics 的固定顺序输出。两者都是 `UIO`，任何观测故障都不会改变主循环。
+  * 宿主只需提供同一套 OpenTelemetry SDK 产生的 `AgentTelemetry & AgentMetrics`，本 Layer 就会创建各自独立、 并发安全的事件配对状态，并按 Trace ->
+  * Metrics -> StructuredLog 的固定顺序输出。三者都是 `UIO`，任何观测故障都不会改变主循环。
   */
 object ObservabilityRunObserver:
-  /** @return 同时输出持续时间 Trace/Langfuse observation 与低基数 Metrics 的单一 RunObserver */
+  /** @return 同时输出持续时间 Trace/Langfuse observation、低基数 Metrics 与低敏结构化日志的单一 RunObserver */
   val layer: ZLayer[AgentTelemetry & AgentMetrics, Nothing, RunObserver] =
     ZLayer.fromZIO {
       for
@@ -938,5 +1087,6 @@ object ObservabilityRunObserver:
         metrics        <- ZIO.service[AgentMetrics]
         traceObserver  <- TelemetryRunObserver.make(telemetry)
         metricObserver <- MetricsRunObserver.make(metrics)
-      yield RunObserver.combine(traceObserver, metricObserver)
+        logObserver    <- StructuredLogRunObserver.make
+      yield RunObserver.combine(traceObserver, metricObserver, logObserver)
     }

@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-10-28
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -179,6 +179,13 @@ service.deleteScope(actor, own)                           // 返回本次删除�
 
 删除转换为 tombstone，清空 `value_json/search_text` 并递增版本。重复删除返回 0 但仍记录一次 affectedCount=0 的用户动作，
 便于区分“用户确实再次请求删除”和“系统没有收到请求”。
+
+同时，`MemoryStore` 提供 `MemoryDeletionBarrier(scopeGeneration, keyVersions, deletedAtEpochMilli, activeVersions)` 与 4 参数原子接口 `compareAndSet(scope, expectedVersion, entry, barrier)`：
+
+- `deleteScope` 在同一事务中递增保留行 `__scope_barrier__`（`MemoryStore.ScopeBarrierKey`）的 `scopeGeneration`；
+- 单条 `delete` 保留 `deletedAtEpochMilli` 历史删除时间，即使后续新对话合法重建该键也不会抹除历史删除边界；
+- 异步提炼任务必须携带原消息接受时刻捕获的 `MemoryDeletionBarrier`；若写入时 `scopeGeneration` 已推进，或该键在快照之后发生过删除，原子 CAS 立即拒绝回灌；
+- 自定义 `MemoryStore` 若复用 4 参数默认兼容实现，事后屏障复核仅在确认刚写入版本仍为当前活跃版本且未被更新墓碑超越时才执行补偿删除，绝不误删并发删除后合法新写入的值。
 
 ## 5. 审计数据最小化
 

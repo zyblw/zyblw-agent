@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-10-28
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -46,6 +46,7 @@ PostgreSQL/RunStore 为准；Trace 被采样或 Metrics 丢失都不影响恢复
 - Langfuse 使用官方 OTLP traces endpoint、Basic Auth 和 ingestion version 4。
 - 已提供 Collector、Prometheus 告警规则和 Grafana dashboard 基线。
 - 测试覆盖 duration 配对、暂停恢复、usage、动态 label 折叠、正文/密钥阻断以及 exporter 不可达。
+- `RunObserver.logging` 与 `Telemetry` 统一注入 `run_id`、`session_id`、`component`、`operation`、`error_kind` 等结构化 `LogAnnotation`，并对包含空白、引号、等号或逗号的值做安全转义，便于宿主日志管线（如 `StructuredJsonLayout`）零歧义解析关联上下文。
 
 ## 3. 指标契约
 

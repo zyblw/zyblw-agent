@@ -2,7 +2,7 @@
 
 > 状态：当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-09-23
+> 最后核验：2026-10-28
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -197,7 +197,7 @@ val registered: RegisteredTool = new McpRegisteredTool(
 )
 ```
 
-`McpRegisteredTool` 只负责远端调用适配。真正执行仍必须经过 `RegisteredToolRegistry`、`ToolExecutor`、权限、审批、预算、审计和耐久工具账本。远端 annotations 不能自动降低本地风险等级。
+`McpRegisteredTool` 只负责远端调用适配。真正执行仍必须经过 `RegisteredToolRegistry`、`ToolExecutor`、权限、审批、预算、审计和耐久工具账本。远端 annotations 不能自动降低本地风险等级。当 `ToolMetadata.sensitiveOutputFields` 非空时，`McpRegisteredTool` 通过 `redactMcpInlineEnvelope` 对返回信封做全量脱敏：若存在 `structuredContent`，先校验原始 Schema 再脱敏 `structuredContent`，并将 `content[].text` 同步重写为脱敏后的 JSON 文本；若缺少 `structuredContent`，要求 `content[].text` 必须是可解析的 JSON 对象并对其脱敏，非结构化纯文本直接 Fail-Closed。
 
 ## sampling 与 elicitation
 

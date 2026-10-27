@@ -537,6 +537,106 @@ object RunStoreConformanceSpec extends ZIOSpecDefault:
               kind -> changed.map(_.field)
           } == Chunk("incompatible" -> Chunk("allowedTools"))
         )
+      },
+      test("终态 Run 原子收口悬挂工具与模型账本，且拒绝终态后迟到 prepareToolExecutions 新增 Prepared 行") {
+        for
+          store <- ZIO.service[RunStore]
+          runId = stableRunId("terminal-rejects-late-prepare")
+          sessionId <- SessionId.random
+          created = PersistedAgentEvent(
+            stableEventId("terminal-rejects-created"),
+            runId,
+            0L,
+            AgentEvent.RunCreated(runId, sessionId, 0L),
+            0L
+          )
+          reqId     = ModelRequestId(java.util.UUID.nameUUIDFromBytes("terminal-open-model".getBytes))
+          openModel = ModelCallExecutionRecord(
+            runId = runId,
+            requestId = reqId,
+            attempt = 1,
+            status = ModelCallStatus.Dispatched,
+            provider = "test-provider",
+            model = "test-model",
+            capturePolicy = CapturePolicy.MetadataOnly,
+            fingerprint = "f" * 64,
+            messageCount = 1,
+            toolCount = 0,
+            lineage = ModelCallContextLineage(1, 0, 0, 0, 0),
+            instructionFingerprint = None,
+            canonicalRequest = None,
+            updatedAtEpochMilli = 1L
+          )
+          initial = state(runId, sessionId).copy(lastEventSequence = 0L, status = RunStatus.Running)
+          _ <- store.createWithEvents(initial, NonEmptyChunk(created))
+          stepEvent = PersistedAgentEvent(
+            stableEventId("terminal-rejects-step"),
+            runId,
+            1L,
+            AgentEvent.ModelCallPrepared(
+              runId,
+              reqId.asString,
+              "test-provider",
+              "test-model",
+              "f" * 64,
+              "MetadataOnly",
+              1,
+              0,
+              1L
+            ),
+            1L
+          )
+          _ <- store.commit(
+            Version.initial,
+            initial.copy(lastEventSequence = 1L),
+            NonEmptyChunk(stepEvent),
+            Some(ModelCallWrite.Insert(openModel))
+          )
+          earlyTool = ToolExecutionRecord(
+            runId,
+            "early:0",
+            0,
+            "early-call",
+            "lookup",
+            Some("early-call"),
+            ToolExecutionStatus.Prepared,
+            None,
+            0,
+            1L
+          )
+          _ <- store.prepareToolExecutions(NonEmptyChunk(earlyTool))
+          cancelEvent = PersistedAgentEvent(
+            stableEventId("terminal-rejects-cancelled"),
+            runId,
+            2L,
+            AgentEvent.RunCancelled(runId, 2L),
+            2L
+          )
+          _ <- store.commit(
+            Version(1L),
+            initial.copy(status = RunStatus.Cancelled, lastEventSequence = 2L),
+            NonEmptyChunk(cancelEvent)
+          )
+          lateTool = ToolExecutionRecord(
+            runId,
+            "late:0",
+            0,
+            "late-call",
+            "lookup",
+            Some("late-call"),
+            ToolExecutionStatus.Prepared,
+            None,
+            0,
+            3L
+          )
+          latePrepare <- store.prepareToolExecutions(NonEmptyChunk(lateTool)).exit
+          toolsAfter  <- store.listToolExecutions(runId)
+          modelsAfter <- store.getModelCalls(runId)
+        yield assertTrue(
+          latePrepare.isFailure,
+          toolsAfter.map(t => t.callId -> t.status) == Chunk("early-call" -> ToolExecutionStatus.Unknown),
+          modelsAfter.map(m => m.requestId -> m.status) == Chunk(reqId -> ModelCallStatus.Unknown)
+        )
       }
     ).provideLayerShared(layer)
 

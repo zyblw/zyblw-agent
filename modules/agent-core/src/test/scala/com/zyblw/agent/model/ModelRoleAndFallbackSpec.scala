@@ -51,6 +51,40 @@ object ModelRoleAndFallbackSpec extends ZIOSpecDefault:
         ok.message.text == "ok",
         vision.left.exists(_.isInstanceOf[AgentError.UnsupportedModelCapability])
       )
+    },
+    test("降级链按 fallbackable 精确判别：503/429 可切换，retryable 但非 fallbackable 的 409 不切换") {
+      def modelFailingWith(providerName: String, error: AgentError): ChatModel =
+        new ChatModel:
+          val provider                                                     = providerName
+          def complete(request: ChatRequest): IO[AgentError, ChatResponse] = ZIO.fail(error)
+      for
+        backup    <- SucceedingModel.make("backup", "ok-backup")
+        unavailFb <- FallbackChatModel.make(
+          "primary",
+          List(
+            modelFailingWith(
+              "primary",
+              AgentError.ModelHttpFailure("primary", 503, Some("service_unavailable"))
+            ),
+            backup
+          )
+        )
+        okUnavail  <- unavailFb.complete(ChatRequest(Chunk(AgentMessage.user("hi"))))
+        conflictFb <- FallbackChatModel.make(
+          "primary",
+          List(
+            modelFailingWith(
+              "primary",
+              AgentError.ModelHttpFailure("primary", 409, Some("request_conflict"))
+            ),
+            backup
+          )
+        )
+        conflictExit <- conflictFb.complete(ChatRequest(Chunk(AgentMessage.user("hi")))).either
+      yield assertTrue(
+        okUnavail.message.text == "ok-backup",
+        conflictExit.left.exists(_.isInstanceOf[AgentError.ModelHttpFailure])
+      )
     }
   )
 

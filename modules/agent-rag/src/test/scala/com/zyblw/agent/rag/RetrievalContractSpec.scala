@@ -254,5 +254,63 @@ object RetrievalContractSpec extends ZIOSpecDefault:
         )
       yield assertTrue(result.hits.map(_.chunk.id).toSet == Set("seed", "neighbor")))
         .provide(InMemoryVectorStore.layer)
+    },
+    test("mergeHits 跨分支合并保留完整 signals，且非精确 3-gram phrase 不会压过 Hybrid RRF") {
+      val hybridHit = RetrievalHit(
+        chunk.copy(id = "c-hybrid"),
+        0.032,
+        Map("vectorScore" -> 0.88, "textScore" -> 0.5, "textRank" -> 1.0)
+      )
+      val exactSameChunk = RetrievalHit(
+        chunk.copy(id = "c-hybrid"),
+        1.0,
+        Map("phraseScore" -> 1.0)
+      )
+      val fuzzyPhraseHit = RetrievalHit(
+        chunk.copy(id = "c-fuzzy"),
+        0.25,
+        Map("phraseScore" -> 0.25)
+      )
+      val merged = DefaultRetriever.mergeHits(
+        Chunk(Chunk(hybridHit), Chunk(fuzzyPhraseHit, exactSameChunk)),
+        limit = 5
+      )
+      val top = merged.head
+      assertTrue(
+        top.chunk.id == "c-hybrid",
+        top.signals.get("vectorScore").contains(0.88),
+        top.signals.get("textScore").contains(0.5),
+        top.signals.get("phraseScore").contains(1.0)
+      )
+    },
+    test("acceptsSeed 在具备权威 rerankScore 时优先按精排分裁决，回退重排仍沿用词法/向量规则") {
+      val rejectedByRerank = RetrievalHit(
+        chunk.copy(id = "rerank-low"),
+        0.10,
+        Map("textScore" -> 0.8, "vectorScore" -> 0.9, "rerankScore" -> 0.10)
+      )
+      val acceptedByFallback = RetrievalHit(
+        chunk.copy(id = "rerank-fallback"),
+        0.10,
+        Map("textScore" -> 0.8, "rerankScore" -> 0.10, "rerankFallback" -> 1.0)
+      )
+      assertTrue(
+        !DefaultRetriever.acceptsSeed(rejectedByRerank, 0.35),
+        DefaultRetriever.acceptsSeed(acceptedByFallback, 0.35)
+      )
+    },
+    test("R7：HybridExact 路径与多次 mergeHits 对模糊 Phrase 仅归一化一次，不发生重复缩放") {
+      val fuzzyPhraseHit = RetrievalHit(
+        chunk.copy(id = "c-fuzzy-once"),
+        0.25,
+        Map("phraseScore" -> 0.25)
+      )
+      val once  = DefaultRetriever.mergeHits(Chunk(Chunk(fuzzyPhraseHit)), limit = 5)
+      val twice = DefaultRetriever.mergeHits(Chunk(once), limit = 5)
+      assertTrue(
+        once.head.score == (0.25 / 61.0),
+        twice.head.score == once.head.score,
+        twice.head.signals.get("retrievalScore").contains(0.25)
+      )
     }
   )

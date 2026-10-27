@@ -245,11 +245,13 @@ final class GovernedEmbeddingModel(
     quotaPolicy: EmbeddingQuotaPolicy,
     config: GovernedEmbeddingConfig
 ) extends EmbeddingModel:
-  override val capabilities: EmbeddingCapabilities       = delegate.capabilities
-  override val descriptor: EmbeddingProviderDescriptorV2 = delegate.descriptor
+  override val capabilities: EmbeddingCapabilities =
+    delegate.capabilities.copy(outputs = Set(EmbeddingOutputKind.Dense))
+  override val descriptor: EmbeddingProviderDescriptorV2 =
+    delegate.descriptor.copy(capabilities = capabilities)
 
   def embed(request: EmbeddingRequest): IO[RetrievalError, EmbeddingResponse] =
-    delegate.validate(request) *> {
+    validate(request) *> delegate.validate(request) *> {
       val texts = request.texts
       for
         now <- Clock.instant

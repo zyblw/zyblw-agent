@@ -380,5 +380,149 @@ object DefaultContextManagerSpec extends ZIOSpecDefault:
         second.worldSectionCursors == first.worldSectionCursors,
         !first.worldSectionCursors.toJson.contains("学习中医")
       )
+    },
+    test("被 memory 预算裁掉的记忆不会跨分区误删同正文的 RAG 检索证据，且准确记录实际交付文档 ID") {
+      val sharedText = "桂枝汤方：桂枝三两，芍药三两，甘草二两，生姜三两，大枣十二枚"
+      val sources    = ContextSources(
+        memories = Chunk(
+          ContextMemory("top-memory", "优先保留的重要用户偏好说明", importance = 10.0),
+          ContextMemory("dropped-memory", sharedText, importance = 1.0)
+        ),
+        retrieval = Chunk(
+          ContextDocument("doc-kept", sharedText, "shanghanlun", score = Some(0.95)),
+          ContextDocument("doc-dup", sharedText, "shanghanlun-dup", score = Some(0.90)),
+          ContextDocument("doc-over-budget", "超长附录资料" * 200, "appendix", score = Some(0.50))
+        )
+      )
+      manager
+        .build(
+          state(Chunk(AgentMessage.user("桂枝汤组成"))),
+          definition,
+          sources,
+          policy(memory = 45, retrieval = 120)
+        )
+        .map { prepared =>
+          assertTrue(
+            prepared.usage.droppedMemories == 1,
+            prepared.deliveredDocumentIds == Chunk("doc-kept"),
+            prepared.droppedDocumentReasons.get("doc-dup").contains("duplicate-content"),
+            prepared.droppedDocumentReasons.get("doc-over-budget").contains("budget-exceeded"),
+            prepared.messages.exists(_.text.contains(sharedText))
+          )
+        }
+    },
+    test("R2/R4：检索证据裁剪后按 [1]..[K] 连续重排并与 deliveredSources 严格对齐，withdrawnDocumentIds 清洗历史工具消息与摘要") {
+      val dupText = "重复引言"
+      val sources = ContextSources(
+        retrieval = Chunk(
+          ContextDocument("1", dupText, "book://doc-a", score = Some(0.95)),
+          ContextDocument("2", dupText, "book://doc-b", score = Some(0.90)),
+          ContextDocument("3", "条文三：太阳病，或已发热，或未发热", "book://doc-c", score = Some(0.82))
+        ),
+        citations = Chunk(
+          RunCitation("evidence-1", "book://doc-a", dupText, 0.95, chunkId = Some("c-a")),
+          RunCitation("evidence-2", "book://doc-b", dupText, 0.90, chunkId = Some("c-b")),
+          RunCitation("evidence-3", "book://doc-c", "条文三：太阳病，或已发热，或未发热", 0.82, chunkId = Some("c-c"))
+        ),
+        retrievalEvidence = Some(RunRetrievalEvidence("Supported", 3, 3, Some(0.95))),
+        withdrawnDocumentIds = Set("withdrawn-book"),
+        existingSummary = Some("保留摘要行\n已撤回引用 withdrawn-book 的旧摘要行")
+      )
+      val toolJson = zio.json
+        .DecoderOps(
+          """{"status":"ok","citations":[{"documentId":"withdrawn-book","chunkId":"w1"},{"documentId":"kept-book","chunkId":"k1"}],"results":[{"documentId":"withdrawn-book","text":"撤回正文"},{"documentId":"kept-book","text":"保留正文"}]}"""
+        )
+        .fromJson[zio.json.ast.Json]
+        .toOption
+        .get
+      val history = Chunk(
+        AgentMessage.user("先查资料"),
+        AgentMessage.tool(
+          "call-1",
+          "knowledge_fetch",
+          ToolResult(toolJson)
+        )
+      )
+      manager
+        .build(
+          state(history),
+          definition,
+          sources,
+          policy(retrieval = 200, toolCharacters = 500)
+        )
+        .map { prepared =>
+          val delivered = com.zyblw.agent.runtime.ContextAssembler.deliveredSources(sources, prepared)
+          val allText   = prepared.messages.map(ContextRendering.renderContent).mkString("\n")
+          assertTrue(
+            prepared.deliveredDocumentIds == Chunk("1", "3"),
+            allText.contains("[1] 重复引言"),
+            allText.contains("[2] 条文三：太阳病，或已发热，或未发热"),
+            !allText.contains("[3]"),
+            delivered.retrieval.map(_.id) == Chunk("1", "2"),
+            delivered.citations.map(_.id) == Chunk("evidence-1", "evidence-2"),
+            delivered.citations.map(_.sourceUri) == Chunk("book://doc-a", "book://doc-c"),
+            !allText.contains("withdrawn-book"),
+            !allText.contains("撤回正文"),
+            allText.contains("kept-book"),
+            allText.contains("保留正文")
+          )
+        }
+    },
+    test(
+      "F2/F3/7.1：SearchOutput 形态工具输出的 excerpts 与 excerptSources 成对撤回清洗、通用 cite-N 提示与持久化引用编号一致、含撤回来源的耐久摘要失效"
+    ) {
+      val sources = ContextSources(
+        retrieval = Chunk(
+          ContextDocument("cite-1", "重复正文", "book://doc-1"),
+          ContextDocument("cite-1-dup", "重复正文", "book://doc-1-dup"),
+          ContextDocument("cite-2", "第二段独立正文", "book://doc-2")
+        ),
+        citations = Chunk(
+          RunCitation("cite-1", "book://doc-1", "重复正文", 0.9),
+          RunCitation("cite-1-dup", "book://doc-1-dup", "重复正文", 0.85),
+          RunCitation("cite-2", "book://doc-2", "第二段独立正文", 0.8)
+        ),
+        withdrawnDocumentIds = Set("doc-withdrawn")
+      )
+      val searchOutputJson = zio.json
+        .DecoderOps(
+          """{"status":"ok","excerpts":["撤回文档独有正文 LEAKED_EXCERPT","保留文档正文 KEPT_EXCERPT","撤回邻接扩展块 LEAKED_NEIGHBOR"],"citations":[{"id":"cite-1","sourceUri":"book://withdrawn","excerpt":"撤回摘要","score":0.9,"pageNumbers":[1],"chunkId":"c-1","documentId":"doc-withdrawn"},{"id":"cite-2","sourceUri":"book://active","excerpt":"保留摘要","score":0.8,"pageNumbers":[2],"chunkId":"c-2","documentId":"doc-active"}],"excerptSources":[{"documentId":"doc-withdrawn","chunkId":"c-1"},{"documentId":"doc-active","chunkId":"c-2"},{"documentId":"doc-withdrawn","chunkId":"c-1-next"}],"evidenceStatus":"Supported","acceptedCount":2}"""
+        )
+        .fromJson[zio.json.ast.Json]
+        .toOption
+        .get
+      val history = Chunk(
+        AgentMessage.user("第一问"),
+        AgentMessage.tool("call-search", "knowledge_search", ToolResult(searchOutputJson))
+      )
+      val initialDigest  = ContextRendering.messagePrefixDigest(history.take(1))
+      val taintedSummary = ContextSummaryCheckpoint(
+        summary = "含撤回文档的旧摘要 TaintedSummaryText",
+        coveredMessages = 1,
+        sourceDigest = initialDigest,
+        compressorVersion = "deterministic-v1",
+        sourceDocumentIds = Set("doc-withdrawn")
+      )
+      manager
+        .build(
+          state(history).copy(contextSummary = Some(taintedSummary)),
+          definition,
+          sources,
+          policy(retrieval = 200, toolCharacters = 1000)
+        )
+        .map { prepared =>
+          val delivered = com.zyblw.agent.runtime.ContextAssembler.deliveredSources(sources, prepared)
+          val allText   = prepared.messages.map(ContextRendering.renderContent).mkString("\n")
+          assertTrue(
+            !allText.contains("LEAKED_EXCERPT"),
+            !allText.contains("LEAKED_NEIGHBOR"),
+            !allText.contains("TaintedSummaryText"),
+            allText.contains("KEPT_EXCERPT"),
+            allText.contains("[cite-1] 重复正文"),
+            allText.contains("[cite-2] 第二段独立正文"),
+            delivered.retrieval.map(_.id) == Chunk("cite-1", "cite-2"),
+            delivered.citations.map(_.id) == Chunk("cite-1", "cite-2")
+          )
+        }
     }
   )

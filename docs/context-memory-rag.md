@@ -1,8 +1,8 @@
 # Context、Memory 与 RAG 接入指南
 
-> 状态：0.9.0 当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
+> 状态：0.10.0 当前说明（模块稳定度见 [成熟度与路线](maturity-and-roadmap.md)）
 >
-> 最后核验：2026-10-11
+> 最后核验：2026-10-28
 >
 > 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
@@ -138,7 +138,9 @@ val knowledgeAgent = AgentDefinition(
 7. assistant `tool_calls` 与紧随其后的 Tool results 是一个原子组，要么一起保留，要么一起摘要/淘汰；
 8. 最近消息只选择连续 suffix，不会跳过一个放不下的新回合后又塞入更旧内容；
 9. 历史摘要必须通过 TokenCounter 二次复核，压缩器超过目标时 fail-closed；
-10. 最终总输入还会扣除 tools、output reserve 和 safety margin 后再次校验。
+10. 最终总输入还会扣除 tools、output reserve 和 safety margin 后再次校验；
+11. `PreparedContext` 同时返回 `deliveredDocumentIds`、`droppedDocumentReasons` 与 `deliveredDocumentDisplayIds`；当检索片段因去重或预算发生跳过时，`selectRetrieval` 与 `ContextAssembler.deliveredSources` 统一按 `1..K`、`cite-1..K` 或 `evidence-1..K` 对齐模型提示词与持久化引用；
+12. 当 `ContextSources.withdrawnDocumentIds` 非空时，`DefaultContextManager` 同步从检索候选、历史 `Tool` 消息（含 `KnowledgeTools.SearchOutput` 的 `excerpts`、`excerptSources`、`citations`、`results`）清洗已撤回文档，并使包含撤回来源的 `ContextSummaryCheckpoint`（记录 `sourceDocumentIds`）自动失效重算。
 
 `PreparedContext.debug` 只返回分区预算、使用 token、包含/丢弃/截断数量和固定 Context Rot code，不包含 prompt、Memory
 key/value、RAG query/document/source 或工具正文。当前信号包括：输入接近上限、历史重度淘汰、工具结果已外置、Runtime Status 因预算省略、Memory/RAG

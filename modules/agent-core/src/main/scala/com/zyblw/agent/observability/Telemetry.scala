@@ -59,6 +59,66 @@ object AgentTelemetry:
         case (current, (key, value)) => ZIO.logAnnotate(key, value)(current)
       })
 
+  /** 生产环境未配置外部 OTLP/Langfuse 时的低噪结构化日志回退实现。
+    *
+    * 仅对失败事件、慢操作（>= 1000ms）与评测结果输出单行结构化日志，确保关键 RAG/Memory/Worker 异常不落入黑洞。
+    */
+  private def sanitizeLogValue(raw: String): String =
+    val singleLine = raw.replace('\r', ' ').replace('\n', ' ').trim
+    if singleLine.contains(',') || singleLine.contains('=') || singleLine.contains('"') then
+      "\"" + singleLine.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+    else singleLine
+
+  val structuredLog: ULayer[AgentTelemetry] = ZLayer.succeed(new AgentTelemetry:
+    def emit(event: TelemetryEvent): UIO[Unit] =
+      val durationMs = event.startedAtEpochMilli
+        .filter(_ <= event.atEpochMilli)
+        .map(started => event.atEpochMilli - started)
+      val outcome   = event.attributes.getOrElse("agent.outcome", "succeeded")
+      val isFailure = outcome != "succeeded"
+      val isSlow    = durationMs.exists(_ >= 1000L)
+      val isEval    = event.name == "agent.evaluation"
+      if !isFailure && !isSlow && !isEval then ZIO.unit
+      else
+        val kv = (
+          event.runId.map(id => "runId" -> id.asString).toList ++
+            durationMs.map(ms => "durationMs" -> ms.toString).toList ++
+            event.attributes
+              .filterNot(_._1.startsWith("langfuse."))
+              .toList
+              .sortBy(_._1) ++
+            event.measurements.toList.sortBy(_._1).map((k, v) => k -> v.toString)
+        ).map((k, v) => s"$k=${sanitizeLogValue(v)}").mkString(", ")
+        val msg       = s"${event.name}: $kv"
+        val logEffect =
+          if isFailure || isSlow then ZIO.logWarning(msg)
+          else ZIO.logInfo(msg)
+        val baseAnnotations = Set(
+          LogAnnotation("component", "agent-telemetry"),
+          LogAnnotation("operation", event.name)
+        ) ++ event.runId.map(id => LogAnnotation("run_id", id.asString)).toSet
+        ZIO.logAnnotate(baseAnnotations)(logEffect)
+
+    def span[R, E, A](name: String, attributes: Map[String, String])(effect: ZIO[R, E, A]): ZIO[R, E, A] =
+      effect.exit.timed.flatMap { case (duration, exit) =>
+        val durationMs = duration.toMillis
+        val logEffect  =
+          if exit.isFailure || durationMs >= 1000L then
+            val attrs =
+              attributes.toList.sortBy(_._1).map((k, v) => s"$k=${sanitizeLogValue(v)}").mkString(", ")
+            val suffix = if attrs.nonEmpty then s", $attrs" else ""
+            ZIO.logAnnotate(
+              LogAnnotation("component", "agent-telemetry"),
+              LogAnnotation("operation", name)
+            ) {
+              ZIO.logWarning(
+                s"$name: outcome=${if exit.isSuccess then "succeeded" else "failed"}, durationMs=$durationMs$suffix"
+              )
+            }
+          else ZIO.unit
+        logEffect *> ZIO.suspendSucceed(exit)
+      })
+
 final class InMemoryTelemetry private (ref: Ref[Chunk[TelemetryEvent]]) extends AgentTelemetry:
   def emit(event: TelemetryEvent): UIO[Unit] = ref.update(_ :+ event)
   def events: UIO[Chunk[TelemetryEvent]]     = ref.get

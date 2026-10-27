@@ -196,6 +196,7 @@ object OpenAIHttpContractSpec extends ZIOSpecDefault:
       for
         bodies        <- Ref.make(Chunk.empty[String])
         streamStarted <- Promise.make[Nothing, Unit]
+        firstEvent    <- Promise.make[Nothing, Unit]
         streamClosed  <- Promise.make[Nothing, Unit]
         closed        <- (for
           _      <- TestServer.addRoutes(routes(bodies, streamStarted, streamClosed))
@@ -210,12 +211,14 @@ object OpenAIHttpContractSpec extends ZIOSpecDefault:
           )
           cancelFiber <- OpenAICompatibleChatModel(client, config)
             .stream(ChatRequest(Chunk(AgentMessage.user("hello"))))
+            .tap(_ => firstEvent.succeed(()).unit)
             .runDrain
             .fork
           // 取消传播是资源生命周期契约，必须使用独立 Client/Server Scope；若与前面的断流和超时复用
           // 连接池，测试结果会混入旧连接回收速度，而不再只验证当前无限 Body 是否收到中断。
-          _ <- streamStarted.await.timeoutFail(new RuntimeException("cancel-stream 未在 10 秒内建立"))(10.seconds)
-          _ <- cancelFiber.interrupt
+          _ <- (streamStarted.await *> firstEvent.await)
+            .timeoutFail(new RuntimeException("cancel-stream 未在 10 秒内建立"))(10.seconds)
+          _      <- cancelFiber.interrupt
           closed <- streamClosed.await.timeout(10.seconds)
         yield closed).provide(Client.default, TestServer.default)
       yield assertTrue(closed.isDefined)

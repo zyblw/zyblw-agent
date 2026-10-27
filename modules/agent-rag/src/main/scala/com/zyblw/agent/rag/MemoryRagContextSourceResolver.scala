@@ -89,6 +89,9 @@ final class MemoryRagContextSourceResolver(
       grounding =
         if refusing then GroundingDecision.Refuse(MemoryRagContextSourceResolver.RefusalMessage)
         else GroundingDecision.Proceed,
+      refusalMessageOnEmptyDelivery = Option.when(
+        !refusing && policy.lowEvidenceResponse == LowEvidenceResponse.RequireExplicitRefusal && result.hits.nonEmpty
+      )(MemoryRagContextSourceResolver.RefusalMessage),
       citations = result.hits.map { case (hit, citation) =>
         RunCitation(
           citation.id,

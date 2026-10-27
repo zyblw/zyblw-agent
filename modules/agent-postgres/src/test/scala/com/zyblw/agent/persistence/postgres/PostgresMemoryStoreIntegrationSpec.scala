@@ -126,9 +126,14 @@ object PostgresMemoryStoreIntegrationSpec extends ZIOSpecDefault:
           kind = MemoryKind.Episodic,
           expiresAtEpochMilli = Some(now.plusSeconds(5).toEpochMilli)
         )
-        _       <- harness.store.put(scopeA, expiring)
-        purged  <- harness.store.purgeExpired(now.plusSeconds(6).toEpochMilli, 10)
-        expired <- harness.store.get(scopeA, "session.temporary")
+        _                  <- harness.store.put(scopeA, expiring)
+        purged             <- harness.store.purgeExpired(now.plusSeconds(6).toEpochMilli, 10)
+        expired            <- harness.store.get(scopeA, "session.temporary")
+        barrierBeforeScope <- harness.store.currentBarrier(scopeA)
+        _                  <- harness.store.delete(scopeA, "predeleted.unborn")
+        barrierAfterSingle <- harness.store.currentBarrier(scopeA)
+        _                  <- harness.store.deleteScope(scopeA)
+        barrierAfterScope  <- harness.store.currentBarrier(scopeA)
       yield assertTrue(
         races.count(_.isSuccess) == 1,
         races.count(_.isFailure) == 1,
@@ -138,7 +143,10 @@ object PostgresMemoryStoreIntegrationSpec extends ZIOSpecDefault:
         staleAfterDelete.isFailure,
         cleared,
         purged == 1L,
-        expired.isEmpty
+        expired.isEmpty,
+        barrierBeforeScope.scopeGeneration == 0L,
+        barrierAfterSingle.tombstoneVersions.get("predeleted.unborn").contains(1L),
+        barrierAfterScope.scopeGeneration == 1L
       )).provideLayer(harnessLayer)
     } @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
       3.minutes
@@ -198,6 +206,60 @@ object PostgresMemoryStoreIntegrationSpec extends ZIOSpecDefault:
         audit._4 == 1L,
         audit._5 == "tenant-a",
         audit._6 == "user-a"
+      )).provideLayer(harnessLayer)
+    } @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
+      3.minutes
+    ) @@ TestAspect.sequential,
+    test("PostgreSQL 删除屏障：单键删后重建保留历史删除版本阻止旧屏障 CAS，且 __scope_barrier__ 对业务读写不可见") {
+      (for
+        harness <- ZIO.service[Harness]
+        now     <- Clock.instant
+        scope = MemoryScope.User(TenantId("tenant-barrier"), UserId("user-barrier"))
+        _         <- harness.store.compareAndSet(scope, 0L, entry("topic.key", "v1", now))
+        barrierT0 <- harness.store.currentBarrier(scope)
+        _         <- harness.store.delete(scope, "topic.key")
+        rebuilt   <- harness.store.compareAndSet(
+          scope,
+          2L,
+          entry("topic.key", "v2-rebuilt", now.plusSeconds(1))
+        )
+        staleCas <- harness.store
+          .compareAndSet(
+            scope,
+            rebuilt.version,
+            entry("topic.key", "stale-from-t0", now.plusSeconds(2)),
+            Some(barrierT0)
+          )
+          .exit
+        current            <- harness.store.get(scope, "topic.key")
+        barrierBeforeScope <- harness.store.currentBarrier(scope)
+        _                  <- harness.store.deleteScope(scope)
+        staleScopeCas      <- harness.store
+          .compareAndSet(
+            scope,
+            0L,
+            entry("new.after.clear", "stale", now.plusSeconds(3)),
+            Some(barrierBeforeScope)
+          )
+          .exit
+        reservedPut <- harness.store.put(scope, entry(MemoryStore.ScopeBarrierKey, "bad", now)).exit
+        reservedCas <- harness.store
+          .compareAndSet(scope, 0L, entry(MemoryStore.ScopeBarrierKey, "bad", now))
+          .exit
+        reservedDel <- harness.store.delete(scope, MemoryStore.ScopeBarrierKey).exit
+        reservedGet <- harness.store.get(scope, MemoryStore.ScopeBarrierKey)
+        listed      <- harness.store.list(scope, 20)
+        searched    <- harness.store.search(scope, "scope_barrier", 20)
+      yield assertTrue(
+        staleCas.isFailure,
+        current.exists(_.value == Json.Str("v2-rebuilt")),
+        staleScopeCas.isFailure,
+        reservedPut.isFailure,
+        reservedCas.isFailure,
+        reservedDel.isFailure,
+        reservedGet.isEmpty,
+        !listed.exists(_.key == MemoryStore.ScopeBarrierKey),
+        !searched.exists(_.key == MemoryStore.ScopeBarrierKey)
       )).provideLayer(harnessLayer)
     } @@ PostgresIntegrationAspect.enabled @@ TestAspect.timeout(
       3.minutes

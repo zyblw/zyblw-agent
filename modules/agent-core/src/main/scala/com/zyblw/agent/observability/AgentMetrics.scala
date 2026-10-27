@@ -173,6 +173,31 @@ object AgentMetrics:
   /** 未启用 Metrics 时的零成本实现。 */
   val noop: ULayer[AgentMetrics] = ZLayer.succeed((_: AgentMetric) => ZIO.unit)
 
+  /** 未配置外部指标收集器时的结构化日志降级出口：只记录失败、慢检索与组合漂移告警。 */
+  val structuredLog: ULayer[AgentMetrics] = ZLayer.succeed {
+    case AgentMetric.CompositionDriftDetected(kind) =>
+      ZIO.logWarning(s"agent.metric.composition_drift: kind=$kind")
+    case AgentMetric.RetrievalFinished(operation, outcome, durationSeconds, hitCount)
+        if outcome != MetricOutcome.Succeeded || durationSeconds.exists(_ >= 1.0) =>
+      val durationMs = durationSeconds.map(s => (s * 1000.0).toLong).getOrElse(-1L)
+      ZIO.logWarning(
+        s"agent.metric.retrieval: operation=$operation, outcome=${outcome.label}, durationMs=$durationMs, hitCount=$hitCount"
+      )
+    case AgentMetric.MemoryOperationFinished(operation, outcome, durationSeconds)
+        if outcome != MetricOutcome.Succeeded || durationSeconds.exists(_ >= 1.0) =>
+      val durationMs = durationSeconds.map(s => (s * 1000.0).toLong).getOrElse(-1L)
+      ZIO.logWarning(
+        s"agent.metric.memory: operation=$operation, outcome=${outcome.label}, durationMs=$durationMs"
+      )
+    case AgentMetric.WorkerCommandFinished(command, outcome, durationSeconds)
+        if outcome != MetricOutcome.Succeeded =>
+      val durationMs = durationSeconds.map(s => (s * 1000.0).toLong).getOrElse(-1L)
+      ZIO.logWarning(
+        s"agent.metric.worker_command: command=$command, outcome=${outcome.label}, durationMs=$durationMs"
+      )
+    case _ => ZIO.unit
+  }
+
   /** 从环境记录一个指标，便于 RAG、Memory、Worker 等模块在业务 effect 周围组合。 */
   def record(metric: AgentMetric): URIO[AgentMetrics, Unit] =
     ZIO.serviceWithZIO[AgentMetrics](_.record(metric))

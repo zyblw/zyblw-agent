@@ -320,6 +320,36 @@ final class AdminHttpApi(
                 view   <- inspection.approval(parsed)
               yield view.fold(Response.status(Status.NotFound))(value => Response.json(value.toJson))
             }
+          },
+        Method.GET / "api" / "v1" / "admin" / "runs" / string("runId") / "inspection" ->
+          handler { (runId: String, request: Request) =>
+            respond {
+              for
+                _      <- authorizeRead(request)
+                parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+                view   <- inspection.inspection(parsed)
+              yield view.fold(Response.status(Status.NotFound))(value => Response.json(value.toJson))
+            }
+          },
+        Method.GET / "api" / "v1" / "admin" / "runs" / string("runId") / "trajectory" ->
+          handler { (runId: String, request: Request) =>
+            respond {
+              for
+                _      <- authorizeRead(request)
+                parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+                view   <- inspection.trajectory(parsed)
+              yield view.fold(Response.status(Status.NotFound))(value => Response.json(value.toJson))
+            }
+          },
+        Method.GET / "api" / "v1" / "admin" / "runs" / string("runId") / "incident-pack" ->
+          handler { (runId: String, request: Request) =>
+            respond {
+              for
+                _      <- authorizeRead(request)
+                parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+                view   <- inspection.incidentPack(parsed)
+              yield view.fold(Response.status(Status.NotFound))(value => Response.json(value.toJson))
+            }
           }
       )
     }
@@ -590,7 +620,7 @@ final class AdminHttpApi(
 
   /** 集中把领域错误映射为已有的稳定状态码与脱敏 JSON。 */
   private def respond(effect: IO[AgentError, Response]): UIO[Response] =
-    effect.catchAll(error => ZIO.succeed(HttpErrorResponse.from(error)))
+    HttpErrorResponse.respond("admin-http-api")(effect)
 
 object AdminHttpApi:
   /** Provider 与模型名的最大字符数；两者都是路由标识而不是自由文本。 */

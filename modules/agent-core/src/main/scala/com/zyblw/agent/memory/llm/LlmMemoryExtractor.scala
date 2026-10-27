@@ -169,7 +169,9 @@ final class LlmMemoryExtractor(
             "上一次工具参数未通过本地 schema 或逐字证据校验。请重新调用唯一工具；不要解释，不要复述失败内容。"
           )
         )
-        callAndDecode(repairRequest, sources, sourceRunId, repairsRemaining - 1)
+        ZIO.logWarning(
+          s"agent.memory.extractor.repair_retry runId=${sourceRunId.asString} reason=${error.message.take(120)} repairsRemaining=$repairsRemaining"
+        ) *> callAndDecode(repairRequest, sources, sourceRunId, repairsRemaining - 1)
       case error => ZIO.fail(error)
     }
 

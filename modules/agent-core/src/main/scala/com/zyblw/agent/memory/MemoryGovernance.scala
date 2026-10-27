@@ -362,7 +362,11 @@ final class MemoryGovernanceService(
   /** 删除一条记忆；不存在时保持幂等，但仍审计 affectedCount=0。 */
   def delete(actor: RunContext, scope: MemoryScope, key: String): IO[AgentError, Long] =
     for
-      _       <- authorize(actor, scope, write = true)
+      _ <- authorize(actor, scope, write = true)
+      _ <- ZIO
+        .fail(AgentError.MemoryPolicyRejected(key, "reserved-memory-key"))
+        .when(key.trim == MemoryStore.ScopeBarrierKey)
+        .unit
       now     <- Clock.instant
       auditId <- Random.nextUUID
       audit = MemoryAuditRecord(

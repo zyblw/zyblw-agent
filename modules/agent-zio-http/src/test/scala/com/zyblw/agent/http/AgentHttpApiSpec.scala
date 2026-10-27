@@ -452,5 +452,34 @@ object AgentHttpApiSpec extends ZIOSpecDefault:
         body.contains("/api/v1/runs/{runId}"),
         unversioned.status == Status.NotFound
       )
+    },
+    test("progressEventRoutes 在事件列表与 SSE 历史重放中均剥离完成事件正文 output，而通用 eventRoutes 保留完整合同") {
+      for
+        rawListResp <- api.eventRoutes.runZIO(Request.get(v1 / "runs" / streamRunId.asString / "events"))
+        rawListBody <- rawListResp.body.asString
+        rawSseResp  <- api.eventRoutes.runZIO(
+          Request.get(v1 / "runs" / streamRunId.asString / "events" / "stream")
+        )
+        rawSseBody       <- rawSseResp.body.asString
+        progressListResp <- api.progressEventRoutes.runZIO(
+          Request.get(v1 / "runs" / streamRunId.asString / "events")
+        )
+        progressListBody <- progressListResp.body.asString
+        progressSseResp  <- api.progressEventRoutes.runZIO(
+          Request.get(v1 / "runs" / streamRunId.asString / "events" / "stream")
+        )
+        progressSseBody <- progressSseResp.body.asString
+      yield assertTrue(
+        rawListResp.status == Status.Ok,
+        rawListBody.contains("\"output\":\"done\""),
+        rawSseResp.status == Status.Ok,
+        rawSseBody.contains("\"output\":\"done\""),
+        progressListResp.status == Status.Ok,
+        progressListBody.contains("\"eventType\":\"RunCompleted\""),
+        !progressListBody.contains("\"output\":\"done\""),
+        progressSseResp.status == Status.Ok,
+        progressSseBody.contains("RunCompleted"),
+        !progressSseBody.contains("\"output\":\"done\"")
+      )
     }
   )

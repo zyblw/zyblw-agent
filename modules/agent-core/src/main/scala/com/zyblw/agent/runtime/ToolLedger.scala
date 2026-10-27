@@ -52,6 +52,9 @@ private[agent] trait ToolLedger:
   /** Running → Unknown。崩溃恢复在无法判断外部副作用时的收口写入。 */
   def settleUnknown(existing: ToolExecutionRecord, at: Long): IO[AgentError, ToolExecutionRecord]
 
+  /** Running → Running，仅在中断或崩溃恢复边界刷新活跃时间戳，用于跨崩溃时长核算。 */
+  def touchRunning(active: ToolExecutionRecord, at: Long): IO[AgentError, ToolExecutionRecord]
+
   def get(runId: RunId, callId: String): IO[AgentError, Option[ToolExecutionRecord]]
 
   /** 按批次读取全部 pending write，用于部分成功恢复。 */
@@ -137,6 +140,15 @@ object ToolLedger:
       transition(
         existing,
         existing.copy(status = ToolExecutionStatus.Unknown, updatedAtEpochMilli = at)
+      )
+
+    def touchRunning(active: ToolExecutionRecord, at: Long): IO[AgentError, ToolExecutionRecord] =
+      transition(
+        active,
+        active.copy(
+          status = ToolExecutionStatus.Running,
+          updatedAtEpochMilli = math.max(active.updatedAtEpochMilli, at)
+        )
       )
 
     def get(runId: RunId, callId: String): IO[AgentError, Option[ToolExecutionRecord]] =

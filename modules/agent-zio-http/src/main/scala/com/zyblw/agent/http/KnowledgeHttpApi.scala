@@ -255,7 +255,7 @@ final class KnowledgeHttpApi(
     )
 
   private def respond(effect: IO[AgentError, Response]): UIO[Response] =
-    effect.catchAll(error => ZIO.succeed(HttpErrorResponse.from(error)))
+    HttpErrorResponse.respond("knowledge-http-api")(effect)
 
 object KnowledgeHttpApi:
   val layer: URLayer[KnowledgeService & AgentRequestContextResolver, KnowledgeHttpApi] =

@@ -26,6 +26,28 @@ final case class ContextDocument(id: String, content: String, source: String, sc
   )
   require(score.forall(_.isFinite), "ContextDocument score 必须是有限数")
 
+object ContextDocument:
+  /** 将按顺序编号的引用 ID（纯数字、`cite-N`、`evidence-N`）统一重编为实际交付给模型的紧凑序号 `1..K`。 */
+  def displayIdFor(rawId: String, ordinal: Int): String =
+    val trimmed = rawId.trim
+    if trimmed.nonEmpty && trimmed.forall(_.isDigit) then ordinal.toString
+    else if trimmed.startsWith("cite-") && trimmed.drop(5).nonEmpty && trimmed.drop(5).forall(_.isDigit) then
+      s"cite-$ordinal"
+    else if trimmed.startsWith("evidence-") && trimmed.drop(9).nonEmpty && trimmed.drop(9).forall(_.isDigit)
+    then s"evidence-$ordinal"
+    else rawId
+
+  /** 将持久化的 `RunCitation.id` 对齐到实际交付文档在提示中的显示编号。 */
+  def alignCitationId(rawCiteId: String, displayDocId: Option[String], ordinal: Int): String =
+    displayDocId match
+      case Some(docDisplayId)
+          if (rawCiteId.forall(_.isDigit) && docDisplayId.forall(_.isDigit)) ||
+            (rawCiteId.startsWith("cite-") && docDisplayId.startsWith("cite-")) ||
+            (rawCiteId.startsWith("evidence-") && docDisplayId.startsWith("evidence-")) =>
+        docDisplayId
+      case _ =>
+        displayIdFor(rawCiteId, ordinal)
+
 /** 一条经过 Memory 生命周期治理、可以进入当前回合的长期记忆。
   *
   * @param key
@@ -62,7 +84,11 @@ final case class ContextSources(
     /** 上一会话注入的 user/assistant 工作记忆；进入 recentMessages 分区，不是 RAG 或 System 策略。 */
     priorTurns: Chunk[AgentMessage] = Chunk.empty,
     /** 证据不足以回答时，Runtime 直接完成拒绝，不再把决定交给模型。 */
-    grounding: GroundingDecision = GroundingDecision.Proceed
+    grounding: GroundingDecision = GroundingDecision.Proceed,
+    /** 严格拒答策略下，若检索阶段有候选但 Context 装箱因预算/去重将本轮检索片段全部裁空时的拒答文案。 */
+    refusalMessageOnEmptyDelivery: Option[String] = None,
+    /** 本回合经宿主核验已撤回或修订失效的文档 ID 集合；ContextManager 在装配历史工具消息与摘要时予以剔除。 */
+    withdrawnDocumentIds: Set[String] = Set.empty
 )
 
 /** 这一回合是否允许模型在没有足够检索证据时继续作答。 */
@@ -123,7 +149,10 @@ object ContextSourceResolver:
             citations = left.citations ++ right.citations,
             retrievalEvidence = right.retrievalEvidence.orElse(left.retrievalEvidence),
             priorTurns = left.priorTurns ++ right.priorTurns,
-            grounding = combineGrounding(left.grounding, right.grounding)
+            grounding = combineGrounding(left.grounding, right.grounding),
+            refusalMessageOnEmptyDelivery =
+              left.refusalMessageOnEmptyDelivery.orElse(right.refusalMessageOnEmptyDelivery),
+            withdrawnDocumentIds = left.withdrawnDocumentIds ++ right.withdrawnDocumentIds
           )
         }
       }
@@ -225,7 +254,13 @@ final case class PreparedContext(
     compressionUsage: TokenUsage = TokenUsage(),
     sectionDecisions: Chunk[ContextSectionDecision] = Chunk.empty,
     worldSectionCursors: Chunk[ContextSectionCursor] = Chunk.empty,
-    promptLineage: PromptLineage = PromptLineage.empty
+    promptLineage: PromptLineage = PromptLineage.empty,
+    /** 本回合实际装箱进入 `messages` 的检索片段稳定 ID 顺序列表。 */
+    deliveredDocumentIds: Chunk[String] = Chunk.empty,
+    /** 本回合未进入 `messages` 的检索片段稳定 ID 及其丢弃原因（例如 `"duplicate-content"`、`"budget-exceeded"`）。 */
+    droppedDocumentReasons: Map[String, String] = Map.empty,
+    /** 本回合实际交付文档的原始 ID 到模型可见显示编号（如 `cite-2 -> cite-1`）的确定性映射。 */
+    deliveredDocumentDisplayIds: Map[String, String] = Map.empty
 )
 
 /** Provider tokenizer 的可替换边界。 */
@@ -380,29 +415,44 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
     // 至少为本回合主模型保留一次调用；辅助压缩不能提前耗尽整个 Run 的 modelCalls 预算。
     val compressionCallBudget = math.max(0, state.budget.limits.maxModelCalls - state.usage.modelCalls - 1)
     for
-      normalized     <- validateToolOutputs(state.messages, policy)
-      systemMessages <- buildSystemMessages(definition, sources)
-      systemTokens   <- countMessages(systemMessages)
-      _              <- failOverBudget("system/safety", systemTokens, budget.system)
-      deduplicated     = deduplicateSources(sources)
-      memoryCandidates = deduplicated.memories
-        .sortBy(memory => (-memory.importance, memory.key))
-        .map(renderMemory)
-      memorySelection <- selectSection(memoryCandidates, budget.memory)
+      normalized      <- validateToolOutputs(state.messages, policy)
+      systemMessages  <- buildSystemMessages(definition, sources)
+      systemTokens    <- countMessages(systemMessages)
+      _               <- failOverBudget("system/safety", systemTokens, budget.system)
+      memorySelection <- selectMemories(sources.memories, budget.memory)
       sectionPlan = ContextWorldSections.plan(
         state.worldSectionCursors,
         sources.sections,
         omitUnchanged = policy.worldStateDelivery == WorldStateDelivery.TrustedStatefulDelta
       )
-      documentMessages    = deduplicated.retrieval.map(renderDocument)
-      retrievalCandidates = sectionPlan.messages ++ documentMessages
-      retrievalSelection <- selectSection(retrievalCandidates, budget.retrieval)
+      retrievalSelection <- selectRetrieval(
+        sectionPlan.messages,
+        sources.retrieval,
+        budget.retrieval,
+        memorySelection.includedFingerprints
+      )
       runtimeStatus = RuntimeStatusContext.message(state)
       runtimeStatusTokens <- counter.countMessage(runtimeStatus)
-      recentPlan          <- planRecent(
-        state,
-        sources.priorTurns ++ normalized.messages,
-        sources.existingSummary,
+      scrubbedStateMessages = scrubWithdrawnMessages(normalized.messages, sources.withdrawnDocumentIds)
+      scrubbedPriorTurns    = scrubWithdrawnMessages(sources.priorTurns, sources.withdrawnDocumentIds)
+      summaryHasWithdrawn   = state.contextSummary.exists(cp =>
+        sources.withdrawnDocumentIds.nonEmpty &&
+          (cp.sourceDocumentIds.isEmpty || cp.sourceDocumentIds
+            .intersect(sources.withdrawnDocumentIds)
+            .nonEmpty)
+      )
+      effectiveState =
+        if sources.withdrawnDocumentIds.isEmpty ||
+          (scrubbedStateMessages == normalized.messages && !summaryHasWithdrawn)
+        then state
+        else state.copy(contextSummary = None, messages = scrubbedStateMessages)
+      effectiveExistingSummary =
+        if sources.withdrawnDocumentIds.nonEmpty then None
+        else sources.existingSummary
+      recentPlan <- planRecent(
+        effectiveState,
+        scrubbedPriorTurns ++ scrubbedStateMessages,
+        effectiveExistingSummary,
         policy,
         compressionCallBudget
       )
@@ -415,8 +465,9 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
       promptLineage <- ZIO.fromEither(PromptCompiler.lineage(allMessages))
       totalTokens   <- countMessages(allMessages)
       _             <- failOverBudget("total input", totalTokens, inputBudget)
-      droppedMemories  = memorySelection.dropped + deduplicated.duplicateMemories
-      droppedRetrieval = retrievalSelection.dropped + deduplicated.duplicateRetrieval
+      droppedMemories  = memorySelection.dropped + memorySelection.duplicates
+      droppedRetrieval = retrievalSelection.dropped + retrievalSelection.duplicates
+      totalDuplicates  = memorySelection.duplicates + retrievalSelection.duplicates
       compressionUsage = recentPlan.compressionUsage
       compressionCalls = recentPlan.compressionCalls
       usage            = ContextUsage(
@@ -480,7 +531,7 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
         normalized.truncated,
         droppedMemories,
         droppedRetrieval,
-        deduplicated.totalDuplicates,
+        totalDuplicates,
         runtimeStatusIncluded = statusFits
       )
     yield PreparedContext(
@@ -491,7 +542,10 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
       compressionUsage,
       sectionPlan.decisions,
       sectionPlan.cursors,
-      promptLineage
+      promptLineage,
+      retrievalSelection.deliveredDocumentIds,
+      retrievalSelection.droppedDocumentReasons,
+      retrievalSelection.deliveredDocumentDisplayIds
     )
 
   /** Agent 指令与安全约束都不可静默丢弃，合并后由 system 分区统一硬校验。 */
@@ -730,14 +784,18 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
           _ <- ZIO
             .fail(AgentError.ContextBuildFailed("ContextCompressor 返回空摘要"))
             .when(rendered.trim.isEmpty)
-          wrapped    = summaryMessage(s"$historySummaryBoundary$rendered")
-          checkpoint = ContextSummaryCheckpoint(
+          wrapped   = summaryMessage(s"$historySummaryBoundary$rendered")
+          sourceIds =
+            checkpoint.fold(Set.empty[String])(_.sourceDocumentIds) ++
+              extractDocumentIdsFromMessages(rawMessages.take(droppedCount))
+          updatedCheckpoint = ContextSummaryCheckpoint(
             summary = rendered,
             coveredMessages = droppedCount,
             sourceDigest = ContextRendering.messagePrefixDigest(rawMessages.take(droppedCount)),
-            compressorVersion = result.compressorVersion
+            compressorVersion = result.compressorVersion,
+            sourceDocumentIds = sourceIds
           )
-        yield SummaryBuild(wrapped, result.usage, result.modelCalls, Some(checkpoint))
+        yield SummaryBuild(wrapped, result.usage, result.modelCalls, Some(updatedCheckpoint))
 
   /** 在任何 Provider 调用前验证应用装配与 AgentDefinition 声明一致。
     *
@@ -793,7 +851,7 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
     if current.nonEmpty then groups += current
     Chunk.fromIterable(groups)
 
-  /** 对 Memory/RAG 候选逐项计数；超限项被跳过，后续较小项仍有机会进入。 */
+  /** 对候选消息逐项计数；超限项被跳过，后续较小项仍有机会进入。 */
   private def selectSection(candidates: Chunk[AgentMessage], budget: Long): UIO[SectionSelection] =
     ZIO.foldLeft(candidates)(SectionSelection(Chunk.empty, 0L, 0, 0)) { (state, message) =>
       counter.countMessage(message).map { size =>
@@ -807,26 +865,271 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
       }
     }
 
-  /** 按正文 SHA-256 去除重复 Memory/RAG，避免同一片段多次占据上下文并放大 prompt injection。 Memory 优先于 Retrieval；debug
-    * 只记录重复数量，不暴露哈希或正文。
-    */
-  private def deduplicateSources(sources: ContextSources): DeduplicatedSources =
-    var fingerprints      = Set.empty[String]
-    var duplicateMemories = 0
-    val memories          = sources.memories.filter { memory =>
+  /** 按重要性排序去重并选择可放入 memory 分区预算的记忆；只有实际放入上下文的记忆才产生跨分区去重指纹，避免因 memory 预算不足导致相同正文的 RAG 片段一起消失。 */
+  private def selectMemories(memories: Chunk[ContextMemory], budget: Long): UIO[MemorySelection] =
+    val sorted = memories.sortBy(memory => (-memory.importance, memory.key))
+    ZIO.foldLeft(sorted)(MemorySelection(Chunk.empty, 0L, 0, 0, 0, Set.empty, Set.empty)) { (state, memory) =>
       val fingerprint = ContextRendering.sha256(memory.content)
-      val fresh       = !fingerprints(fingerprint)
-      if fresh then fingerprints += fingerprint else duplicateMemories += 1
-      fresh
+      if state.seenFingerprints.contains(fingerprint) then
+        ZIO.succeed(state.copy(duplicates = state.duplicates + 1))
+      else
+        val rendered = renderMemory(memory)
+        counter.countMessage(rendered).map { size =>
+          if state.usedTokens + size <= budget then
+            state.copy(
+              messages = state.messages :+ rendered,
+              usedTokens = state.usedTokens + size,
+              included = state.included + 1,
+              seenFingerprints = state.seenFingerprints + fingerprint,
+              includedFingerprints = state.includedFingerprints + fingerprint
+            )
+          else
+            state.copy(
+              dropped = state.dropped + 1,
+              seenFingerprints = state.seenFingerprints + fingerprint
+            )
+        }
     }
-    var duplicateRetrieval = 0
-    val retrieval          = sources.retrieval.filter { document =>
-      val fingerprint = ContextRendering.sha256(document.content)
-      val fresh       = !fingerprints(fingerprint)
-      if fresh then fingerprints += fingerprint else duplicateRetrieval += 1
-      fresh
+
+  /** 先装入 world-state section，再按顺序对检索片段执行跨分区去重与预算装箱，并精确记录实际交付的文档 ID 与丢弃原因。 */
+  private def selectRetrieval(
+      sectionMessages: Chunk[AgentMessage],
+      documents: Chunk[ContextDocument],
+      budget: Long,
+      includedMemoryFingerprints: Set[String]
+  ): UIO[RetrievalSelection] =
+    selectSection(sectionMessages, budget).flatMap { sectionSelected =>
+      val initial = RetrievalSelection(
+        messages = sectionSelected.messages,
+        usedTokens = sectionSelected.usedTokens,
+        included = sectionSelected.included,
+        dropped = sectionSelected.dropped,
+        duplicates = 0,
+        seenFingerprints = includedMemoryFingerprints,
+        deliveredDocumentIds = Chunk.empty,
+        droppedDocumentReasons = Map.empty,
+        deliveredDocumentDisplayIds = Map.empty
+      )
+      ZIO.foldLeft(documents)(initial) { (state, document) =>
+        val fingerprint = ContextRendering.sha256(document.content)
+        if state.seenFingerprints.contains(fingerprint) then
+          ZIO.succeed(
+            state.copy(
+              duplicates = state.duplicates + 1,
+              droppedDocumentReasons = state.droppedDocumentReasons.updated(document.id, "duplicate-content")
+            )
+          )
+        else
+          val ordinal   = state.deliveredDocumentIds.length + 1
+          val displayId =
+            if state.droppedDocumentReasons.nonEmpty then ContextDocument.displayIdFor(document.id, ordinal)
+            else document.id
+          val displayDoc =
+            if displayId == document.id then document
+            else document.copy(id = displayId)
+          val rendered = renderDocument(displayDoc)
+          counter.countMessage(rendered).map { size =>
+            if state.usedTokens + size <= budget then
+              state.copy(
+                messages = state.messages :+ rendered,
+                usedTokens = state.usedTokens + size,
+                included = state.included + 1,
+                seenFingerprints = state.seenFingerprints + fingerprint,
+                deliveredDocumentIds = state.deliveredDocumentIds :+ document.id,
+                deliveredDocumentDisplayIds =
+                  state.deliveredDocumentDisplayIds.updated(document.id, displayId)
+              )
+            else
+              state.copy(
+                dropped = state.dropped + 1,
+                droppedDocumentReasons = state.droppedDocumentReasons.updated(document.id, "budget-exceeded")
+              )
+          }
+      }
     }
-    DeduplicatedSources(memories, retrieval, duplicateMemories, duplicateRetrieval)
+
+  private def extractDocumentIdsFromMessages(messages: Chunk[AgentMessage]): Set[String] =
+    def extractFromJson(json: Json): Set[String] = json match
+      case Json.Obj(fields) =>
+        fields.foldLeft(Set.empty[String]) {
+          case (acc, ("documentId", Json.Str(docId))) if docId.trim.nonEmpty => acc + docId.trim
+          case (acc, (_, nested))                                            => acc ++ extractFromJson(nested)
+        }
+      case Json.Arr(items) => items.foldLeft(Set.empty[String])(_ ++ extractFromJson(_))
+      case _               => Set.empty
+
+    messages.foldLeft(Set.empty[String]) { (acc, message) =>
+      if message.role != MessageRole.Tool then acc
+      else
+        message.content.foldLeft(acc) {
+          case (inner, ContentPart.JsonValue(json)) => inner ++ extractFromJson(json)
+          case (inner, ContentPart.Text(raw))       =>
+            raw.fromJson[Json].toOption.fold(inner)(inner ++ extractFromJson(_))
+          case (inner, _) => inner
+        }
+    }
+
+  /** 将已撤回或修订失效的来源从历史 Tool 消息中剔除，防止撤回文档在多步循环后续回合继续暴露给模型。 */
+  private def scrubWithdrawnMessages(
+      messages: Chunk[AgentMessage],
+      withdrawnDocumentIds: Set[String]
+  ): Chunk[AgentMessage] =
+    val nonEmptyIds = withdrawnDocumentIds.map(_.trim).filter(_.nonEmpty)
+    if nonEmptyIds.isEmpty then messages
+    else messages.map(scrubWithdrawnToolMessage(_, nonEmptyIds))
+
+  private def scrubWithdrawnToolMessage(
+      message: AgentMessage,
+      withdrawnDocumentIds: Set[String]
+  ): AgentMessage =
+    if message.role != MessageRole.Tool then message
+    else
+      val updatedContent = message.content.map {
+        case ContentPart.JsonValue(json) =>
+          ContentPart.JsonValue(scrubWithdrawnJson(json, withdrawnDocumentIds))
+        case ContentPart.Text(raw) =>
+          raw.fromJson[Json].toOption match
+            case Some(json) =>
+              val scrubbed = scrubWithdrawnJson(json, withdrawnDocumentIds)
+              if scrubbed == json then ContentPart.Text(raw)
+              else ContentPart.Text(scrubbed.toJson)
+            case None =>
+              if withdrawnDocumentIds.exists(raw.contains) then
+                ContentPart.Text("""{"status":"withdrawn","excerpts":[],"results":[],"citations":[]}""")
+              else ContentPart.Text(raw)
+        case other => other
+      }
+      message.copy(content = updatedContent)
+
+  private def scrubWithdrawnJson(
+      json: Json,
+      withdrawnDocumentIds: Set[String]
+  ): Json =
+    json match
+      case Json.Obj(fields) =>
+        def isWithdrawnItem(item: Json): Boolean = item match
+          case Json.Obj(itemFields) =>
+            itemFields.exists {
+              case ("documentId", Json.Str(docId)) => withdrawnDocumentIds.contains(docId.trim)
+              case ("sourceUri", Json.Str(uri))    => withdrawnDocumentIds.exists(id => uri.contains(id))
+              case _                               => false
+            }
+          case Json.Str(str) =>
+            withdrawnDocumentIds.exists(id => str.contains(id))
+          case _ => false
+
+        if isWithdrawnItem(json) then
+          Json.Obj(
+            Chunk(
+              "status"    -> Json.Str("withdrawn"),
+              "excerpts"  -> Json.Arr(Chunk.empty),
+              "results"   -> Json.Arr(Chunk.empty),
+              "citations" -> Json.Arr(Chunk.empty)
+            )
+          )
+        else
+          val rawCitationsOpt      = fields.collectFirst { case ("citations", Json.Arr(items)) => items }
+          val rawResultsOpt        = fields.collectFirst { case ("results", Json.Arr(items)) => items }
+          val rawExcerptSourcesOpt = fields.collectFirst { case ("excerptSources", Json.Arr(items)) => items }
+          val rawExcerptsOpt       = fields.collectFirst { case ("excerpts", Json.Arr(items)) => items }
+
+          var changed       = false
+          var remainingHits = 0
+
+          val keptExcerptPairsOpt: Option[(Chunk[Json], Option[Chunk[Json]])] =
+            rawExcerptsOpt.map { excerpts =>
+              rawExcerptSourcesOpt match
+                case Some(sources) if sources.length == excerpts.length =>
+                  val pairs = excerpts.zip(sources).filterNot { case (_, src) => isWithdrawnItem(src) }
+                  if pairs.length != excerpts.length then changed = true
+                  (pairs.map(_._1), Some(pairs.map(_._2)))
+                case _ =>
+                  rawCitationsOpt match
+                    case Some(cites) if cites.length == excerpts.length =>
+                      val kept =
+                        excerpts.zip(cites).collect { case (ex, cite) if !isWithdrawnItem(cite) => ex }
+                      if kept.length != excerpts.length then changed = true
+                      (kept, None)
+                    case _ =>
+                      rawResultsOpt match
+                        case Some(res) if res.length == excerpts.length =>
+                          val kept = excerpts.zip(res).collect { case (ex, r) if !isWithdrawnItem(r) => ex }
+                          if kept.length != excerpts.length then changed = true
+                          (kept, None)
+                        case _ =>
+                          val anyCitationOrResultWithdrawn =
+                            rawCitationsOpt.exists(_.exists(isWithdrawnItem)) ||
+                              rawResultsOpt.exists(_.exists(isWithdrawnItem))
+                          if anyCitationOrResultWithdrawn || withdrawnDocumentIds.exists(json.toJson.contains)
+                          then
+                            if excerpts.nonEmpty then changed = true
+                            (Chunk.empty, None)
+                          else
+                            val kept = excerpts.filterNot(isWithdrawnItem)
+                            if kept.length != excerpts.length then changed = true
+                            (kept, None)
+            }
+
+          val updatedFields = fields.map {
+            case ("results", Json.Arr(items)) =>
+              val kept = items.filterNot(isWithdrawnItem)
+              if kept.length != items.length then changed = true
+              remainingHits += kept.length
+              "results" -> Json.Arr(kept)
+            case ("citations", Json.Arr(items)) =>
+              val kept = items.filterNot(isWithdrawnItem)
+              if kept.length != items.length then changed = true
+              remainingHits += kept.length
+              "citations" -> Json.Arr(kept)
+            case ("excerpts", Json.Arr(items)) =>
+              val kept = keptExcerptPairsOpt.map(_._1).getOrElse(items)
+              if rawCitationsOpt.isEmpty && rawResultsOpt.isEmpty then remainingHits += kept.length
+              "excerpts" -> Json.Arr(kept)
+            case ("excerptSources", Json.Arr(items)) =>
+              val kept = keptExcerptPairsOpt.flatMap(_._2).getOrElse(items.filterNot(isWithdrawnItem))
+              if kept.length != items.length then changed = true
+              "excerptSources" -> Json.Arr(kept)
+            case other => other
+          }
+          if changed then
+            val finalFields =
+              if remainingHits > 0 then
+                updatedFields.map {
+                  case ("acceptedCount", _) => "acceptedCount" -> Json.Num(remainingHits)
+                  case other                => other
+                }
+              else
+                updatedFields.map {
+                  case ("status", _)         => "status"         -> Json.Str("withdrawn")
+                  case ("acceptedCount", _)  => "acceptedCount"  -> Json.Num(0)
+                  case ("excerpts", _)       => "excerpts"       -> Json.Arr(Chunk.empty)
+                  case ("excerptSources", _) => "excerptSources" -> Json.Arr(Chunk.empty)
+                  case ("results", _)        => "results"        -> Json.Arr(Chunk.empty)
+                  case ("citations", _)      => "citations"      -> Json.Arr(Chunk.empty)
+                  case other                 => other
+                }
+            Json.Obj(finalFields)
+          else if withdrawnDocumentIds.exists(json.toJson.contains) then
+            Json.Obj(
+              Chunk(
+                "status"    -> Json.Str("withdrawn"),
+                "excerpts"  -> Json.Arr(Chunk.empty),
+                "results"   -> Json.Arr(Chunk.empty),
+                "citations" -> Json.Arr(Chunk.empty)
+              )
+            )
+          else json
+      case other =>
+        if withdrawnDocumentIds.exists(other.toJson.contains) then
+          Json.Obj(
+            Chunk(
+              "status"    -> Json.Str("withdrawn"),
+              "excerpts"  -> Json.Arr(Chunk.empty),
+              "results"   -> Json.Arr(Chunk.empty),
+              "citations" -> Json.Arr(Chunk.empty)
+            )
+          )
+        else other
 
   /** 生成固定、低敏 Context Rot 信号；所有消息都只描述计数/比例，不包含内容。 */
   private def contextRotSignals(
@@ -903,12 +1206,36 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
       truncated: Int
   )
 
-  /** 通用 Memory/RAG 分区选择结果。 */
+  /** 通用候选分区选择结果。 */
   final private case class SectionSelection(
       messages: Chunk[AgentMessage],
       usedTokens: Long,
       included: Int,
       dropped: Int
+  )
+
+  /** Memory 分区去重与选择结果；只把实际选中记忆的指纹传递给跨分区去重。 */
+  final private case class MemorySelection(
+      messages: Chunk[AgentMessage],
+      usedTokens: Long,
+      included: Int,
+      dropped: Int,
+      duplicates: Int,
+      seenFingerprints: Set[String],
+      includedFingerprints: Set[String]
+  )
+
+  /** Retrieval 分区选择与实际交付追踪结果。 */
+  final private case class RetrievalSelection(
+      messages: Chunk[AgentMessage],
+      usedTokens: Long,
+      included: Int,
+      dropped: Int,
+      duplicates: Int,
+      seenFingerprints: Set[String],
+      deliveredDocumentIds: Chunk[String],
+      droppedDocumentReasons: Map[String, String],
+      deliveredDocumentDisplayIds: Map[String, String] = Map.empty
   )
 
   /** 最近原子组选择的内部状态。 */
@@ -940,15 +1267,6 @@ final class DefaultContextManager(counter: TokenCounter, compressor: ContextComp
       modelCalls: Int,
       summaryUpdate: Option[ContextSummaryCheckpoint]
   )
-
-  /** 去重后的来源和去重计数。 */
-  final private case class DeduplicatedSources(
-      memories: Chunk[ContextMemory],
-      retrieval: Chunk[ContextDocument],
-      duplicateMemories: Int,
-      duplicateRetrieval: Int
-  ):
-    def totalDuplicates: Int = duplicateMemories + duplicateRetrieval
 
 /** Context 的纯渲染和哈希辅助函数。
   *

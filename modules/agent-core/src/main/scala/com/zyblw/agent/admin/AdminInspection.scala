@@ -3,7 +3,9 @@ package com.zyblw.agent.admin
 import com.zyblw.agent.composition.{CompositionComparisonView, LiveComposition}
 import com.zyblw.agent.core.*
 import com.zyblw.agent.harness.{Goal, GoalBudgetSnapshot, GoalId, HarnessStore, Plan, PlanId}
-import com.zyblw.agent.memory.RunStore
+import com.zyblw.agent.inspection.{IncidentPack, RunInspection, RunTrajectory, RunTrajectoryExporter}
+import com.zyblw.agent.memory.{RunCommandStore, RunStore}
+import java.util.concurrent.TimeUnit
 import zio.*
 import zio.json.*
 
@@ -125,12 +127,27 @@ trait RunInspectionAdmin:
   def modelCalls(runId: RunId, limit: Int): IO[StoreError, Chunk[AdminModelCallView]]
   def approval(runId: RunId): IO[StoreError, Option[AdminApprovalSubjectView]]
   def suspension(runId: RunId): IO[StoreError, Option[AdminSuspensionView]]
+  def inspection(runId: RunId): IO[StoreError, Option[RunInspection]] =
+    val _ = runId
+    ZIO.succeed(None)
+  def trajectory(runId: RunId): IO[StoreError, Option[RunTrajectory]] =
+    val _ = runId
+    ZIO.succeed(None)
+  def incidentPack(runId: RunId): IO[StoreError, Option[IncidentPack]] =
+    val _ = runId
+    ZIO.succeed(None)
 
 object RunInspectionAdmin:
   /** @param live
     *   现场组合读出口。宿主没有装配时 `composition` 只返回冻结侧，`drift` 留空而不是伪造"兼容"。
+    * @param commands
+    *   可选持久化命令队列存储；传入后 `trajectory` 与 `incidentPack` 将包含完整的控制面命令与死信记录。
     */
-  def fromStore(store: RunStore, live: Option[LiveComposition] = None): RunInspectionAdmin =
+  def fromStore(
+      store: RunStore,
+      live: Option[LiveComposition] = None,
+      commands: Option[RunCommandStore] = None
+  ): RunInspectionAdmin =
     new RunInspectionAdmin:
       def composition(runId: RunId): IO[StoreError, Option[AdminCompositionView]] =
         loadState(store, runId).map(_.map { state =>
@@ -176,6 +193,23 @@ object RunInspectionAdmin:
         loadState(store, runId).map(_.map { state =>
           AdminSuspensionView(runId.asString, state.suspension.map(toSuspensionRecord))
         })
+
+      override def trajectory(runId: RunId): IO[StoreError, Option[RunTrajectory]] =
+        RunTrajectoryExporter
+          .fromStore(store, runId, live, commands)
+          .asSome
+          .catchSome { case _: AgentError.RunNotFound =>
+            ZIO.succeed(None)
+          }
+
+      override def inspection(runId: RunId): IO[StoreError, Option[RunInspection]] =
+        trajectory(runId).map(_.map(_.inspection))
+
+      override def incidentPack(runId: RunId): IO[StoreError, Option[IncidentPack]] =
+        for
+          now  <- Clock.currentTime(TimeUnit.MILLISECONDS)
+          traj <- trajectory(runId)
+        yield traj.map(IncidentPack.build(_, now))
 
       private def loadState(store: RunStore, runId: RunId): IO[StoreError, Option[AgentState]] =
         store.load(runId).asSome.catchSome { case _: AgentError.RunNotFound =>

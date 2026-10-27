@@ -499,13 +499,14 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
   }
 
   /** 在一个短事务中插入整批 Prepared pending writes。 `ON CONFLICT DO NOTHING` 只为恢复幂等，绝不把已有 Succeeded/Running 状态回退成
-    * Prepared。
+    * Prepared；若主 Run 已进入终态，拒绝迟到 Fiber 新增 Prepared 账本。
     */
   def prepareToolExecutions(records: NonEmptyChunk[ToolExecutionRecord]): IO[StoreError, Unit] =
     RunStore.validateToolBatch(records) *> withConnection { connection =>
       ZIO
         .attemptBlocking {
           connection.setAutoCommit(false)
+          val runId     = records.head.runId
           val statement = connection.prepareStatement(
             """INSERT INTO zyblw_agent_core.tool_executions
           |(run_id, batch_id, ordinal, call_id, tool_name, idempotency_key, status, attempt, record_json, updated_at)
@@ -513,6 +514,17 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
           |ON CONFLICT (run_id, call_id) DO NOTHING""".stripMargin
           )
           try
+            val runCheck = connection.prepareStatement(
+              "SELECT status FROM zyblw_agent_core.agent_runs WHERE run_id = ?::uuid FOR UPDATE"
+            )
+            val runStatus =
+              try
+                runCheck.setString(1, runId.asString)
+                val rs = runCheck.executeQuery()
+                if !rs.next() then throw MissingRun(runId)
+                RunStatus.valueOf(rs.getString(1))
+              finally runCheck.close()
+            if RunStatus.isTerminal(runStatus) then throw ToolLedgerConflict
             records.foreach { record =>
               statement.setString(1, record.runId.asString)
               statement.setString(2, record.batchId)
@@ -557,6 +569,14 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
         }
         .ensuring(ZIO.attemptBlocking(connection.setAutoCommit(true)).orDie)
         .mapError {
+          case MissingRun(runId)  => AgentError.RunNotFound(runId)
+          case ToolLedgerConflict =>
+            AgentError.ToolExecutionConflict(
+              records.head.runId,
+              records.head.callId,
+              ToolExecutionStatus.Prepared.toString,
+              0
+            )
           case ToolLedgerIdentityConflict(callId) =>
             AgentError.PersistenceFailure(s"工具 callId $callId 已属于其他批次或 ordinal，拒绝错误复用账本")
           case error => databaseError("批量准备工具执行账本失败", error)
@@ -576,7 +596,12 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
           """UPDATE zyblw_agent_core.tool_executions SET status = ?, attempt = ?, record_json = ?::jsonb, updated_at = ?
           |WHERE run_id = ?::uuid AND call_id = ? AND status = ? AND attempt = ?
           |  AND batch_id = ? AND ordinal = ? AND tool_name = ?
-          |  AND idempotency_key IS NOT DISTINCT FROM ?""".stripMargin
+          |  AND idempotency_key IS NOT DISTINCT FROM ?
+          |  AND (? = 'Unknown' OR EXISTS (
+          |    SELECT 1 FROM zyblw_agent_core.agent_runs r
+          |    WHERE r.run_id = zyblw_agent_core.tool_executions.run_id
+          |      AND r.status NOT IN ('Completed', 'Cancelled', 'Failed', 'TimedOut', 'BudgetExceeded')
+          |  ))""".stripMargin
         )
         try
           statement.setString(1, next.status.toString)
@@ -591,6 +616,7 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
           statement.setInt(10, next.ordinal)
           statement.setString(11, next.toolName)
           statement.setString(12, next.idempotencyKey.orNull)
+          statement.setString(13, next.status.toString)
           if statement.executeUpdate() == 1 then next
           else throw ToolLedgerConflict
         finally statement.close()
@@ -1127,8 +1153,9 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
       .unit
   }
 
-  /** 按权威状态同步到期索引。没有挂起则删除；Expired 且仍是同一条挂起则保留 lease。 */
+  /** 按权威状态同步到期索引并原子收敛终态悬挂工具账本。没有挂起则删除；Expired 且仍是同一条挂起则保留 lease。 */
   private def syncSuspensionIndex(connection: Connection, state: AgentState): Unit =
+    settleTerminalToolExecutions(connection, state)
     state.suspension match
       case None =>
         val statement =
@@ -1193,6 +1220,77 @@ final class PostgresRunStore(dataSource: DataSource) extends RunStore with Suspe
           setInstant(statement, 5, record.createdAt)
           statement.executeUpdate(): Unit
         finally statement.close()
+
+  /** Run 进入终态时在同一数据库事务内把残留的 Prepared/Running 工具账本与 Prepared/Dispatched 模型调用账本原子收敛为 Unknown。 */
+  private def settleTerminalToolExecutions(connection: Connection, state: AgentState): Unit =
+    if RunStatus.isTerminal(state.status) then
+      val nowMs = state.updatedAt.toEpochMilli
+      val query = connection.prepareStatement(
+        """SELECT run_id::text, batch_id, ordinal, call_id, tool_name, idempotency_key,
+          | status, attempt, record_json::text
+          |FROM zyblw_agent_core.tool_executions
+          |WHERE run_id = ?::uuid AND status IN ('Prepared', 'Running')
+          |FOR UPDATE""".stripMargin
+      )
+      val openRecords =
+        try
+          query.setString(1, state.runId.asString)
+          val result  = query.executeQuery()
+          val builder = ChunkBuilder.make[ToolExecutionRecord]()
+          while result.next() do builder += decodeToolEnvelope(result, state.runId, None)
+          builder.result()
+        finally query.close()
+      if openRecords.nonEmpty then
+        val update = connection.prepareStatement(
+          """UPDATE zyblw_agent_core.tool_executions
+            |SET status = ?, record_json = ?::jsonb, updated_at = ?
+            |WHERE run_id = ?::uuid AND call_id = ? AND status IN ('Prepared', 'Running')""".stripMargin
+        )
+        try
+          openRecords.foreach { record =>
+            val settled = record.copy(status = ToolExecutionStatus.Unknown, updatedAtEpochMilli = nowMs)
+            update.setString(1, settled.status.toString)
+            update.setString(2, settled.toJson)
+            setInstant(update, 3, Instant.ofEpochMilli(nowMs))
+            update.setString(4, state.runId.asString)
+            update.setString(5, record.callId)
+            update.addBatch()
+          }
+          update.executeBatch(): Unit
+        finally update.close()
+      val modelQuery = connection.prepareStatement(
+        """SELECT run_id::text, request_id::text, attempt, status, provider, model, capture_policy,
+          | fingerprint, message_count, tool_count, record_json::text
+          |FROM zyblw_agent_core.model_call_executions
+          |WHERE run_id = ?::uuid AND status IN ('Prepared', 'Dispatched')
+          |FOR UPDATE""".stripMargin
+      )
+      val openModels =
+        try
+          modelQuery.setString(1, state.runId.asString)
+          val result  = modelQuery.executeQuery()
+          val builder = ChunkBuilder.make[ModelCallExecutionRecord]()
+          while result.next() do builder += decodeModelCallEnvelope(result, state.runId, None)
+          builder.result()
+        finally modelQuery.close()
+      if openModels.nonEmpty then
+        val modelUpdate = connection.prepareStatement(
+          """UPDATE zyblw_agent_core.model_call_executions
+            |SET status = ?, record_json = ?::jsonb, updated_at = ?
+            |WHERE run_id = ?::uuid AND request_id = ?::uuid AND status IN ('Prepared', 'Dispatched')""".stripMargin
+        )
+        try
+          openModels.foreach { record =>
+            val settled = record.copy(status = ModelCallStatus.Unknown, updatedAtEpochMilli = nowMs)
+            modelUpdate.setString(1, settled.status.toString)
+            modelUpdate.setString(2, settled.toJson)
+            setInstant(modelUpdate, 3, Instant.ofEpochMilli(nowMs))
+            modelUpdate.setString(4, state.runId.asString)
+            modelUpdate.setString(5, record.requestId.asString)
+            modelUpdate.addBatch()
+          }
+          modelUpdate.executeBatch(): Unit
+        finally modelUpdate.close()
 
 final private case class VersionConflict(actual: Long)                        extends RuntimeException
 final private case class MissingRun(runId: RunId)                             extends RuntimeException

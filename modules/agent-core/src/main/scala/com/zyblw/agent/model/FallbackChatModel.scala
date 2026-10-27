@@ -77,7 +77,14 @@ final class FallbackChatModel private (
             }
           call.map(response => response -> head.provider).catchSome {
             case error if FallbackChatModel.retryable(error) && tail.nonEmpty =>
-              loop(tail, attempted :+ head.provider)
+              ZIO.logAnnotate(
+                LogAnnotation("component", "agent-model-fallback"),
+                LogAnnotation("operation", s"fallback.${head.provider}")
+              )(
+                ZIO.logWarning(
+                  s"agent.model.fallback fromProvider=${head.provider} toProvider=${tail.head.provider} category=${error.category} retryable=${error.retryable}"
+                )
+              ) *> loop(tail, attempted :+ head.provider)
           }
     loop(ordered.toList, Chunk.empty)
 
@@ -102,9 +109,9 @@ object FallbackChatModel:
   def layer(defaultProvider: String, models: Iterable[ChatModel]): ZLayer[Any, AgentError, ChatModel] =
     ZLayer.fromZIO(make(defaultProvider, models))
 
-  /** 能力不匹配、配置和安全错误不可降级；仅瞬时模型/HTTP 失败可换候选。 */
+  /** 能力不匹配、配置和安全错误不可降级；仅可降级的模型/Provider 失败可换候选。 */
   private[model] def retryable(error: AgentError): Boolean = error match
     case _: AgentError.UnsupportedModelCapability => false
     case _: AgentError.InvalidConfiguration       => false
     case _: AgentError.ProviderNotFound           => false
-    case other                                    => other.retryable
+    case other                                    => other.fallbackable

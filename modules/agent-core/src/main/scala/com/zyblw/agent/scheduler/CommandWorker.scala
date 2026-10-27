@@ -91,7 +91,14 @@ final class CommandWorker(
         {
           case _: AgentError.LeaseLost  => ZIO.unit
           case error if error.retryable =>
-            ZIO.sleep(config.retryDelay)
+            ZIO.logAnnotate(
+              LogAnnotation("worker_id", owner.value),
+              LogAnnotation("component", "agent-scheduler")
+            ) {
+              ZIO.logWarning(
+                s"agent.command.claim_retry_backoff: workerId=${owner.value}, category=${error.category}, delayMs=${config.retryDelay.toMillis}"
+              )
+            } *> ZIO.sleep(config.retryDelay)
           case error => ZIO.fail(error)
         },
         _ => ZIO.unit
@@ -110,21 +117,50 @@ final class CommandWorker(
 
   /** 根据 typed retryable 决定自动重排队或永久 DeadLetter。 */
   private def process(lease: RunCommandLease): IO[AgentError, Unit] =
-    supervisor.supervise(lease)(runOne(lease)).exit.flatMap {
-      case Exit.Success(_)     => store.complete(lease)
-      case Exit.Failure(cause) =>
-        cause.failureOption match
-          case Some(error: AgentError.LeaseLost) => ZIO.fail(error)
-          case Some(error) if error.retryable    =>
-            Clock.instant
-              .flatMap(now => store.abandon(lease, plus(now, config.retryDelay), safeSummary(error)))
-          case Some(error) => store.deadLetter(lease, safeSummary(error))
-          case None        => ZIO.refailCause(cause)
+    val commandType = lease.command.payload.commandType
+    ZIO.logAnnotate(
+      LogAnnotation("run_id", lease.runId.asString),
+      LogAnnotation("command_id", lease.commandId.asString),
+      LogAnnotation("command_type", commandType),
+      LogAnnotation("worker_id", lease.owner.value),
+      LogAnnotation("component", "agent-scheduler")
+    ) {
+      supervisor.supervise(lease)(runOne(lease)).exit.flatMap {
+        case Exit.Success(_)     => store.complete(lease)
+        case Exit.Failure(cause) =>
+          cause.failureOption match
+            case Some(error: AgentError.LeaseLost) =>
+              ZIO.logWarning(
+                s"agent.command.lease_lost: runId=${lease.runId.asString}, commandId=${lease.commandId.asString}, commandType=$commandType, workerId=${lease.owner.value}, generation=${lease.generation}, attempt=${lease.command.attempt}"
+              ) *> ZIO.fail(error)
+            case Some(error) if error.retryable =>
+              val summary = safeSummary(error)
+              for
+                now <- Clock.instant
+                _   <- ZIO.logWarning(
+                  s"agent.command.abandoned_for_retry: runId=${lease.runId.asString}, commandId=${lease.commandId.asString}, commandType=$commandType, workerId=${lease.owner.value}, attempt=${lease.command.attempt}, maxAttempts=${config.maxAttempts}, retryDelayMs=${config.retryDelay.toMillis}, $summary"
+                )
+                _ <- store.abandon(lease, plus(now, config.retryDelay), summary)
+              yield ()
+            case Some(error) =>
+              val summary = safeSummary(error)
+              ZIO.logError(
+                s"agent.command.dead_lettered: runId=${lease.runId.asString}, commandId=${lease.commandId.asString}, commandType=$commandType, workerId=${lease.owner.value}, attempt=${lease.command.attempt}, $summary"
+              ) *> store.deadLetter(lease, summary)
+            case None => ZIO.refailCause(cause)
+      }
     }
 
-  /** 只保存稳定错误类别和 retryable 标志，不持久化 Provider 原文或用户内容。 */
+  /** 只保存稳定错误类别、retryable 标志和低基数安全 diagnostic，不持久化 Provider 原文或用户内容。 */
   private def safeSummary(error: AgentError): String =
-    s"category=${error.category},retryable=${error.retryable}"
+    val base = s"category=${error.category},retryable=${error.retryable}"
+    val diag = error.diagnostic.toList
+      .sortBy(_._1)
+      .map { case (k, v) => s"${sanitizeToken(k)}=${sanitizeToken(v)}" }
+    if diag.isEmpty then base else (base :: diag).mkString(",")
+
+  private def sanitizeToken(raw: String): String =
+    raw.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').replace(',', ';').trim.take(120)
 
   /** 集中完成 Instant 与 ZIO Duration 转换。 */
   private def plus(instant: Instant, duration: Duration): Instant = instant.plusMillis(duration.toMillis)

@@ -241,12 +241,17 @@ final private class AgentHttpHostLive(
       process: AgentHostProcess,
       worker: Fiber.Runtime[AgentError, Nothing]
   ): IO[AgentError, Nothing] = worker.await.flatMap { exit =>
-    val code = exit match
-      case Exit.Failure(cause) if cause.failureOption.nonEmpty => "process_typed_failure"
-      case Exit.Failure(cause) if cause.defects.nonEmpty       => "process_defect"
-      case Exit.Failure(_)                                     => "process_interrupted"
-      case Exit.Success(_)                                     => "process_completed"
-    state.set(AgentHostState.Failed(code)) *>
+    val (code, detail) = exit match
+      case Exit.Failure(cause) if cause.failureOption.nonEmpty =>
+        val err = cause.failureOption.get
+        "process_typed_failure" -> s"category=${err.category}"
+      case Exit.Failure(cause) if cause.defects.nonEmpty =>
+        val defect = cause.defects.head.getClass.getSimpleName
+        "process_defect" -> s"defect=$defect"
+      case Exit.Failure(_) => "process_interrupted" -> "interrupted=true"
+      case Exit.Success(_) => "process_completed"   -> "completed=true"
+    ZIO.logError(s"agent.host.critical_process_stopped process=${process.name} code=$code $detail") *>
+      state.set(AgentHostState.Failed(code)) *>
       ZIO.fail(
         AgentError.Unexpected(
           s"Agent HTTP Host 的关键后台进程已停止: process=${process.name}, code=$code"
@@ -298,15 +303,18 @@ final private class AgentHttpHostLive(
               case None    =>
                 healthResponse("ready", Status.ServiceUnavailable, "not_ready", Some("dependency_timeout"))
             }
-            .catchAll(_ =>
-              ZIO.succeed(
-                healthResponse(
-                  "ready",
-                  Status.ServiceUnavailable,
-                  "not_ready",
-                  Some("dependency_unavailable")
+            .catchAll(error =>
+              ZIO.logWarning(
+                s"agent.host.readiness_failed category=${error.category} retryable=${error.retryable}"
+              ) *>
+                ZIO.succeed(
+                  healthResponse(
+                    "ready",
+                    Status.ServiceUnavailable,
+                    "not_ready",
+                    Some("dependency_unavailable")
+                  )
                 )
-              )
             )
         case AgentHostState.Starting =>
           ZIO.succeed(healthResponse("ready", Status.ServiceUnavailable, "not_ready", Some("starting")))

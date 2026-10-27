@@ -35,6 +35,10 @@ private[http] object AgentHttpProjection:
       evidence = state.retrievalEvidence.map(evidence)
     )
 
+  /** 将数据库事件信封转换成低敏进度事件视图（隐藏 `output` 正文，供需要由产品层完成二次来源门禁与展示投影的宿主挂载）。 */
+  def progressEvent(persisted: PersistedAgentEvent): RunEventView =
+    event(persisted).copy(output = None)
+
   /** 将数据库事件信封转换成不依赖内部 ADT JSON 表示的公共事件。
     * @param persisted
     *   已按 runId/sequence 连续性验证的耐久事件

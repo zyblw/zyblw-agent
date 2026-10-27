@@ -166,5 +166,44 @@ object EmbeddingGovernanceSpec extends ZIOSpecDefault:
         purged == 1L,
         retried.requests == 1L
       )
+    },
+    test("GovernedEmbeddingModel 将底层声称的 Sparse 能力收窄为仅 Dense，并在调用 delegate 前拒绝 DenseAndSparse 请求") {
+      for
+        calls        <- Ref.make(Chunk.empty[Chunk[String]])
+        dependencies <- stores
+        hybridDelegate = new EmbeddingModel:
+          override val capabilities: EmbeddingCapabilities =
+            EmbeddingDefaults
+              .denseCapabilities(2, 100)
+              .copy(outputs = Set(EmbeddingOutputKind.Dense, EmbeddingOutputKind.DenseAndSparse))
+          override val descriptor: EmbeddingProviderDescriptorV2 =
+            EmbeddingProviderDescriptorV2("test-provider", "hybrid-model", capabilities)
+          def embed(request: EmbeddingRequest): IO[RetrievalError, EmbeddingResponse] =
+            calls.update(_ :+ request.texts) *> ZIO.fail(AgentError.RetrievalFailed("不应进入底层 delegate"))
+        service = GovernedEmbeddingModel(
+          hybridDelegate,
+          dependencies._1,
+          dependencies._2,
+          EmbeddingQuotaPolicy(),
+          GovernedEmbeddingConfig()
+        )
+        rejected <- service
+          .embed(
+            EmbeddingRequest(
+              Chunk("中医辨证"),
+              EmbeddingInputRole.Query,
+              output = EmbeddingOutputKind.DenseAndSparse,
+              context =
+                EmbeddingRequestContext(tenantA, EmbeddingPurpose.Query, "reject-sparse-before-delegate")
+            )
+          )
+          .either
+        recordedCalls <- calls.get
+      yield assertTrue(
+        service.capabilities.outputs == Set(EmbeddingOutputKind.Dense),
+        service.descriptor.capabilities.outputs == Set(EmbeddingOutputKind.Dense),
+        rejected.isLeft,
+        recordedCalls.isEmpty
+      )
     }
   )

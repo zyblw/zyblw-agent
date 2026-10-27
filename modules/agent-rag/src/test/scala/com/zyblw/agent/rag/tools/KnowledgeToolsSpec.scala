@@ -57,8 +57,8 @@ object KnowledgeToolsSpec extends ZIOSpecDefault:
       )
     }.provide(memoryRag),
     test("search 摘录截断，fetch 返回授权块全文，citation excerpt 仍不超过 500") {
-      val tail = "后半段鉴别要点" * 80
-      val body = ("阴阳者，天地之道也。" * 40) + tail
+      val tail = "后半段鉴别要点 1234567890 " * 80
+      val body = ("阴阳者，天地之道也。" * 20) + tail
       for
         rag <- ZIO.service[RagApplication]
         tenant = TenantId("acme")
@@ -233,11 +233,55 @@ object KnowledgeToolsSpec extends ZIOSpecDefault:
         miss.guidance.get.contains("建议")
       )
     }.provide(memoryRag),
-    test("fetch 支持 expandNeighbors 扩展相邻块") {
+    test("fetch 支持 expandNeighbors 扩展相邻块，且合并去重后保持 hit 与 citation 一一对应") {
+      val tenant = TenantId("acme")
+      def mkHit(chunkId: String, docId: String, text: String, prev: Option[String], next: Option[String]) =
+        RetrievalHit(
+          DocumentChunk.fromText(
+            chunkId,
+            docId,
+            text,
+            s"book://$docId#$chunkId",
+            tenant,
+            Set("knowledge:read"),
+            Map("title" -> s"Title-$docId"),
+            lineage = Some(
+              ChunkLineage(
+                parentId = Some("sec-1"),
+                ordinal = 0,
+                previousChunkId = prev,
+                nextChunkId = next
+              )
+            )
+          ),
+          score = 0.8
+        )
+      val seed1  = mkHit("c-2", "doc-a", "核心块正文二", Some("c-1"), Some("c-3"))
+      val seed2  = mkHit("c-3", "doc-a", "核心块正文三", Some("c-2"), None)
+      val neigh1 = mkHit("c-1", "doc-a", "前邻块正文一", None, Some("c-2"))
+      val neigh2 = mkHit("c-3", "doc-a", "核心块正文三", Some("c-2"), None)
+      // primary 与 secondary 各自从 cite-1 编号，且包含重叠块 c-3
+      val primary = RetrievalResult(
+        Chunk(seed1, seed2),
+        Chunk(
+          Citation("cite-1", "book://doc-a#c-2", "核心块正文二", 0.8),
+          Citation("cite-2", "book://doc-a#c-3", "核心块正文三", 0.8)
+        ),
+        RetrievalEvidence(RetrievalEvidenceStatus.Supported, 2, 2, Some(0.8), 0.18)
+      )
+      val secondary = RetrievalResult(
+        Chunk(neigh1, neigh2),
+        Chunk(
+          Citation("cite-1", "book://doc-a#c-1", "前邻块正文一", 0.8),
+          Citation("cite-2", "book://doc-a#c-3", "核心块正文三", 0.8)
+        ),
+        RetrievalEvidence(RetrievalEvidenceStatus.Supported, 2, 2, Some(0.8), 0.18)
+      )
+      val merged = KnowledgeTools.mergePairedResults(primary, secondary)
+      val out    = KnowledgeTools.toSearchOutput(merged, includeFullChunkText = true, isFetch = true)
       for
         rag <- ZIO.service[RagApplication]
-        tenant = TenantId("acme")
-        _ <- rag.ingestOne(
+        _   <- rag.ingestOne(
           DocumentIngestionRequest(
             DocumentInput.fromBytes(
               "multi-chunk.md",
@@ -261,7 +305,12 @@ object KnowledgeToolsSpec extends ZIOSpecDefault:
         )
       yield assertTrue(
         fetched.status == "ok",
-        fetched.excerpts.nonEmpty
+        fetched.excerpts.nonEmpty,
+        fetched.citations.length == fetched.excerpts.length,
+        out.citations.map(_.id) == List("cite-1", "cite-2", "cite-3"),
+        out.citations.map(_.chunkId) == List("c-2", "c-3", "c-1"),
+        out.citations.map(_.sourceUri) == List("book://doc-a#c-2", "book://doc-a#c-3", "book://doc-a#c-1"),
+        out.citations.map(_.excerpt) == List("核心块正文二", "核心块正文三", "前邻块正文一")
       )
     }.provide(memoryRag),
     test("outlineTool 固定当前 Profile 后读取目录，并拒绝越出宿主范围") {

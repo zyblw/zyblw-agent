@@ -46,6 +46,19 @@ object SuspensionExpiryObserver:
     def abandoned(category: ErrorCategory): UIO[Unit]                  = ZIO.unit
     def failed(category: ErrorCategory, retryable: Boolean): UIO[Unit] = ZIO.unit)
 
+  /** 只记录低基数控制信息的结构化日志实现。 */
+  val logging: ULayer[SuspensionExpiryObserver] = ZLayer.succeed(new SuspensionExpiryObserver:
+    def cycle(result: SuspensionExpiryCycle): UIO[Unit] =
+      ZIO.logDebug(
+        s"suspension-expiry cycle expired=${result.expired} claimed=${result.claimed} " +
+          s"completed=${result.completed} abandoned=${result.abandoned}"
+      )
+    def leaseLost(): UIO[Unit]                        = ZIO.logWarning("suspension-expiry lease-lost")
+    def abandoned(category: ErrorCategory): UIO[Unit] =
+      ZIO.logWarning(s"suspension-expiry abandoned category=$category")
+    def failed(category: ErrorCategory, retryable: Boolean): UIO[Unit] =
+      ZIO.logError(s"suspension-expiry failed category=$category retryable=$retryable"))
+
 /** 把到期挂起推进为失败或按默认值恢复的多实例安全 Worker。
   *
   * 每轮先批量把到期 Pending 标为 Expired，再领取一条租约。决议经 [[RunCommitter]] 写回 `AgentState`：Worker 自己不改状态机，

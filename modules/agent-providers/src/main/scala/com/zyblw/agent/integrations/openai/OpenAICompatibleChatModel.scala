@@ -63,7 +63,7 @@ final class OpenAICompatibleChatModel(client: Client, config: OpenAICompatibleCo
                   )
                 case other => other
               }
-          else ZIO.fail(httpError(response.status.code, responseBody))
+          else ZIO.fail(httpError(response, responseBody))
         )
     yield result.copy(
       usage = ProviderBilling
@@ -110,7 +110,7 @@ final class OpenAICompatibleChatModel(client: Client, config: OpenAICompatibleCo
                 OpenAISse.events(response.body.asStream, config.compatibility)
               else
                 ZStream.fromZIO(
-                  response.body.asString.flatMap(body => ZIO.fail(httpError(response.status.code, body)))
+                  response.body.asString.flatMap(body => ZIO.fail(httpError(response, body)))
                 )
             }
             .mapError {
@@ -147,9 +147,10 @@ final class OpenAICompatibleChatModel(client: Client, config: OpenAICompatibleCo
         }
       }
 
-  /** 只保留 HTTP 状态与 OpenAI 风格 envelope 的低基数 code/type；原始响应正文不进入错误。 */
-  private def httpError(status: Int, body: String): AgentError.ModelHttpFailure =
-    AgentError.ModelHttpFailure(provider, status, OpenAIHttpError.code(body))
+  /** 只保留 HTTP 状态、OpenAI 风格 envelope 的低基数 code/type 与上游 request-id；原始响应正文不进入错误。 */
+  private def httpError(response: Response, body: String): AgentError.ModelHttpFailure =
+    val reqId = response.rawHeader("x-request-id").orElse(response.rawHeader("request-id"))
+    AgentError.ModelHttpFailure(provider, response.status.code, OpenAIHttpError.code(body), reqId)
 
 object OpenAICompatibleChatModel:
   val layer: URLayer[Client & OpenAICompatibleConfig, ChatModel] =

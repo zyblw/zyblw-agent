@@ -1094,28 +1094,62 @@ final class DefaultRetriever(
     else ZIO.fail(AgentError.RetrievalFailed("上下文扩展输出违反权限、数量或有限值契约"))
 
 object DefaultRetriever:
-  /** 词法命中直接接受；仅向量近邻必须过余弦阈值；成功重排时优先采用精排相关度。RRF fused score 不参与门槛。 */
+  /** 成功重排时优先采用精排相关度；未启用或回退重排时词法命中直接接受，仅向量近邻必须过余弦阈值。RRF fused score 不参与门槛。 */
   def acceptsSeed(hit: RetrievalHit, minimumScore: Double): Boolean =
-    hasLexicalSupport(hit) || relevanceScore(hit) >= minimumScore
+    if hasAuthoritativeRerankScore(hit) then hit.signals("rerankScore") >= minimumScore
+    else hasLexicalSupport(hit) || relevanceScore(hit) >= minimumScore
 
   def relevanceScore(hit: RetrievalHit): Double =
-    if !hit.signals.get("rerankFallback").contains(1.0) && hit.signals.contains("rerankScore") then
-      hit.signals("rerankScore")
+    if hasAuthoritativeRerankScore(hit) then hit.signals("rerankScore")
     else
       hit.signals.get("vectorScore").getOrElse {
         if hasLexicalSupport(hit) && hit.signals.contains("textScore") then hit.signals("textScore")
         else hit.signals.get("phraseScore").orElse(hit.signals.get("retrievalScore")).getOrElse(hit.score)
       }
 
+  private def hasAuthoritativeRerankScore(hit: RetrievalHit): Boolean =
+    !hit.signals.get("rerankFallback").contains(1.0) && hit.signals.contains("rerankScore")
+
   private def hasLexicalSupport(hit: RetrievalHit): Boolean =
     hit.signals.get("textScore").exists(_ > 0.0) || hit.signals.get("textRank").exists(_ > 0.0)
 
+  private[rag] def mergeSignalMaps(
+      left: Map[String, Double],
+      right: Map[String, Double]
+  ): Map[String, Double] =
+    right.foldLeft(left) { case (acc, (key, value)) =>
+      acc.get(key) match
+        case Some(existing) => acc.updated(key, math.max(existing, value))
+        case None           => acc.updated(key, value)
+    }
+
+  private def normalizedBranchScore(hit: RetrievalHit, rank: Int): Double =
+    val isFuzzyPhraseOnly =
+      !hit.signals.contains("retrievalScore") &&
+        hit.signals.get("phraseScore").exists(_ < 1.0) &&
+        !hit.signals.contains("vectorScore") &&
+        !hit.signals.contains("textScore") &&
+        !hit.signals.contains("textRank")
+    if isFuzzyPhraseOnly then (1.0 / (60.0 + rank + 1.0)) * math.max(0.0, hit.score)
+    else hit.score
+
   def mergeHits(groups: Chunk[Chunk[RetrievalHit]], limit: Int): Chunk[RetrievalHit] =
     Chunk.fromIterable(
-      groups.flatten
+      groups
+        .flatMap(_.zipWithIndex.map { case (hit, rank) =>
+          val adjusted = normalizedBranchScore(hit, rank)
+          if adjusted == hit.score then hit
+          else hit.copy(score = adjusted, signals = hit.signals + ("retrievalScore" -> hit.score))
+        })
         .groupBy(hit => hit.chunk.documentId -> hit.chunk.id)
         .values
-        .map(_.maxBy(hit => (hit.score, hit.chunk.documentId, hit.chunk.id)))
+        .map { occurrences =>
+          val primary       = occurrences.maxBy(hit => (hit.score, hit.chunk.documentId, hit.chunk.id))
+          val mergedSignals = occurrences.foldLeft(Map.empty[String, Double]) { (acc, hit) =>
+            mergeSignalMaps(acc, hit.signals)
+          }
+          primary.copy(signals = mergedSignals)
+        }
         .toVector
         .sortBy(hit => (-hit.score, hit.chunk.documentId, hit.chunk.id))
         .take(limit.max(0))

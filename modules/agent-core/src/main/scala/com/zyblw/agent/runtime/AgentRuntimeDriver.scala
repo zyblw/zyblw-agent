@@ -82,37 +82,53 @@ final class AgentRuntimeDriver(
       outcome <- startCreated(created)
     yield outcome
 
+  /** 将 Run 级因果关联标识（run_id, session_id, user_id, request_id）绑定到当前执行 Fiber 的 LogAnnotation。 */
+  private def withRunLogContext[A](state: AgentState)(effect: IO[AgentError, A]): IO[AgentError, A] =
+    val annotations = List(
+      Some(LogAnnotation("run_id", state.runId.asString)),
+      Some(LogAnnotation("session_id", state.threadId.value)).filter(_.value.nonEmpty),
+      state.runContext.userId.map(_.trim).filter(_.nonEmpty).map(LogAnnotation("user_id", _)),
+      state.runContext.attributes
+        .get("request_id")
+        .map(_.trim)
+        .filter(_.nonEmpty)
+        .map(LogAnnotation("request_id", _))
+    ).flatten
+    ZIO.logAnnotate(annotations.toSet)(effect)
+
   /** 把已经耐久保存的 Created 状态推进为 Running，并进入主循环。
     *
     * 同步本地入口和分布式 `Start` 命令共用该方法。分布式调用时租约已由 `executeLeased` 绑定，所以 [[RunCommitter]] 自动 走 `commitFenced`；HTTP 请求
     * Fiber 不会进入这里。
     */
   private def startCreated(initial: AgentState): IO[AgentError, RunOutcome] =
-    for
-      _ <- ZIO
-        .fail(AgentError.InvalidResume(initial.runId, s"Start 只接受 Created，实际为 ${initial.status}"))
-        .unless(initial.status == RunStatus.Created)
-      _     <- guard.ensureCompatible(initial)
-      input <- ZIO
-        .fromOption(initial.messages.headOption)
-        .orElseFail(AgentError.InvalidConfiguration(s"Run ${initial.runId.asString} 缺少首条输入消息"))
-        .tapError(error => terminator.markFailed(initial.runId, error))
-      outcome <- (for
-        inputDecisions <- guardrails.checkInput(input, guardrailContext(initial))
-        _              <- publisher.emitGuardrails(initial.runId, "input", inputDecisions)
-        startedAt      <- RunClock.instant
-        running        <- committer.commit(
-          initial,
-          initial.copy(status = RunStatus.Running, updatedAt = startedAt),
-          AgentEvent.RunStarted(initial.runId, startedAt.toEpochMilli)
-        )
-        result <- loop(running)
-      yield result)
-        .timeoutFail(
-          AgentError.BudgetExceeded("durationMillis", initial.budget.limits.maxDuration.toMillis)
-        )(initial.budget.limits.maxDuration)
-        .tapError(error => terminator.markFailed(initial.runId, error))
-    yield outcome
+    withRunLogContext(initial) {
+      for
+        _ <- ZIO
+          .fail(AgentError.InvalidResume(initial.runId, s"Start 只接受 Created，实际为 ${initial.status}"))
+          .unless(initial.status == RunStatus.Created)
+        _     <- guard.ensureCompatible(initial)
+        input <- ZIO
+          .fromOption(initial.messages.headOption)
+          .orElseFail(AgentError.InvalidConfiguration(s"Run ${initial.runId.asString} 缺少首条输入消息"))
+          .tapError(error => terminator.markFailed(initial.runId, error))
+        outcome <- (for
+          inputDecisions <- guardrails.checkInput(input, guardrailContext(initial))
+          _              <- publisher.emitGuardrails(initial.runId, "input", inputDecisions)
+          startedAt      <- RunClock.instant
+          running        <- committer.commit(
+            initial,
+            initial.copy(status = RunStatus.Running, updatedAt = startedAt),
+            AgentEvent.RunStarted(initial.runId, startedAt.toEpochMilli)
+          )
+          result <- loop(running)
+        yield result)
+          .timeoutFail(
+            AgentError.BudgetExceeded("durationMillis", initial.budget.limits.maxDuration.toMillis)
+          )(initial.budget.limits.maxDuration)
+          .tapError(error => terminator.markFailed(initial.runId, error))
+      yield outcome
+    }
 
   /** 为新 Run 创建有界事件队列；流消费者的 Scope 是执行 Fiber 的唯一父生命周期。 */
   def runEvents(agent: AgentDefinition, request: RunRequest): ZStream[Any, AgentError, AgentEvent] =
@@ -145,9 +161,11 @@ final class AgentRuntimeDriver(
       for
         state  <- loadExecutable(runId)
         target <- ZIO.fromEither(AgentKernel.resumeTarget(state))
-        next   <- decision match
-          case ApprovalDecision.Approve                 => approveResume(state, target)
-          case reject @ ApprovalDecision.Reject(reason) => rejectResume(state, target, reject, reason)
+        next   <- withRunLogContext(state) {
+          decision match
+            case ApprovalDecision.Approve                 => approveResume(state, target)
+            case reject @ ApprovalDecision.Reject(reason) => rejectResume(state, target, reject, reason)
+        }
       yield next
     }
 
@@ -167,7 +185,8 @@ final class AgentRuntimeDriver(
         )
       case Right(grant) =>
         for
-          now <- RunClock.instant
+          remaining <- remainingDuration(state)
+          now       <- RunClock.instant
           approvalStep = AgentStep.ApprovalStep(
             state.steps.length + 1,
             target.approval,
@@ -187,7 +206,7 @@ final class AgentRuntimeDriver(
           next <- processToolPlan(approved, grant)
             .timeoutFail(
               AgentError.BudgetExceeded("durationMillis", approved.budget.limits.maxDuration.toMillis)
-            )(approved.budget.limits.maxDuration)
+            )(remaining)
         yield next
     }
 
@@ -204,35 +223,39 @@ final class AgentRuntimeDriver(
       Some(decision),
       target.approval.requestedAtEpochMilli
     )
-    appendToolBatchResults(
-      state.copy(
-        status = RunStatus.Running,
-        suspension = None,
-        steps = state.steps :+ approvalStep
-      ),
-      target.batch,
-      Chunk(target.item -> result)
-    ).flatMap(next =>
-      processToolPlan(next)
+    for
+      remaining <- remainingDuration(state)
+      next      <- appendToolBatchResults(
+        state.copy(
+          status = RunStatus.Running,
+          suspension = None,
+          steps = state.steps :+ approvalStep
+        ),
+        target.batch,
+        Chunk(target.item -> result)
+      )
+      outcome <- processToolPlan(next)
         .timeoutFail(
           AgentError.BudgetExceeded("durationMillis", next.budget.limits.maxDuration.toMillis)
-        )(next.budget.limits.maxDuration)
-    )
+        )(remaining)
+    yield outcome
 
   /** 依据状态与执行账本恢复，而不是重新从用户输入开始。 */
   def recover(runId: RunId): IO[AgentError, RunOutcome] =
     closeModelFailure(runId) {
       for
         state  <- loadExecutable(runId)
-        result <- AgentKernel.recoveryDecision(state.status) match
-          case AgentKernel.RecoveryDecision.ReturnCompleted =>
-            ZIO.fromEither(AgentKernel.completedOutcome(state))
-          case AgentKernel.RecoveryDecision.ReturnCancelled         => ZIO.fail(AgentError.Cancelled(runId))
-          case AgentKernel.RecoveryDecision.CloseUncertainModelCall => closeUncertainModelCall(state)
-          case AgentKernel.RecoveryDecision.RecoverSuspended        =>
-            guard.ensureCompatible(state) *> recoverPending(state)
-          case AgentKernel.RecoveryDecision.StartCreated   => startCreated(state)
-          case AgentKernel.RecoveryDecision.RecoverRunning => recoverRunning(state)
+        result <- withRunLogContext(state) {
+          AgentKernel.recoveryDecision(state.status) match
+            case AgentKernel.RecoveryDecision.ReturnCompleted =>
+              ZIO.fromEither(AgentKernel.completedOutcome(state))
+            case AgentKernel.RecoveryDecision.ReturnCancelled         => ZIO.fail(AgentError.Cancelled(runId))
+            case AgentKernel.RecoveryDecision.CloseUncertainModelCall => closeUncertainModelCall(state)
+            case AgentKernel.RecoveryDecision.RecoverSuspended        =>
+              guard.ensureCompatible(state) *> recoverPending(state)
+            case AgentKernel.RecoveryDecision.StartCreated   => startCreated(state)
+            case AgentKernel.RecoveryDecision.RecoverRunning => recoverRunning(state)
+        }
       yield result
     }
 
@@ -390,8 +413,7 @@ final class AgentRuntimeDriver(
         guardrailContext(state)
       )
       _         <- publisher.emitGuardrails(state.runId, "retrieval", retrievalDecisions)
-      cited     <- contextAssembler.persistCitations(state, sources)
-      assembled <- contextAssembler.build(cited, agent, sources)
+      assembled <- contextAssembler.build(state, agent, sources)
       (contextState, prepared) = assembled
       // Context 压缩已经计入模型调用预算；主模型开始前再次检查，避免辅助调用用掉最后额度后继续越界。
       _         <- ensureBudget(contextState)
@@ -408,6 +430,86 @@ final class AgentRuntimeDriver(
           contextAt
         )
       )
+      outcome <- sources.refusalMessageOnEmptyDelivery match
+        case Some(refusalMessage)
+            if sources.retrieval.nonEmpty &&
+              prepared.deliveredDocumentIds.isEmpty &&
+              !hasDeliveredToolEvidence(prepared) =>
+          terminator.complete(
+            contextState,
+            AgentMessage.assistant(refusalMessage),
+            Some(CompletionDisposition.InsufficientEvidence)
+          )
+        case _ =>
+          invokeModelTurn(contextState, agent, prepared)
+    yield outcome
+
+  /** 检查本次实际送往模型的消息窗口中是否包含有效、非空且未被撤回的知识检索/提取工具证据。 */
+  private def hasDeliveredToolEvidence(
+      prepared: com.zyblw.agent.context.PreparedContext
+  ): Boolean =
+    import zio.json.DecoderOps
+    def nonEmptyField(obj: Map[String, zio.json.ast.Json], key: String): Boolean =
+      obj.get(key).exists {
+        case zio.json.ast.Json.Str(v) => v.trim.nonEmpty
+        case _                        => false
+      }
+    def isValidCitationItem(item: zio.json.ast.Json): Boolean = item match
+      case zio.json.ast.Json.Obj(fields) =>
+        val m = fields.toMap
+        nonEmptyField(m, "documentId") &&
+        (nonEmptyField(m, "chunkId") || nonEmptyField(m, "sourceUri"))
+      case _ => false
+    def isValidResultItem(item: zio.json.ast.Json): Boolean = item match
+      case zio.json.ast.Json.Obj(fields) =>
+        val m = fields.toMap
+        (nonEmptyField(m, "documentId") || nonEmptyField(m, "sourceUri")) &&
+        (nonEmptyField(m, "text") || nonEmptyField(m, "content") || nonEmptyField(m, "excerpt"))
+      case _ => false
+    def isEvidenceJson(json: zio.json.ast.Json): Boolean = json match
+      case zio.json.ast.Json.Obj(fields) =>
+        val fieldMap    = fields.toMap
+        val statusOk    = fieldMap.get("status").contains(zio.json.ast.Json.Str("ok"))
+        val hasExcerpts = fieldMap.get("excerpts").exists {
+          case zio.json.ast.Json.Arr(items) =>
+            items.exists {
+              case zio.json.ast.Json.Str(s) => s.trim.nonEmpty
+              case _                        => false
+            }
+          case _ => false
+        }
+        val hasCitations = fieldMap.get("citations").exists {
+          case zio.json.ast.Json.Arr(items) =>
+            items.exists(isValidCitationItem) &&
+            (hasExcerpts || items.exists {
+              case zio.json.ast.Json.Obj(f) => nonEmptyField(f.toMap, "excerpt")
+              case _                        => false
+            })
+          case _ => false
+        }
+        val hasResults = fieldMap.get("results").exists {
+          case zio.json.ast.Json.Arr(items) => items.exists(isValidResultItem)
+          case _                            => false
+        }
+        statusOk && (hasCitations || hasResults)
+      case _ => false
+
+    prepared.messages.exists { message =>
+      message.role == MessageRole.Tool &&
+      !message.metadata.get("isError").contains("true") &&
+      message.content.exists {
+        case ContentPart.JsonValue(json) => isEvidenceJson(json)
+        case ContentPart.Text(raw)       => raw.fromJson[zio.json.ast.Json].toOption.exists(isEvidenceJson)
+        case _                           => false
+      }
+    }
+
+  private def invokeModelTurn(
+      contextState: AgentState,
+      agent: AgentDefinition,
+      prepared: com.zyblw.agent.context.PreparedContext
+  ): IO[AgentError, RunOutcome] =
+    for
       definitions <- registry.definitions(agent.allowedTools.map(ToolName(_)))
       // 每个调用捕获一次 live 工作点并与创建时组合比较；同一份值随后用于能力校验、账本和 dispatch，消除检查后再次读取造成的漂移窗口。
       prices = modelPolicies.pricesFor(contextState.composition.modelPricingFingerprint)
@@ -595,9 +697,14 @@ final class AgentRuntimeDriver(
       _  <- publisher.emit(
         AgentEvent.ToolBatchStarted(state.runId, plan.id, batch.index, batch.items.length, at)
       )
-      _ <- ZIO.foreachDiscard(batch.items)(item =>
-        publisher.emit(AgentEvent.ToolCallRequested(state.runId, item.call, at))
-      )
+      _ <- ZIO.foreachDiscard(resolved) { case (item, maybeTool) =>
+        val redactedCall = maybeTool.toOption.fold(item.call)(tool =>
+          item.call.copy(
+            arguments = ToolMetadata.redactJson(item.call.arguments, tool.metadata.sensitiveInputFields)
+          )
+        )
+        publisher.emit(AgentEvent.ToolCallRequested(state.runId, redactedCall, at))
+      }
       gate   <- authorization.gate(state, plan, batch, resolved, grant)
       result <- gate match
         case GateDecision.NeedsApproval(item, risk, reason, subject) =>
@@ -730,14 +837,34 @@ final class AgentRuntimeDriver(
       _      <- publisher.emit(AgentEvent.ToolExecutionStarted(state.runId, call.id, now))
       executor = toolExecutor.narrowed(state.definition.allowedTools.map(ToolName(_)), toolPolicies.current())
       context  = executionContext(state, call)
-      result <- executor
-        .execute(tool, call, context)
+      result <- ZIO
+        .scoped {
+          ZIO
+            .sleep(1.second)
+            .flatMap(_ => RunClock.millis.flatMap(at => toolLedger.touchRunning(active, at).ignore))
+            .forever
+            .forkScoped *>
+            executor
+              .execute(tool, call, context)
+              .onInterrupt(
+                RunClock.millis.flatMap(at => toolLedger.touchRunning(active, at).ignore)
+              )
+        }
         .foldZIO(
           error =>
             for
               at <- RunClock.millis
-              _  <- toolLedger.fail(active, tool.metadata.mayReplayAfterCrash, error.category.toString, at)
-              _  <- publisher.emit(
+              durationMs = math.max(0L, at - now)
+              _ <- ZIO.logAnnotate(
+                LogAnnotation("component", "agent-tool-executor"),
+                LogAnnotation("operation", s"tool.${call.name}")
+              )(
+                ZIO.logWarning(
+                  s"agent.tool.execution.failed runId=${state.runId.asString} tool=${call.name} callId=${call.id} attempt=${active.attempt} durationMs=$durationMs category=${error.category} retryable=${error.retryable}"
+                )
+              )
+              _ <- toolLedger.fail(active, tool.metadata.mayReplayAfterCrash, error.category.toString, at)
+              _ <- publisher.emit(
                 AgentEvent.ToolExecutionFailed(state.runId, call.id, error.category.toString, at)
               )
               message = if error.safeToExpose then error.message else s"工具 ${call.name} 执行失败"
@@ -756,20 +883,44 @@ final class AgentRuntimeDriver(
                 state.definition.contextPolicy.maxToolResultCharacters
               )
               at <- RunClock.millis
-              _  <- toolLedger.succeed(active, externalized, at)
+              durationMs = math.max(0L, at - now)
+              _ <- toolLedger.succeed(active, externalized, at)
+              _ <- ZIO.logAnnotate(
+                LogAnnotation("component", "agent-tool-executor"),
+                LogAnnotation("operation", s"tool.${call.name}")
+              )(
+                if externalized.isError || durationMs >= 2000L then
+                  ZIO.logWarning(
+                    s"agent.tool.execution.completed runId=${state.runId.asString} tool=${call.name} callId=${call.id} attempt=${active.attempt} durationMs=$durationMs isError=${externalized.isError}"
+                  )
+                else
+                  ZIO.logDebug(
+                    s"agent.tool.execution.completed runId=${state.runId.asString} tool=${call.name} callId=${call.id} attempt=${active.attempt} durationMs=$durationMs isError=false"
+                  )
+              )
             yield externalized
         )
     yield result
 
-  /** 将工具结果、步骤、用量和下一个恢复游标作为一个状态转换提交。 */
+  /** 将工具结果、步骤、用量和下一个恢复游标作为一个状态转换提交，并对进入步骤轨迹的敏感输入字段脱敏。 */
   private def appendToolBatchResults(
       state: AgentState,
       batch: DurableToolBatch,
       results: Chunk[(DurableToolPlanItem, ToolResult)]
   ): IO[AgentError, AgentState] =
     for
-      now        <- RunClock.instant
-      transition <- ZIO.fromEither(AgentKernel.commitToolBatch(state, batch, results, now))
+      now             <- RunClock.instant
+      redactedResults <- ZIO.foreach(results) { case (item, result) =>
+        registry.get(ToolName(item.call.name)).either.map { maybeTool =>
+          val redactedCall = maybeTool.toOption.fold(item.call)(tool =>
+            item.call.copy(
+              arguments = ToolMetadata.redactJson(item.call.arguments, tool.metadata.sensitiveInputFields)
+            )
+          )
+          item.copy(call = redactedCall) -> result
+        }
+      }
+      transition <- ZIO.fromEither(AgentKernel.commitToolBatch(state, batch, redactedResults, now))
       next       <- committer.commitTransition(state, transition)
     yield next
 
@@ -784,15 +935,71 @@ final class AgentRuntimeDriver(
           (AgentKernel.settledFinalAnswer(state) match
             case Some(answer) if state.pendingToolPlan.isEmpty => terminator.complete(state, answer)
             case _                                             =>
-              guard.ensureCompatible(state) *>
-                (state.pendingToolPlan match
-                  case Some(_) => recoverToolPlan(state)
-                  case None    => loop(state)
+              for
+                _         <- guard.ensureCompatible(state)
+                _         <- settleUnrecordedRunningTail(state)
+                remaining <- remainingDuration(state)
+                now       <- RunClock.instant
+                events    <- loadAllEvents(state.runId)
+                tools     <- store.listToolExecutions(state.runId)
+                models    <- store.getModelCalls(state.runId)
+                resumed   <-
+                  if now.toEpochMilli > state.updatedAt.toEpochMilli then
+                    val lastEventAt =
+                      events.lastOption.map(_.atEpochMilli).getOrElse(state.updatedAt.toEpochMilli)
+                    val preResumeActiveAt =
+                      (tools.map(_.updatedAtEpochMilli) ++ models.map(
+                        _.updatedAtEpochMilli
+                      ) :+ state.updatedAt.toEpochMilli)
+                        .filter(_ < now.toEpochMilli)
+                        .maxOption
+                        .getOrElse(state.updatedAt.toEpochMilli)
+                    val resumeEvents =
+                      if preResumeActiveAt > lastEventAt then
+                        NonEmptyChunk(
+                          AgentEvent.UsageUpdated(state.runId, state.usage, preResumeActiveAt),
+                          AgentEvent.RunResumed(state.runId, now.toEpochMilli)
+                        )
+                      else NonEmptyChunk(AgentEvent.RunResumed(state.runId, now.toEpochMilli))
+                    committer.commitAll(
+                      state,
+                      state.copy(updatedAt = now),
+                      resumeEvents
+                    )
+                  else ZIO.succeed(state)
+                outcome <- (resumed.pendingToolPlan match
+                  case Some(_) => recoverToolPlan(resumed)
+                  case None    => loop(resumed)
                 )
                   .timeoutFail(
-                    AgentError.BudgetExceeded("durationMillis", state.budget.limits.maxDuration.toMillis)
-                  )(state.budget.limits.maxDuration))
+                    AgentError.BudgetExceeded("durationMillis", resumed.budget.limits.maxDuration.toMillis)
+                  )(remaining)
+              yield outcome)
     }
+
+  /** 对硬崩溃后仍处于 Running 且未记录中断时间戳的工具账本，按工具超时上限做保守尾部记账，防止崩溃丢失已执行的工具耗时。 */
+  private def settleUnrecordedRunningTail(state: AgentState): IO[AgentError, Unit] =
+    for
+      nowMs  <- RunClock.millis
+      events <- loadAllEvents(state.runId)
+      tools  <- store.listToolExecutions(state.runId)
+      startedAtByCall = events.foldLeft(Map.empty[String, Long]) { (acc, persisted) =>
+        persisted.event match
+          case AgentEvent.ToolExecutionStarted(_, callId, at) => acc.updated(callId, at)
+          case _                                              => acc
+      }
+      maxTailMillis = toolPolicies.current().defaultTimeout.toMillis.max(1L)
+      _ <- ZIO.foreachDiscard(tools) { record =>
+        val startedAt = startedAtByCall.getOrElse(record.callId, record.updatedAtEpochMilli)
+        if record.status == ToolExecutionStatus.Running &&
+          record.updatedAtEpochMilli <= startedAt &&
+          nowMs > record.updatedAtEpochMilli
+        then
+          val conservativeAt = math.min(nowMs, record.updatedAtEpochMilli + maxTailMillis)
+          toolLedger.touchRunning(record, conservativeAt).ignore
+        else ZIO.unit
+      }
+    yield ()
 
   /** Failed 终态若仍有未结算模型账本，先收口 Unknown，禁止把它当成可忽略的普通终态。 */
   private def closeUncertainModelCall(state: AgentState): IO[AgentError, RunOutcome] =
@@ -875,6 +1082,36 @@ final class AgentRuntimeDriver(
   private def ensureBudget(state: AgentState): IO[AgentError, Unit] =
     ZIO.fromEither(AgentKernel.validateBeforeAction(state)) *> ensureKnownModelCosts(state)
 
+  /** 计算跨暂停审批与崩溃恢复的剩余有效执行时长预算。
+    *
+    * 人工审批等待窗口（`RunSuspended`/`ToolApprovalRequired` 至 `RunResumed`）以及崩溃后等待租约到期的停机窗口
+    * 不计入有效执行耗时；所有已发生的有效执行区间累加后从 `maxDuration` 扣减。
+    */
+  private def remainingDuration(state: AgentState): IO[AgentError, Duration] =
+    val maxMillis = state.budget.limits.maxDuration.toMillis
+    for
+      events     <- loadAllEvents(state.runId)
+      tools      <- store.listToolExecutions(state.runId)
+      modelCalls <- store.getModelCalls(state.runId)
+      consumed  = AgentRuntimeDriver.consumedActiveMillis(state, events, tools, modelCalls)
+      remaining = maxMillis - consumed
+      _ <- ZIO
+        .fail(AgentError.BudgetExceeded("durationMillis", maxMillis))
+        .when(remaining <= 0L)
+    yield Duration.fromMillis(remaining)
+
+  private def loadAllEvents(runId: RunId): IO[AgentError, Chunk[PersistedAgentEvent]] =
+    def loopPages(
+        afterSeq: Long,
+        acc: Chunk[PersistedAgentEvent]
+    ): IO[AgentError, Chunk[PersistedAgentEvent]] =
+      store.events(runId, afterSeq, RunStore.MaxEventPageSize).flatMap { page =>
+        val combined = acc ++ page
+        if page.length < RunStore.MaxEventPageSize then ZIO.succeed(combined)
+        else loopPages(page.last.sequence, combined)
+      }
+    loopPages(-1L, Chunk.empty)
+
   /** 费用上限下不能把缺失用量当零继续调用；读取耐久账本让崩溃恢复走相同门禁。 */
   private def ensureKnownModelCosts(state: AgentState): IO[AgentError, Unit] =
     if state.budget.limits.maxEstimatedCost.isEmpty || state.usage.modelCalls == 0 then ZIO.unit
@@ -927,3 +1164,96 @@ object AgentRuntimeDriver:
       contract: com.zyblw.agent.composition.ToolContractFingerprint,
       approvalSubject: Option[com.zyblw.agent.composition.ApprovalSubject]
   )
+
+  private val observedToolAttemptTimestamps =
+    new java.util.concurrent.ConcurrentHashMap[RunId, Map[(String, Int), Long]]()
+
+  private def recordAndReadToolTimestamps(
+      runId: RunId,
+      tools: Chunk[ToolExecutionRecord],
+      isTerminal: Boolean
+  ): Chunk[Long] =
+    val updated = observedToolAttemptTimestamps.compute(
+      runId,
+      (_, existing) => {
+        val base = Option(existing).getOrElse(Map.empty)
+        tools.foldLeft(base) { (acc, record) =>
+          val key  = record.callId -> record.attempt
+          val prev = acc.getOrElse(key, 0L)
+          acc.updated(key, math.max(prev, record.updatedAtEpochMilli))
+        }
+      }
+    )
+    if isTerminal then
+      val _ = observedToolAttemptTimestamps.remove(runId)
+    else if observedToolAttemptTimestamps.size() > 4096 then observedToolAttemptTimestamps.clear()
+    Chunk.fromIterable(updated.values)
+
+  private[runtime] def consumedActiveMillis(
+      state: AgentState,
+      events: Chunk[PersistedAgentEvent],
+      tools: Chunk[ToolExecutionRecord],
+      modelCalls: Chunk[ModelCallExecutionRecord]
+  ): Long =
+    val toolTimestamps =
+      (tools.map(_.updatedAtEpochMilli) ++
+        recordAndReadToolTimestamps(state.runId, tools, RunStatus.isTerminal(state.status))).distinct
+    val ledgerTimestamps =
+      (toolTimestamps ++ modelCalls.map(_.updatedAtEpochMilli)).sorted
+    var activeStart: Option[Long]  = None
+    var lastActiveAt: Option[Long] = None
+    var accumulated: Long          = 0L
+    events.foreach { persisted =>
+      val at = persisted.atEpochMilli
+      persisted.event match
+        case _: AgentEvent.RunCreated            => ()
+        case AgentEvent.RunStarted(_, startedAt) =>
+          if activeStart.isEmpty then
+            activeStart = Some(startedAt)
+            lastActiveAt = Some(startedAt)
+          else lastActiveAt = Some(math.max(lastActiveAt.getOrElse(startedAt), startedAt))
+        case AgentEvent.RunSuspended(_, _, suspendedAt) =>
+          activeStart.foreach(start => accumulated += math.max(0L, suspendedAt - start))
+          activeStart = None
+          lastActiveAt = None
+        case AgentEvent.ToolApprovalRequired(_, _, suspendedAt) =>
+          activeStart.foreach(start => accumulated += math.max(0L, suspendedAt - start))
+          activeStart = None
+          lastActiveAt = None
+        case AgentEvent.RunResumed(_, resumedAt) =>
+          activeStart match
+            case None =>
+              activeStart = Some(resumedAt)
+              lastActiveAt = Some(resumedAt)
+            case Some(start) =>
+              val ledgerBeforeResume =
+                ledgerTimestamps.filter(ts => ts >= start && ts < resumedAt).maxOption.getOrElse(start)
+              val crashedEnd = math.max(lastActiveAt.getOrElse(start), ledgerBeforeResume)
+              accumulated += math.max(0L, math.min(resumedAt, crashedEnd) - start)
+              activeStart = Some(resumedAt)
+              lastActiveAt = Some(resumedAt)
+        case AgentEvent.RunCompleted(_, _, _, endedAt) =>
+          activeStart.foreach(start => accumulated += math.max(0L, endedAt - start))
+          activeStart = None
+          lastActiveAt = None
+        case AgentEvent.RunFailed(_, _, _, endedAt) =>
+          activeStart.foreach(start => accumulated += math.max(0L, endedAt - start))
+          activeStart = None
+          lastActiveAt = None
+        case AgentEvent.RunCancelled(_, endedAt) =>
+          activeStart.foreach(start => accumulated += math.max(0L, endedAt - start))
+          activeStart = None
+          lastActiveAt = None
+        case _ =>
+          if activeStart.isEmpty then
+            activeStart = Some(at)
+            lastActiveAt = Some(at)
+          else lastActiveAt = Some(math.max(lastActiveAt.getOrElse(at), at))
+    }
+    activeStart match
+      case None        => accumulated
+      case Some(start) =>
+        val maxLedgerAfterStart =
+          (ledgerTimestamps.filter(_ >= start) :+ state.updatedAt.toEpochMilli).maxOption.getOrElse(start)
+        val segmentEnd = math.max(lastActiveAt.getOrElse(start), maxLedgerAfterStart)
+        accumulated + math.max(0L, segmentEnd - start)

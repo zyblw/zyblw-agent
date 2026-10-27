@@ -240,7 +240,9 @@ final class LlmContextCompressor(model: ChatModel, config: LlmContextCompressorC
                       "不要解释，不要复述失败内容，也不要添加来源未提供的事实。"
                   )
                 )
-                callAndDecode(
+                ZIO.logWarning(
+                  s"agent.context.compressor.repair_retry reason=${error.message.take(120)} repairsRemaining=$repairsRemaining calls=$calls"
+                ) *> callAndDecode(
                   repairRequest,
                   sources,
                   originalMessages,
@@ -278,15 +280,18 @@ final class LlmContextCompressor(model: ChatModel, config: LlmContextCompressorC
   ): IO[ContextError, ContextCompressionResult] =
     if !config.deterministicFallbackOnValidationExhausted then ZIO.fail(validationError)
     else
-      ContextCompressor.deterministicValue
-        .compress(messages, targetTokens, maxModelCalls = 0)
-        .map(result =>
-          result.copy(
-            usage = usage,
-            modelCalls = calls,
-            compressorVersion = s"${config.compressorVersion}.fallback"
+      ZIO.logWarning(
+        s"agent.context.compressor.deterministic_fallback reason=${validationError.message.take(120)} calls=$calls compressorVersion=${config.compressorVersion}"
+      ) *>
+        ContextCompressor.deterministicValue
+          .compress(messages, targetTokens, maxModelCalls = 0)
+          .map(result =>
+            result.copy(
+              usage = usage,
+              modelCalls = calls,
+              compressorVersion = s"${config.compressorVersion}.fallback"
+            )
           )
-        )
 
   /** 要求恰好调用唯一工具，并把所有候选转换成经过逐字来源验证的确定性摘要。 */
   private def decodeResponse(

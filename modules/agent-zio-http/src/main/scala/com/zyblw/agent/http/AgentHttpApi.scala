@@ -79,15 +79,23 @@ final class AgentHttpApi(
           threadId <- ZIO
             .fromEither(ThreadId.fromString(input.threadId))
             .mapError(AgentError.InvalidConfiguration(_))
-          agent          <- agents.get(parsedAgentId)
-          context        <- contexts.resolve(request)
+          agent      <- agents.get(parsedAgentId)
+          rawContext <- contexts.resolve(request)
+          reqIdOpt = request
+            .rawHeader("X-Request-Id")
+            .map(_.trim)
+            .filter(id => id.nonEmpty && id.length <= 128 && !id.exists(_.isControl))
+          context = reqIdOpt.fold(rawContext) { reqId =>
+            if rawContext.attributes.contains("request_id") then rawContext
+            else rawContext.copy(attributes = rawContext.attributes.updated("request_id", reqId))
+          }
           idempotencyKey <- ZIO
             .fromOption(request.rawHeader("Idempotency-Key").map(_.trim).filter(_.nonEmpty))
             .orElseFail(AgentError.InvalidConfiguration("缺少 Idempotency-Key 请求头"))
           _ <- validateText("Idempotency-Key", idempotencyKey, AgentHttpLimits.IdempotencyKeyChars)
           runRequest = RunRequest(threadId, AgentMessage.user(input.input), context)
           record <- commands.submitStart(agent, runRequest, idempotencyKey)
-        yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
+        yield accepted(record)).catchAll(respondError)
       }
     )
   )
@@ -102,7 +110,7 @@ final class AgentHttpApi(
           actor      <- contexts.resolve(request)
           authorized <- RunAuthorization.read(state, actor)
         yield Response.json(AgentHttpProjection.run(authorized).toJson))
-          .catchAll(error => ZIO.succeed(errorResponse(error)))
+          .catchAll(respondError)
       },
       AgentHttpContract.getRunCitationsPattern -> handler { (runId: String, request: Request) =>
         (for
@@ -111,7 +119,7 @@ final class AgentHttpApi(
           actor      <- contexts.resolve(request)
           authorized <- RunAuthorization.read(state, actor)
         yield Response.json(AgentHttpProjection.run(authorized).toJson))
-          .catchAll(error => ZIO.succeed(errorResponse(error)))
+          .catchAll(respondError)
       },
       AgentHttpContract.inspectRunPattern -> handler { (runId: String, request: Request) =>
         (for
@@ -123,7 +131,7 @@ final class AgentHttpApi(
           _          <- validateCursor(cursor, authorized)
           events     <- runtime.persistedEvents(parsed, cursor)
         yield Response.json(AgentHttpProjection.inspection(authorized, events, cursor).toJson))
-          .catchAll(error => ZIO.succeed(errorResponse(error)))
+          .catchAll(respondError)
       }
     )
   )
@@ -141,7 +149,7 @@ final class AgentHttpApi(
             validateText("reason", reason, AgentHttpLimits.ReasonChars)
           )
           record <- commands.submitCancel(parsed, command.reason, actor)
-        yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
+        yield accepted(record)).catchAll(respondError)
       },
       AgentHttpContract.approveRunPattern -> handler { (runId: String, request: Request) =>
         (for
@@ -159,14 +167,14 @@ final class AgentHttpApi(
             case other     => ZIO.fail(AgentError.InvalidConfiguration(s"未知审批决定: $other"))
           actor  <- contexts.resolve(request)
           record <- commands.submitApproval(parsed, decision, actor)
-        yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
+        yield accepted(record)).catchAll(respondError)
       },
       AgentHttpContract.recoverRunPattern -> handler { (runId: String, request: Request) =>
         (for
           parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
           actor  <- contexts.resolve(request)
           record <- commands.submitRecover(parsed, actor)
-        yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
+        yield accepted(record)).catchAll(respondError)
       },
       AgentHttpContract.retryRunPattern -> handler { (runId: String, request: Request) =>
         (for
@@ -179,7 +187,7 @@ final class AgentHttpApi(
           _      <- validateText("reason", command.reason, AgentHttpLimits.ReasonChars)
           actor  <- contexts.resolve(request)
           record <- commands.submitRetry(parsed, command.requestId, command.reason, actor)
-        yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
+        yield accepted(record)).catchAll(respondError)
       }
     )
   )
@@ -194,7 +202,7 @@ final class AgentHttpApi(
             .mapError(AgentError.InvalidConfiguration(_))
           actor  <- contexts.resolve(request)
           record <- commands.inspect(parsed, actor)
-        yield Response.json(view(record).toJson)).catchAll(error => ZIO.succeed(errorResponse(error)))
+        yield Response.json(view(record).toJson)).catchAll(respondError)
       },
       AgentHttpContract.retryCommandPattern -> handler { (commandId: String, request: Request) =>
         (for
@@ -203,7 +211,7 @@ final class AgentHttpApi(
             .mapError(AgentError.InvalidConfiguration(_))
           actor  <- contexts.resolve(request)
           record <- commands.retryDeadLetter(parsed, actor)
-        yield accepted(record)).catchAll(error => ZIO.succeed(errorResponse(error)))
+        yield accepted(record)).catchAll(respondError)
       },
       AgentHttpContract.listRunCommandsPattern -> handler { (runId: String, request: Request) =>
         (for
@@ -211,38 +219,46 @@ final class AgentHttpApi(
           actor   <- contexts.resolve(request)
           records <- commands.list(parsed, actor)
         yield Response.json(records.map(view).toList.toJson))
-          .catchAll(error => ZIO.succeed(errorResponse(error)))
+          .catchAll(respondError)
       }
     )
   )
 
   /** 只公开耐久事件列表与 SSE；嵌入式业务宿主可仅挂载这一最小读取面。 */
-  val eventRoutes: Routes[Any, Nothing] = versioned(
-    Routes(
-      AgentHttpContract.streamRunEventsPattern -> handler { (runId: String, request: Request) =>
-        (for
-          parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
-          cursor <- parseLastEventId(request)
-          actor  <- contexts.resolve(request)
-          state  <- runtime.inspect(parsed)
-          _      <- RunAuthorization.read(state, actor)
-          _      <- validateCursor(cursor, state)
-        yield durableEventResponse(parsed, cursor)).catchAll(error => ZIO.succeed(errorResponse(error)))
-      },
-      AgentHttpContract.listRunEventsPattern -> handler { (runId: String, request: Request) =>
-        (for
-          parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
-          cursor <- parseLastEventId(request)
-          actor  <- contexts.resolve(request)
-          state  <- runtime.inspect(parsed)
-          _      <- RunAuthorization.read(state, actor)
-          _      <- validateCursor(cursor, state)
-          events <- runtime.persistedEvents(parsed, cursor)
-        yield Response.json(events.map(AgentHttpProjection.event).toList.toJson))
-          .catchAll(error => ZIO.succeed(errorResponse(error)))
-      }
+  val eventRoutes: Routes[Any, Nothing] =
+    buildEventRoutes(AgentHttpProjection.event)
+
+  /** 只公开不含 `output` 原文的低敏进度事件列表与 SSE；供在产品层执行来源门禁、撤回过滤与最终回答投影的宿主挂载。 */
+  val progressEventRoutes: Routes[Any, Nothing] =
+    buildEventRoutes(AgentHttpProjection.progressEvent)
+
+  private def buildEventRoutes(projectEvent: PersistedAgentEvent => RunEventView): Routes[Any, Nothing] =
+    versioned(
+      Routes(
+        AgentHttpContract.streamRunEventsPattern -> handler { (runId: String, request: Request) =>
+          (for
+            parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+            cursor <- parseLastEventId(request)
+            actor  <- contexts.resolve(request)
+            state  <- runtime.inspect(parsed)
+            _      <- RunAuthorization.read(state, actor)
+            _      <- validateCursor(cursor, state)
+          yield durableEventResponse(parsed, cursor, projectEvent)).catchAll(respondError)
+        },
+        AgentHttpContract.listRunEventsPattern -> handler { (runId: String, request: Request) =>
+          (for
+            parsed <- ZIO.fromEither(RunId.fromString(runId)).mapError(AgentError.InvalidConfiguration(_))
+            cursor <- parseLastEventId(request)
+            actor  <- contexts.resolve(request)
+            state  <- runtime.inspect(parsed)
+            _      <- RunAuthorization.read(state, actor)
+            _      <- validateCursor(cursor, state)
+            events <- runtime.persistedEvents(parsed, cursor)
+          yield Response.json(events.map(projectEvent).toList.toJson))
+            .catchAll(respondError)
+        }
+      )
     )
-  )
 
   /** 稳定公共协议的元数据端点。 */
   val metadataRoutes: Routes[Any, Nothing] = versioned(
@@ -263,11 +279,15 @@ final class AgentHttpApi(
     * `PersistedAgentEvent`。流中途数据库故障时 HTTP 状态已经无法改变，因此发送一个不含内部错误详情的 `stream_error` 后结束；客户端可稍后携带最后成功 ID 重连。15 秒
     * heartbeat 只维持代理连接，不推进游标，也不写入 RunStore。
     */
-  private def durableEventResponse(runId: RunId, afterSequence: Long): Response =
+  private def durableEventResponse(
+      runId: RunId,
+      afterSequence: Long,
+      projectEvent: PersistedAgentEvent => RunEventView
+  ): Response =
     val eventStream = durableEvents
       .events(runId, afterSequence)
       .map { persisted =>
-        val publicEvent = AgentHttpProjection.event(persisted)
+        val publicEvent = projectEvent(persisted)
         ServerSentEvent(
           data = publicEvent.toJson,
           eventType = Some(publicEvent.eventType),
@@ -362,8 +382,8 @@ final class AgentHttpApi(
     * @param error
     *   Runtime、注册表或请求解析产生的类型化错误
     */
-  private def errorResponse(error: AgentError): Response =
-    HttpErrorResponse.from(error)
+  private def respondError(error: AgentError): UIO[Response] =
+    HttpErrorResponse.respond("agent-http-api")(ZIO.fail(error))
 
   /** 根据错误的公开标记决定是否返回原始领域消息。
     * @param error

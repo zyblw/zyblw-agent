@@ -1,6 +1,6 @@
 package com.zyblw.agent.runtime
 
-import com.zyblw.agent.composition.{CapabilityKind, CapabilityRef}
+import com.zyblw.agent.composition.{CapabilityKind, CapabilityRef, RuntimeComposition, RuntimeProfile}
 import com.zyblw.agent.context.*
 import com.zyblw.agent.core.*
 import com.zyblw.agent.guardrails.*
@@ -1211,5 +1211,432 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
           case other => ZIO.fail(AgentError.Unexpected(s"首事件不是 RunCreated: $other"))
         state <- runtime.inspect(runId)
       yield assertTrue(state.status == RunStatus.Cancelled)).provideLayer(layers(noisyModel, Nil))
+    },
+    test("R3：严格低证据拒答不会被失败或非知识证据的 Tool 消息绕过，仅在交付有效知识工具证据时放行") {
+      val strictAgent = agent.copy(
+        contextPolicy = ContextPolicy(
+          budget = ContextBudget(
+            total = 1000,
+            system = 100,
+            tools = 100,
+            recentMessages = 300,
+            memory = 100,
+            retrieval = 10,
+            outputReserve = 100,
+            safetyMargin = 100
+          )
+        )
+      )
+      def customToolResponse(callId: String, toolName: String, args: Json.Obj): ChatResponse =
+        ChatResponse(
+          AgentMessage.assistantToolCalls(Chunk(ToolCall(callId, toolName, args))),
+          FinishReason.ToolCalls,
+          TokenUsage(4, 2)
+        )
+      val emptyEvidenceContributor = new ContextContributor:
+        val id                                                                              = "empty-evidence"
+        def contribute(state: AgentState, definition: AgentDefinition): UIO[ContextSources] =
+          val _ = definition
+          if state.messages.size <= 1 then ZIO.succeed(ContextSources())
+          else
+            ZIO.succeed(
+              ContextSources(
+                retrieval = Chunk(ContextDocument("1", "超长检索片段" * 200, "doc-1")),
+                retrievalEvidence = Some(RunRetrievalEvidence("Supported", 1, 1, Some(0.9))),
+                refusalMessageOnEmptyDelivery = Some("未命中有效证据，拒绝回答")
+              )
+            )
+      val resolver      = ContextContributor.resolver(emptyEvidenceContributor)
+      val unrelatedTool = Tool.json[Any, Json.Obj, Nothing, Json.Obj](
+        ToolName("echo_noop"),
+        "非证据工具",
+        Json.Obj("type" -> Json.Str("object")),
+        None,
+        ToolMetadata(ToolRisk.ReadOnly, SideEffect.None)
+      )((_, _) => ZIO.succeed(Json.Obj("echo" -> Json.Str("hello"))))
+      val evidenceTool = Tool.json[Any, Json.Obj, Nothing, Json.Obj](
+        ToolName("knowledge_fetch"),
+        "知识提取工具",
+        Json.Obj("type" -> Json.Str("object")),
+        None,
+        ToolMetadata(ToolRisk.ReadOnly, SideEffect.None)
+      )((_, _) =>
+        ZIO.succeed(
+          Json.Obj(
+            "status"    -> Json.Str("ok"),
+            "citations" -> Json.Arr(Json.Obj("documentId" -> Json.Str("doc-1"), "chunkId" -> Json.Str("c1"))),
+            "results"   -> Json.Arr(Json.Obj("documentId" -> Json.Str("doc-1"), "text" -> Json.Str("桂枝汤主之")))
+          )
+        )
+      )
+      for
+        // 1. 仅有非证据工具消息时，下一轮在检索证据被预算裁空后必须拒答，不再调用第二轮模型
+        model1 <- ScriptedChatModel.make(
+          Chunk(
+            customToolResponse("call-noop", "echo_noop", Json.Obj()),
+            finalResponse("不应到达的无据回答")
+          )
+        )
+        regNoop  <- RegisteredTool.make(unrelatedTool)
+        outcome1 <- (for
+          runtime <- ZIO.service[AgentRuntime]
+          out     <- runtime.run(
+            strictAgent.copy(allowedTools = Set("echo_noop")),
+            RunRequest(ThreadId("r3-noop"), AgentMessage.user("询问"))
+          )
+          state1 <- runtime.inspect(runIdOf(out))
+          reqs   <- model1.recordedRequests
+        yield (out, state1, reqs)).provideLayer(
+          TestAgentRuntime.inMemory(
+            model1,
+            List(regNoop),
+            contextSources = resolver,
+            toolPolicy = ToolPolicyConfig(allowedTools = Set(ToolName("echo_noop")))
+          )
+        )
+        // 2. 交付了有效知识工具证据（status=ok & citations non-empty）时允许完成回答
+        model2 <- ScriptedChatModel.make(
+          Chunk(
+            customToolResponse("call-ev", "knowledge_fetch", Json.Obj()),
+            finalResponse("基于知识工具证据的回答")
+          )
+        )
+        regEv    <- RegisteredTool.make(evidenceTool)
+        outcome2 <- (for
+          runtime <- ZIO.service[AgentRuntime]
+          out     <- runtime.run(
+            strictAgent.copy(allowedTools = Set("knowledge_fetch")),
+            RunRequest(ThreadId("r3-evidence"), AgentMessage.user("询问"))
+          )
+          state2 <- runtime.inspect(runIdOf(out))
+          reqs   <- model2.recordedRequests
+        yield (out, state2, reqs)).provideLayer(
+          TestAgentRuntime.inMemory(
+            model2,
+            List(regEv),
+            contextSources = resolver,
+            toolPolicy = ToolPolicyConfig(allowedTools = Set(ToolName("knowledge_fetch")))
+          )
+        )
+      yield assertTrue(
+        outcome1._1 match
+          case RunOutcome.Completed(_, _, answer, _, _) =>
+            answer.text == "未命中有效证据，拒绝回答"
+          case _ => false
+        ,
+        outcome1._2.completionDisposition.contains(CompletionDisposition.InsufficientEvidence),
+        outcome1._3.length == 1,
+        outcome2._1 match
+          case RunOutcome.Completed(_, _, answer, _, _) =>
+            answer.text == "基于知识工具证据的回答"
+          case _ => false
+        ,
+        outcome2._2.completionDisposition.isEmpty,
+        outcome2._3.length == 2
+      )
+    },
+    test("R6：跨暂停审批、多次崩溃长停机、Running 未结算工具尾部及超 4096 事件的累计有效时长核算") {
+      val runId     = RunId(java.util.UUID.randomUUID())
+      val sessionId = SessionId(java.util.UUID.randomUUID())
+      val baseState = AgentState(
+        runId = runId,
+        sessionId = sessionId,
+        agentId = agent.id,
+        status = RunStatus.Running,
+        messages = Chunk.empty,
+        steps = Chunk.empty,
+        usage = UsageSummary(),
+        budget = BudgetState(RunLimits(maxDuration = 10.seconds), UsageSummary(), 0),
+        suspension = None,
+        createdAt = java.time.Instant.ofEpochMilli(0L),
+        updatedAt = java.time.Instant.ofEpochMilli(68000L),
+        version = Version(10L),
+        definition = agent,
+        composition = RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings),
+        threadId = ThreadId("r6-duration")
+      )
+      // 场景 A：两次崩溃恢复含 60s 长停机，仅累加真实活跃段 [0..4000] 与 [64000..68000] = 8000ms (0.8X)
+      val crashEvents = Chunk(
+        PersistedAgentEvent(
+          EventId(java.util.UUID.randomUUID()),
+          runId,
+          0L,
+          AgentEvent.RunCreated(runId, sessionId, 0L),
+          0L
+        ),
+        PersistedAgentEvent(
+          EventId(java.util.UUID.randomUUID()),
+          runId,
+          1L,
+          AgentEvent.RunStarted(runId, 0L),
+          0L
+        ),
+        PersistedAgentEvent(
+          EventId(java.util.UUID.randomUUID()),
+          runId,
+          2L,
+          AgentEvent.StepStarted(runId, 1, 4000L),
+          4000L
+        ),
+        PersistedAgentEvent(
+          EventId(java.util.UUID.randomUUID()),
+          runId,
+          3L,
+          AgentEvent.RunResumed(runId, 64000L),
+          64000L
+        ),
+        PersistedAgentEvent(
+          EventId(java.util.UUID.randomUUID()),
+          runId,
+          4L,
+          AgentEvent.StepStarted(runId, 2, 68000L),
+          68000L
+        )
+      )
+      val consumedTwoCrashes = AgentRuntimeDriver.consumedActiveMillis(
+        baseState,
+        crashEvents,
+        Chunk.empty,
+        Chunk.empty
+      )
+      // 场景 B：Running 工具在中断/崩溃时通过 touchRunning 记录 8000ms 尾部耗时
+      val runningTool = ToolExecutionRecord(
+        runId,
+        "b:0",
+        0,
+        "c-run",
+        "slow_tool",
+        None,
+        ToolExecutionStatus.Running,
+        None,
+        1,
+        8000L
+      )
+      val consumedRunningTail = AgentRuntimeDriver.consumedActiveMillis(
+        baseState.copy(updatedAt = java.time.Instant.ofEpochMilli(0L)),
+        Chunk(
+          PersistedAgentEvent(
+            EventId(java.util.UUID.randomUUID()),
+            runId,
+            0L,
+            AgentEvent.RunCreated(runId, sessionId, 0L),
+            0L
+          ),
+          PersistedAgentEvent(
+            EventId(java.util.UUID.randomUUID()),
+            runId,
+            1L,
+            AgentEvent.RunStarted(runId, 0L),
+            0L
+          ),
+          PersistedAgentEvent(
+            EventId(java.util.UUID.randomUUID()),
+            runId,
+            2L,
+            AgentEvent.ToolExecutionStarted(runId, "c-run", 0L),
+            0L
+          )
+        ),
+        Chunk(runningTool),
+        Chunk.empty
+      )
+      // 场景 C：超过 4096 条事件的分页读取与恢复预算超限拦截（超限后模型/工具调用计数为 0）
+      for
+        providerCalls <- Ref.make(0)
+        countingModel = new ChatModel:
+          val provider                                                     = "counting"
+          def complete(request: ChatRequest): IO[AgentError, ChatResponse] =
+            providerCalls.update(_ + 1).as(finalResponse("should-not-run"))
+        result <- (for
+          store   <- ZIO.service[RunStore]
+          runtime <- ZIO.service[AgentRuntime]
+          manyEvents = NonEmptyChunk
+            .fromChunk(
+              Chunk(
+                PersistedAgentEvent(
+                  EventId(java.util.UUID.randomUUID()),
+                  runId,
+                  0L,
+                  AgentEvent.RunCreated(runId, sessionId, 0L),
+                  0L
+                ),
+                PersistedAgentEvent(
+                  EventId(java.util.UUID.randomUUID()),
+                  runId,
+                  1L,
+                  AgentEvent.RunStarted(runId, 0L),
+                  0L
+                )
+              ) ++
+                Chunk.fromIterable(
+                  (2 to 4100).map(seq =>
+                    PersistedAgentEvent(
+                      EventId(java.util.UUID.randomUUID()),
+                      runId,
+                      seq.toLong,
+                      AgentEvent.StepStarted(runId, seq, seq.toLong),
+                      seq.toLong
+                    )
+                  )
+                ) :+
+                PersistedAgentEvent(
+                  EventId(java.util.UUID.randomUUID()),
+                  runId,
+                  4101L,
+                  AgentEvent.StepStarted(runId, 4101, 10000L),
+                  10000L
+                )
+            )
+            .get
+          exhaustedState = baseState.copy(
+            version = Version.initial,
+            lastEventSequence = 4101L,
+            updatedAt = java.time.Instant.ofEpochMilli(10000L)
+          )
+          _       <- store.createWithEvents(exhaustedState, manyEvents)
+          recover <- runtime.recover(runId).exit
+          calls   <- providerCalls.get
+        yield recover -> calls).provideLayer(layers(countingModel, Nil))
+      yield assertTrue(
+        consumedTwoCrashes == 8000L,
+        consumedRunningTail == 8000L,
+        result._1.isFailure,
+        result._2 == 0
+      )
+    },
+    test("R3：getModelCalls 首次读取故障注入时不会产生终态 Run + open 模型行，重试后原子收口为 Unknown") {
+      val runId     = RunId(java.util.UUID.randomUUID())
+      val sessionId = SessionId(java.util.UUID.randomUUID())
+      val initial   = AgentState(
+        runId = runId,
+        sessionId = sessionId,
+        agentId = agent.id,
+        status = RunStatus.Running,
+        messages = Chunk(AgentMessage.user("hello")),
+        steps = Chunk.empty,
+        usage = UsageSummary(),
+        budget = BudgetState(RunLimits(), UsageSummary(), 0),
+        suspension = None,
+        createdAt = java.time.Instant.EPOCH,
+        updatedAt = java.time.Instant.EPOCH,
+        version = Version.initial,
+        definition = agent,
+        composition = RuntimeComposition.fingerprint(RuntimeProfile.default, agent, agent.modelSettings),
+        threadId = ThreadId("r3-fault-injection"),
+        lastEventSequence = 0L
+      )
+      (for
+        delegate       <- ZIO.service[RunStore]
+        failOnce       <- Ref.make(true)
+        seenFailureRef <- Ref.make(false)
+        faultyStore = new RunStore:
+          export delegate.{
+            createWithEvents,
+            load,
+            save,
+            commit,
+            commitFenced,
+            appendEvents,
+            events,
+            requestCancellation,
+            cancellationRequested,
+            prepareToolExecutions,
+            transitionToolExecution,
+            getToolExecution,
+            getToolExecutions,
+            listToolExecutions,
+            getModelCall,
+            delete
+          }
+          def getModelCalls(id: RunId): IO[StoreError, Chunk[ModelCallExecutionRecord]] =
+            failOnce.getAndSet(false).flatMap { shouldFail =>
+              if shouldFail then
+                seenFailureRef.set(true) *>
+                  ZIO.fail(
+                    AgentError.DatabaseFailure(
+                      "injected transient read failure",
+                      "40001",
+                      retryable = true
+                    )
+                  )
+              else delegate.getModelCalls(id)
+            }
+        createdId  <- EventId.random
+        preparedId <- EventId.random
+        requestId  <- ModelRequestId.random
+        _          <- delegate.createWithEvents(
+          initial,
+          NonEmptyChunk(
+            PersistedAgentEvent(createdId, runId, 0L, AgentEvent.RunCreated(runId, sessionId, 0L), 0L)
+          )
+        )
+        fingerprint = "a" * 64
+        openModel   = ModelCallExecutionRecord(
+          runId,
+          requestId,
+          1,
+          ModelCallStatus.Dispatched,
+          "openai",
+          "gpt-5.4",
+          CapturePolicy.MetadataOnly,
+          fingerprint,
+          1,
+          0,
+          ModelCallContextLineage(1, 0, 0, 0, 0),
+          None,
+          None,
+          updatedAtEpochMilli = 10L
+        )
+        _ <- delegate.commit(
+          Version.initial,
+          initial.copy(
+            lastEventSequence = 1L,
+            pendingModelCall = Some(
+              PendingModelCall(requestId, 1, fingerprint, CapturePolicy.MetadataOnly, "openai", "gpt-5.4")
+            )
+          ),
+          NonEmptyChunk(
+            PersistedAgentEvent(
+              preparedId,
+              runId,
+              1L,
+              AgentEvent.ModelCallPrepared(
+                runId,
+                requestId.asString,
+                "openai",
+                "gpt-5.4",
+                fingerprint,
+                "MetadataOnly",
+                1,
+                0,
+                10L
+              ),
+              10L
+            )
+          ),
+          Some(ModelCallWrite.Insert(openModel))
+        )
+        activeRuns <- Ref.make(Map.empty[RunId, Fiber.Runtime[AgentError, RunOutcome]])
+        noopObs: RunObserver = (_: AgentEvent) => ZIO.unit
+        publisher <- RunEventPublisher.make(noopObs, activeRuns)
+        committer <- RunCommitter.make(faultyStore, publisher.emit)
+        terminator = RunTerminator(
+          faultyStore,
+          committer,
+          GuardrailEngine(ConfiguredGuardrails(Chunk.empty, Chunk.empty, Chunk.empty, Chunk.empty)),
+          publisher,
+          activeRuns
+        )
+        _            <- terminator.cancel(runId)
+        seenFailure  <- seenFailureRef.get
+        afterCancel  <- delegate.load(runId)
+        callsAfterOk <- delegate.getModelCalls(runId)
+      yield assertTrue(
+        seenFailure,
+        afterCancel.status == RunStatus.Cancelled,
+        afterCancel.pendingModelCall.isEmpty,
+        callsAfterOk.nonEmpty,
+        callsAfterOk.forall(_.status == ModelCallStatus.Unknown)
+      )).provide(RunStore.inMemory, Scope.default)
     }
   )
