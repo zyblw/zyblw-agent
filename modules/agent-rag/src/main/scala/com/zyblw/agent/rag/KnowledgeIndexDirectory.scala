@@ -80,6 +80,29 @@ trait KnowledgeIndexDirectory:
       cursor: Option[KnowledgeIndexCursor]
   ): IO[RetrievalError, KnowledgeIndexPage]
 
+  /** 按可选租户与调用方文档级 ACL 权限分页列出索引清单。
+    *
+    * @param callerPermissions
+    *   `None` 表示管理全量视角；`Some(perms)` 表示仅返回 `manifest.permissions` 非空且为 `perms` 子集的清单（在分页与游标生成前过滤）
+    */
+  def list(
+      tenantId: Option[TenantId],
+      limit: Int,
+      cursor: Option[KnowledgeIndexCursor],
+      callerPermissions: Option[Set[String]]
+  ): IO[RetrievalError, KnowledgeIndexPage] =
+    list(tenantId, limit, cursor).map { page =>
+      callerPermissions match
+        case None        => page
+        case Some(perms) =>
+          val filtered = page.items.filter(m => m.permissions.nonEmpty && m.permissions.subsetOf(perms))
+          KnowledgeIndexPage(
+            filtered,
+            filtered.lastOption.filter(_ => page.hasMore).map(KnowledgeIndexDirectory.cursorOf),
+            page.hasMore && filtered.nonEmpty
+          )
+    }
+
 object KnowledgeIndexDirectory:
   /** 未指定时的单页条数。 */
   val DefaultLimit: Int = 50
@@ -120,9 +143,21 @@ object KnowledgeIndexDirectory:
           limit: Int,
           cursor: Option[KnowledgeIndexCursor]
       ): IO[RetrievalError, KnowledgeIndexPage] =
+        list(tenantId, limit, cursor, None)
+
+      override def list(
+          tenantId: Option[TenantId],
+          limit: Int,
+          cursor: Option[KnowledgeIndexCursor],
+          callerPermissions: Option[Set[String]]
+      ): IO[RetrievalError, KnowledgeIndexPage] =
         snapshots.map { manifests =>
           val ordered = manifests
-            .filter(manifest => tenantId.forall(_ == manifest.build.key.tenantId))
+            .filter(manifest =>
+              tenantId.forall(_ == manifest.build.key.tenantId) &&
+                callerPermissions
+                  .forall(perms => manifest.permissions.nonEmpty && manifest.permissions.subsetOf(perms))
+            )
             .sorted(using descending)
           val remaining = cursor.fold(ordered)(value => ordered.filter(after(value)))
           val window    = remaining.take(boundedLimit(limit))

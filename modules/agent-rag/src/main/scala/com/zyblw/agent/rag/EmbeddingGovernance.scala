@@ -245,10 +245,15 @@ final class GovernedEmbeddingModel(
     quotaPolicy: EmbeddingQuotaPolicy,
     config: GovernedEmbeddingConfig
 ) extends EmbeddingModel:
+  private val degradedCountRef = new java.util.concurrent.atomic.AtomicLong(0L)
+
   override val capabilities: EmbeddingCapabilities =
     delegate.capabilities.copy(outputs = Set(EmbeddingOutputKind.Dense))
   override val descriptor: EmbeddingProviderDescriptorV2 =
     delegate.descriptor.copy(capabilities = capabilities)
+
+  /** FailOpen 模式下因底层缓存读取或写入失败而发生降级的累计次数。 */
+  def cacheDegradedCount: UIO[Long] = ZIO.succeed(degradedCountRef.get())
 
   def embed(request: EmbeddingRequest): IO[RetrievalError, EmbeddingResponse] =
     validate(request) *> delegate.validate(request) *> {
@@ -261,7 +266,7 @@ final class GovernedEmbeddingModel(
         misses = unique.filterNot(item => cached.contains(item._3))
         generated <-
           if misses.isEmpty then ZIO.succeed(EmbeddingResponse(Chunk.empty, descriptor))
-          else reserveAndEmbed(request, misses, now)
+          else reserveAndEmbed(request, unique, misses, now)
         fresh = misses.map(_._3).zip(generated.denseEmbeddings).toMap
         _ <- cacheWrite(Chunk.fromIterable(fresh.map { case (cacheKey, embedding) =>
           EmbeddingCacheEntry(cacheKey, embedding, now.plusMillis(config.cacheTtl.toMillis))
@@ -275,14 +280,30 @@ final class GovernedEmbeddingModel(
 
   private def reserveAndEmbed(
       request: EmbeddingRequest,
+      unique: Chunk[(Int, String, EmbeddingCacheKey)],
       misses: Chunk[(Int, String, EmbeddingCacheKey)],
       now: Instant
   ): IO[RetrievalError, EmbeddingResponse] =
-    val texts   = misses.map(_._2)
-    val context = request.context
-    val dim     = request.dimension.getOrElse(capabilities.defaultDenseDimension)
-    val hash    = sha256(
-      s"${context.purpose}|${request.role}|${request.output}|${descriptor.provider}|${descriptor.model}|$dim|${misses.map(_._3.contentHash).mkString("\n")}"
+    val texts       = misses.map(_._2)
+    val context     = request.context
+    val dim         = request.dimension.getOrElse(capabilities.defaultDenseDimension)
+    val instruction = request.instruction.fold("-")(i => s"${i.id}:${i.version}")
+    val space       = context.knowledgeSpaceId.fold("default")(_.value)
+    // 请求幂等指纹绑定完整去重请求集及全部缓存语义维度（租户、空间、权限、指令、模型与文本哈希），避免重试期间部分文本被并发写入缓存触发伪冲突，同时阻断语义篡改复用 requestId。
+    val hash = sha256(
+      List(
+        context.tenantId.value,
+        context.purpose.toString,
+        space,
+        context.permissionFingerprint,
+        request.role.toString,
+        request.output.toString,
+        instruction,
+        descriptor.provider,
+        descriptor.model,
+        dim.toString,
+        unique.map(item => s"${item._3.keyVersion}:${item._3.contentHash}").mkString("\n")
+      ).map(value => s"${value.length}:$value").mkString("|")
     )
     val characters  = texts.foldLeft(0L)((sum, text) => sum + text.codePointCount(0, text.length).toLong)
     val reservation = EmbeddingQuotaReservation(context, hash, 1L, texts.length.toLong, characters)
@@ -298,23 +319,44 @@ final class GovernedEmbeddingModel(
   private def key(request: EmbeddingRequest, text: String): EmbeddingCacheKey =
     val instruction = request.instruction.fold("-")(i => s"${i.id}:${i.version}")
     val space       = request.context.knowledgeSpaceId.fold("default")(_.value)
-    val fingerprint =
-      s"${request.role}|${request.output}|$instruction|${request.dimension.getOrElse(capabilities.defaultDenseDimension)}|${request.context.tenantId.value}|$space|${request.context.permissionFingerprint}"
+    val dim         = request.dimension.getOrElse(capabilities.defaultDenseDimension)
+    val fingerprint = List(
+      "role"        -> request.role.toString,
+      "output"      -> request.output.toString,
+      "instruction" -> instruction,
+      "dim"         -> dim.toString,
+      "tenant"      -> request.context.tenantId.value,
+      "space"       -> space,
+      "permissions" -> request.context.permissionFingerprint
+    ).map { case (name, value) => s"$name:${value.length}:$value" }.mkString("|")
+    val versionPrefix = config.cacheKeyVersion.trim.take(32)
     EmbeddingCacheKey(
       request.context.tenantId,
       request.context.purpose,
       descriptor.provider,
       descriptor.model,
-      request.dimension.getOrElse(capabilities.defaultDenseDimension),
-      s"${config.cacheKeyVersion}|$fingerprint",
+      dim,
+      s"$versionPrefix:${sha256(fingerprint)}",
       sha256(text)
     )
+
+  private def recordCacheDegradation(operation: String, error: RetrievalError): UIO[Unit] =
+    ZIO.succeed(degradedCountRef.incrementAndGet()).flatMap { total =>
+      zio.metrics.Metric
+        .counter("zyblw_agent_embedding_cache_degraded_total")
+        .tagged("operation", operation)
+        .update(1L) *>
+        ZIO.logWarning(
+          s"agent.rag.embedding_cache.degraded operation=$operation category=${error.category} total=$total"
+        )
+    }
 
   private def cacheRead(keys: Chunk[EmbeddingCacheKey], now: Instant) =
     cache
       .get(keys, now)
       .catchAll(error =>
-        if config.cacheFailureMode == CacheFailureMode.FailOpen then ZIO.succeed(Map.empty)
+        if config.cacheFailureMode == CacheFailureMode.FailOpen then
+          recordCacheDegradation("read", error).as(Map.empty)
         else ZIO.fail(error)
       )
 
@@ -322,7 +364,8 @@ final class GovernedEmbeddingModel(
     cache
       .put(entries)
       .catchAll(error =>
-        if config.cacheFailureMode == CacheFailureMode.FailOpen then ZIO.unit else ZIO.fail(error)
+        if config.cacheFailureMode == CacheFailureMode.FailOpen then recordCacheDegradation("write", error)
+        else ZIO.fail(error)
       )
 
   private def sha256(value: String): String =

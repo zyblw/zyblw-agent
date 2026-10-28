@@ -1051,7 +1051,166 @@ object WorkflowSpec extends ZIOSpecDefault:
         wasInterrupted <- interrupted.get
         checkpoint     <- store.load(runId)
       yield assertTrue(exit.isFailure, wasInterrupted, checkpoint.isEmpty)
-    }.provide(WorkflowCheckpointStore.inMemory[Int])
+    }.provide(WorkflowCheckpointStore.inMemory[Int]),
+    test("Durable Workflow 首节点 prepare 后 commit 前崩溃时，依赖初始 step=0 checkpoint 可通过 resume 恢复且不重跑首节点") {
+      for
+        runId          <- RunId.random
+        sessionId      <- SessionId.random
+        executionStore <- ZIO.service[WorkflowExecutionStore[Int]]
+        entryCalls     <- Ref.make(0)
+        crashOnCommit  <- Ref.make(true)
+        entry      = NodeId("entry")
+        next       = NodeId("next")
+        definition = validDefinition(
+          entry,
+          Map(
+            entry -> node(entry)(state => entryCalls.update(_ + 1).as(NodeOutcome.Succeeded(state + 10))),
+            next  -> node(next)(state => ZIO.succeed(NodeOutcome.Succeeded(state + 1)))
+          ),
+          Map(
+            entry -> WorkflowTransition.Next(next),
+            next  -> WorkflowTransition.Complete()
+          )
+        )
+        flakyStore = new WorkflowExecutionStore[Int]:
+          def save(runId: RunId, checkpoint: WorkflowCheckpoint[Int]) =
+            executionStore.save(runId, checkpoint)
+          def load(runId: RunId) = executionStore.load(runId)
+          def claim(key: WorkflowExecutionKey, owner: WorkerId, leaseDuration: Duration) =
+            executionStore.claim(key, owner, leaseDuration)
+          def heartbeat(lease: WorkflowExecutionLease, leaseDuration: Duration) =
+            executionStore.heartbeat(lease, leaseDuration)
+          def prepare(lease: WorkflowExecutionLease, outcome: NodeOutcome[Int]) =
+            executionStore.prepare(lease, outcome)
+          def commit(
+              leases: NonEmptyChunk[WorkflowExecutionLease],
+              checkpoint: WorkflowCheckpoint[Int],
+              waitCommit: WorkflowWaitCommit
+          ): IO[StoreError, Unit] =
+            crashOnCommit.get.flatMap { shouldCrash =>
+              if shouldCrash then
+                crashOnCommit.set(false) *> ZIO.fail(
+                  AgentError.PersistenceFailure("simulated crash before first transition commit")
+                )
+              else executionStore.commit(leases, checkpoint, waitCommit)
+            }
+          def get(key: WorkflowExecutionKey) = executionStore.get(key)
+          def currentWait(runId: RunId)      = executionStore.currentWait(runId)
+          def signal(
+              waitKey: WorkflowWaitKey,
+              signalId: WorkflowSignalId,
+              name: WorkflowSignalName,
+              payload: String,
+              authorization: com.zyblw.agent.composition.AuthorizationFingerprint
+          ) = executionStore.signal(waitKey, signalId, name, payload, authorization)
+          def expireDue(limit: Int) = executionStore.expireDue(limit)
+          def claimWakeups(
+              workflowId: WorkflowId,
+              definitionVersion: WorkflowVersion,
+              owner: WorkerId,
+              leaseDuration: Duration,
+              limit: Int
+          ) = executionStore.claimWakeups(workflowId, definitionVersion, owner, leaseDuration, limit)
+          def heartbeatWakeup(lease: WorkflowWakeupLease, leaseDuration: Duration) =
+            executionStore.heartbeatWakeup(lease, leaseDuration)
+          def abandonWakeup(lease: WorkflowWakeupLease, availableAt: java.time.Instant) =
+            executionStore.abandonWakeup(lease, availableAt)
+          override def wakeQueueSnapshot(workflowId: WorkflowId, definitionVersion: WorkflowVersion) =
+            executionStore.wakeQueueSnapshot(workflowId, definitionVersion)
+          override def timeline(runId: RunId, after: Option[WorkflowTimelineCursor], limit: Int) =
+            executionStore.timeline(runId, after, limit)
+        engine1 = WorkflowEngine.makeDurable(
+          definition,
+          flakyStore,
+          sumReducer,
+          WorkflowExecutionPolicy(
+            owner = WorkerId("worker-1"),
+            leaseDuration = 1.second,
+            heartbeatInterval = 200.millis
+          )
+        )
+        firstRun  <- engine1.run(5, context(runId, sessionId)).runCollect.exit
+        initialCp <- executionStore.load(runId)
+        _         <- TestClock.adjust(2.seconds)
+        engine2 = WorkflowEngine.makeDurable(
+          definition,
+          flakyStore,
+          sumReducer,
+          WorkflowExecutionPolicy(
+            owner = WorkerId("worker-2"),
+            leaseDuration = 1.second,
+            heartbeatInterval = 200.millis
+          )
+        )
+        resumed <- engine2.resume(context(runId, sessionId)).runCollect
+        calls   <- entryCalls.get
+        finalCp <- executionStore.load(runId)
+      yield assertTrue(
+        firstRun.isFailure,
+        initialCp.exists(_.step == 0),
+        initialCp.exists(_.cursor == WorkflowCursor.At(entry)),
+        calls == 1,
+        resumed.contains(WorkflowEvent.Completed(16)),
+        finalCp.exists(_.cursor == WorkflowCursor.Completed),
+        finalCp.exists(_.state == 16)
+      )
+    }.provide(WorkflowExecutionStore.inMemory[Int]),
+    test("Durable FanOut 期间持续续租父级与已完成快分支租约，慢分支超过单次 leaseDuration 后仍可成功汇合提交") {
+      for
+        runId          <- RunId.random
+        sessionId      <- SessionId.random
+        executionStore <- ZIO.service[WorkflowExecutionStore[Int]]
+        fastDone       <- Promise.make[Nothing, Unit]
+        slowRelease    <- Promise.make[Nothing, Unit]
+        start      = NodeId("start")
+        fast       = NodeId("fast")
+        slow       = NodeId("slow")
+        join       = NodeId("join")
+        definition = validDefinition(
+          start,
+          Map(
+            start -> node(start)(state => ZIO.succeed(NodeOutcome.Succeeded(state + 1))),
+            fast  -> node(fast)(_ => fastDone.succeed(()) *> ZIO.succeed(NodeOutcome.Succeeded(10))),
+            slow  -> node(slow)(_ => slowRelease.await *> ZIO.succeed(NodeOutcome.Succeeded(20))),
+            join  -> node(join)(state => ZIO.succeed(NodeOutcome.Succeeded(state)))
+          ),
+          Map(
+            start -> WorkflowTransition.FanOut(
+              NonEmptyChunk(fast, slow),
+              join,
+              FanInPolicy.AllSucceeded
+            ),
+            fast -> WorkflowTransition.Complete(),
+            slow -> WorkflowTransition.Complete(),
+            join -> WorkflowTransition.Complete()
+          )
+        )
+        engine = WorkflowEngine.makeDurable(
+          definition,
+          executionStore,
+          sumReducer,
+          WorkflowExecutionPolicy(
+            owner = WorkerId("fanout-worker"),
+            leaseDuration = 600.millis,
+            heartbeatInterval = 200.millis
+          ),
+          maxParallelism = 2
+        )
+        fiber   <- engine.run(0, context(runId, sessionId)).runCollect.fork
+        _       <- fastDone.await
+        _       <- TestClock.adjust(250.millis)
+        _       <- TestClock.adjust(250.millis)
+        _       <- TestClock.adjust(250.millis)
+        _       <- TestClock.adjust(250.millis)
+        _       <- slowRelease.succeed(())
+        events  <- fiber.join
+        finalCp <- executionStore.load(runId)
+      yield assertTrue(
+        events.contains(WorkflowEvent.Completed(31)),
+        finalCp.exists(_.cursor == WorkflowCursor.Completed),
+        finalCp.exists(_.state == 31)
+      )
+    }.provide(WorkflowExecutionStore.inMemory[Int])
   )
 
   private def node(id0: NodeId)(

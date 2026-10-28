@@ -541,28 +541,45 @@ final class AgentRuntimeDriver(
       response = dispatched.response
       // 模型这一步发出的工具调用全部进入执行器。同时在飞的数量由 ToolExecutor 信号量限制，
       // 累计次数、步数和时长仍由 RunLimits 熔断，避免一次正常的并行检索把整轮判死。
+      // 注意：模型响应既已返回，其 Token/费用事实已经发生；即使工具预算或工具计划校验拒绝后续执行，也必须先原子结算模型用量与账本，再以对应错误终止。
       estimatedCost = prices.estimate(resolvedProvider, resolvedModel, response.usage)
-      _ <- ZIO.fromEither(
-        AgentKernel.validateToolCallBudget(
-          dispatched.state.budget.limits,
-          AgentKernel.modelTurnUsage(dispatched.state, response.usage, estimatedCost, routing.routed),
-          response.message.toolCalls.length
-        )
-      )
-      pending   <- createDurableToolPlan(dispatched.state, response.message.toolCalls)
+      turnUsage = AgentKernel.modelTurnUsage(dispatched.state, response.usage, estimatedCost, routing.routed)
+      plannedResult <- (
+        ZIO.fromEither(
+          AgentKernel.validateToolCallBudget(
+            dispatched.state.budget.limits,
+            turnUsage,
+            response.message.toolCalls.length
+          )
+        ) *> createDurableToolPlan(dispatched.state, response.message.toolCalls)
+      ).either
       now       <- RunClock.instant
       modelTurn <- ZIO.fromEither(
-        AgentKernel.settleModelTurn(
-          dispatched.state,
-          response,
-          resolvedProvider,
-          resolvedModel,
-          estimatedCost,
-          routing.routed,
-          pending,
-          dispatched.record,
-          now
-        )
+        plannedResult match
+          case Right(pending) =>
+            AgentKernel.settleModelTurn(
+              dispatched.state,
+              response,
+              resolvedProvider,
+              resolvedModel,
+              estimatedCost,
+              routing.routed,
+              pending,
+              dispatched.record,
+              now
+            )
+          case Left(rejection) =>
+            AgentKernel.settleModelResponseWithoutTools(
+              dispatched.state,
+              response,
+              resolvedProvider,
+              resolvedModel,
+              estimatedCost,
+              routing.routed,
+              dispatched.record,
+              rejection,
+              now
+            )
       )
       updated <- committer.commitTransition(
         dispatched.state,
@@ -571,7 +588,12 @@ final class AgentRuntimeDriver(
           ModelCallWrite.Transition(ModelCallStatus.Dispatched, record.attempt, record)
         )
       )
-      _       <- publisher.emit(AgentEvent.UsageUpdated(updated.runId, modelTurn.usage, now.toEpochMilli))
+      _ <- ZIO
+        .when(plannedResult.isRight)(
+          publisher.emit(AgentEvent.UsageUpdated(updated.runId, modelTurn.usage, now.toEpochMilli))
+        )
+        .unit
+      _       <- ZIO.fromEither(plannedResult)
       _       <- ZIO.fromEither(AgentKernel.validateUsage(updated.budget.limits, modelTurn.usage))
       outcome <-
         if response.message.toolCalls.isEmpty then terminator.complete(updated, response.message)
@@ -935,46 +957,62 @@ final class AgentRuntimeDriver(
           (AgentKernel.settledFinalAnswer(state) match
             case Some(answer) if state.pendingToolPlan.isEmpty => terminator.complete(state, answer)
             case _                                             =>
-              for
-                _         <- guard.ensureCompatible(state)
-                _         <- settleUnrecordedRunningTail(state)
-                remaining <- remainingDuration(state)
-                now       <- RunClock.instant
-                events    <- loadAllEvents(state.runId)
-                tools     <- store.listToolExecutions(state.runId)
-                models    <- store.getModelCalls(state.runId)
-                resumed   <-
-                  if now.toEpochMilli > state.updatedAt.toEpochMilli then
-                    val lastEventAt =
-                      events.lastOption.map(_.atEpochMilli).getOrElse(state.updatedAt.toEpochMilli)
-                    val preResumeActiveAt =
-                      (tools.map(_.updatedAtEpochMilli) ++ models.map(
-                        _.updatedAtEpochMilli
-                      ) :+ state.updatedAt.toEpochMilli)
-                        .filter(_ < now.toEpochMilli)
-                        .maxOption
-                        .getOrElse(state.updatedAt.toEpochMilli)
-                    val resumeEvents =
-                      if preResumeActiveAt > lastEventAt then
-                        NonEmptyChunk(
-                          AgentEvent.UsageUpdated(state.runId, state.usage, preResumeActiveAt),
-                          AgentEvent.RunResumed(state.runId, now.toEpochMilli)
+              state.messages.lastOption
+                .filter(message => message.role == MessageRole.Assistant && message.toolCalls.nonEmpty) match
+                case Some(unplannedAssistant) if state.pendingToolPlan.isEmpty =>
+                  (
+                    ZIO.fromEither(
+                      AgentKernel.validateToolCallBudget(
+                        state.budget.limits,
+                        state.usage,
+                        unplannedAssistant.toolCalls.length
+                      )
+                    ) *>
+                      createDurableToolPlan(state, unplannedAssistant.toolCalls) *>
+                      ZIO.fail(AgentError.InvalidModelResponse("工具调用计划未持久化，拒绝自动重放"))
+                  ).tapError(terminator.markFailed(state.runId, _))
+                case _ =>
+                  for
+                    _         <- guard.ensureCompatible(state)
+                    _         <- settleUnrecordedRunningTail(state)
+                    remaining <- remainingDuration(state)
+                    now       <- RunClock.instant
+                    events    <- loadAllEvents(state.runId)
+                    tools     <- store.listToolExecutions(state.runId)
+                    models    <- store.getModelCalls(state.runId)
+                    resumed   <-
+                      if now.toEpochMilli > state.updatedAt.toEpochMilli then
+                        val lastEventAt =
+                          events.lastOption.map(_.atEpochMilli).getOrElse(state.updatedAt.toEpochMilli)
+                        val preResumeActiveAt =
+                          (tools.map(_.updatedAtEpochMilli) ++ models.map(
+                            _.updatedAtEpochMilli
+                          ) :+ state.updatedAt.toEpochMilli)
+                            .filter(_ < now.toEpochMilli)
+                            .maxOption
+                            .getOrElse(state.updatedAt.toEpochMilli)
+                        val resumeEvents =
+                          if preResumeActiveAt > lastEventAt then
+                            NonEmptyChunk(
+                              AgentEvent.UsageUpdated(state.runId, state.usage, preResumeActiveAt),
+                              AgentEvent.RunResumed(state.runId, now.toEpochMilli)
+                            )
+                          else NonEmptyChunk(AgentEvent.RunResumed(state.runId, now.toEpochMilli))
+                        committer.commitAll(
+                          state,
+                          state.copy(updatedAt = now),
+                          resumeEvents
                         )
-                      else NonEmptyChunk(AgentEvent.RunResumed(state.runId, now.toEpochMilli))
-                    committer.commitAll(
-                      state,
-                      state.copy(updatedAt = now),
-                      resumeEvents
+                      else ZIO.succeed(state)
+                    outcome <- (resumed.pendingToolPlan match
+                      case Some(_) => recoverToolPlan(resumed)
+                      case None    => loop(resumed)
                     )
-                  else ZIO.succeed(state)
-                outcome <- (resumed.pendingToolPlan match
-                  case Some(_) => recoverToolPlan(resumed)
-                  case None    => loop(resumed)
-                )
-                  .timeoutFail(
-                    AgentError.BudgetExceeded("durationMillis", resumed.budget.limits.maxDuration.toMillis)
-                  )(remaining)
-              yield outcome)
+                      .timeoutFail(
+                        AgentError
+                          .BudgetExceeded("durationMillis", resumed.budget.limits.maxDuration.toMillis)
+                      )(remaining)
+                  yield outcome)
     }
 
   /** 对硬崩溃后仍处于 Running 且未记录中断时间戳的工具账本，按工具超时上限做保守尾部记账，防止崩溃丢失已执行的工具耗时。 */

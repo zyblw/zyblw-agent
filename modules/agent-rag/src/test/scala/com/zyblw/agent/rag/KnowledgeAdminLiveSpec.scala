@@ -45,6 +45,7 @@ object KnowledgeAdminLiveSpec extends ZIOSpecDefault:
 
   final private case class Harness(
       admin: KnowledgeAdminService,
+      knowledge: KnowledgeService,
       indexer: KnowledgeIndexer,
       jobs: IngestionJobStore
   )
@@ -70,7 +71,22 @@ object KnowledgeAdminLiveSpec extends ZIOSpecDefault:
         ingestion = DocumentIngestionService(loaders, indexer),
         jobs = jobs
       )
-    yield Harness(admin, indexer, jobs)
+      knowledge = new KnowledgeServiceLive(
+        admin = admin,
+        store = store,
+        reindexService = KnowledgeReindexService(
+          directory = KnowledgeIndexDirectory.inMemory(store),
+          store = store,
+          ingestion = DocumentIngestionService(loaders, indexer),
+          sources = new KnowledgeSourceResolver:
+            def load(tenantId: TenantId, documentId: String): UIO[Option[DocumentInput]] =
+              val _ = (tenantId, documentId)
+              ZIO.none
+          ,
+          parallelism = 1
+        )
+      )
+    yield Harness(admin, knowledge, indexer, jobs)
 
   /** 轮询到任务进入终态；后台 Fiber 与测试 Fiber 并发，不能假设提交后立刻完成。 */
   private def awaitTerminal(jobs: IngestionJobStore, jobId: String): IO[AgentError, IngestionJobView] =
@@ -262,5 +278,33 @@ object KnowledgeAdminLiveSpec extends ZIOSpecDefault:
       harness()
         .flatMap(_.admin.documents(None, 50, Some("not-a-cursor")).exit)
         .map(result => assertTrue(result.isFailure))
+    },
+    test("KnowledgeService 按 callerPermissions 严格隔离私有文档列表与详情") {
+      for
+        harnessed <- harness()
+        _         <- harnessed.indexer.index(
+          SourceDocument("doc-user-a-private", "用户 A 私有笔记", "doc://private-a"),
+          tenant,
+          Set("owner:user-a"),
+          "ing-a"
+        )
+        _ <- harnessed.indexer.index(
+          SourceDocument("doc-public", "公开文章", "doc://public"),
+          tenant,
+          Set("public"),
+          "ing-pub"
+        )
+        userBPerms = Some(Set("knowledge:read", "public", "members", "owner:user-b"))
+        userAPerms = Some(Set("knowledge:read", "public", "members", "owner:user-a"))
+        userBList   <- harnessed.knowledge.documents(tenant.value, 50, None, userBPerms)
+        userBDetail <- harnessed.knowledge.document(tenant.value, "doc-user-a-private", userBPerms)
+        userADetail <- harnessed.knowledge.document(tenant.value, "doc-user-a-private", userAPerms)
+        adminDetail <- harnessed.knowledge.document(tenant.value, "doc-user-a-private", None)
+      yield assertTrue(
+        userBList.items.map(_.documentId) == Chunk("doc-public"),
+        userBDetail.isEmpty,
+        userADetail.exists(_.documentId == "doc-user-a-private"),
+        adminDetail.exists(_.documentId == "doc-user-a-private")
+      )
     }
   ) @@ TestAspect.withLiveClock

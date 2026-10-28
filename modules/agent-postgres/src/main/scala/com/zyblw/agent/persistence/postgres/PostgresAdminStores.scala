@@ -376,7 +376,7 @@ final class PostgresIngestionJobStore(protected val dataSource: DataSource)
         finally statement.close()
       }
       .mapError {
-        case MissingIngestionJob(id) => AgentError.PersistenceFailure(s"摄入任务不存在: $id")
+        case MissingIngestionJob(id) => AgentError.IngestionJobNotFound(id)
         case error                   => databaseError("推进摄入任务状态失败", error)
       }
   }

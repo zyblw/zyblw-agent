@@ -21,6 +21,30 @@ object KnowledgeAuthorization:
   def requireAdmin(actor: RunContext): IO[AgentError, Unit] =
     check(actor, AdminScope, actor.scopes.contains(AdminScope))
 
+  /** 判断调用方是否具备全租户知识目录管理/写入视角。
+    *
+    * 普通业务检索调用方仅持有 `knowledge:read` 与自身业务 ACL scope（例如 `public`、`owner:<id>`），不应枚举或读取其他用户私有索引文档元数据及摄入作业详情。
+    */
+  def hasCatalogPrivilege(actor: RunContext): Boolean =
+    has(
+      actor,
+      WriteScope,
+      AdminScope,
+      AdminAuthorization.ReadScope,
+      AdminAuthorization.WriteScope
+    )
+
+  /** 计算文档目录与详情接口的文档级 ACL 过滤条件。
+    *   - 具备管理/写入权限的调用方返回 `None`（查看当前租户全量索引清单）
+    *   - 仅持有 `knowledge:read` 的普通调用方返回 `Some(actor.scopes)`，要求文档 `permissions` 非空且为 `actor.scopes` 的子集
+    */
+  def documentReadPermissions(actor: RunContext): Option[Set[String]] =
+    if hasCatalogPrivilege(actor) then None else Some(actor.scopes)
+
+  /** 摄入任务状态包含原始文件路径或业务来源 URI，仅允许具备写入或管理权限的调用方查询。 */
+  def requireIngestionRead(actor: RunContext): IO[AgentError, Unit] =
+    check(actor, WriteScope, hasCatalogPrivilege(actor))
+
   /** 写入索引的 ACL。chunk 权限必须是检索方 scope 的子集，因此不能把 write/admin 写进文档。 */
   def indexPermissions(scopes: Set[String]): Set[String] =
     if has(scopes, ReadScope, WriteScope, AdminScope) then Set(ReadScope) else Set.empty

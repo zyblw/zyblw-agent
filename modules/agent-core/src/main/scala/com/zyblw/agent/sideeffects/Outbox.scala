@@ -180,10 +180,11 @@ final class OutboxPublisher(
     owner: SideEffectWorkerId,
     config: OutboxPublisherConfig
 ):
-  /** 领取并处理一批事件；空队列直接返回零，便于测试和宿主指标采集。 */
+  /** 领取并处理一批事件；空队列直接返回零，便于测试和宿主指标采集。单次 claim 数量不超过并发度，确保每个已领取租约立即启动独立 heartbeat。 */
   def runOnce: IO[AgentError, Int] =
+    val claimLimit = math.min(config.batchSize, config.parallelism)
     store
-      .claim(owner, config.batchSize, config.leaseDuration, config.maxAttempts)
+      .claim(owner, claimLimit, config.leaseDuration, config.maxAttempts)
       .flatMap(leases =>
         ZIO.foreachPar(leases)(publishOne).withParallelism(config.parallelism).as(leases.length)
       )
@@ -211,6 +212,7 @@ final class OutboxPublisher(
         },
         _ => store.markPublished(lease)
       )
+      .catchSome { case _: AgentError.OutboxLeaseLost => ZIO.unit }
 
 object OutboxPublisher:
   /** 从 ZIO 环境装配 publisher，宿主可以替换 Store 或 Transport 进行确定性测试。 */

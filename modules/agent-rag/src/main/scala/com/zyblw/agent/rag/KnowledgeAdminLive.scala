@@ -40,12 +40,20 @@ final class KnowledgeAdminLive private (
       limit: Int,
       cursor: Option[String]
   ): IO[AgentError, KnowledgeDocumentPage] =
+    documents(tenantId, limit, cursor, None)
+
+  override def documents(
+      tenantId: Option[String],
+      limit: Int,
+      cursor: Option[String],
+      callerPermissions: Option[Set[String]]
+  ): IO[AgentError, KnowledgeDocumentPage] =
     for
       tenant  <- ZIO.foreach(tenantId.map(_.trim).filter(_.nonEmpty))(tenantOf)
       decoded <- ZIO.foreach(cursor.map(_.trim).filter(_.nonEmpty))(value =>
         ZIO.fromEither(KnowledgeIndexCursor.decode(value)).mapError(AgentError.InvalidConfiguration(_))
       )
-      page <- directory.list(tenant, limit, decoded)
+      page <- directory.list(tenant, limit, decoded, callerPermissions)
     yield KnowledgeDocumentPage(
       page.items.map(documentView),
       page.nextCursor.map(_.encoded),

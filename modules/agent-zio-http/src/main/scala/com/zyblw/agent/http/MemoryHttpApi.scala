@@ -232,17 +232,31 @@ object MemoryHttpApi:
 
 /** Agent HTTP 模块统一的 typed error → status/安全 JSON 映射。 */
 private[http] object HttpErrorResponse:
+  private def isResourceNotFound(error: AgentError): Boolean = error match
+    case _: AgentError.RunNotFound               => true
+    case _: AgentError.HarnessNotFound           => true
+    case _: AgentError.CommandNotFound           => true
+    case _: AgentError.OutboxEventNotFound       => true
+    case _: AgentError.CompensationNotFound      => true
+    case _: AgentError.MemoryNotFound            => true
+    case _: AgentError.KnowledgeDocumentNotFound => true
+    case _: AgentError.IngestionJobNotFound      => true
+    case _                                       => false
+
   /** 把内部错误映射为稳定状态；只有 safeToExpose 错误会返回领域消息。 */
   def from(error: AgentError): Response =
     val status = error.category match
       case ErrorCategory.Authentication => Status.Unauthorized
       case ErrorCategory.Authorization  => Status.Forbidden
-      case ErrorCategory.Persistence    => Status.NotFound
-      case ErrorCategory.Conflict       => Status.Conflict
-      case ErrorCategory.RateLimit      => Status.TooManyRequests
-      case ErrorCategory.Unavailable    => Status.ServiceUnavailable
-      case ErrorCategory.Unexpected     => Status.InternalServerError
-      case _                            => Status.BadRequest
+      case ErrorCategory.Persistence    =>
+        if isResourceNotFound(error) then Status.NotFound
+        else if error.retryable then Status.ServiceUnavailable
+        else Status.InternalServerError
+      case ErrorCategory.Conflict    => Status.Conflict
+      case ErrorCategory.RateLimit   => Status.TooManyRequests
+      case ErrorCategory.Unavailable => Status.ServiceUnavailable
+      case ErrorCategory.Unexpected  => Status.InternalServerError
+      case _                         => Status.BadRequest
     val message = if error.safeToExpose then error.message else "智能体服务暂时无法完成请求"
     Response(status = status, body = Body.fromString(ErrorResponse(error.category.toString, message).toJson))
       .addHeader(Header.ContentType(MediaType.application.json))

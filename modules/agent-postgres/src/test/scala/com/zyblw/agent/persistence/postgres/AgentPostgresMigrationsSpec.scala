@@ -80,5 +80,23 @@ object AgentPostgresMigrationsSpec extends ZIOSpecDefault:
       assertZIO(AgentPostgresMigrations.inspectKnowledge1024(null, invalid).exit)(
         fails(isSubtype[IllegalArgumentException](anything))
       )
+    },
+    test("docs/compatibility.md 引用的全部 SQL 迁移资源在 classpath 中真实存在") {
+      val docCandidates = List(
+        java.nio.file.Paths.get("docs/compatibility.md"),
+        java.nio.file.Paths.get("../../docs/compatibility.md")
+      )
+      val existingDoc        = docCandidates.find(java.nio.file.Files.exists(_))
+      val referencedSqlPaths = existingDoc.toList.flatMap { path =>
+        val text  = java.nio.file.Files.readString(path)
+        val regex =
+          """(com/zyblw/agent/persistence/postgres/[A-Za-z0-9_/]+\.sql)""".r
+        regex.findAllIn(text).toList.distinct
+      }
+      val missing = referencedSqlPaths.filter(rel => Option(getClass.getResource(s"/$rel")).isEmpty)
+      assertTrue(
+        existingDoc.isEmpty || referencedSqlPaths.size >= 2,
+        missing.isEmpty
+      )
     }
   )

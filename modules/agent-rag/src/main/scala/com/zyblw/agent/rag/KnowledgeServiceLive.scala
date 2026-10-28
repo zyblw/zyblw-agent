@@ -16,13 +16,33 @@ final class KnowledgeServiceLive(
       limit: Int,
       cursor: Option[String]
   ): IO[AgentError, KnowledgeDocumentPage] =
-    admin.documents(Some(tenantId), limit, cursor)
+    documents(tenantId, limit, cursor, None)
+
+  override def documents(
+      tenantId: String,
+      limit: Int,
+      cursor: Option[String],
+      callerPermissions: Option[Set[String]]
+  ): IO[AgentError, KnowledgeDocumentPage] =
+    admin.documents(Some(tenantId), limit, cursor, callerPermissions)
 
   def document(tenantId: String, documentId: String): IO[AgentError, Option[KnowledgeDocumentView]] =
+    document(tenantId, documentId, None)
+
+  override def document(
+      tenantId: String,
+      documentId: String,
+      callerPermissions: Option[Set[String]]
+  ): IO[AgentError, Option[KnowledgeDocumentView]] =
     for
       tenant <- ZIO.fromEither(TenantId.fromString(tenantId)).mapError(AgentError.InvalidConfiguration(_))
       active <- store.active(KnowledgeDocumentKey(tenant, documentId))
-    yield active.map(KnowledgeAdminLive.documentView)
+    yield active
+      .filter(manifest =>
+        callerPermissions
+          .forall(perms => manifest.permissions.nonEmpty && manifest.permissions.subsetOf(perms))
+      )
+      .map(KnowledgeAdminLive.documentView)
 
   def retire(tenantId: String, documentId: String, expectedActiveVersion: Long): IO[AgentError, Unit] =
     admin.retire(tenantId, documentId, expectedActiveVersion)

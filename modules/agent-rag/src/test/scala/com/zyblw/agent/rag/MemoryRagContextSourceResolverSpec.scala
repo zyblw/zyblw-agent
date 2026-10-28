@@ -251,5 +251,74 @@ object MemoryRagContextSourceResolverSpec extends ZIOSpecDefault:
         sources.retrieval.map(_.id) == Chunk("cite-lex"),
         sources.retrieval.head.source == "book://lex"
       )
+    }.provide(MemoryStore.inMemory),
+    test("二级 minimumRetrievalScore 过滤清空全部命中及扩展邻块后，证据重算为 BelowMinimumScore 并触发拒答") {
+      for
+        store     <- ZIO.service[MemoryStore]
+        runId     <- RunId.random
+        sessionId <- SessionId.random
+        weakSeed = DocumentChunk.fromText(
+          "weak-seed",
+          "doc-weak",
+          "低相关性种子片段",
+          "book://weak",
+          TenantId("tenant-a"),
+          Set("knowledge:read")
+        )
+        expandedNeighbor = DocumentChunk.fromText(
+          "expanded-neighbor",
+          "doc-weak",
+          "因种子展开而附带的邻块",
+          "book://weak",
+          TenantId("tenant-a"),
+          Set("knowledge:read")
+        )
+        retriever = new Retriever:
+          def retrieve(request: RetrievalRequest): IO[RetrievalError, RetrievalResult] =
+            ZIO.succeed(
+              RetrievalResult(
+                Chunk(
+                  RetrievalHit(
+                    weakSeed,
+                    0.20,
+                    Map("vectorScore" -> 0.20, "vectorRank" -> 1.0)
+                  ),
+                  RetrievalHit(
+                    expandedNeighbor,
+                    0.18,
+                    Map("expandedFrom" -> 1.0)
+                  )
+                ),
+                Chunk(
+                  Citation("cite-seed", weakSeed.sourceUri, weakSeed.text, 0.20),
+                  Citation("cite-neighbor", expandedNeighbor.sourceUri, expandedNeighbor.text, 0.18)
+                ),
+                RetrievalEvidence(
+                  RetrievalEvidenceStatus.Supported,
+                  candidateCount = 2,
+                  acceptedCount = 2,
+                  topAcceptedScore = Some(0.20),
+                  minimumScore = 0.15
+                )
+              )
+            )
+        resolver = MemoryRagContextSourceResolver(
+          store,
+          retriever,
+          MemoryRagContextPolicy(
+            minimumRetrievalScore = 0.35,
+            lowEvidenceResponse = LowEvidenceResponse.RequireExplicitRefusal
+          )
+        )
+        sources <- resolver.resolve(
+          state(runId, sessionId, Some("tenant-a")),
+          AgentDefinition(AgentId("a"), "a", "i")
+        )
+      yield assertTrue(
+        sources.retrieval.isEmpty,
+        sources.grounding == GroundingDecision.Refuse(MemoryRagContextSourceResolver.RefusalMessage),
+        sources.retrievalEvidence.exists(_.status == "BelowMinimumScore"),
+        sources.retrievalEvidence.exists(_.acceptedCount == 0)
+      )
     }.provide(MemoryStore.inMemory)
   )

@@ -197,7 +197,7 @@ object AdminHttpApiSpec extends ZIOSpecDefault:
         afterSequence: Long
     ): IO[AgentError, ZStream[Any, AgentError, PersistedAgentEvent]] =
       calls.update(_ :+ s"stream:${runId.asString}:$afterSequence").flatMap { _ =>
-        if runId != streamRunId then ZIO.fail(AgentError.PersistenceFailure("Run 不存在"))
+        if runId != streamRunId then ZIO.fail(AgentError.RunNotFound(runId))
         else if afterSequence > 1L then ZIO.fail(AgentError.InvalidConfiguration("事件游标超过最后序号"))
         else
           ZIO.succeed(

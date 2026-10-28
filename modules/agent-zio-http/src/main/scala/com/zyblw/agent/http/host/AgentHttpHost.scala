@@ -259,12 +259,12 @@ final private class AgentHttpHostLive(
       )
   }
 
-  /** 任意关键进程率先退出都会终止 Host；raceAll 会在获胜后中断其余 monitor Fiber。 */
+  /** 任意关键进程率先退出都会终止 Host；raceFirst 会在首个进程结束（包括失败退出）后立即中断其余 monitor Fiber。 */
   private def monitorProcesses(
       fibers: NonEmptyChunk[(AgentHostProcess, Fiber.Runtime[AgentError, Nothing])]
   ): IO[AgentError, Nothing] =
     val monitors = fibers.map((process, fiber) => monitorProcess(process, fiber))
-    monitors.head.raceAll(monitors.tail)
+    monitors.reduceLeft(_ raceFirst _)
 
   /** Server 原始异常只进入 cause chain，公开错误使用稳定、不含地址或 TLS 细节的摘要。 */
   private def serverFailure(cause: Throwable): AgentError =

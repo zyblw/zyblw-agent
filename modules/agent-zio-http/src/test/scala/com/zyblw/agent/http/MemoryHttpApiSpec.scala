@@ -245,5 +245,41 @@ object MemoryHttpApiSpec extends ZIOSpecDefault:
         (_, _, api) = tuple
         response <- api.routes.runZIO(authenticated(Request.get(URL.root / "memory" / "missing")))
       yield assertTrue(response.status == Status.NotFound)
+    },
+    test("数据库暂时故障返回 503 ServiceUnavailable 而不被误映射为 404 NotFound") {
+      val failingStore = new MemoryStore:
+        def put(scope: MemoryScope, entry: MemoryEntry): IO[StoreError, Unit] =
+          ZIO.fail(AgentError.PersistenceFailure("db pool exhausted"))
+        def compareAndSet(
+            scope: MemoryScope,
+            expectedVersion: Long,
+            entry: MemoryEntry
+        ): IO[StoreError, MemoryEntry] =
+          ZIO.fail(AgentError.PersistenceFailure("db pool exhausted"))
+        def get(scope: MemoryScope, key: String): IO[StoreError, Option[MemoryEntry]] =
+          ZIO.fail(AgentError.PersistenceFailure("db pool exhausted"))
+        def list(scope: MemoryScope, limit: Int): IO[StoreError, Chunk[MemoryEntry]] =
+          ZIO.fail(AgentError.PersistenceFailure("db pool exhausted"))
+        def search(scope: MemoryScope, query: String, limit: Int): IO[StoreError, Chunk[MemoryEntry]] =
+          ZIO.fail(AgentError.PersistenceFailure("db pool exhausted"))
+        def delete(scope: MemoryScope, key: String): IO[StoreError, Unit] =
+          ZIO.fail(AgentError.PersistenceFailure("db pool exhausted"))
+        def deleteScope(scope: MemoryScope): IO[StoreError, Long] =
+          ZIO.fail(AgentError.PersistenceFailure("db pool exhausted"))
+        def purgeExpired(nowEpochMilli: Long, limit: Int): IO[StoreError, Long] =
+          ZIO.fail(AgentError.PersistenceFailure("db pool exhausted"))
+      for
+        repository <- InMemoryMemoryGovernanceRepository.make(failingStore)
+        api = MemoryHttpApi(
+          MemoryGovernanceService(failingStore, repository, MemoryGovernancePolicy()),
+          contexts
+        )
+        response <- api.routes.runZIO(authenticated(Request.get(memory / "learning.preferred_classic")))
+        body     <- response.body.asString
+      yield assertTrue(
+        response.status == Status.ServiceUnavailable,
+        body.contains("\"category\":\"Persistence\""),
+        !body.contains("db pool exhausted")
+      )
     }
   )

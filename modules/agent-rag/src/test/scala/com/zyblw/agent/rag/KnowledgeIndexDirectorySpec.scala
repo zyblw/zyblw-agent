@@ -161,5 +161,28 @@ object KnowledgeIndexDirectorySpec extends ZIOSpecDefault:
       ZIO.serviceWithZIO[KnowledgeIndexDirectory](_.list(None, 50, None)).map { page =>
         assertTrue(page.items.isEmpty, page.nextCursor.isEmpty, !page.hasMore)
       }
-    }.provide(KnowledgeIndexDirectory.empty)
+    }.provide(KnowledgeIndexDirectory.empty),
+    test("按 callerPermissions 过滤时在分页前剔除无权文档，游标不泄露私有 documentId") {
+      val mixed = Chunk(
+        manifest("doc-private-a", 1L, 300L).copy(permissions = Set("owner:user-a")),
+        manifest("doc-public-1", 1L, 200L).copy(permissions = Set("public")),
+        manifest("doc-private-a-2", 1L, 150L).copy(permissions = Set("owner:user-a")),
+        manifest("doc-owned-b", 1L, 100L).copy(permissions = Set("owner:user-b"))
+      )
+      val directory  = KnowledgeIndexDirectory.fromSnapshots(ZIO.succeed(mixed))
+      val userBPerms = Some(Set("knowledge:read", "public", "owner:user-b"))
+      for
+        page1 <- directory.list(Some(TenantId("tenant-a")), 1, None, userBPerms)
+        page2 <- directory.list(Some(TenantId("tenant-a")), 1, page1.nextCursor, userBPerms)
+        admin <- directory.list(Some(TenantId("tenant-a")), 10, None, None)
+      yield assertTrue(
+        keys(page1.items) == Chunk("doc-public-1" -> 1L),
+        page1.hasMore,
+        page1.nextCursor.exists(_.documentId == "doc-public-1"),
+        !page1.nextCursor.exists(_.documentId.contains("private-a")),
+        keys(page2.items) == Chunk("doc-owned-b" -> 1L),
+        !page2.hasMore,
+        admin.items.length == 4
+      )
+    }
   )

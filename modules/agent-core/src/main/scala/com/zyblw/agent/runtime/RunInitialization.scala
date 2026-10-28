@@ -133,13 +133,17 @@ object RunInitialization:
   def effectiveLimits(requested: RunLimits, configuredMaxToolCalls: Int): RunLimits =
     requested.copy(maxToolCalls = math.min(requested.maxToolCalls, configuredMaxToolCalls))
 
-  /** 请求指纹不包含随机 runId、eventId 或创建时间，因此同一 HTTP 请求的重试会得到相同值。 JSON 在哈希前递归排序对象字段，避免 Scala Map 迭代顺序造成伪冲突。
+  /** 请求指纹不包含随机 runId、eventId、创建时间或非语义观测追踪属性（如 request_id），因此同一业务请求在重试或跨节点恢复时会得到相同值。 JSON 在哈希前递归排序对象字段，避免
+    * Scala Map 迭代顺序造成伪冲突。
     */
-  private def requestFingerprint(agent: AgentDefinition, request: RunRequest): IO[AgentError, String] =
+  private[runtime] def requestFingerprint(
+      agent: AgentDefinition,
+      request: RunRequest
+  ): IO[AgentError, String] =
     for
       agentJson   <- decodeForFingerprint("AgentDefinition", agent.toJson)
       inputJson   <- decodeForFingerprint("AgentMessage", request.input.toJson)
-      contextJson <- decodeForFingerprint("RunContext", request.context.toJson)
+      contextJson <- decodeForFingerprint("RunContext", request.context.semanticContext.toJson)
       limitsJson  <- decodeForFingerprint("RunLimits", request.limits.toJson)
       value = Json.Obj(
         "agent"    -> agentJson,

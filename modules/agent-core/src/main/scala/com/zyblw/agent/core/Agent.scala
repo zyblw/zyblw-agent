@@ -40,7 +40,26 @@ final case class RunContext(
     tenantId: Option[String] = None,
     scopes: Set[String] = Set.empty,
     attributes: Map[String, String] = Map.empty
-) derives JsonCodec
+) derives JsonCodec:
+  /** 剥离仅用于观测/追踪的瞬态属性，保留参与业务与权限语义的上下文。 */
+  def semanticContext: RunContext =
+    copy(attributes = attributes.filterNot { case (k, _) => RunContext.isDiagnosticAttribute(k) })
+
+object RunContext:
+  /** 仅用于日志、链路追踪与诊断关联的非业务属性键；它们在跨进程恢复或重试时允许改变，因此不参与请求幂等指纹。 */
+  val DiagnosticAttributeKeys: Set[String] = Set(
+    "request_id",
+    "trace_id",
+    "span_id",
+    "correlation_id",
+    "x-request-id"
+  )
+
+  val DiagnosticAttributePrefix: String = "diagnostic."
+
+  def isDiagnosticAttribute(key: String): Boolean =
+    val normalized = key.trim.toLowerCase(java.util.Locale.ROOT)
+    DiagnosticAttributeKeys.contains(normalized) || normalized.startsWith(DiagnosticAttributePrefix)
 
 /** 发起一次运行所需的会话、输入、权限上下文与完整硬预算。
   *

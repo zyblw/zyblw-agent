@@ -1419,8 +1419,19 @@ final class PostgresKnowledgeIndexDirectory(dataSource: DataSource) extends Know
       limit: Int,
       cursor: Option[KnowledgeIndexCursor]
   ): IO[RetrievalError, KnowledgeIndexPage] =
+    list(tenantId, limit, cursor, None)
+
+  override def list(
+      tenantId: Option[TenantId],
+      limit: Int,
+      cursor: Option[KnowledgeIndexCursor],
+      callerPermissions: Option[Set[String]]
+  ): IO[RetrievalError, KnowledgeIndexPage] =
     val bounded    = KnowledgeIndexDirectory.boundedLimit(limit)
     val conditions = Chunk.fromIterable(tenantId.map(_ => "d.tenant_id = ?")) ++
+      Chunk.fromIterable(
+        callerPermissions.map(_ => "cardinality(d.permissions) > 0 AND d.permissions <@ ?::text[]")
+      ) ++
       // 行值比较让 PostgreSQL 直接在复合索引上定位游标位置；拆成 OR 条件通常退化为顺序扫描。
       Chunk.fromIterable(
         cursor.map(_ =>
@@ -1448,6 +1459,9 @@ final class PostgresKnowledgeIndexDirectory(dataSource: DataSource) extends Know
                 var index       = 0
                 def next(): Int = { index += 1; index }
                 tenantId.foreach(value => statement.setString(next(), value.value))
+                callerPermissions.foreach(perms =>
+                  statement.setArray(next(), KnowledgeSql.textArray(connection, perms.toVector.sorted))
+                )
                 cursor.foreach { value =>
                   statement.setTimestamp(
                     next(),

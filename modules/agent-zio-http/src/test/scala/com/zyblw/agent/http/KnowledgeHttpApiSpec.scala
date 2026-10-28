@@ -26,10 +26,29 @@ object KnowledgeHttpApiSpec extends ZIOSpecDefault:
 
   final private class RecordingKnowledge(val calls: Ref[Chunk[String]]) extends KnowledgeService:
     def documents(tenantId: String, limit: Int, cursor: Option[String]) =
-      calls.update(_ :+ s"documents:$tenantId").as(KnowledgeDocumentPage(Chunk.empty, None, hasMore = false))
+      documents(tenantId, limit, cursor, None)
+
+    override def documents(
+        tenantId: String,
+        limit: Int,
+        cursor: Option[String],
+        callerPermissions: Option[Set[String]]
+    ) =
+      val permTag = callerPermissions.fold("all")(perms => perms.toList.sorted.mkString("&"))
+      calls
+        .update(_ :+ s"documents:$tenantId:$permTag")
+        .as(KnowledgeDocumentPage(Chunk.empty, None, hasMore = false))
 
     def document(tenantId: String, documentId: String) =
-      calls.update(_ :+ s"document:$tenantId:$documentId").as(None)
+      document(tenantId, documentId, None)
+
+    override def document(
+        tenantId: String,
+        documentId: String,
+        callerPermissions: Option[Set[String]]
+    ) =
+      val permTag = callerPermissions.fold("all")(perms => perms.toList.sorted.mkString("&"))
+      calls.update(_ :+ s"document:$tenantId:$documentId:$permTag").as(None)
 
     def retire(tenantId: String, documentId: String, expectedActiveVersion: Long) =
       calls.update(_ :+ s"retire:$tenantId:$documentId:$expectedActiveVersion").unit
@@ -177,6 +196,65 @@ object KnowledgeHttpApiSpec extends ZIOSpecDefault:
         denied.status == Status.Forbidden,
         allowed.status == Status.Ok,
         recorded == Chunk("reindex:acme")
+      )
+    },
+    test("普通只读用户查询文档列表与详情时自动下推文档级 callerPermissions，管理员拥有全量目录视角") {
+      for
+        tuple <- api
+        (http, calls) = tuple
+        _ <- http.routes.runZIO(
+          authed(
+            Request.get(knowledge / "documents"),
+            KnowledgeAuthorization.ReadScope,
+            "public",
+            "owner:reader-1"
+          )
+        )
+        _ <- http.routes.runZIO(
+          authed(
+            Request.get(knowledge / "documents" / "doc-private"),
+            KnowledgeAuthorization.ReadScope,
+            "public",
+            "owner:reader-1"
+          )
+        )
+        _ <- http.routes.runZIO(
+          authed(
+            Request.get(knowledge / "documents"),
+            KnowledgeAuthorization.ReadScope,
+            KnowledgeAuthorization.AdminScope
+          )
+        )
+        recorded <- calls.get
+      yield assertTrue(
+        recorded == Chunk(
+          "documents:acme:knowledge:read&owner:reader-1&public",
+          "document:acme:doc-private:knowledge:read&owner:reader-1&public",
+          "documents:acme:all"
+        )
+      )
+    },
+    test("摄入作业状态查询要求 knowledge:write 或管理权限，普通 knowledge:read 返回 403") {
+      for
+        tuple <- api
+        (http, calls) = tuple
+        denied <- http.routes.runZIO(
+          authed(
+            Request.get(knowledge / "ingestions" / "job-1"),
+            KnowledgeAuthorization.ReadScope
+          )
+        )
+        allowed <- http.routes.runZIO(
+          authed(
+            Request.get(knowledge / "ingestions" / "job-1"),
+            KnowledgeAuthorization.WriteScope
+          )
+        )
+        recorded <- calls.get
+      yield assertTrue(
+        denied.status == Status.Forbidden,
+        allowed.status == Status.NotFound,
+        recorded == Chunk("job:acme:job-1")
       )
     }
   )

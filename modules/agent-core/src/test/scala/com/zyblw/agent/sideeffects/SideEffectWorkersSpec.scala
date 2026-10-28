@@ -124,6 +124,67 @@ object SideEffectWorkersSpec extends ZIOSpecDefault:
         count  <- worker.runOnce
         result <- action.get
       yield assertTrue(count == 1, result == "none")
+    },
+    test(
+      "OutboxPublisher 与 CompensationWorker 单波次 claim 不超过 parallelism，且 markPublished/complete 租约丢失时不中断波次"
+    ) {
+      val handler = new CompensationHandler:
+        val name                                                          = "undo-record-v1"
+        def compensate(_record: CompensationRecord): IO[AgentError, Unit] = ZIO.unit
+      for
+        outboxBatchSize <- Ref.make(0)
+        compBatchSize   <- Ref.make(0)
+        staleOutboxStore = new OutboxStore:
+          def claim(_owner: SideEffectWorkerId, batchSize: Int, _leaseDuration: Duration, _maxAttempts: Int) =
+            outboxBatchSize.set(batchSize).as(Chunk(outboxLease))
+          def heartbeat(_lease: OutboxLease, _extendBy: Duration) = ZIO.succeed(now.plusSeconds(30))
+          def markPublished(_lease: OutboxLease)                  =
+            ZIO.fail(AgentError.OutboxLeaseLost(eventId.asString, owner.value, outboxLease.generation))
+          def abandon(_lease: OutboxLease, _safeFailure: String, _availableAt: Instant) = ZIO.unit
+          def deadLetter(_lease: OutboxLease, _safeFailure: String)                     = ZIO.unit
+          def get(_eventId: OutboxEventId)                                              = ZIO.succeed(event)
+          def list(_operationId: BusinessOperationId) = ZIO.succeed(Chunk(event))
+        staleCompStore = new CompensationStore:
+          def activate(_id: CompensationId, _availableAt: Instant) = ZIO.succeed(compensation)
+          def cancel(_id: CompensationId)                          =
+            ZIO.succeed(compensation.copy(status = CompensationStatus.Cancelled))
+          def claim(_owner: SideEffectWorkerId, batchSize: Int, _leaseDuration: Duration, _maxAttempts: Int) =
+            compBatchSize.set(batchSize).as(Chunk(compensationLease))
+          def heartbeat(_lease: CompensationLease, _extendBy: Duration) = ZIO.succeed(now.plusSeconds(60))
+          def complete(_lease: CompensationLease)                       =
+            ZIO.fail(
+              AgentError.CompensationLeaseLost(
+                compensationId.asString,
+                owner.value,
+                compensationLease.generation
+              )
+            )
+          def abandon(_lease: CompensationLease, _safeFailure: String, _availableAt: Instant) = ZIO.unit
+          def deadLetter(_lease: CompensationLease, _safeFailure: String)                     = ZIO.unit
+          def get(_id: CompensationId) = ZIO.succeed(compensation)
+        transport = new OutboxTransport:
+          def publish(_value: OutboxEventRecord): IO[AgentError, Unit] = ZIO.unit
+        registry    <- CompensationRegistry.make(List(handler))
+        outboxCount <- OutboxPublisher(
+          staleOutboxStore,
+          transport,
+          owner,
+          OutboxPublisherConfig(batchSize = 20, parallelism = 4)
+        ).runOnce
+        compCount <- CompensationWorker(
+          staleCompStore,
+          registry,
+          owner,
+          CompensationWorkerConfig(batchSize = 10, parallelism = 2)
+        ).runOnce
+        claimedOutbox <- outboxBatchSize.get
+        claimedComp   <- compBatchSize.get
+      yield assertTrue(
+        outboxCount == 1,
+        compCount == 1,
+        claimedOutbox == 4,
+        claimedComp == 2
+      )
     }
   )
 

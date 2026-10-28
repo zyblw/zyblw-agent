@@ -178,14 +178,80 @@ private[agent] object AgentKernel:
   ): Either[AgentError, ModelTurnTransition] =
     val usage = modelTurnUsage(state, response.usage, estimatedCost, routed)
     for
+      _       <- validateToolCallBudget(state.budget.limits, usage, response.message.toolCalls.length)
+      _       <- validateToolPlan(response.message.toolCalls, pendingToolPlan)
+      settled <- settleModelResponse(
+        state,
+        response,
+        provider,
+        model,
+        usage,
+        routed,
+        pendingToolPlan,
+        modelCallRecord,
+        at
+      )
+    yield settled
+
+  /** 当模型响应已经完整返回，但后续工具预算或工具计划校验拒绝执行时，同一状态转换内原子结算已发生的模型调用用量、账本与失败终态，且不生成待执行工具计划。 */
+  def settleModelResponseWithoutTools(
+      state: AgentState,
+      response: ChatResponse,
+      provider: String,
+      model: String,
+      estimatedCost: BigDecimal,
+      routed: Boolean,
+      modelCallRecord: Option[ModelCallExecutionRecord],
+      rejection: AgentError,
+      at: Instant
+  ): Either[AgentError, ModelTurnTransition] =
+    val usage = modelTurnUsage(state, response.usage, estimatedCost, routed)
+    settleModelResponse(
+      state,
+      response,
+      provider,
+      model,
+      usage,
+      routed,
+      pendingToolPlan = None,
+      modelCallRecord = modelCallRecord,
+      at = at
+    ).map { settled =>
+      val usageEvent = AgentEvent.UsageUpdated(state.runId, usage, at.toEpochMilli)
+      fail(settled.transition.state, rejection, at) match
+        case Some(failed) =>
+          settled.copy(
+            transition = Transition(
+              failed.state,
+              settled.transition.events ++ NonEmptyChunk(usageEvent) ++ failed.events
+            )
+          )
+        case None =>
+          settled.copy(
+            transition = settled.transition.copy(
+              events = settled.transition.events ++ NonEmptyChunk(usageEvent)
+            )
+          )
+    }
+
+  private def settleModelResponse(
+      state: AgentState,
+      response: ChatResponse,
+      provider: String,
+      model: String,
+      usage: UsageSummary,
+      routed: Boolean,
+      pendingToolPlan: Option[DurableToolPlan],
+      modelCallRecord: Option[ModelCallExecutionRecord],
+      at: Instant
+  ): Either[AgentError, ModelTurnTransition] =
+    for
       _ <- requireStatus(state, "结算模型响应", Set(RunStatus.Running))
       _ <- Either.cond(
         !routed || state.usage.modelCalls > 0,
         (),
         AgentError.PersistenceFailure("路由模型响应缺少预留的模型调用用量")
       )
-      _ <- validateToolCallBudget(state.budget.limits, usage, response.message.toolCalls.length)
-      _ <- validateToolPlan(response.message.toolCalls, pendingToolPlan)
       _ <- Either.cond(
         modelCallRecord.forall(_.status == ModelCallStatus.Dispatched),
         (),

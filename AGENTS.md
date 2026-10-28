@@ -45,13 +45,13 @@ lifecycle, protocol, security, or license boundary plus an ADR.
 
 ## Current state
 
-The first, unreleased candidate is `0.9.0`; all current capabilities belong to this single fresh-install baseline: folded Flyway (core + 1024 knowledge each a single V001), structural retrieval, PaddleOCR, model usage/price snapshots, knowledge HTTP, citation source types, and `KnowledgeQaHost`.
-Installation starts from an empty database and follows `docs/fresh-install-0.9.0.md`.
+The current fresh-install baseline is `0.10.0`; all current capabilities belong to this single fresh-install baseline: folded Flyway (core + 1024 knowledge each a single V001), structural retrieval, PaddleOCR, model usage/price snapshots, knowledge HTTP, citation source types, and `KnowledgeQaHost`.
+Installation starts from an empty database and follows `docs/fresh-install-0.10.0.md`.
 
 Internal runtime structure is Functional Kernel + Driver ([ADR-0028](docs/architecture/0028-functional-kernel-runtime-driver.md)): pure `AgentKernel` decides, `AgentRuntimeDriver` owns effects. Public entry remains `AgentRuntime` / `AgentApplication`. Context authority and Prompt Cache are governed by [ADR-0029](docs/architecture/0029-context-authority-prompt-lineage.md) and [prompt-runtime.md](docs/prompt-runtime.md): Memory/RAG/summary never become System, and cache is not a fact source.
 
 Maturity is tracked per capability in `docs/maturity-and-roadmap.md`, not per module. As of
-`0.9.0`:
+`0.10.0`:
 
 - **Foundation**: runtime loop (`AgentKernel` + `AgentRuntimeDriver`), typed tools and policy, durable command worker, layered
   instructions, unified `Suspension`, business HTTP v1, run inspection / `RunTrajectory`.
@@ -156,9 +156,9 @@ Run the smallest relevant checks during development and the full gates before a 
 ```bash
 sbt -batch 'scalafmtCheckAll; scalafmtSbtCheck; testFull'
 RUN_POSTGRES_INTEGRATION=1 sbt -batch postgres/testFull
-sbt -batch 'set ThisBuild / version := "0.9.0-local"; publishM2'
+sbt -batch 'set ThisBuild / version := "0.10.0-local"; publishM2'
 cd integration-tests/maven-consumer
-ZYBLW_AGENT_VERSION=0.9.0-local sbt -batch compile
+ZYBLW_AGENT_VERSION=0.10.0-local sbt -batch compile
 ```
 
 Console changes additionally require, in `modules/agent-dashboard`:

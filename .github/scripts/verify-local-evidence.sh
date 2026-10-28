@@ -46,6 +46,13 @@ pending = sum(item["status"] in {"pending_host", "blocked_external", "deferred"}
 eval_data = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
 if eval_data.get("schemaVersion") != 1:
     raise SystemExit("invalid eval evidence manifest schema")
+release_line = data.get("releaseLine")
+if not isinstance(release_line, str) or not release_line or eval_data.get("releaseLine") != release_line:
+    raise SystemExit("wave-0 and eval manifest releaseLine must match")
+for doc_name in ("README.md", "AGENTS.md", "docs/maturity-and-roadmap.md"):
+    doc_text = pathlib.Path(doc_name).read_text(encoding="utf-8")
+    if f"`{release_line}`" not in doc_text:
+        raise SystemExit(f"{doc_name} does not mention current releaseLine {release_line!r}")
 for mechanism in eval_data.get("mechanisms", []):
     if mechanism.get("status") not in {"verified_local", "verified_ci"}:
         raise SystemExit(f"{mechanism.get('id')}: eval mechanism is not verified")

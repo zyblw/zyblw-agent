@@ -81,7 +81,7 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
           val db = scopeDb(scope)
           lockScope(connection, db) *>
             ZIO.foreachDiscard(expectedBarrier) { captured =>
-              readBarrierInConnection(connection, scope).flatMap { latest =>
+              readBarrierInConnection(connection, scope, Some(entry.key)).flatMap { latest =>
                 if latest.hasDeletedSince(captured, entry.key) then
                   ZIO.fail(
                     AgentError.MemoryVersionConflict(
@@ -197,22 +197,35 @@ final class PostgresMemoryStore(dataSource: DataSource, maxValueCharacters: Int 
 
   /** 读取当前作用域的删除屏障快照（包含 scope 级清空代数与各 key 的 tombstone/active 版本）。 */
   override def currentBarrier(scope: MemoryScope): IO[StoreError, MemoryDeletionBarrier] =
-    withConnection(connection => readBarrierInConnection(connection, scope))
+    withConnection(connection => readBarrierInConnection(connection, scope, None))
 
   private def readBarrierInConnection(
       connection: Connection,
-      scope: MemoryScope
+      scope: MemoryScope,
+      targetKey: Option[String]
   ): IO[StoreError, MemoryDeletionBarrier] =
     jdbc("read memory deletion barrier") {
-      val statement = connection.prepareStatement(
-        """SELECT memory_key, version, status, value_json::text
-          |FROM zyblw_agent_core.agent_memories
-          |WHERE scope_kind = ? AND scope_key = ?""".stripMargin
-      )
+      val sql = targetKey match
+        case Some(_) =>
+          """SELECT memory_key, version, status,
+            |       CASE WHEN memory_key = ? THEN value_json::text ELSE NULL END
+            |FROM zyblw_agent_core.agent_memories
+            |WHERE scope_kind = ? AND scope_key = ? AND memory_key IN (?, ?)""".stripMargin
+        case None =>
+          """SELECT memory_key, version, status,
+            |       CASE WHEN memory_key = ? THEN value_json::text ELSE NULL END
+            |FROM zyblw_agent_core.agent_memories
+            |WHERE scope_kind = ? AND scope_key = ?""".stripMargin
+      val statement = connection.prepareStatement(sql)
       try
         val db = scopeDb(scope)
-        statement.setString(1, db.kind)
-        statement.setString(2, db.key)
+        statement.setString(1, MemoryStore.ScopeBarrierKey)
+        statement.setString(2, db.kind)
+        statement.setString(3, db.key)
+        targetKey.foreach { key =>
+          statement.setString(4, MemoryStore.ScopeBarrierKey)
+          statement.setString(5, key)
+        }
         val result          = statement.executeQuery()
         var scopeGeneration = 0L
         val tombstones      = scala.collection.mutable.Map.empty[String, Long]

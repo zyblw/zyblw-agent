@@ -174,18 +174,34 @@ final class MemoryRagContextSourceResolver(
           .fold(retrieval)(_.retrieval(state.runId, "retrieve")(retrieval)(_.hits.length.toLong))
           .mapError(retrievalError)
           .map { result =>
-            val accepted =
+            val paired          = result.hits.zip(result.citations)
+            val acceptedSeedIds =
               if result.evidence.supportsGroundedAnswer then
-                result.hits.zip(result.citations).filter { (hit, _) =>
-                  hit.chunk.lineage
-                    .flatMap(_.seedChunkId)
-                    .nonEmpty || DefaultRetriever.acceptsSeed(hit, policy.minimumRetrievalScore)
+                paired.collect {
+                  case (hit, _)
+                      if hit.chunk.lineage.flatMap(_.seedChunkId).forall(_ == hit.chunk.id) &&
+                        DefaultRetriever.acceptsSeed(hit, policy.minimumRetrievalScore) =>
+                    hit.chunk.id
+                }.toSet
+              else Set.empty[String]
+            val accepted =
+              if acceptedSeedIds.nonEmpty then
+                paired.filter { (hit, _) =>
+                  hit.chunk.lineage.flatMap(_.seedChunkId) match
+                    case Some(seedId) if seedId != hit.chunk.id => acceptedSeedIds.contains(seedId)
+                    case _                                      => acceptedSeedIds.contains(hit.chunk.id)
                 }
               else Chunk.empty
+            val insufficient = !result.evidence.supportsGroundedAnswer || accepted.isEmpty
+            val status       =
+              if !result.evidence.supportsGroundedAnswer then result.evidence.status.toString
+              else if accepted.nonEmpty then result.evidence.status.toString
+              else if result.hits.nonEmpty then RetrievalEvidenceStatus.BelowMinimumScore.toString
+              else RetrievalEvidenceStatus.NoAcceptedHits.toString
             ResolvedRetrieval(
               accepted,
-              insufficient = !result.evidence.supportsGroundedAnswer,
-              evidenceStatus = result.evidence.status.toString,
+              insufficient = insufficient,
+              evidenceStatus = status,
               candidateCount = result.evidence.candidateCount.max(result.hits.length).max(accepted.length),
               acceptedCount = accepted.length,
               topScore = accepted.map(_._1).map(DefaultRetriever.relevanceScore).maxOption

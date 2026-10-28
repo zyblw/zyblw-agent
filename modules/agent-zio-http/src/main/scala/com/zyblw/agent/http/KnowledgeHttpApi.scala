@@ -31,7 +31,12 @@ final class KnowledgeHttpApi(
           actor  <- authorizeRead(request)
           tenant <- KnowledgeAuthorization.requireTenant(actor)
           page   <- knowledge
-            .documents(tenant, intParam(request, "limit", 50, 200), request.queryParam("cursor"))
+            .documents(
+              tenant,
+              intParam(request, "limit", 50, 200),
+              request.queryParam("cursor"),
+              KnowledgeAuthorization.documentReadPermissions(actor)
+            )
         yield Response.json(toPage(page).toJson)
       }
     },
@@ -41,8 +46,8 @@ final class KnowledgeHttpApi(
           actor  <- authorizeRead(request)
           tenant <- KnowledgeAuthorization.requireTenant(actor)
           view   <- knowledge
-            .document(tenant, documentId)
-            .someOrFail(AgentError.PersistenceFailure(s"知识文档不存在: $documentId"))
+            .document(tenant, documentId, KnowledgeAuthorization.documentReadPermissions(actor))
+            .someOrFail(AgentError.KnowledgeDocumentNotFound(documentId))
         yield Response.json(toSummary(view).toJson)
       }
     },
@@ -90,11 +95,11 @@ final class KnowledgeHttpApi(
     AgentHttpContract.getKnowledgeIngestionPattern -> handler { (jobId: String, request: Request) =>
       respond {
         for
-          actor  <- authorizeRead(request)
+          actor  <- authorizeIngestionRead(request)
           tenant <- KnowledgeAuthorization.requireTenant(actor)
           job    <- knowledge
             .ingestionJob(tenant, jobId)
-            .someOrFail(AgentError.PersistenceFailure(s"摄入任务不存在: $jobId"))
+            .someOrFail(AgentError.IngestionJobNotFound(jobId))
         yield Response.json(toIngestion(job).toJson)
       }
     },
@@ -125,6 +130,9 @@ final class KnowledgeHttpApi(
 
   private def authorizeRead(request: Request): IO[AgentError, RunContext] =
     contexts.resolve(request).tap(KnowledgeAuthorization.requireRead)
+
+  private def authorizeIngestionRead(request: Request): IO[AgentError, RunContext] =
+    contexts.resolve(request).tap(KnowledgeAuthorization.requireIngestionRead)
 
   private def authorizeWrite(request: Request): IO[AgentError, RunContext] =
     contexts.resolve(request).tap(KnowledgeAuthorization.requireWrite)

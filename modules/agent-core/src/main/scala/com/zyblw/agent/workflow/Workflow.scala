@@ -453,7 +453,21 @@ final class WorkflowEngine[R, S] private (
     *   惰性事件流；只有下游拉取时才执行节点，失败和取消遵循 ZIO Stream 语义
     */
   def run(initial: S, context: WorkflowContext): ZStream[R, WorkflowError, WorkflowEvent[S]] =
-    execute(definition.entry, initial, 0, Map.empty, context.copy(wakeup = None), None)
+    val cleanContext   = context.copy(wakeup = None)
+    val initCheckpoint = durableExecution match
+      case Some(_) if maxSteps > 0 && !definition.visitLimits.get(definition.entry).exists(1 > _) =>
+        ZStream
+          .fromZIO(
+            store
+              .save(
+                cleanContext.runId,
+                checkpoint(WorkflowCursor.At(definition.entry), initial, 0, Map.empty, cleanContext)
+              )
+              .mapError(error => workflowStoreError(s"save:${definition.entry.value}", error))
+          )
+          .drain
+      case _ => ZStream.empty
+    initCheckpoint ++ execute(definition.entry, initial, 0, Map.empty, cleanContext, None)
 
   /** 当前 Engine 绑定的稳定 Workflow ID，供 wake worker 限定自己的 claim 范围。 */
   def workflowId: WorkflowId = definition.id
@@ -745,34 +759,53 @@ final class WorkflowEngine[R, S] private (
             ZIO.fail(AgentError.WorkflowFailed(branch.value, s"超过节点访问上限 $limit"))
           case _ => ZIO.unit
       }
-      val branchEffects = visitPreflight *> ZIO
-        .foreachPar(branchIds.zipWithIndex) { case (branch, ordinal) =>
-          executeNode(
-            branch,
-            base,
-            step + ordinal + 1,
-            branchVisits(branch),
-            context
-          ).flatMap { executed =>
-            executed.outcome match
-              case NodeOutcome.Succeeded(branchState) => ZIO.succeed(branchState -> executed.leases)
-              case NodeOutcome.Suspended(_, _)        =>
-                ZIO.fail(AgentError.WorkflowFailed(branch.value, "fan-out 单步分支不能暂停"))
-              case NodeOutcome.Awaiting(_, _) =>
-                ZIO.fail(AgentError.WorkflowFailed(branch.value, "fan-out 单步分支不能注册耐久等待"))
-          }
-        }
-        .withParallelism(maxParallelism)
+      val branchEffects =
+        for
+          _          <- visitPreflight
+          heldLeases <- Ref.make(currentLeases)
+          fanOutHeartbeat = durableExecution match
+            case None                               => ZIO.never
+            case Some((executionStore, execPolicy)) =>
+              (ZIO.sleep(execPolicy.heartbeatInterval) *>
+                heldLeases.get.flatMap { leases =>
+                  ZIO.foreachDiscard(leases) { lease =>
+                    executionStore
+                      .heartbeat(lease, execPolicy.leaseDuration)
+                      .mapError(error => workflowStoreError(s"heartbeat:${lease.key.nodeId.value}", error))
+                  }
+                }).forever
+          mergedAndLeases <- (
+            ZIO
+              .foreachPar(branchIds.zipWithIndex) { case (branch, ordinal) =>
+                executeNode(
+                  branch,
+                  base,
+                  step + ordinal + 1,
+                  branchVisits(branch),
+                  context
+                ).flatMap { executed =>
+                  executed.outcome match
+                    case NodeOutcome.Succeeded(branchState) =>
+                      heldLeases.update(_ ++ executed.leases).as(branchState -> executed.leases)
+                    case NodeOutcome.Suspended(_, _) =>
+                      ZIO.fail(AgentError.WorkflowFailed(branch.value, "fan-out 单步分支不能暂停"))
+                    case NodeOutcome.Awaiting(_, _) =>
+                      ZIO.fail(AgentError.WorkflowFailed(branch.value, "fan-out 单步分支不能注册耐久等待"))
+                }
+              }
+              .withParallelism(maxParallelism)
+              .flatMap(results =>
+                reducer
+                  .merge(base, Chunk.fromIterable(results.map(_._1)))
+                  .map(merged => merged -> results.flatMap(_._2))
+              )
+            )
+            .raceFirst(fanOutHeartbeat)
+        yield mergedAndLeases
 
       ZStream.succeed(WorkflowEvent.FanOutStarted(current, branchIds, join, policy, step)) ++
         ZStream
-          .fromZIO(
-            branchEffects.flatMap(results =>
-              reducer
-                .merge(base, Chunk.fromIterable(results.map(_._1)))
-                .map(merged => merged -> results.flatMap(_._2))
-            )
-          )
+          .fromZIO(branchEffects)
           .flatMap { case (merged, branchLeases) =>
             persist(
               context.runId,

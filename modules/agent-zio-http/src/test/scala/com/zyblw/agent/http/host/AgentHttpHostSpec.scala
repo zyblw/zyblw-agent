@@ -227,6 +227,50 @@ object AgentHttpHostSpec extends ZIOSpecDefault:
         duplicate   <- AgentHostProcesses.make(Chunk(processA, processB)).exit
         invalidName <- AgentHostProcess.make("tenant/动态-worker", ZIO.never).exit
       yield assertTrue(empty.isFailure, duplicate.isFailure, invalidName.isFailure)
+    },
+    test("多个关键进程并存时任一进程失败立即终止 Host 并中断其余常驻进程") {
+      for
+        captured       <- Promise.make[Nothing, Routes[Any, Nothing]]
+        serverStopped  <- Promise.make[Nothing, Unit]
+        siblingStopped <- Promise.make[Nothing, Unit]
+        release        <- Promise.make[Nothing, Unit]
+        failingProcess <- AgentHostProcess.make(
+          "command-worker",
+          release.await *> ZIO.fail(AgentError.PersistenceFailure("db-lost"))
+        )
+        healthyProcess <- AgentHostProcess.make(
+          "workflow-wake-worker",
+          ZIO.never.onInterrupt(siblingStopped.succeed(()).unit)
+        )
+        processes <- AgentHostProcesses.make(Chunk(failingProcess, healthyProcess))
+        server    = capturingServer(captured, serverStopped)
+        readiness = new AgentHostReadiness:
+          def check: UIO[Unit] = ZIO.unit
+        assertion <- ZIO.scoped {
+          (for
+            host   <- ZIO.service[AgentHttpHost]
+            fiber  <- host.serve.forkScoped
+            routes <- captured.await
+            _      <- release.succeed(())
+            exit   <- fiber.await
+            _      <- siblingStopped.await
+            _      <- serverStopped.await
+            live   <- routes.runZIO(Request.get(URL.root / "health" / "live"))
+          yield assertTrue(
+            exit.isFailure,
+            live.status == Status.ServiceUnavailable
+          )).provideSomeLayer[Scope](
+            hostLayer(
+              processes,
+              AgentHttpPrimaryRoutes(Routes.empty),
+              readiness,
+              AgentHttpAdditionalRoutes(Routes.empty),
+              server,
+              AgentHttpHostConfig()
+            )
+          )
+        }
+      yield assertion
     }
   )
 

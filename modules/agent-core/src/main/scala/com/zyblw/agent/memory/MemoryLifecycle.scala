@@ -145,11 +145,7 @@ final class MemoryLifecycle(
               case Some(reason) =>
                 ZIO.succeed(report.copy(rejected = report.rejected :+ (incoming.key -> reason)))
               case None =>
-                store.currentBarrier(scope).flatMap { latestBarrier =>
-                  if wasDeletedSinceBarrier(incoming.key, capturedBarrier, latestBarrier) then
-                    ZIO.succeed(report.copy(ignored = report.ignored + 1))
-                  else upsertWithRetry(scope, incoming, report, capturedBarrier, retriesRemaining = 1)
-                }
+                upsertWithRetry(scope, incoming, report, capturedBarrier, retriesRemaining = 1)
       }
 
   /** 执行单条候选的读取、合并与 CAS 写入：

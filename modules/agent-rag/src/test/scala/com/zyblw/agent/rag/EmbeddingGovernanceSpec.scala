@@ -135,13 +135,41 @@ object EmbeddingGovernanceSpec extends ZIOSpecDefault:
           GovernedEmbeddingConfig()
         )
         context = EmbeddingRequestContext(tenantA, EmbeddingPurpose.Query, "stable-request")
-        _        <- service.embed(req(context, Chunk("相同"), EmbeddingInputRole.Query))
-        retry    <- service.embed(req(context, Chunk("相同"), EmbeddingInputRole.Query)).either
-        conflict <- service.embed(req(context, Chunk("不同"), EmbeddingInputRole.Query)).either
-        batches  <- calls.get
+        _               <- service.embed(req(context, Chunk("相同"), EmbeddingInputRole.Query))
+        retry           <- service.embed(req(context, Chunk("相同"), EmbeddingInputRole.Query)).either
+        conflict        <- service.embed(req(context, Chunk("不同"), EmbeddingInputRole.Query)).either
+        diffInstruction <- service
+          .embed(
+            req(context, Chunk("相同"), EmbeddingInputRole.Query).copy(
+              instruction = Some(EmbeddingInstruction("retrieval-zh", "v2", "检索中医经典"))
+            )
+          )
+          .either
+        diffSpace <- service
+          .embed(
+            req(
+              context.copy(knowledgeSpaceId = Some(KnowledgeSpaceId("space-other"))),
+              Chunk("相同"),
+              EmbeddingInputRole.Query
+            )
+          )
+          .either
+        diffPerm <- service
+          .embed(
+            req(
+              context.copy(permissionFingerprint = "perm-other"),
+              Chunk("相同"),
+              EmbeddingInputRole.Query
+            )
+          )
+          .either
+        batches <- calls.get
       yield assertTrue(
         retry.isRight,
         conflict.left.exists(_.category == ErrorCategory.Validation),
+        diffInstruction.left.exists(_.category == ErrorCategory.Validation),
+        diffSpace.left.exists(_.category == ErrorCategory.Validation),
+        diffPerm.left.exists(_.category == ErrorCategory.Validation),
         batches.length == 2
       )
     },
@@ -204,6 +232,114 @@ object EmbeddingGovernanceSpec extends ZIOSpecDefault:
         service.descriptor.capabilities.outputs == Set(EmbeddingOutputKind.Dense),
         rejected.isLeft,
         recordedCalls.isEmpty
+      )
+    },
+    test("长 UUID 租户与知识空间隔离维度的 keyVersion 长度固定不超过 100 且任意维度变化指纹不同") {
+      for
+        calls      <- Ref.make(Chunk.empty[Chunk[String]])
+        captured   <- Ref.make(Chunk.empty[EmbeddingCacheEntry])
+        (_, quota) <- stores
+        capturingCache = new EmbeddingCacheStore:
+          def get(keys: Chunk[EmbeddingCacheKey], now: java.time.Instant) = ZIO.succeed(Map.empty)
+          def put(entries: Chunk[EmbeddingCacheEntry])                    = captured.update(_ ++ entries)
+          def purgeExpired(now: java.time.Instant, limit: Int)            = ZIO.succeed(0L)
+        service = GovernedEmbeddingModel(
+          provider(calls),
+          capturingCache,
+          quota,
+          EmbeddingQuotaPolicy(),
+          GovernedEmbeddingConfig()
+        )
+        baseCtx = EmbeddingRequestContext(
+          tenantId = TenantId("550e8400-e29b-41d4-a716-446655440000"),
+          purpose = EmbeddingPurpose.Query,
+          requestId = "req-1",
+          knowledgeSpaceId = Some(KnowledgeSpaceId("6ba7b810-9dad-11d1-80b4-00c04fd430c8")),
+          permissionFingerprint = "perm-sha256-abcdef0123456789abcdef0123456789abcdef0123456789"
+        )
+        diffSpaceCtx = baseCtx.copy(
+          requestId = "req-2",
+          knowledgeSpaceId = Some(KnowledgeSpaceId("6ba7b810-9dad-11d1-80b4-00c04fd430c9"))
+        )
+        _       <- service.embed(req(baseCtx, Chunk("测试"), EmbeddingInputRole.Query))
+        _       <- service.embed(req(diffSpaceCtx, Chunk("测试"), EmbeddingInputRole.Query))
+        entries <- captured.get
+        key1 = entries(0).key
+        key2 = entries(1).key
+      yield assertTrue(
+        entries.length == 2,
+        key1.keyVersion.length <= 100,
+        key2.keyVersion.length <= 100,
+        key1.keyVersion != key2.keyVersion
+      )
+    },
+    test("原样重试前其他请求填充部分缓存不会导致配额幂等哈希冲突") {
+      for
+        calls        <- Ref.make(Chunk.empty[Chunk[String]])
+        shouldFail   <- Ref.make(true)
+        dependencies <- stores
+        flakyDelegate = new EmbeddingModel:
+          override val capabilities: EmbeddingCapabilities       = EmbeddingDefaults.denseCapabilities(2, 100)
+          override val descriptor: EmbeddingProviderDescriptorV2 =
+            EmbeddingProviderDescriptorV2("test-provider", "test-model", capabilities)
+          def embed(request: EmbeddingRequest): IO[RetrievalError, EmbeddingResponse] =
+            shouldFail.get.flatMap { failNow =>
+              if failNow && request.context.requestId == "retry-request-id" then
+                shouldFail.set(false) *> ZIO.fail(AgentError.RetrievalFailed("transient provider timeout"))
+              else provider(calls).embed(request)
+            }
+        service = GovernedEmbeddingModel(
+          flakyDelegate,
+          dependencies._1,
+          dependencies._2,
+          EmbeddingQuotaPolicy(maxRequests = 5, maxTexts = 10, maxCharacters = 100),
+          GovernedEmbeddingConfig()
+        )
+        retryCtx = EmbeddingRequestContext(tenantA, EmbeddingPurpose.Query, "retry-request-id")
+        otherCtx = EmbeddingRequestContext(tenantA, EmbeddingPurpose.Query, "other-request-id")
+        firstAttempt <- service
+          .embed(req(retryCtx, Chunk("甲", "乙"), EmbeddingInputRole.Query))
+          .either
+        _             <- service.embed(req(otherCtx, Chunk("甲"), EmbeddingInputRole.Query))
+        secondAttempt <- service
+          .embed(req(retryCtx, Chunk("甲", "乙"), EmbeddingInputRole.Query))
+          .either
+        batches <- calls.get
+      yield assertTrue(
+        firstAttempt.isLeft,
+        secondAttempt.isRight,
+        secondAttempt.toOption.exists(_.denseEmbeddings.length == 2),
+        batches == Chunk(Chunk("甲"), Chunk("乙"))
+      )
+    },
+    test("FailOpen 模式下缓存读写异常递增 cacheDegradedCount 且不阻塞主链路") {
+      for
+        calls        <- Ref.make(Chunk.empty[Chunk[String]])
+        dependencies <- stores
+        brokenCache = new EmbeddingCacheStore:
+          def get(keys: Chunk[EmbeddingCacheKey], now: java.time.Instant) =
+            ZIO.fail(AgentError.RetrievalFailed("cache read timeout"))
+          def put(entries: Chunk[EmbeddingCacheEntry]) =
+            ZIO.fail(AgentError.RetrievalFailed("cache write timeout"))
+          def purgeExpired(now: java.time.Instant, limit: Int) = ZIO.succeed(0L)
+        service = GovernedEmbeddingModel(
+          provider(calls),
+          brokenCache,
+          dependencies._2,
+          EmbeddingQuotaPolicy(),
+          GovernedEmbeddingConfig(cacheFailureMode = CacheFailureMode.FailOpen)
+        )
+        response <- service.embed(
+          req(
+            EmbeddingRequestContext(tenantA, EmbeddingPurpose.Query, "degraded-cache-req"),
+            Chunk("甲"),
+            EmbeddingInputRole.Query
+          )
+        )
+        degraded <- service.cacheDegradedCount
+      yield assertTrue(
+        response.denseEmbeddings.length == 1,
+        degraded == 2L
       )
     }
   )

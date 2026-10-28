@@ -260,7 +260,7 @@ object IngestionJobStore:
           Clock.instant.flatMap { now =>
             state.modifyZIO { current =>
               current.get(jobId) match
-                case None      => ZIO.fail(AgentError.PersistenceFailure(s"摄入任务不存在: $jobId"))
+                case None      => ZIO.fail(AgentError.IngestionJobNotFound(jobId))
                 case Some(job) =>
                   val next = job.copy(
                     status = status,
@@ -302,6 +302,16 @@ trait KnowledgeAdminService:
       cursor: Option[String]
   ): IO[AgentError, KnowledgeDocumentPage]
 
+  /** 按调用方权限视角分页列出知识索引版本清单（`callerPermissions = None` 表示管理全量视角）。 */
+  def documents(
+      tenantId: Option[String],
+      limit: Int,
+      cursor: Option[String],
+      callerPermissions: Option[Set[String]]
+  ): IO[AgentError, KnowledgeDocumentPage] =
+    val _ = callerPermissions
+    documents(tenantId, limit, cursor)
+
   /** 以指定租户与权限视角执行一次真实检索。
     *
     * 该操作会调用 Embedding Provider 并产生真实费用，因此 HTTP 层必须要求 [[AdminAuthorization.DebugScope]]。
@@ -341,7 +351,26 @@ trait KnowledgeService:
       cursor: Option[String]
   ): IO[AgentError, KnowledgeDocumentPage]
 
+  /** 按调用方权限视角分页列出当前租户的知识索引文档（`callerPermissions = Some(scopes)` 时执行数据库/分页前文档级 ACL 过滤）。 */
+  def documents(
+      tenantId: String,
+      limit: Int,
+      cursor: Option[String],
+      callerPermissions: Option[Set[String]]
+  ): IO[AgentError, KnowledgeDocumentPage] =
+    val _ = callerPermissions
+    documents(tenantId, limit, cursor)
+
   def document(tenantId: String, documentId: String): IO[AgentError, Option[KnowledgeDocumentView]]
+
+  /** 按调用方权限视角查询单个文档详情（未命中文档级 ACL 时返回 `None`，不泄露私有文档存在性）。 */
+  def document(
+      tenantId: String,
+      documentId: String,
+      callerPermissions: Option[Set[String]]
+  ): IO[AgentError, Option[KnowledgeDocumentView]] =
+    val _ = callerPermissions
+    document(tenantId, documentId)
 
   def retire(tenantId: String, documentId: String, expectedActiveVersion: Long): IO[AgentError, Unit]
 

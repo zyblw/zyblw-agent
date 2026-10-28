@@ -500,6 +500,20 @@ object AgentError:
     val category              = ErrorCategory.Persistence
     override val safeToExpose = true
 
+  /** 知识文档不存在。 */
+  final case class KnowledgeDocumentNotFound(documentId: String) extends StoreError:
+    val message               = s"知识文档不存在: $documentId"
+    val category              = ErrorCategory.Persistence
+    override val safeToExpose = true
+    override val diagnostic   = Map("documentId" -> documentId)
+
+  /** 摄入任务不存在。 */
+  final case class IngestionJobNotFound(jobId: String) extends StoreError:
+    val message               = s"摄入任务不存在: $jobId"
+    val category              = ErrorCategory.Persistence
+    override val safeToExpose = true
+    override val diagnostic   = Map("jobId" -> jobId)
+
   /** 认证主体无权读取或修改目标 MemoryScope。
     *
     * scope 只包含框架 canonical 诊断标签，不包含正文；action 是 read/manage 两个稳定值，便于 HTTP 映射为 403。

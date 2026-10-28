@@ -1,9 +1,9 @@
 # 当前兼容性与版本边界
 
-> 状态：0.9.0 全新安装基线
-> 最后核验：2026-10-05；未发布结构检索变更见下文
+> 状态：0.10.0 全新安装基线
+> 最后核验：2026-10-28；未发布结构检索变更见下文
 >
-> 2026-09-24 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。知识文档以来源谱系和构建规格为身份，向量查询绑定 Profile 并使用 HNSW 迭代扫描，不按 Profile 分区。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
+> 2026-10-28 对照：现行安装是 0.10 空库（核心与 1024 知识各一份 V001）。知识文档以来源谱系和构建规格为身份，向量查询绑定 Profile 并使用 HNSW 迭代扫描，不按 Profile 分区。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
 
 ## 已验证工具链矩阵
@@ -29,7 +29,7 @@
 
 ## 唯一安装基线
 
-当前源码是尚未发布的首版 `0.9.0` 空库候选，包含全部最新 Runtime、模型计量和结构 RAG。核心数据库执行 `V001__zyblw_agent_0_9_baseline.sql`，1024 知识执行 `V001__agent_knowledge_0_9_baseline.sql`；两者各配一份 R__ 中文数据字典。结构表直接包含在知识 V001，不保留 V002。
+当前源码是尚未发布的首版 `0.10.0` 空库候选，包含全部最新 Runtime、模型计量和结构 RAG。核心数据库执行 `com/zyblw/agent/persistence/postgres/migration/V001__zyblw_agent_0_9_baseline.sql`，1024 知识执行 `com/zyblw/agent/persistence/postgres/optional/pgvector_1024/V001__agent_knowledge_0_9_baseline.sql`；两者各配一份 R__ 中文数据字典（`R__zyblw_agent_schema_comments.sql`、`R__agent_knowledge_1024_comments.sql`）。结构表直接包含在知识 V001，不保留 V002。
 
 没有历史 schema、旧向量维度、旧 Run 形状转换入口、MiMa 或旧 OpenAPI 对照快照。开发库遇到 checksum 或结构不符须显式重建，不能 repair 或静默转换。本次未连接或重建任何已有环境数据库，也不改远端 tag/制品。首版公开发布后才冻结该基线并开始兼容维护。
 

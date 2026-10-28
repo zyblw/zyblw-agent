@@ -162,9 +162,10 @@ final class CompensationWorker(
     owner: SideEffectWorkerId,
     config: CompensationWorkerConfig
 ):
-  /** 处理一批计划并返回领取数量。 */
+  /** 处理一批计划并返回领取数量。单次 claim 数量不超过并发度，确保每个已领取租约立即启动独立 heartbeat。 */
   def runOnce: IO[AgentError, Int] =
-    store.claim(owner, config.batchSize, config.leaseDuration, config.maxAttempts).flatMap { leases =>
+    val claimLimit = math.min(config.batchSize, config.parallelism)
+    store.claim(owner, claimLimit, config.leaseDuration, config.maxAttempts).flatMap { leases =>
       ZIO.foreachPar(leases)(executeOne).withParallelism(config.parallelism).as(leases.length)
     }
 
@@ -191,3 +192,4 @@ final class CompensationWorker(
         },
         _ => store.complete(lease)
       )
+      .catchSome { case _: AgentError.CompensationLeaseLost => ZIO.unit }

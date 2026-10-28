@@ -869,6 +869,150 @@ object ModelCallRuntimeSpec extends ZIOSpecDefault:
         events.exists(_.event.isInstanceOf[AgentEvent.ModelCallUnknown]),
         events.exists(_.event.isInstanceOf[AgentEvent.RunCancelled])
       )
+    },
+    test("模型响应完整返回但工具提案超出 maxToolCalls 时，先落账已知模型用量再以 BudgetExceeded 终止") {
+      for
+        calls <- Ref.make(0)
+        toolCalls = Chunk(
+          ToolCall("c1", "echo", Json.Obj("text" -> Json.Str("a"))),
+          ToolCall("c2", "echo", Json.Obj("text" -> Json.Str("b")))
+        )
+        model = countingModel(
+          calls,
+          ChatResponse(
+            AgentMessage(MessageRole.Assistant, Chunk.empty, toolCalls = toolCalls),
+            FinishReason.ToolCalls,
+            TokenUsage(100L, 40L)
+          )
+        )
+        inner    <- ZIO.service[RunStore].provideLayer(RunStore.inMemory)
+        observed <- InjectingRunStore.make(inner, (_, _) => false)
+        result   <- (for
+          runtime <- ZIO.service[AgentRuntime]
+          failed  <- runtime
+            .run(
+              agent,
+              RunRequest(
+                ThreadId("tool-budget-reject-after-model"),
+                AgentMessage.user("请调用两次工具"),
+                limits = RunLimits(maxToolCalls = 1)
+              )
+            )
+            .exit
+          id     <- observed.lastRunId.get.someOrFail(AgentError.Unexpected("missing run"))
+          ledger <- inner.getModelCalls(id)
+          state  <- inner.load(id)
+          events <- inner.events(id)
+        yield (failed, ledger, state, events))
+          .provideLayer(layers(model, CapturePolicy.MetadataOnly, ZLayer.succeed(observed)))
+        (failed, ledger, state, events) = result
+      yield assertTrue(
+        failed.isFailure,
+        state.status == RunStatus.BudgetExceeded,
+        state.usage.modelCalls == 1,
+        state.usage.inputTokens == 100L,
+        state.usage.outputTokens == 40L,
+        state.usage.toolCalls == 0,
+        state.pendingModelCall.isEmpty,
+        ledger.length == 1,
+        ledger.head.status == ModelCallStatus.Succeeded,
+        ledger.head.usage.contains(TokenUsage(100L, 40L)),
+        events.exists(_.event.isInstanceOf[AgentEvent.ModelCallCompleted])
+      )
+    },
+    test("工具预算拒绝在同一次模型结算提交中原子写入终态，且崩溃恢复不会触发第二次 Provider 调用") {
+      for
+        calls <- Ref.make(0)
+        toolCalls = Chunk(
+          ToolCall("c1", "echo", Json.Obj("text" -> Json.Str("a"))),
+          ToolCall("c2", "echo", Json.Obj("text" -> Json.Str("b")))
+        )
+        model = countingModel(
+          calls,
+          ChatResponse(
+            AgentMessage(MessageRole.Assistant, Chunk.empty, toolCalls = toolCalls),
+            FinishReason.ToolCalls,
+            TokenUsage(100L, 40L)
+          )
+        )
+        inner <- ZIO.service[RunStore].provideLayer(RunStore.inMemory)
+        // 若首次运行存在单独的二次终态提交则注入失败，证明模型结算与 BudgetExceeded 终态在单次提交内原子完成
+        observed <- InjectingRunStore.make(
+          inner,
+          (state, modelCall) => RunStatus.isTerminal(state.status) && modelCall.isEmpty
+        )
+        result <- (for
+          runtime <- ZIO.service[AgentRuntime]
+          failed  <- runtime
+            .run(
+              agent,
+              RunRequest(
+                ThreadId("tool-budget-reject-atomic-and-recover"),
+                AgentMessage.user("请调用两次工具"),
+                limits = RunLimits(maxToolCalls = 1)
+              )
+            )
+            .exit
+          id            <- observed.lastRunId.get.someOrFail(AgentError.Unexpected("missing run"))
+          stateAfterRun <- inner.load(id)
+          recoveredExit <- runtime.recover(id).exit
+          // 模拟遗留/极端状态：模型响应已写入但状态仍为 Running 且无 pendingToolPlan，恢复时也必须按原工具预算拒绝而非重调模型
+          _             <- observed.clearRemaining
+          _             <- inner.save(stateAfterRun.version, stateAfterRun.copy(status = RunStatus.Running))
+          legacyRecover <- runtime.recover(id).exit
+          finalState    <- inner.load(id)
+          providerCalls <- calls.get
+        yield (failed, recoveredExit, legacyRecover, stateAfterRun, finalState, providerCalls))
+          .provideLayer(layers(model, CapturePolicy.MetadataOnly, ZLayer.succeed(observed)))
+        (failed, recoveredExit, legacyRecover, stateAfterRun, finalState, providerCalls) = result
+      yield assertTrue(
+        failed.isFailure,
+        recoveredExit.isFailure,
+        legacyRecover.isFailure,
+        stateAfterRun.status == RunStatus.BudgetExceeded,
+        finalState.status == RunStatus.BudgetExceeded,
+        finalState.usage.modelCalls == 1,
+        finalState.usage.inputTokens == 100L,
+        finalState.usage.outputTokens == 40L,
+        providerCalls == 1
+      )
+    },
+    test("RunInitialization 请求指纹忽略诊断追踪属性，仅对业务语义上下文敏感") {
+      val baseRequest = RunRequest(
+        ThreadId("idempotent-thread"),
+        AgentMessage.user("桂枝汤的组成"),
+        context = RunContext(
+          tenantId = Some("tenant-a"),
+          userId = Some("user-a"),
+          scopes = Set("qa:ask"),
+          attributes = Map(
+            "business_key"          -> "v1",
+            "request_id"            -> "req-http-1",
+            "trace_id"              -> "trace-1",
+            "diagnostic.reconciler" -> "worker-1"
+          )
+        )
+      )
+      val retryRequest = baseRequest.copy(
+        context = baseRequest.context.copy(
+          attributes = Map(
+            "business_key"          -> "v1",
+            "request_id"            -> "req-reconcile-2",
+            "trace_id"              -> "trace-2",
+            "diagnostic.reconciler" -> "worker-2"
+          )
+        )
+      )
+      val semanticChangedRequest = baseRequest.copy(
+        context = baseRequest.context.copy(
+          attributes = baseRequest.context.attributes.updated("business_key", "v2")
+        )
+      )
+      for
+        hash1 <- RunInitialization.requestFingerprint(agent, baseRequest)
+        hash2 <- RunInitialization.requestFingerprint(agent, retryRequest)
+        hash3 <- RunInitialization.requestFingerprint(agent, semanticChangedRequest)
+      yield assertTrue(hash1 == hash2, hash1 != hash3)
     }
   )
 
@@ -899,6 +1043,8 @@ object ModelCallRuntimeSpec extends ZIOSpecDefault:
       getModelCalls,
       delete
     }
+
+    def clearRemaining: UIO[Unit] = remaining.set(0)
 
     def createWithEvents(
         state: AgentState,

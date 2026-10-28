@@ -59,3 +59,13 @@ LIMIT ?;
 
 - **局部事务原子性**：本地业务状态的变更与随之产生的审计日志、Outbox 领域事件，必须在同一个本地数据库事务中提交。
 - **严禁长事务包裹远程调用**：**严禁将耗时极长或不可控的网络 HTTP 请求、大模型推理调用包裹在持有数据库锁的事务块内**。远程调用完成后，通过独立的 CAS 事务写入结果。
+
+## 五、 建表 DDL 与全量中文数据字典铁律 (Schema & Chinese Comments Discipline)
+
+1. **按表精确映射与 Fail-Closed 门禁**：
+   - 在 `zyblw_agent_core`（`R__zyblw_agent_schema_comments.sql`）与 `zyblw_agent_knowledge`（`R__agent_knowledge_1024_comments.sql`）中，所有表与字段必须按 `WHEN column_record.table_name = '<table_name>' THEN CASE column_record.column_name ... END` 显式编写专属中文注释。
+   - **严禁**使用跨表全局列名兜底或 `format('「%s」...', ...)` 泛化模板；任何未映射的新增表或字段均会触发 `RAISE EXCEPTION` 使迁移立即失败。
+2. **状态机枚举与谱系约束完整入注**：
+   - 所有带 `CHECK (... IN (...))` 的状态机字段（如 `status`、`scope_kind`、`action`、`cursor_kind`、`condition_kind`、`disposition` 等）必须在中文注释中完整列出全部合法枚举值及流转语义。
+3. **跨仓全量脚本同步校验**：
+   - 当框架表结构或注释发生变更时，除通过 `AgentPostgresMigrationsSpec` 与 PostgreSQL 集成测试外，在工作区联调时可执行 `zyblw-platform/scripts/verify-schema-comments.sh --sync` 同步更新全量初始化建表脚本并校验零目录漂移。
