@@ -430,5 +430,47 @@ object RagRuntimeSpineSpec extends ZIOSpecDefault:
         _     <- worker.withdraw(KnowledgeDocumentKey(TenantId("t"), "doc-1"), "rev-1")
         after <- cache.get(Chunk(key), now)
       yield assertTrue(before.contains(key), after.isEmpty)
+    },
+    test("KnowledgeRetentionWorker.runCycle 与 startScoped 按批次有界清理过期非活跃版本并遵守 legalHold") {
+      val tenant  = TenantId("retention-cycle")
+      val keyFree = KnowledgeDocumentKey(tenant, "doc-free")
+      val keyHold = KnowledgeDocumentKey(tenant, "doc-hold")
+      ZIO.scoped {
+        for
+          store <- InMemoryKnowledgeIndexStore.make
+          _     <- beginAndPublish(store, begin(keyFree, "free-v1", revision = "rev-1"), "c-free-1")
+          _     <- beginAndPublish(
+            store,
+            begin(keyFree, "free-v2", revision = "rev-2", text = "b" * 64),
+            "c-free-2"
+          )
+          _ <- beginAndPublish(store, begin(keyHold, "hold-v1", revision = "rev-1"), "c-hold-1")
+          _ <- beginAndPublish(
+            store,
+            begin(keyHold, "hold-v2", revision = "rev-2", text = "c" * 64),
+            "c-hold-2"
+          )
+          _ <- TestClock.adjust(15.days)
+          policy = KnowledgeRetentionPolicy(
+            retainAfter = 14.days,
+            batchSize = 1,
+            legalHold = Set(keyHold),
+            interval = 1.hour,
+            maxBatchesPerCycle = 5
+          )
+          worker = new KnowledgeRetentionWorker(store, policy)
+          purged     <- worker.runCycle
+          freeOld    <- store.find(keyFree, "free-v1")
+          freeActive <- store.find(keyFree, "free-v2")
+          holdOld    <- store.find(keyHold, "hold-v1")
+          fiber      <- worker.startScoped
+          _          <- fiber.interrupt
+        yield assertTrue(
+          purged == 1L,
+          freeOld.isEmpty,
+          freeActive.exists(m => m.status == KnowledgeIndexStatus.Ready && m.active),
+          holdOld.isDefined
+        )
+      }
     }
   )

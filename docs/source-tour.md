@@ -1,9 +1,9 @@
 # 源码阅读路线
 
 > 状态：当前
-> 最后核验：2026-09-23
+> 最后核验：2026-10-30
 >
-> 2026-09-23 对照：现行安装是 0.9 空库（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
+> 2026-10-30 对照：现行安装是 0.10 基线（核心与 1024 知识各一份 V001）。执行内核是 `AgentKernel` + `AgentRuntimeDriver`。Memory、RAG 与摘要走 User envelope。等待使用 `Suspension`。稳定 HTTP 是 OpenAPI `1.0.0`。本页不提升 Experimental 能力的成熟度。
 >
 > 事实来源：`build.sbt`、`modules/*/src/main`、`modules/*/src/test`
 
@@ -72,7 +72,7 @@ sbt "testkit/testOnly com.zyblw.agent.app.AgentApplicationSpec"
 8. `processToolPlan` / `executeDurableBatch`：审批、并行批次、账本和稳定结果顺序。
 9. `saveEvents` / `save`：乐观锁、事件序号和 lease-aware fenced commit。
 10. `recover` / `resume` / `cancel`：部分成功、人工决定与中断如何回到同一事实状态。
-11. `core/Suspension.scala` 与 `runtime/SuspensionExpiryWorker.scala`：审批只是一种等待；到期决议如何经 `RunCommitter` 写回。
+11. `core/Suspension.scala` 与 `runtime/SuspensionExpiryWorker.scala`：审批只是一种等待；`Fail` / `Cancel` 超期决议经 `RunCommitter` 写回，而 `ResumeWithDefault` 超期则向 `RunCommandStore` 投递耐久 `Recover` 命令，由 `AgentRuntimeDriver.recoverPending` 在排他命令租约下应用默认值并继续执行。
 12. `inspection/RunTrajectory.scala`：只读投影如何收成时间线、账本、挂起和组合对照，而不是第二事实源。
 
 对应测试是

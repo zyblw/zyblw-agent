@@ -1,7 +1,7 @@
 # zyblw-agent 成熟度、取舍与路线
 
 > 状态：路线图
-> 最后核验：2026-09-26
+> 最后核验：2026-10-30
 > 事实来源：`build.sbt`、模块源码、测试、发布工作流、迁移与当前文档
 
 ## 成熟度语义
@@ -18,6 +18,8 @@
 真实领域金标、Provider/OCR 运行、长时多节点 soak、主备切换和生产 SLO 仍按下表列为缺口。
 
 2026-09-26 发布复核：`0.9.0` 作为全新安装基线进入 Maven 发布。发布不提升任何 Beta 或 Experimental 等级。宿主长时 soak、主备 SLO、领域金标、真实 OCR 与恶意 PDF corpus 仍是发布后的证据缺口。
+
+2026-10-29 审查闭环复核：`SuspensionExpiry.ResumeWithDefault` 耐久恢复入队与 `AgentRuntimeDriver.recoverPending` 接续、纯词法/短语检索脱离前置 Embedding 强耦合及 Hybrid 降级回退、`KnowledgeRetentionWorker` 宿主生命周期闭环、引用槽位原始身份保持、离线回放与检索金标扩展、容器与 `/health/version` 运行版本可识别性均已落地并有确定性测试。真实多节点长时 soak、主备故障切换与大规模人工领域校准仍保持在下方缺口表中跟踪。
 
 版本语义与能力成熟度是两条轴：整个仓库当前按 `0.x` Early SemVer 发布；表中 Foundation 只表示内部契约和测试基础
 较稳，不表示已经承诺 `1.x` 的长期二进制兼容或大规模生产 SLO。
@@ -226,8 +228,8 @@ PostgreSQL Testcontainers 与故障注入证据。
    `KnowledgeIndexStore & VectorStore` 指向相同 active snapshot，示例不再绕过 Loader/Indexer；
 7. **已完成 R2-B 契约层**：保留 Docling JSON block/page/bbox lineage，`DocumentStructureChunker` 生成 parent/neighbor，
    0.9 单文件 pgvector V001 随 active snapshot 原子发布；rerank 后相邻/同父级扩展重新应用 tenant ACL 和数量上限；
-8. **下一步 R2-C**：真实 Docling/OCR smoke、恶意 PDF corpus、与 Embedding tokenizer 对齐的切分、索引构建性能/成本/质量趋势、
-   低证据拒答门禁和保留期 Worker。提取质量门禁、可回放解析级联和可选逐页 VLM 转录已作为契约落地，但不能代替上述运行证据。
+8. **下一步 R2-C**：真实 Docling/OCR smoke、恶意 PDF corpus、与 Embedding tokenizer 对齐的切分、索引构建性能/成本/质量趋势。
+   低证据拒答门禁、`KnowledgeRetentionWorker` 宿主生命周期闭环、提取质量门禁、可回放解析级联和可选逐页 VLM 转录已落地，但不能代替上述真实语料运行证据。
 9. **随后 R2-D**：在视觉复杂 corpus 证明布局/OCR 仍不足后，再引入 late-interaction 页面检索 Adapter。整页 VLM 转录只是摄取回退，不是检索替换。
 
 退出标准：质量和权限评测通过，语料可追溯/撤回，成本可预测。

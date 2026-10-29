@@ -1051,19 +1051,25 @@ final class AgentRuntimeDriver(
     * 这里要求单调用批次：一个等待人工的边界必须能唯一指向"人看到的那个副作用"，多调用批次无法建立这种对应关系。
     */
   private def recoverPending(state: AgentState): IO[AgentError, RunOutcome] =
-    state.pendingToolPlan.flatMap(_.currentBatch) match
-      case None        => ZIO.fail(AgentError.InvalidResume(state.runId, "暂停状态缺少工具恢复游标"))
-      case Some(batch) =>
-        for
-          item <- ZIO
-            .fromOption(batch.items.headOption)
-            .orElseFail(AgentError.InvalidResume(state.runId, "暂停工具批次为空"))
-          _ <- ZIO
-            .fail(AgentError.InvalidResume(state.runId, "审批恢复批次必须为单调用"))
-            .unless(batch.items.length == 1)
-          tool    <- registry.get(ToolName(item.call.name))
-          outcome <- resumeToolBoundary(state, item, tool, suspendedBoundary = true, recoverToolPlan)
-        yield outcome
+    RunClock.instant.flatMap { now =>
+      AgentKernel.suspensionExpiry(state, now) match
+        case Right(AgentKernel.SuspensionExpiryAction.Resume(transition)) =>
+          committer.commitTransition(state, transition).flatMap(recoverRunning)
+        case _ =>
+          state.pendingToolPlan.flatMap(_.currentBatch) match
+            case None        => ZIO.fail(AgentError.InvalidResume(state.runId, "暂停状态缺少工具恢复游标"))
+            case Some(batch) =>
+              for
+                item <- ZIO
+                  .fromOption(batch.items.headOption)
+                  .orElseFail(AgentError.InvalidResume(state.runId, "暂停工具批次为空"))
+                _ <- ZIO
+                  .fail(AgentError.InvalidResume(state.runId, "审批恢复批次必须为单调用"))
+                  .unless(batch.items.length == 1)
+                tool    <- registry.get(ToolName(item.call.name))
+                outcome <- resumeToolBoundary(state, item, tool, suspendedBoundary = true, recoverToolPlan)
+              yield outcome
+    }
 
   /** 恢复已经持久化批准或执行中的工具边界。 */
   private def recoverToolPlan(state: AgentState): IO[AgentError, RunOutcome] =

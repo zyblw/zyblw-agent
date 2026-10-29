@@ -61,8 +61,8 @@ object SuspensionExpiryObserver:
 
 /** 把到期挂起推进为失败或按默认值恢复的多实例安全 Worker。
   *
-  * 每轮先批量把到期 Pending 标为 Expired，再领取一条租约。决议经 [[RunCommitter]] 写回 `AgentState`：Worker 自己不改状态机，
-  * 因此"索引已到期、权威状态仍在等待"只会存在于领取到提交之间的短暂窗口，崩溃后由下一轮 claim 重放。
+  * 每轮先批量把到期 Pending 标为 Expired，再领取一条租约。失败决议经 [[RunCommitter]] 写回；恢复决议只耐久入队， 由持有命令租约的 Runtime 推进状态并执行，避免两个
+  * Worker 竞争同一状态版本。
   */
 final class SuspensionExpiryWorker(
     owner: WorkerId,
@@ -70,7 +70,8 @@ final class SuspensionExpiryWorker(
     suspensions: SuspensionStore,
     committer: RunCommitter,
     observer: SuspensionExpiryObserver,
-    config: SuspensionExpiryWorkerConfig
+    config: SuspensionExpiryWorkerConfig,
+    commands: Option[com.zyblw.agent.memory.RunCommandStore] = None
 ):
   /** 执行一次“决议到期—领取一个—提交或释放”的完整周期；本方法本身不 sleep。 */
   def runOnce: IO[AgentError, SuspensionExpiryCycle] =
@@ -130,19 +131,63 @@ final class SuspensionExpiryWorker(
     * 状态已经没有挂起（人先批了、Run 已终态）时视为成功空操作：索引行仍要 resolve，避免同一 Run 被反复领取。
     */
   private def applyExpiry(lease: SuspensionLease): IO[AgentError, Unit] =
+    def enqueueResume(state: AgentState): IO[AgentError, Unit] =
+      ZIO
+        .fromOption(commands)
+        .orElseFail(AgentError.InvalidResume(lease.runId, "到期恢复必须配置耐久命令队列"))
+        .flatMap(cmdStore =>
+          cmdStore
+            .submit(
+              lease.runId,
+              com.zyblw.agent.memory.RunCommandPayload.Recover,
+              s"suspension-expiry-resume:${lease.runId.asString}:${state.version.value}"
+            )
+            .unit
+        )
     for
       state <- store.load(lease.runId)
       now   <- RunClock.instant
       _     <- state.suspension match
+        case None
+            if state.status == RunStatus.Running && lease.expiryOutcome == SuspensionExpiry.ResumeWithDefault =>
+          enqueueResume(state)
         case None                                                => ZIO.unit
         case Some(_) if AgentKernel.terminalStatus(state.status) => ZIO.unit
         case Some(_)                                             =>
           ZIO.fromEither(AgentKernel.suspensionExpiry(state, now)).flatMap {
-            case AgentKernel.SuspensionExpiryAction.Resume(transition) =>
-              committer.commitTransition(state, transition).unit
+            case AgentKernel.SuspensionExpiryAction.Resume(_) =>
+              enqueueResume(state)
             case AgentKernel.SuspensionExpiryAction.FailRun(kind) =>
               val error = AgentError.SuspensionExpired(state.runId, kind)
               ZIO.foreachDiscard(AgentKernel.fail(state, error, now))(committer.commitTransition(state, _))
           }
       _ <- suspensions.resolve(lease)
     yield ()
+
+object SuspensionExpiryWorker:
+  def layer(
+      owner: WorkerId,
+      config: SuspensionExpiryWorkerConfig = SuspensionExpiryWorkerConfig()
+  ): URLayer[
+    com.zyblw.agent.memory.RunStore & SuspensionStore & com.zyblw.agent.memory.RunCommandStore & RunObserver &
+      SuspensionExpiryObserver,
+    SuspensionExpiryWorker
+  ] =
+    ZLayer.scoped {
+      for
+        store       <- ZIO.service[com.zyblw.agent.memory.RunStore]
+        suspensions <- ZIO.service[SuspensionStore]
+        commands    <- ZIO.service[com.zyblw.agent.memory.RunCommandStore]
+        observer    <- ZIO.service[RunObserver]
+        expObserver <- ZIO.service[SuspensionExpiryObserver]
+        committer   <- RunCommitter.make(store, observer.emit)
+      yield new SuspensionExpiryWorker(
+        owner,
+        store,
+        suspensions,
+        committer,
+        expObserver,
+        config,
+        Some(commands)
+      )
+    }

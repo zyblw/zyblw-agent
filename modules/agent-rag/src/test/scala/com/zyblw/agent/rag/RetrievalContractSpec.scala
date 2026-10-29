@@ -312,5 +312,36 @@ object RetrievalContractSpec extends ZIOSpecDefault:
         twice.head.score == once.head.score,
         twice.head.signals.get("retrievalScore").contains(0.25)
       )
+    },
+    test("LexicalOnly 与 Phrase 模式不依赖前置 Embedding 调用，Embedding 故障时仍可完成词法检索") {
+      val baseModel    = HashEmbedding(2)
+      val failingModel = new EmbeddingModel:
+        override val capabilities                                                   = baseModel.capabilities
+        override val descriptor                                                     = baseModel.descriptor
+        def embed(request: EmbeddingRequest): IO[RetrievalError, EmbeddingResponse] =
+          val _ = request
+          ZIO.fail(AgentError.RetrievalFailed("Embedding 服务故障"))
+      val lexicalChunk = DocumentChunk(
+        "c-lex",
+        "doc-lex",
+        "桂枝汤主治太阳中风",
+        "book://lex",
+        tenant,
+        Set("read")
+      )
+      (for
+        store <- ZIO.service[VectorStore]
+        _     <- store.upsert(Chunk(IndexedChunk(lexicalChunk, Embedding(Chunk(1.0f, 0.0f)))))
+        retriever = DefaultRetriever(failingModel, store, identity)
+        lexicalRes <- retriever.retrieve(
+          RetrievalRequest("桂枝汤", scope, 3, RetrievalMode.LexicalOnly)
+        )
+        phraseRes <- retriever.retrieve(
+          RetrievalRequest("桂枝汤", scope, 3, RetrievalMode.Phrase)
+        )
+      yield assertTrue(
+        lexicalRes.hits.map(_.chunk.id) == Chunk("c-lex"),
+        phraseRes.hits.map(_.chunk.id) == Chunk("c-lex")
+      )).provide(InMemoryVectorStore.layer)
     }
   )

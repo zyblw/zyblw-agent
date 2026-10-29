@@ -82,15 +82,16 @@ object SuspensionExpiryWorkerSpec extends ZIOSpecDefault:
         )
       }
     },
-    test("到期 ResumeWithDefault 清空挂起并回到 Running") {
+    test("到期 ResumeWithDefault 只耐久入队，由持有命令租约的执行者恢复状态并完成") {
       ZIO.scoped {
         for
-          store       <- ZIO.service[RunStore]
-          suspensions <- ZIO.service[SuspensionStore]
-          runId       <- RunId.random
-          session     <- SessionId.random
-          createdId   <- EventId.random
-          now         <- Clock.instant
+          store        <- ZIO.service[RunStore]
+          suspensions  <- ZIO.service[SuspensionStore]
+          commandStore <- ZIO.service[com.zyblw.agent.memory.RunCommandStore]
+          runId        <- RunId.random
+          session      <- SessionId.random
+          createdId    <- EventId.random
+          now          <- Clock.instant
           base    = initial(runId, session, now)
           created = PersistedAgentEvent(
             createdId,
@@ -104,24 +105,75 @@ object SuspensionExpiryWorkerSpec extends ZIOSpecDefault:
           deadline = now.plusSeconds(1)
           record = SuspensionRecord(Suspension.Timer, now, Some(deadline), SuspensionExpiry.ResumeWithDefault)
           transition = AgentKernel.suspendTransition(loaded, record, now)
-          committer <- RunCommitter.make(store, _ => ZIO.unit)
-          _         <- committer.commitTransition(loaded, transition)
-          _         <- TestClock.adjust(2.seconds)
+          committer    <- RunCommitter.make(store, _ => ZIO.unit)
+          _            <- committer.commitTransition(loaded, transition)
+          _            <- TestClock.adjust(2.seconds)
+          missingQueue <- SuspensionExpiryWorker(
+            WorkerId("missing-command-queue"),
+            store,
+            suspensions,
+            committer,
+            silentObserver,
+            SuspensionExpiryWorkerConfig()
+          ).runOnce.either
+          stillWaiting <- store.load(runId)
+          _            <- TestClock.adjust(31.seconds)
           worker = SuspensionExpiryWorker(
             WorkerId("expiry-worker"),
             store,
             suspensions,
             committer,
             silentObserver,
-            SuspensionExpiryWorkerConfig()
+            SuspensionExpiryWorkerConfig(),
+            Some(commandStore)
           )
-          cycle <- worker.runOnce
-          after <- store.load(runId)
+          cycle      <- worker.runOnce
+          after      <- store.load(runId)
+          queuedCmds <- commandStore.list(runId)
+          cmdWorker = com.zyblw.agent.scheduler.CommandWorker(
+            WorkerId("cmd-worker"),
+            commandStore,
+            com.zyblw.agent.scheduler.CommandLeaseSupervisor(
+              commandStore,
+              com.zyblw.agent.scheduler.WorkerHostConfig()
+            ),
+            com.zyblw.agent.scheduler.WorkerHostConfig(),
+            lease =>
+              committer.withLease(lease) {
+                for
+                  waitingState <- store.load(lease.runId)
+                  doneNow      <- RunClock.instant
+                  expiry       <- ZIO.fromEither(AgentKernel.suspensionExpiry(waitingState, doneNow))
+                  resumedState <- expiry match
+                    case AgentKernel.SuspensionExpiryAction.Resume(next) =>
+                      committer.commitTransition(waitingState, next)
+                    case _ => ZIO.fail(AgentError.Unexpected("测试预期到期恢复"))
+                  completed <- ZIO.fromEither(
+                    AgentKernel.complete(
+                      resumedState,
+                      AgentMessage.assistant("挂起到期后已自动恢复并完成"),
+                      doneNow
+                    )
+                  )
+                  _ <- committer.commitTransition(resumedState, completed)
+                yield ()
+              }
+          )
+          claimed   <- cmdWorker.claimOnce
+          completed <- store.load(runId)
+          finalCmds <- commandStore.list(runId)
         yield assertTrue(
+          missingQueue.isLeft,
+          stillWaiting.suspension.contains(record),
           cycle.completed,
-          after.status == RunStatus.Running,
-          after.suspension.isEmpty
+          after.status == record.runStatus,
+          after.suspension.contains(record),
+          queuedCmds.map(_.payload) == Chunk(com.zyblw.agent.memory.RunCommandPayload.Recover),
+          claimed,
+          completed.status == RunStatus.Completed,
+          completed.messages.lastOption.map(_.text).contains("挂起到期后已自动恢复并完成"),
+          finalCmds.map(_.status) == Chunk(com.zyblw.agent.memory.RunCommandStatus.Completed)
         )
       }
     }
-  ).provide(RunStore.inMemory)
+  ).provide(RunStore.inMemory, com.zyblw.agent.memory.RunCommandStore.inMemory)

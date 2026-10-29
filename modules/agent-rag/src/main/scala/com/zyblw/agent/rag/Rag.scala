@@ -763,44 +763,56 @@ final class DefaultRetriever(
         // evidence for the other side.
         subqueries = rewritten.fold(plan.subqueries)(value => Chunk(value) ++ plan.subqueries.drop(1))
         traceRun <- scope.runId.fold(RunId.random)(ZIO.succeed(_))
-        detailed <- observe(traceRun, scope, "embed")(
-          model.embed(
-            EmbeddingRequest(
-              subqueries,
-              EmbeddingInputRole.Query,
-              if wantSparse then EmbeddingOutputKind.DenseAndSparse else EmbeddingOutputKind.Dense,
-              context = EmbeddingRequestContext(
+        needsVector = searchMode == RetrievalMode.Hybrid || searchMode == RetrievalMode.VectorOnly
+        (denseEmbeddings, queryEmbedding, headSparse) <-
+          if needsVector then
+            for
+              detailed <- observe(traceRun, scope, "embed")(
+                model.embed(
+                  EmbeddingRequest(
+                    subqueries,
+                    EmbeddingInputRole.Query,
+                    if wantSparse then EmbeddingOutputKind.DenseAndSparse else EmbeddingOutputKind.Dense,
+                    context = EmbeddingRequestContext(
+                      pinnedScope.tenantId,
+                      EmbeddingPurpose.Query,
+                      requestId,
+                      knowledgeSpaceId = Some(pinnedScope.spaceId),
+                      permissionFingerprint = pinnedScope.permissions.toList.sorted.mkString(",")
+                    )
+                  )
+                )
+              )(_.items.length.toLong)
+              _ <- ZIO
+                .fail(
+                  AgentError.RetrievalFailed(
+                    "Query embedding response violates count, identity or dimension contract"
+                  )
+                )
+                .unless(
+                  detailed.items.length == subqueries.length &&
+                    detailed.descriptor.provider == model.descriptor.provider &&
+                    detailed.descriptor.model == model.descriptor.model &&
+                    detailed.items
+                      .forall(_.dense.exists(_.values.length == model.capabilities.defaultDenseDimension))
+                )
+              headEmb <- ZIO
+                .fromOption(detailed.denseEmbeddings.headOption)
+                .orElseFail(AgentError.RetrievalFailed("Embedding provider 返回空结果"))
+              _ <- vectors.assertEmbeddingIdentity(
                 pinnedScope.tenantId,
-                EmbeddingPurpose.Query,
-                requestId,
-                knowledgeSpaceId = Some(pinnedScope.spaceId),
-                permissionFingerprint = pinnedScope.permissions.toList.sorted.mkString(",")
+                model.descriptor.denseDescriptor,
+                pinnedScope.spaceId,
+                pinnedScope.pinnedProfileId
               )
+            yield (
+              detailed.denseEmbeddings,
+              headEmb,
+              if wantSparse then detailed.items.headOption.flatMap(_.sparse) else None
             )
-          )
-        )(_.items.length.toLong)
-        _ <- ZIO
-          .fail(
-            AgentError.RetrievalFailed(
-              "Query embedding response violates count, identity or dimension contract"
-            )
-          )
-          .unless(
-            detailed.items.length == subqueries.length &&
-              detailed.descriptor.provider == model.descriptor.provider &&
-              detailed.descriptor.model == model.descriptor.model &&
-              detailed.items
-                .forall(_.dense.exists(_.values.length == model.capabilities.defaultDenseDimension))
-          )
-        queryEmbedding <- ZIO
-          .fromOption(detailed.denseEmbeddings.headOption)
-          .orElseFail(AgentError.RetrievalFailed("Embedding provider 返回空结果"))
-        _ <- vectors.assertEmbeddingIdentity(
-          pinnedScope.tenantId,
-          model.descriptor.denseDescriptor,
-          pinnedScope.spaceId,
-          pinnedScope.pinnedProfileId
-        )
+          else
+            val emptyEmb = Embedding(Chunk(0.0f))
+            ZIO.succeed((Chunk.fill(subqueries.length)(emptyEmb), emptyEmb, None))
         candidateLimit = plan.budgets.perBranch
         lexicalQuery   =
           if searchMode == RetrievalMode.Phrase then subqueries.head else lexical.query(subqueries.head)
@@ -812,7 +824,7 @@ final class DefaultRetriever(
             pinnedScope,
             request.filter,
             candidateLimit,
-            sparseQuery = if wantSparse then detailed.items.headOption.flatMap(_.sparse) else None
+            sparseQuery = headSparse
           )
         )(_.length.toLong)
         exact <-
@@ -821,7 +833,7 @@ final class DefaultRetriever(
           then
             observe(traceRun, scope, "exact_search")(
               ZIO
-                .foreach(subqueries.zip(detailed.denseEmbeddings)) { case (sq, emb) =>
+                .foreach(subqueries.zip(denseEmbeddings)) { case (sq, emb) =>
                   vectors.searchFiltered(
                     RetrievalMode.Phrase,
                     sq,
@@ -834,7 +846,7 @@ final class DefaultRetriever(
                 .map(DefaultRetriever.mergeHits(_, plan.budgets.fusion))
             )(_.length.toLong)
           else ZIO.succeed(Chunk.empty)
-        rest <- ZIO.foreach(subqueries.zip(detailed.denseEmbeddings).drop(1)) { case (subquery, embedding) =>
+        rest <- ZIO.foreach(subqueries.zip(denseEmbeddings).drop(1)) { case (subquery, embedding) =>
           vectors.searchFiltered(
             searchMode,
             if searchMode == RetrievalMode.Phrase then subquery else lexical.query(subquery),

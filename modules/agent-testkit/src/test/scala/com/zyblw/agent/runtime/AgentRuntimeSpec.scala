@@ -139,8 +139,8 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
     */
   private def durableControlLayers(model: ChatModel) =
     ZLayer.make[
-      AgentRuntime & LeaseAwareAgentRuntime & RunStore & RunCommandStore & RunSubmissionStore &
-        AgentCommandService
+      AgentRuntime & LeaseAwareAgentRuntime & RunStore & SuspensionStore & RunCommandStore &
+        RunSubmissionStore & AgentCommandService
     ](
       ZLayer.succeed[ChatModel](model),
       RegisteredToolRegistry.fromTools(Nil),
@@ -163,6 +163,85 @@ object AgentRuntimeSpec extends ZIOSpecDefault:
 
   /** 定义耐久状态机、审批和崩溃恢复的核心回归用例。 */
   def spec: Spec[TestEnvironment & Scope, Any] = suite("AgentRuntime")(
+    test("到期 Recover 在入队返回前已由真实 Runtime 执行时，ExpiryWorker 不再重复提交恢复状态") {
+      for
+        model  <- ScriptedChatModel.make(Chunk(finalResponse()))
+        result <- ZIO
+          .scoped {
+            for
+              service     <- ZIO.service[AgentCommandService]
+              runtime     <- ZIO.service[LeaseAwareAgentRuntime]
+              store       <- ZIO.service[RunStore]
+              commands    <- ZIO.service[RunCommandStore]
+              suspensions <- ZIO.service[SuspensionStore]
+              observer    <- ZIO.service[SuspensionExpiryObserver].provideLayer(SuspensionExpiryObserver.noop)
+              accepted    <- service.submitStart(
+                agent,
+                RunRequest(ThreadId("expiry-interleave"), AgentMessage.user("继续学习")),
+                "expiry-interleave"
+              )
+              startLease <- commands.claim(WorkerId("setup-worker"), 30.seconds, 3).some
+              _          <- commands.complete(startLease)
+              created    <- store.load(accepted.runId)
+              _          <- store.save(created.version, created.copy(status = RunStatus.Running))
+              running    <- store.load(accepted.runId)
+              now        <- Clock.instant
+              record = SuspensionRecord(
+                Suspension.Timer,
+                now,
+                Some(now.plusSeconds(1)),
+                SuspensionExpiry.ResumeWithDefault
+              )
+              committer <- RunCommitter.make(store, _ => ZIO.unit)
+              _ <- committer.commitTransition(running, AgentKernel.suspendTransition(running, record, now))
+              _ <- TestClock.adjust(2.seconds)
+              interleaved = new RunCommandStore:
+                export commands.{
+                  claim,
+                  heartbeat,
+                  complete,
+                  abandon,
+                  deadLetter,
+                  retry,
+                  get,
+                  list,
+                  queueSnapshot
+                }
+                def submit(
+                    runId: RunId,
+                    payload: RunCommandPayload,
+                    idempotencyKey: String,
+                    priority: Int,
+                    availableAt: java.time.Instant
+                ): IO[StoreError, RunCommandRecord] =
+                  commands.submit(runId, payload, idempotencyKey, priority, availableAt).tap { _ =>
+                    (for
+                      lease <- commands.claim(WorkerId("fast-worker"), 30.seconds, 3).some
+                      _     <- runtime.executeLeased(lease)
+                      _     <- commands.complete(lease)
+                    yield ()).orDieWith(error => new IllegalStateException(error.toString))
+                  }
+              cycle <- SuspensionExpiryWorker(
+                WorkerId("expiry-worker"),
+                store,
+                suspensions,
+                committer,
+                observer,
+                SuspensionExpiryWorkerConfig(),
+                Some(interleaved)
+              ).runOnce
+              finalState <- store.load(accepted.runId)
+              events     <- store.events(accepted.runId)
+            yield (cycle, finalState, events)
+          }
+          .provideLayer(durableControlLayers(model))
+      yield assertTrue(
+        result._1.completed,
+        result._2.status == RunStatus.Completed,
+        result._2.suspension.isEmpty,
+        result._3.count(_.event.isInstanceOf[AgentEvent.RunResumed]) == 1
+      )
+    },
     test("模型不能扩大 Agent 或部署白名单，也不能越过显式拒绝") {
       val allowEcho = ToolPolicyConfig(allowedTools = Set(ToolName("echo")))
       ZIO
