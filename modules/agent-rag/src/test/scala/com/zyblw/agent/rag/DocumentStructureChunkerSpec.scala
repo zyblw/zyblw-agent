@@ -305,5 +305,47 @@ object DocumentStructureChunkerSpec extends ZIOSpecDefault:
           proseChunks.length >= 2,
           proseChunks.forall(c => c.text.endsWith("。") && !c.text.startsWith("，") && !c.text.startsWith("。"))
         )
+    },
+    test("古籍主治短条文与紧邻子级本方合并，避免条文或加减说明孤立成超短碎片") {
+      val structure = DocumentStructure(
+        "paddleocr-vl-1.6",
+        None,
+        Chunk(
+          DocumentBlock(
+            "b1",
+            Some("sec-shaoyin"),
+            0,
+            DocumentBlockKind.Paragraph,
+            "少阴病，下利，白通汤主之。",
+            Chunk("伤寒杂病论卷第十一", "辨少阴病脉证并治"),
+            Chunk(DocumentOrigin(120))
+          ),
+          DocumentBlock(
+            "b2",
+            Some("sec-baitong"),
+            1,
+            DocumentBlockKind.Paragraph,
+            "白通汤方\n葱白四茎 干姜一两 附子一枚（生，去皮，破八片）\n右三味，以水三升，煮取一升，去滓，分温再服。",
+            Chunk("伤寒杂病论卷第十一", "辨少阴病脉证并治", "白通汤方"),
+            Chunk(DocumentOrigin(120))
+          )
+        )
+      )
+      val doc = SourceDocument(
+        "shanghan",
+        "",
+        "book://shanghan",
+        Map("title" -> "桂林古本伤寒杂病论"),
+        representation = DocumentRepresentation.Markdown,
+        structure = Some(structure)
+      )
+      for chunks <- DocumentStructureChunker().split(doc, tenant, scope)
+      yield assertTrue(
+        chunks.length == 1,
+        chunks.head.text.contains("少阴病，下利，白通汤主之。"),
+        chunks.head.text.contains("葱白四茎 干姜一两"),
+        chunks.head.lineage.exists(_.headingPath == Chunk("伤寒杂病论卷第十一", "辨少阴病脉证并治", "白通汤方")),
+        chunks.head.lineage.exists(_.blockIds == Chunk("b1", "b2"))
+      )
     }
   )

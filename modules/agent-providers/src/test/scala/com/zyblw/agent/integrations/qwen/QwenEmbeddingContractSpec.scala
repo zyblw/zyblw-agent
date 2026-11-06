@@ -91,8 +91,64 @@ object QwenEmbeddingContractSpec extends ZIOSpecDefault:
         result._2.last.contains("丙"),
         !result._2.last.contains("甲")
       )
+    } @@ TestAspect.sequential,
+    test("乱序返回 text_index 时按输入顺序重排，重复或越界索引直接拒绝") {
+      val context           = EmbeddingRequestContext(TenantId("t"), EmbeddingPurpose.Indexing, "qwen-order")
+      val outOfOrderPayload =
+        """{"output":{"embeddings":[{"text_index":2,"embedding":[3.0,0.0,0.0]},{"text_index":0,"embedding":[1.0,0.0,0.0]},{"text_index":1,"embedding":[2.0,0.0,0.0]}]}}"""
+      val duplicateIndexPayload =
+        """{"output":{"embeddings":[{"text_index":0,"embedding":[1.0,0.0,0.0]},{"text_index":0,"embedding":[2.0,0.0,0.0]}]}}"""
+      for
+        ordered <- (for
+          _      <- TestServer.addRoutes(fixedJsonRoute(outOfOrderPayload))
+          port   <- ZIO.serviceWithZIO[Server](_.port)
+          client <- ZIO.service[Client]
+          model = QwenEmbeddingModel(
+            client,
+            QwenEmbeddingConfig(
+              apiKey = "test-key",
+              model = "qwen3.7-text-embedding",
+              dimension = 3,
+              baseUrl = Some(s"http://127.0.0.1:$port/api/v1"),
+              maxBatchTexts = 10
+            )
+          )
+          res <- model.embed(
+            EmbeddingRequest(Chunk("甲", "乙", "丙"), EmbeddingInputRole.Document, context = context)
+          )
+        yield res).provide(Client.default, TestServer.default)
+        dupErr <- (for
+          _      <- TestServer.addRoutes(fixedJsonRoute(duplicateIndexPayload))
+          port   <- ZIO.serviceWithZIO[Server](_.port)
+          client <- ZIO.service[Client]
+          model = QwenEmbeddingModel(
+            client,
+            QwenEmbeddingConfig(
+              apiKey = "test-key",
+              model = "qwen3.7-text-embedding",
+              dimension = 3,
+              baseUrl = Some(s"http://127.0.0.1:$port/api/v1"),
+              maxBatchTexts = 10
+            )
+          )
+          err <- model
+            .embed(
+              EmbeddingRequest(Chunk("甲", "乙"), EmbeddingInputRole.Document, context = context)
+            )
+            .flip
+        yield err).provide(Client.default, TestServer.default)
+      yield assertTrue(
+        ordered.denseEmbeddings.map(_.values.head) == Chunk(1.0f, 2.0f, 3.0f),
+        dupErr.getMessage.contains("text_index")
+      )
     } @@ TestAspect.sequential
   )
+
+  private def fixedJsonRoute(payload: String): Routes[Any, Response] =
+    Routes(
+      Method.POST / "api" / "v1" / "services" / "embeddings" / "text-embedding" / "text-embedding" ->
+        handler((_: Request) => ZIO.succeed(Response.json(payload)))
+    )
 
   private def nativeRoutes(bodies: Ref[Chunk[String]]): Routes[Any, Response] =
     Routes(

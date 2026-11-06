@@ -219,12 +219,43 @@ final class DocumentStructureChunker(
           else
             flush()
             pending += block
+        else if config.mergePeers && isChildFormulaLeadIn(pending.last, block) &&
+          (pending.length == 1 || codePoints(pending.init.map(_.text).mkString("\n\n")) >= 24) &&
+          fits(
+            title,
+            block.headingPath,
+            uniformKind(Vector(pending.last, block)),
+            pending.last.text + "\n\n" + block.text
+          )
+        then
+          val leadBlock = pending.last.copy(parentId = block.parentId, headingPath = block.headingPath)
+          if pending.length >= 2 then result += fromBlocks(pending.init.toVector)
+          pending.clear()
+          pending += leadBlock
+          pending += block
         else
           flush()
           pending += block
     }
     flush()
     result.toVector
+
+  /** 古籍条文与紧邻子级本方（如“少阴病，下利，白通汤主之。”后紧跟子节“白通汤方”）合块，避免短主治条文或“即前方加减”孤立成超短碎片。 */
+  private def isChildFormulaLeadIn(lead: DocumentBlock, child: DocumentBlock): Boolean =
+    lead.headingPath.nonEmpty &&
+      child.headingPath.length == lead.headingPath.length + 1 &&
+      child.headingPath.init == lead.headingPath &&
+      codePoints(lead.text) <= 120 && {
+        val childTitle      = child.headingPath.last.trim
+        val formulaName     = childTitle.stripSuffix("方").trim
+        val mentionsFormula =
+          formulaName.length >= 2 &&
+            (formulaName.endsWith("汤") || formulaName.endsWith("散") || formulaName.endsWith("丸") ||
+              formulaName.endsWith("饮") || formulaName.endsWith("丹") || formulaName.endsWith("膏") ||
+              childTitle.endsWith("方")) &&
+            lead.text.contains(formulaName)
+        mentionsFormula || codePoints(child.text) <= 24
+      }
 
   private def atomic(kind: DocumentBlockKind): Boolean =
     kind == DocumentBlockKind.Table || kind == DocumentBlockKind.Formula || kind == DocumentBlockKind.KeyValue

@@ -144,30 +144,50 @@ final class QwenEmbeddingModel(client: Client, config: QwenEmbeddingConfig) exte
             ZIO.fail(AgentError.RetrievalFailed("Qwen embedding 输出数量与输入不一致"))
           else
             ZIO
-              .foreach(embeddings) {
-                case Json.Obj(fields) =>
+              .foreach(embeddings.zipWithIndex) {
+                case (Json.Obj(fields), position) =>
+                  val parsedTextIndex: IO[RetrievalError, Option[Int]] =
+                    fields.find(_._1 == "text_index").map(_._2) match
+                      case None                => ZIO.none
+                      case Some(Json.Num(raw)) =>
+                        scala.util.Try(raw.intValueExact()).toOption match
+                          case Some(idx) if idx >= 0 && idx < expected => ZIO.some(idx)
+                          case _                                       =>
+                            ZIO.fail(AgentError.RetrievalFailed("Qwen embedding text_index 越界或非整数"))
+                      case Some(_) =>
+                        ZIO.fail(AgentError.RetrievalFailed("Qwen embedding text_index 类型非法"))
                   fields.find(_._1 == "embedding").map(_._2) match
                     case Some(Json.Arr(values)) =>
-                      ZIO
-                        .foreach(values) {
+                      for
+                        textIdx <- parsedTextIndex
+                        floats  <- ZIO.foreach(values) {
                           case Json.Num(n) if java.lang.Float.isFinite(n.floatValue) =>
                             ZIO.succeed(n.floatValue)
                           case _ => ZIO.fail(AgentError.RetrievalFailed("Qwen embedding 含非有限值"))
                         }
-                        .flatMap { floats =>
+                        item <-
                           if floats.length == config.dimension then
-                            ZIO.succeed(EmbeddingItem(Some(Embedding(floats)), None))
+                            ZIO.succeed((textIdx, position, EmbeddingItem(Some(Embedding(floats)), None)))
                           else
                             ZIO.fail(
                               AgentError.RetrievalFailed(
                                 s"Qwen embedding 维度 ${floats.length} 与配置 ${config.dimension} 不一致"
                               )
                             )
-                        }
+                      yield item
                     case _ => ZIO.fail(AgentError.RetrievalFailed("Qwen embedding 缺少向量"))
                 case _ => ZIO.fail(AgentError.RetrievalFailed("Qwen embedding item 非法"))
               }
-              .map(items => EmbeddingResponse(items, descriptor))
+              .flatMap { indexedItems =>
+                val explicitIndices = indexedItems.flatMap(_._1)
+                if explicitIndices.isEmpty then
+                  ZIO.succeed(EmbeddingResponse(indexedItems.map(_._3), descriptor))
+                else if explicitIndices.length == expected && explicitIndices.toSet == (0 until expected).toSet
+                then
+                  val ordered = indexedItems.sortBy(entry => entry._1.getOrElse(entry._2)).map(_._3)
+                  ZIO.succeed(EmbeddingResponse(ordered, descriptor))
+                else ZIO.fail(AgentError.RetrievalFailed("Qwen embedding text_index 重复或缺失"))
+              }
         case _ => ZIO.fail(AgentError.RetrievalFailed("Qwen embedding 根节点非法"))
       }
 

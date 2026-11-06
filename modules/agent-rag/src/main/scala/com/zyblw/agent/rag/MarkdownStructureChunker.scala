@@ -152,9 +152,9 @@ final class MarkdownStructureChunker(
     val parsed   = MarkdownStructureChunker.parseRawUnits(markdown, config.maxHeadingDepth)
     val sections = mutable.ArrayBuffer.empty[Section]
     val blocks   = mutable.ArrayBuffer.empty[Block]
-    var stack    = Vector.empty[(Int, String)]
+    var stack    = Vector.empty[(Int, Int, String)] // (rawLevel, clampedLevel, title)
 
-    def headingPath: Vector[String] = stack.map(_._2)
+    def headingPath: Vector[String] = stack.map(_._3)
 
     def flushSection(): Unit =
       if blocks.nonEmpty then sections += Section(headingPath, blocks.toVector)
@@ -164,8 +164,8 @@ final class MarkdownStructureChunker(
       case Left((level, title, _)) =>
         flushSection()
         val prefix     = stack.takeWhile(_._1 < level)
-        val clampedLvl = prefix.lastOption.fold(1)(_._1 + 1).min(level).max(1)
-        stack = prefix :+ (clampedLvl -> takeCodePoints(title, 300))
+        val clampedLvl = prefix.lastOption.fold(1)(_._2 + 1).min(level).max(1)
+        stack = prefix :+ (level, clampedLvl, takeCodePoints(title, 300))
       case Right(block) =>
         blocks += Block(block.text, block.startLine, block.endLine, block.kind)
     }
@@ -308,17 +308,19 @@ object MarkdownStructureChunker:
   private val IntroHeadingPattern =
     """^(?:引言|前言|导言|导读|绪论|序言)(?:[：:\s—\-|｜].*)?$""".r
   private val MajorHeadingPattern =
-    """^(?:[一二三四五六七八九十百零〇]+[、.．]|第[一二三四五六七八九十百零〇\d]+[章节部分篇回])\s*\S+.*$""".r
+    """^(?:[一二三四五六七八九十百零〇]+[、.．]|第[一二三四五六七八九十百零〇\d]+[章节部分篇回卷]|卷之?[一二三四五六七八九十百零〇\d]+[：:\s—\-|｜]?)\s*\S+.*$""".r
   private val PlainMajorLinePattern =
-    """^[一二三四五六七八九十百零〇]+、[^\n。！？；]{2,60}$""".r
+    """^(?:[一二三四五六七八九十百零〇]+[、.．]\s*[^\n。！？；]{2,60}|第[一二三四五六七八九十百零〇\d]+[章节部分篇回卷][：:\s—\-|｜]*[^\n。！？；]{1,60}|卷之?[一二三四五六七八九十百零〇\d]+[：:\s—\-|｜]+[^\n。！？；]{2,60})$""".r
   private val SubHeadingPattern =
     """^[（(][一二三四五六七八九十百零〇\d]+[）)]\s*\S+.*$""".r
+  private val PlainSubLinePattern =
+    """^[（(][一二三四五六七八九十百零〇\d]+[）)]\s*[^\n。！？；]{2,60}$""".r
   private val ArabicHeadingPattern =
     """^\d+[、.．]\s*\S+.*$""".r
   private val PlainArabicLinePattern =
-    """^\d+\.\s+[^\n*。！？；]{2,50}$""".r
+    """^\d+[、.．]\s*[^\n*。！？；]{2,70}$""".r
   private val AppendixOrConclusionPattern =
-    """^(?:附[录记]?[：:\s|｜].*|结语(?:[：:\s—\-|｜].*)?|总结(?:[：:\s—\-|｜].*)?|小结(?:[：:\s—\-|｜].*)?|主要文献.*|参考文献.*)$""".r
+    """^(?:附[录记]?[：:\s|｜].*|终章(?:[：:\s—\-|｜].*)?|尾声(?:[：:\s—\-|｜].*)?|结语(?:[：:\s—\-|｜].*)?|总结(?:[：:\s—\-|｜].*)?|小结(?:[：:\s—\-|｜].*)?|主要文献.*|参考文献.*)$""".r
   private val WeChatPromoLinkLine =
     """^\s*\[[^\]]*https?://mp\.weixin\.qq\.com/s/[^\]]*\]\((?:<https?://mp\.weixin\.qq\.com/s/[^>]+>|https?://mp\.weixin\.qq\.com/s/[^)\s]+)(?:\s+"[^"]*")?\)\s*$""".r
   private val PromoHeadingPattern =
@@ -347,7 +349,7 @@ object MarkdownStructureChunker:
           .take(300)
         val sections = mutable.ArrayBuffer.empty[DocumentSection]
         val blocks   = mutable.ArrayBuffer.empty[DocumentBlock]
-        var stack    = Vector.empty[(Int, String, String)] // (level, id, title)
+        var stack    = Vector.empty[(Int, Int, String, String)] // (rawTargetLevel, clampedLevel, id, title)
         var secSeq   = 0
         var blkSeq   = 0
 
@@ -361,21 +363,22 @@ object MarkdownStructureChunker:
         def openSection(targetLevel: Int, rawTitle: String, startLine: Int): String =
           val cleanTitle = takeCodePoints(rawTitle.trim, 300)
           val prefix     = stack.takeWhile(_._1 < targetLevel)
-          val level      = prefix.lastOption.fold(1)(_._1 + 1).min(targetLevel).max(1)
-          val parentId   = prefix.lastOption.map(_._2)
+          val level      = prefix.lastOption.fold(1)(_._2 + 1).min(targetLevel).max(1)
+          val parentId   = prefix.lastOption.map(_._3)
           val id         = s"md-sec-$secSeq"
           secSeq += 1
-          val pages = pageForRange(startLine, startLine)
+          val pages     = pageForRange(startLine, startLine)
+          val normTitle = if cleanTitle.nonEmpty then cleanTitle else docTitle
           sections += DocumentSection(
             id = id,
             parentId = parentId,
             ordinal = sections.length,
             level = level,
-            title = if cleanTitle.nonEmpty then cleanTitle else docTitle,
+            title = normTitle,
             pageStart = pages.headOption,
             pageEnd = pages.lastOption
           )
-          stack = prefix :+ (level, id, if cleanTitle.nonEmpty then cleanTitle else docTitle)
+          stack = prefix :+ (targetLevel, level, id, normTitle)
           id
 
         val hasExplicitHeadings = units.exists(_.isLeft)
@@ -392,8 +395,8 @@ object MarkdownStructureChunker:
               else rawLvl
             val _ = openSection(shiftedLvl, title, lineNum)
           case Right(raw) =>
-            val currentSecId = stack.lastOption.map(_._2).getOrElse(openSection(1, docTitle, raw.startLine))
-            val path         = Chunk.fromIterable(stack.map(_._3))
+            val currentSecId = stack.lastOption.map(_._3).getOrElse(openSection(1, docTitle, raw.startLine))
+            val path         = Chunk.fromIterable(stack.map(_._4))
             val pages        = pageForRange(raw.startLine, raw.endLine)
             val origins      = Chunk.fromIterable(pages.map(p => DocumentOrigin(p)))
             val docKind      = raw.kind match
@@ -469,6 +472,11 @@ object MarkdownStructureChunker:
     val hasArabicAtx = lines.exists { line =>
       heading(line.trim, maxHeadingDepth).exists((_, t) => ArabicHeadingPattern.matches(t.trim))
     }
+    val hasBoldMajor = lines.exists { line =>
+      unwrapOuterBold(line.trim).exists(inner =>
+        PlainMajorLinePattern.matches(inner) || MajorHeadingPattern.matches(inner)
+      )
+    }
     val rawUnits     = mutable.ArrayBuffer.empty[Either[(Int, String, Int), RawBlock]]
     val currentLines = mutable.ArrayBuffer.empty[(String, Int)]
     var fence        = Option.empty[String]
@@ -510,12 +518,29 @@ object MarkdownStructureChunker:
               val prevEmpty       = zeroBasedLine == 0 || lines(zeroBasedLine - 1).trim.isEmpty
               val nextEmpty       = zeroBasedLine + 1 >= lines.length || lines(zeroBasedLine + 1).trim.isEmpty
               val detectedHeading = heading(trimmed, maxHeadingDepth).orElse {
-                if hasMajorAtx && currentLines.isEmpty && prevEmpty && nextEmpty && PlainMajorLinePattern
-                    .matches(trimmed)
-                then Some(2 -> trimmed)
-                else if hasArabicAtx && currentLines.isEmpty && prevEmpty && nextEmpty && PlainArabicLinePattern
-                    .matches(trimmed)
-                then Some(3 -> trimmed)
+                if currentLines.isEmpty && prevEmpty && nextEmpty then
+                  unwrapOuterBold(trimmed) match
+                    case Some(inner)
+                        if !inner.exists(ch => ch == '。' || ch == '！' || ch == '？' || ch == '；') =>
+                      if PlainMajorLinePattern.matches(inner) || MajorHeadingPattern.matches(inner) then
+                        Some(2 -> inner)
+                      else if PlainSubLinePattern.matches(inner) || SubHeadingPattern.matches(inner) then
+                        Some(3 -> inner)
+                      else if PlainArabicLinePattern.matches(inner) then Some(4 -> inner)
+                      else if (IntroHeadingPattern.matches(inner) || AppendixOrConclusionPattern.matches(
+                          inner
+                        )) &&
+                        inner.length <= 40
+                      then Some(2 -> inner)
+                      else None
+                    case _ =>
+                      if (hasMajorAtx || hasBoldMajor) && PlainMajorLinePattern.matches(trimmed) then
+                        Some(2 -> trimmed)
+                      else if (hasArabicAtx || hasMajorAtx || hasBoldMajor) && PlainArabicLinePattern.matches(
+                          trimmed
+                        )
+                      then Some(3 -> trimmed)
+                      else None
                 else None
               }
               detectedHeading match
@@ -557,7 +582,7 @@ object MarkdownStructureChunker:
       val hasParenSubs       = headings.exists((_, t, _) => SubHeadingPattern.matches(t))
       val arabicOffset       = if hasParenSubs then 2 else 1
       val needsNormalization =
-        hasIntroH1 || majorLevels.length > 1 ||
+        hasIntroH1 || majorLevels.length > 1 || majors.head._1 > 1 ||
           headings.exists((_, t, _) =>
             AppendixOrConclusionPattern.matches(t) || ArabicHeadingPattern.matches(t)
           )
@@ -606,16 +631,30 @@ object MarkdownStructureChunker:
       case Some(value) =>
         markdown.split("\n", -1).map(line => if line.trim == value then "" else line).mkString("\n")
 
+  private def unwrapOuterBold(value: String): Option[String] =
+    val trimmed = value.trim
+    if trimmed.length > 4 && trimmed.startsWith("**") && trimmed.endsWith("**") then
+      val inner = trimmed.slice(2, trimmed.length - 2).trim
+      Option.when(inner.nonEmpty && !inner.contains("**"))(inner)
+    else if trimmed.length > 4 && trimmed.startsWith("__") && trimmed.endsWith("__") then
+      val inner = trimmed.slice(2, trimmed.length - 2).trim
+      Option.when(inner.nonEmpty && !inner.contains("__"))(inner)
+    else None
+
+  private def cleanHeadingTitle(value: String): String =
+    unwrapOuterBold(value).getOrElse(value.trim)
+
   private def heading(value: String, maxHeadingDepth: Int): Option[(Int, String)] =
     val hashes = value.takeWhile(_ == '#').length
     if hashes >= 1 && hashes <= maxHeadingDepth && value.drop(hashes).startsWith(" ") then
-      val title = value
+      val rawTitle = value
         .drop(hashes)
         .trim
         .reverse
         .dropWhile(_ == '#')
         .reverse
         .trim
+      val title = cleanHeadingTitle(rawTitle)
       Option.when(title.nonEmpty)(hashes -> title)
     else None
 

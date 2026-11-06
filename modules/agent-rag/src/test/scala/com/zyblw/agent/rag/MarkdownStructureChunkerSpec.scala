@@ -213,5 +213,95 @@ object MarkdownStructureChunkerSpec extends ZIOSpecDefault:
         secByTitle("结语").level == 1,
         !structure.blocks.exists(_.text.contains("mp.weixin.qq.com"))
       )
+    },
+    test("首段导言后使用 ### 卷一..卷四 与 ### 终章 时保持同级并列，不发生链式错挂") {
+      val markdown =
+        """导言正文第一段。
+          |
+          |### 卷一：万山灵根——人参
+          |
+          |#### 1. 本草溯源
+          |
+          |人参溯源正文。
+          |
+          |### 卷二：临床化裁——参附与生脉
+          |
+          |卷二正文。
+          |
+          |### 卷三：天台芳草——乌药
+          |
+          |卷三正文。
+          |
+          |### 终章：一守一走的气机圆运动
+          |
+          |终章正文。
+          |""".stripMargin
+      val doc        = document(markdown)
+      val structure  = MarkdownStructureChunker.extractStructure(doc).get
+      val secByTitle = structure.sections.map(s => s.title -> s).toMap
+      val rootId     = secByTitle("Guide").id
+      assertTrue(
+        secByTitle("卷一：万山灵根——人参").level == 2,
+        secByTitle("卷一：万山灵根——人参").parentId.contains(rootId),
+        secByTitle("1. 本草溯源").level == 3,
+        secByTitle("1. 本草溯源").parentId.contains(secByTitle("卷一：万山灵根——人参").id),
+        secByTitle("卷二：临床化裁——参附与生脉").level == 2,
+        secByTitle("卷二：临床化裁——参附与生脉").parentId.contains(rootId),
+        secByTitle("卷三：天台芳草——乌药").level == 2,
+        secByTitle("卷三：天台芳草——乌药").parentId.contains(rootId),
+        secByTitle("终章：一守一走的气机圆运动").level == 2,
+        secByTitle("终章：一守一走的气机圆运动").parentId.contains(rootId)
+      )
+    },
+    test("剥离 ATX 标题外层粗体，并识别独立粗体段落主标题与阿拉伯序号小节") {
+      val shenArticle =
+        """导读段落。
+          |
+          |## **一、“参”字探源：从星象神草到补药之长**
+          |
+          |探源正文。
+          |
+          |## **二、补气诸参：从峻补元气到平调清补的阶梯**
+          |
+          |**1. 人参（五加科植物人参的根）——大补元气之王**
+          |
+          |人参正文。
+          |
+          |**2. 西洋参（五加科植物西洋参的根）——气阴双补之品**
+          |
+          |西洋参正文。
+          |""".stripMargin
+      val junchenArticle =
+        """方剂导言。
+          |
+          |**一、 君臣佐使的源流演进与定义边界**
+          |
+          |源流正文。
+          |
+          |**二、 四维架构的深度解析：各司其职的临床逻辑**
+          |
+          |架构正文。
+          |
+          |**结语**
+          |
+          |结语正文。
+          |""".stripMargin
+      val struct1  = MarkdownStructureChunker.extractStructure(document(shenArticle)).get
+      val byTitle1 = struct1.sections.map(s => s.title -> s).toMap
+      val struct2  = MarkdownStructureChunker.extractStructure(document(junchenArticle)).get
+      val byTitle2 = struct2.sections.map(s => s.title -> s).toMap
+      assertTrue(
+        byTitle1.contains("一、“参”字探源：从星象神草到补药之长"),
+        byTitle1.contains("二、补气诸参：从峻补元气到平调清补的阶梯"),
+        byTitle1("1. 人参（五加科植物人参的根）——大补元气之王").parentId.contains(
+          byTitle1("二、补气诸参：从峻补元气到平调清补的阶梯").id
+        ),
+        byTitle1("2. 西洋参（五加科植物西洋参的根）——气阴双补之品").parentId.contains(
+          byTitle1("二、补气诸参：从峻补元气到平调清补的阶梯").id
+        ),
+        byTitle2("一、 君臣佐使的源流演进与定义边界").level == 2,
+        byTitle2("二、 四维架构的深度解析：各司其职的临床逻辑").level == 2,
+        byTitle2("结语").level == 2
+      )
     }
   )
